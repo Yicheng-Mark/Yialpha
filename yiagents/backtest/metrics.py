@@ -43,8 +43,8 @@ strategy clears the multiple-testing hurdle.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional, Sequence, Union
 
 import numpy as np
 
@@ -52,9 +52,7 @@ import numpy as np
 # Optional scipy import -- kept optional so the module works without it.
 # ---------------------------------------------------------------------------
 try:  # pragma: no cover - exercised only by environment
-    from scipy.stats import kurtosis as _scipy_kurtosis
-    from scipy.stats import norm as _scipy_norm
-    from scipy.stats import skew as _scipy_skew
+    from scipy.stats import kurtosis as _scipy_kurtosis, norm as _scipy_norm, skew as _scipy_skew
 
     _HAVE_SCIPY = True
 except Exception:  # pragma: no cover - exercised only by environment
@@ -162,7 +160,7 @@ class BacktestMetrics:
     max_drawdown: float
     calmar: float
     deflated_sharpe: float
-    alpha_vs_buyhold: Optional[float]
+    alpha_vs_buyhold: float | None
     num_periods: int
     periods_per_year: int
 
@@ -170,7 +168,7 @@ class BacktestMetrics:
 # ---------------------------------------------------------------------------
 # Core helpers.
 # ---------------------------------------------------------------------------
-def returns_from_equity(equity: Union[Sequence[float], np.ndarray]) -> np.ndarray:
+def returns_from_equity(equity: Sequence[float] | np.ndarray) -> np.ndarray:
     """Simple per-period returns ``equity[1:] / equity[:-1] - 1``.
 
     Raises ``ValueError`` if fewer than two equity points are supplied (no
@@ -213,8 +211,8 @@ def _deflated_sharpe_ratio(
     sharpe_annualized: float,
     n_trials: int,
     periods_per_year: int,
-    skew_override: Optional[float],
-    kurt_override: Optional[float],
+    skew_override: float | None,
+    kurt_override: float | None,
 ) -> float:
     """Bailey & Lopez de Prado (2014) Deflated Sharpe Ratio in [0, 1].
 
@@ -258,13 +256,13 @@ def _deflated_sharpe_ratio(
 # Public entry point.
 # ---------------------------------------------------------------------------
 def compute_metrics(
-    equity: Union[Sequence[float], np.ndarray],
-    benchmark_equity: Optional[Union[Sequence[float], np.ndarray]] = None,
+    equity: Sequence[float] | np.ndarray,
+    benchmark_equity: Sequence[float] | np.ndarray | None = None,
     periods_per_year: int = 252,
     risk_free: float = 0.0,
     n_trials: int = 1,
-    strategy_skew: Optional[float] = None,
-    strategy_kurtosis: Optional[float] = None,
+    strategy_skew: float | None = None,
+    strategy_kurtosis: float | None = None,
 ) -> BacktestMetrics:
     """Compute the full battery of backtest statistics from an equity curve.
 
@@ -354,7 +352,7 @@ def compute_metrics(
     )
 
     # --- Alpha vs buy-and-hold -------------------------------------------
-    alpha_vs_buyhold: Optional[float] = None
+    alpha_vs_buyhold: float | None = None
     if benchmark_equity is not None:
         bench = np.asarray(benchmark_equity, dtype=float).ravel()
         if bench.size == eq.size and bench.size >= 2:

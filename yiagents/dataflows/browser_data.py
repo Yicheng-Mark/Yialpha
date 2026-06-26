@@ -33,9 +33,10 @@ build on the generic :meth:`BrowserDataFetcher.fetch` engine.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Iterable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,7 @@ class BrowserDataFetcher:
     # ------------------------------------------------------------------
     # Context-manager + lifecycle
     # ------------------------------------------------------------------
-    def __enter__(self) -> "BrowserDataFetcher":
+    def __enter__(self) -> BrowserDataFetcher:
         return self
 
     def __exit__(self, *exc: object) -> bool:

@@ -18,11 +18,9 @@ from yiagents.execution.browser_broker import (
     BrowserBroker,
     KillSwitch,
     OrderAction,
-    OrderResult,
     OrderStatus,
     _coerce_bool_env,
 )
-
 
 # ---------------------------------------------------------------------------
 # Enum round-tripping

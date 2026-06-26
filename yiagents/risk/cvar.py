@@ -10,7 +10,7 @@ from the global config dict or any env var.
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 import numpy as np
 

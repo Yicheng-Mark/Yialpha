@@ -131,9 +131,7 @@ class DrawdownBreaker:
         # - caution: allowed but the caller is warned via the regime.
         # - normal: blocked only while a cooldown from a prior hard stop
         #   is still counting down.
-        if regime in ("hard_stop", "no_new"):
-            can_open_new = False
-        elif self.cooldown_remaining > 0:
+        if regime in ("hard_stop", "no_new") or self.cooldown_remaining > 0:
             can_open_new = False
         else:
             can_open_new = True

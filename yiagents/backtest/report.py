@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import logging
 import statistics
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
 from yiagents.backtest.engine import BacktestResult
 

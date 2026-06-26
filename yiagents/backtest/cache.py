@@ -48,7 +48,7 @@ class CachedDecision:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "CachedDecision":
+    def from_dict(cls, d: dict[str, Any]) -> CachedDecision:
         return cls(
             ticker=d["ticker"],
             date=d["date"],
@@ -84,7 +84,7 @@ class DecisionCache:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     @classmethod
-    def from_config(cls, config: dict[str, Any], enabled: bool = True) -> "DecisionCache":
+    def from_config(cls, config: dict[str, Any], enabled: bool = True) -> DecisionCache:
         """Build a cache rooted at the project's data cache dir."""
         base = Path(config.get("data_cache_dir", ".")) / "backtest_decisions"
         return cls(base, enabled=enabled)

@@ -26,8 +26,9 @@ The same :class:`RiskManager` powers two callers:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from yiagents.risk.breaker import BreakerState, DrawdownBreaker
 from yiagents.risk.cvar import cvar_position_multiplier
@@ -138,7 +139,7 @@ class RiskManager:
         )
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any]) -> "RiskManager":
+    def from_config(cls, config: Mapping[str, Any]) -> RiskManager:
         """Build a RiskManager from a DEFAULT_CONFIG-style mapping.
 
         Reading is defensive: missing keys fall back to the constructor defaults

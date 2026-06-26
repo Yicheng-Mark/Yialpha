@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import html
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from yiagents.backtest.engine import BacktestResult
 

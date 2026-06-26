@@ -9,7 +9,6 @@ from yiagents.agents.utils.agent_utils import (
 )
 from yiagents.agents.utils.prompt_builder import build_fincot_prompt
 
-
 # The indicator catalog the analyst selects from. Shared by both prompt forms so
 # the available tool vocabulary never depends on which framing is active.
 INDICATOR_CATALOG = """Moving Averages:

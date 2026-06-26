@@ -32,10 +32,10 @@ Design invariants (every code path must preserve these):
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Optional
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Environment helpers
@@ -159,7 +159,7 @@ class OrderResult:
 
 
 # Type alias for the optional pre-submit validator hook.
-PreSubmitValidator = Callable[[str, OrderAction, float], Optional[bool]]
+PreSubmitValidator = Callable[[str, OrderAction, float], bool | None]
 
 
 # ---------------------------------------------------------------------------

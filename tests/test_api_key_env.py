@@ -100,6 +100,10 @@ def test_ensure_api_key_prompts_and_writes_to_env(monkeypatch, tmp_path, cli_uti
     """When key is missing, user-pasted value must be written to .env AND os.environ."""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)
+    # find_dotenv(usecwd=True) walks up from cwd and can latch onto a stray .env
+    # in a parent dir (e.g. ~/.env left by earlier runs); pin it to the tmp dir
+    # so this test is independent of the developer's home-directory state.
+    monkeypatch.setattr(cli_utils, "find_dotenv", lambda usecwd=False: str(tmp_path / ".env"))
 
     fake_prompt = type("P", (), {"ask": staticmethod(lambda: "sk-deepseek-test")})()
     with patch.object(cli_utils.questionary, "password", return_value=fake_prompt):

@@ -16,7 +16,7 @@ tool lists) and only swap the framing.
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 
 def build_mermaid_workflow(steps: Sequence[str]) -> str:

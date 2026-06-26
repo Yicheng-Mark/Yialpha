@@ -50,7 +50,7 @@ def _dates(n=14, start="2024-01-01"):
 def test_end_to_end_ab_gate_dashboard(tmp_path):
     dates = _dates(14)
     # Mostly Buy with a couple Holds -> both variants trade, sizing differs.
-    ratings = {d: "Buy" for d in dates}
+    ratings = dict.fromkeys(dates, "Buy")
     ratings[dates[3]] = "Hold"
     ratings[dates[8]] = "Hold"
     graph = FakeGraph(ratings)

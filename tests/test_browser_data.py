@@ -23,7 +23,6 @@ from yiagents.dataflows.browser_data import (
     fetch_alternative_data,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fakes: stand-ins for a Playwright page / browser stack. They never hit the
 # network and record calls so assertions can inspect behavior.
@@ -322,9 +321,8 @@ class TestLifecycle:
 
     def test_context_manager_closes_on_exception(self):
         f = _make_fetcher_with_page(body_text="x")
-        with pytest.raises(ValueError):
-            with f:
-                raise ValueError("boom")
+        with pytest.raises(ValueError), f:
+            raise ValueError("boom")
         assert f._closed is True  # type: ignore[attr-defined]
 
     def test_prediction_market_depth_fetcher(self):

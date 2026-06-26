@@ -7,7 +7,6 @@ import pytest
 
 from yiagents.backtest.cache import DecisionCache
 from yiagents.backtest.engine import (
-    DEFAULT_RATING_TO_WEIGHT,
     BacktestResult,
     TradeRow,
     run_backtest,
@@ -56,7 +55,7 @@ def _decision_dates(n=12, start="2024-01-01"):
 @pytest.mark.unit
 def test_engine_all_buy_beats_flat_index():
     dates = _decision_dates(10)
-    graph = FakeGraph({d: "Buy" for d in dates})
+    graph = FakeGraph(dict.fromkeys(dates, "Buy"))
 
     result = run_backtest(
         graph, "AAPL", dates,
@@ -82,7 +81,7 @@ def test_engine_all_buy_beats_flat_index():
 @pytest.mark.unit
 def test_engine_sell_goes_flat_preserves_capital():
     dates = _decision_dates(8)
-    graph = FakeGraph({d: "Sell" for d in dates})
+    graph = FakeGraph(dict.fromkeys(dates, "Sell"))
     result = run_backtest(
         graph, "AAPL", dates, holding_days=5,
         price_provider=_rising_prices,
@@ -116,7 +115,7 @@ def test_engine_hold_keeps_prior_position():
 @pytest.mark.unit
 def test_engine_custom_weight_fn_overrides_mapping():
     dates = _decision_dates(6)
-    graph = FakeGraph({d: "Buy" for d in dates})
+    graph = FakeGraph(dict.fromkeys(dates, "Buy"))
 
     def half_size(rating, date, ctx):
         return 0.5
@@ -139,7 +138,7 @@ def test_engine_cache_replay_avoids_recalling_graph(tmp_path):
             call_count["n"] += 1
             return super().propagate(company_name, trade_date, asset_type)
 
-    graph = CountingGraph({d: "Buy" for d in dates})
+    graph = CountingGraph(dict.fromkeys(dates, "Buy"))
     cache = DecisionCache(tmp_path, enabled=True)
 
     first = run_backtest(
@@ -152,7 +151,7 @@ def test_engine_cache_replay_avoids_recalling_graph(tmp_path):
     assert first.cached_hits == 0
 
     # Replay with the SAME run_tag: every decision served from cache.
-    graph2 = CountingGraph({d: "Sell" for d in dates})  # different scripts ignored
+    graph2 = CountingGraph(dict.fromkeys(dates, "Sell"))  # different scripts ignored
     second = run_backtest(
         graph2, "AAPL", dates, holding_days=5,
         price_provider=_rising_prices, cache=cache, run_tag="r1",
@@ -167,10 +166,10 @@ def test_engine_cache_replay_avoids_recalling_graph(tmp_path):
 @pytest.mark.unit
 def test_engine_transaction_costs_drag_returns():
     dates = _decision_dates(6)
-    graph = FakeGraph({d: "Buy" for d in dates})
+    graph = FakeGraph(dict.fromkeys(dates, "Buy"))
     no_cost = run_backtest(graph, "AAPL", dates, holding_days=5,
                            price_provider=_rising_prices, cost_bps=0.0)
-    graph2 = FakeGraph({d: "Buy" for d in dates})
+    graph2 = FakeGraph(dict.fromkeys(dates, "Buy"))
     with_cost = run_backtest(graph2, "AAPL", dates, holding_days=5,
                              price_provider=_rising_prices, cost_bps=50.0)
     # Churning into the same target still incurs cost on the first rebalance.
@@ -202,7 +201,7 @@ def test_engine_propagate_error_treated_as_hold():
 @pytest.mark.unit
 def test_trade_row_fields_populated():
     dates = _decision_dates(4)
-    graph = FakeGraph({d: "Buy" for d in dates})
+    graph = FakeGraph(dict.fromkeys(dates, "Buy"))
     result = run_backtest(graph, "AAPL", dates, holding_days=5,
                           price_provider=_rising_prices)
     t: TradeRow = result.trades[0]

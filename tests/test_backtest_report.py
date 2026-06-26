@@ -41,7 +41,7 @@ def _dates(n=8, start="2024-01-01"):
 @pytest.fixture()
 def buy_result():
     dates = _dates(8)
-    g = FakeGraph({d: "Buy" for d in dates})
+    g = FakeGraph(dict.fromkeys(dates, "Buy"))
     return run_backtest(g, "AAPL", dates, holding_days=5, price_provider=_rising)
 
 

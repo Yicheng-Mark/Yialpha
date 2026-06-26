@@ -18,11 +18,10 @@ risk layer as a standalone product.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Sequence
 
 from yiagents.backtest.engine import BacktestResult
-
 
 _METRIC_KEYS = (
     "total_return", "cagr", "sharpe", "max_drawdown", "calmar", "deflated_sharpe",

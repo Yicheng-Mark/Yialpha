@@ -135,7 +135,6 @@ def test_unknown_rating_treated_as_hold():
 @pytest.mark.unit
 def test_backtest_weight_fn_integration_with_engine():
     """The RiskManager's weight_fn must plug into run_backtest and produce sane results."""
-    import pandas as pd
 
     dates = list(pd.bdate_range("2024-01-01", periods=60, freq="B").strftime("%Y-%m-%d"))[::5][:10]
 

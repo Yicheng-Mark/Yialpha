@@ -26,15 +26,15 @@ Design choices driven by the roadmap:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from collections.abc import Mapping
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 import numpy as np
 import pandas as pd
 
 from yiagents.agents.utils.rating import parse_rating
-from yiagents.backtest.cache import CachedDecision, DecisionCache
+from yiagents.backtest.cache import DecisionCache
 from yiagents.backtest.metrics import BacktestMetrics, compute_metrics
 
 logger = logging.getLogger(__name__)
@@ -83,6 +83,7 @@ def _yfinance_price_provider(ticker: str, start: str, end: str) -> pd.Series:
     graph internals and testable with synthetic prices.
     """
     import yfinance as yf
+
     from yiagents.dataflows.symbol_utils import normalize_symbol
 
     canonical = normalize_symbol(ticker)

@@ -21,7 +21,8 @@ then take the Pearson correlation of the ranks).
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Union
+from collections.abc import Sequence
+from typing import Union
 
 import numpy as np
 import pandas as pd
@@ -50,7 +51,7 @@ def _as_clean_series(x: ArrayLike) -> pd.Series:
     return pd.Series(np.asarray(x, dtype=float))
 
 
-def _spearman_from_ranks(fr: pd.Series, rr: pd.Series) -> Optional[float]:
+def _spearman_from_ranks(fr: pd.Series, rr: pd.Series) -> float | None:
     """Pearson correlation of two already-ranked series.
 
     Returns ``None`` when either series has zero variance (the correlation is
@@ -69,7 +70,7 @@ def _spearman_from_ranks(fr: pd.Series, rr: pd.Series) -> Optional[float]:
     return cov / (std_f * std_r)
 
 
-def information_coefficient(factor: ArrayLike, forward_returns: ArrayLike) -> Optional[float]:
+def information_coefficient(factor: ArrayLike, forward_returns: ArrayLike) -> float | None:
     """Spearman rank IC between a factor series and forward returns.
 
     Inputs are equal-length 1-D array-likes (lists / np arrays / pd.Series).
@@ -121,7 +122,7 @@ def rolling_ic(
     factor: ArrayLike,
     forward_returns: ArrayLike,
     window: int = 60,
-) -> "pd.Series":
+) -> pd.Series:
     """Rolling Spearman IC over ``window``-sized trailing windows.
 
     Inputs are equal-length Series indexed identically (e.g. by date). The
