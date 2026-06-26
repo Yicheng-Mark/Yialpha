@@ -70,10 +70,7 @@ def kelly_fraction(win_rate: float, avg_win: float, avg_loss: float) -> float:
     avg_win_f = float(avg_win) if avg_win is not None and np.isfinite(avg_win) else 1.0
     avg_loss_f = float(avg_loss) if avg_loss is not None and np.isfinite(avg_loss) else 1.0
 
-    if avg_loss_f <= 0.0:
-        b = 1.0
-    else:
-        b = avg_win_f / avg_loss_f
+    b = 1.0 if avg_loss_f <= 0.0 else avg_win_f / avg_loss_f
     if b <= 0.0:
         b = 1.0
 
@@ -130,10 +127,7 @@ def kelly_sizing(
         p = bayesian_win_rate(wins, losses)
     elif win_rate is not None:
         p = float(win_rate)
-        if not np.isfinite(p):
-            p = confidence
-        else:
-            p = min(max(p, 0.0), 1.0)
+        p = confidence if not np.isfinite(p) else min(max(p, 0.0), 1.0)
     else:
         p = confidence
 

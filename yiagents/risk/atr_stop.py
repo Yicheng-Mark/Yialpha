@@ -12,8 +12,6 @@ responsibility (negate and mirror the offset).
 
 from __future__ import annotations
 
-from typing import Union
-
 import numpy as np
 import pandas as pd
 from stockstats import wrap
@@ -21,7 +19,7 @@ from stockstats import wrap
 from yiagents.dataflows.stockstats_utils import load_ohlcv
 
 # A precomputed OHLCV frame OR a ticker symbol. Accepted by atr_stop.
-SymbolOrFrame = Union[str, pd.DataFrame]
+SymbolOrFrame = str | pd.DataFrame
 
 
 def latest_atr(symbol: str, curr_date: str) -> tuple[float, float]:
@@ -52,8 +50,8 @@ def latest_atr_from_frame(ohlcv: pd.DataFrame) -> tuple[float, float]:
         raise ValueError("atr_stop: OHLCV frame is None")
     try:
         rows = len(ohlcv)
-    except TypeError:
-        raise ValueError("atr_stop: OHLCV frame has no length")
+    except TypeError as exc:
+        raise ValueError("atr_stop: OHLCV frame has no length") from exc
     if rows == 0:
         raise ValueError("atr_stop: OHLCV frame is empty")
 

@@ -17,6 +17,7 @@ cached (it is large and already written to ``results_dir`` by the graph itself).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -106,10 +107,8 @@ class DecisionCache:
                 return CachedDecision.from_dict(json.load(fh))
         except (OSError, ValueError, KeyError) as exc:
             logger.warning("Corrupt backtest cache entry %s (%s); removing", path, exc)
-            try:
+            with contextlib.suppress(OSError):
                 path.unlink(missing_ok=True)
-            except OSError:
-                pass
             return None
 
     def put(self, decision: CachedDecision) -> None:

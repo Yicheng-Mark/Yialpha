@@ -31,6 +31,7 @@ Design invariants (every code path must preserve these):
 
 from __future__ import annotations
 
+import contextlib
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -583,7 +584,5 @@ class BrowserBroker:
                     preview_url=preview_url,
                 )
             finally:
-                try:
+                with contextlib.suppress(Exception):  # noqa: BLE001 - cleanup must not mask errors
                     browser.close()
-                except Exception:  # noqa: BLE001 - cleanup must not mask errors
-                    pass
