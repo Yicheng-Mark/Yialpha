@@ -17,6 +17,6 @@
   </g>
   <!-- Wordmark -->
   <text x="150" y="76" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="52" font-weight="700" letter-spacing="-1">
-    <tspan fill="#0f172a">Yi</tspan><tspan fill="#2563eb">Agents</tspan>
+    <tspan fill="url(#g)">Yi</tspan><tspan fill="#2563eb">Agents</tspan>
   </text>
 </svg>
