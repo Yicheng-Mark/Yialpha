@@ -236,7 +236,6 @@ yiagents analyze --clear-checkpoints    # 运行前重置
 │   ├── run_baseline.py       # 四档：preflight/smoke/baseline/full
 │   └── smoke_structured_output.py
 ├── tests/                    # 715+ 测试，覆盖数据/风控/回测/闸门/多提供商/i18n
-├── main.py                   # 最小运行入口
 └── pyproject.toml
 ```
 
