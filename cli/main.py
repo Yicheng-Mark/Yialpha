@@ -505,10 +505,10 @@ def get_user_selections():
     welcome_content = Group(
         Align.center(logo_block),
         "",
-        Align.center("[bold orange1]Workflow Steps:[/bold orange1]"),
+        Align.center("[bold white]Workflow Steps:[/bold white]"),
         Align.center(
-            "[orange1]I. Analyst Team → II. Research Team → III. Trader → "
-            "IV. Risk Management → V. Portfolio Management[/orange1]"
+            "[white]I. Analyst Team → II. Research Team → III. Trader → "
+            "IV. Risk Management → V. Portfolio Management[/white]"
         ),
     )
 
