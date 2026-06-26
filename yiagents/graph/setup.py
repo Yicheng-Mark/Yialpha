@@ -1,4 +1,4 @@
-# YiAgents/graph/setup.py
+# yiagents/graph/setup.py
 
 from typing import Any
 

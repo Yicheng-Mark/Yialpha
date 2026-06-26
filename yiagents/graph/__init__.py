@@ -1,4 +1,4 @@
-# YiAgents/graph/__init__.py
+# yiagents/graph/__init__.py
 
 from .conditional_logic import ConditionalLogic
 from .propagation import Propagator

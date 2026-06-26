@@ -1,4 +1,4 @@
-# YiAgents/graph/trading_graph.py
+# yiagents/graph/trading_graph.py
 
 import json
 import logging

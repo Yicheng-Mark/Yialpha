@@ -1,4 +1,4 @@
-# YiAgents/graph/conditional_logic.py
+# yiagents/graph/conditional_logic.py
 
 from yiagents.agents.utils.agent_states import AgentState
 

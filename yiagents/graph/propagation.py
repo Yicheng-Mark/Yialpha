@@ -1,4 +1,4 @@
-# YiAgents/graph/propagation.py
+# yiagents/graph/propagation.py
 
 from typing import Any
 
