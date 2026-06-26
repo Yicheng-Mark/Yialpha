@@ -8,7 +8,7 @@ from pathlib import Path
 import typer
 from rich import box
 from rich.align import Align
-from rich.console import Console
+from rich.console import Console, Group
 from rich.layout import Layout
 from rich.live import Live
 from rich.markdown import Markdown
@@ -275,8 +275,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
     # Header with welcome message
     layout["header"].update(
         Panel(
-            "[bold green]Welcome to YiAgents CLI[/bold green]\n"
-            "[dim]© [zhang12120113-creator](https://github.com/zhang12120113-creator/Yiagents)[/dim]",
+            "[bold green]Welcome to YiAgents CLI[/bold green]",
             title="Welcome to YiAgents",
             border_style="green",
             padding=(1, 2),
@@ -484,13 +483,33 @@ def get_user_selections():
     with open(Path(__file__).parent / "static" / "welcome.txt", encoding="utf-8") as f:
         welcome_ascii = f.read()
 
-    # Create welcome box content
-    welcome_content = f"{welcome_ascii}\n"
-    welcome_content += "[bold orange1]YiAgents: Multi-Agents LLM Financial Trading Framework - CLI[/bold orange1]\n\n"
-    welcome_content += "[bold]Workflow Steps:[/bold]\n"
-    welcome_content += "I. Analyst Team → II. Research Team → III. Trader → IV. Risk Management → V. Portfolio Management\n\n"
-    welcome_content += (
-        "[dim]Built by [zhang12120113-creator](https://github.com/zhang12120113-creator/Yiagents)[/dim]"
+    # Drop surrounding blank lines so the logo centers cleanly.
+    ascii_lines = welcome_ascii.splitlines()
+    while ascii_lines and ascii_lines[0].strip() == "":
+        ascii_lines.pop(0)
+    while ascii_lines and ascii_lines[-1].strip() == "":
+        ascii_lines.pop()
+    welcome_ascii = "\n".join(ascii_lines)
+
+    # Center the logo as a single block. Rich's Align.center works line by
+    # line and trims trailing whitespace, so centering a raw multi-line
+    # string would shear the slant-font letterforms (each line shifted by
+    # its own width). Wrapping the logo in a fixed-width (expand=False),
+    # borderless panel makes every rendered line the same width, so
+    # Align.center shifts the whole block evenly and the logo's internal
+    # alignment is preserved.
+    _invisible_box = box.Box("\n".join(["    "] * 8))
+    logo_block = Panel(welcome_ascii, expand=False, box=_invisible_box, padding=0)
+
+    # Welcome box content — logo and workflow, each centered as its own block.
+    welcome_content = Group(
+        Align.center(logo_block),
+        "",
+        Align.center("[bold orange1]Workflow Steps:[/bold orange1]"),
+        Align.center(
+            "[orange1]I. Analyst Team → II. Research Team → III. Trader → "
+            "IV. Risk Management → V. Portfolio Management[/orange1]"
+        ),
     )
 
     # Create and center the welcome box
