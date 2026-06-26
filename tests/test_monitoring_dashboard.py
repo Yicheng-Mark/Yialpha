@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from tradingagents.backtest.engine import BacktestResult, TradeRow
-from tradingagents.backtest.metrics import BacktestMetrics
-from tradingagents.monitoring.dashboard import render_dashboard, write_dashboard
+from yiagents.backtest.engine import BacktestResult, TradeRow
+from yiagents.backtest.metrics import BacktestMetrics
+from yiagents.monitoring.dashboard import render_dashboard, write_dashboard
 
 
 def _result(ticker="AAPL", total_return=0.15, mdd=-0.08, dsr=0.6) -> BacktestResult:

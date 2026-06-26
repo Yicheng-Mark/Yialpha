@@ -53,13 +53,13 @@ for _stream in (sys.stdout, sys.stderr):
 
 import pandas as pd
 
-from tradingagents.backtest.engine import run_backtest
-from tradingagents.backtest.report import write_report
-from tradingagents.backtest.validation_gate import evaluate_gate
-from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.monitoring.dashboard import write_dashboard
-from tradingagents.risk.manager import RiskManager, build_backtest_weight_fn
+from yiagents.backtest.engine import run_backtest
+from yiagents.backtest.report import write_report
+from yiagents.backtest.validation_gate import evaluate_gate
+from yiagents.default_config import DEFAULT_CONFIG
+from yiagents.graph.trading_graph import YiAgentsGraph
+from yiagents.monitoring.dashboard import write_dashboard
+from yiagents.risk.manager import RiskManager, build_backtest_weight_fn
 
 
 def _rebalance_dates(start: str, end: str, step: int, n: int) -> list[str]:
@@ -73,9 +73,9 @@ def _rebalance_dates(start: str, end: str, step: int, n: int) -> list[str]:
     return [d.strftime("%Y-%m-%d") for d in picked]
 
 
-def _build_graph(debug: bool = False) -> TradingAgentsGraph:
+def _build_graph(debug: bool = False) -> YiAgentsGraph:
     config = DEFAULT_CONFIG.copy()
-    return TradingAgentsGraph(debug=debug, config=config)
+    return YiAgentsGraph(debug=debug, config=config)
 
 
 def preflight(ticker: str) -> int:
@@ -109,13 +109,13 @@ def preflight(ticker: str) -> int:
             hint = 'pip install "requests[socks]"  # 装 PySocks' if mod == "socks" else f"pip install {mod}"
             check(f"依赖 {mod}", False, hint)
 
-    # 2) env / key（.env 由 tradingagents 导入时通过 find_dotenv(usecwd=True) 加载，
+    # 2) env / key（.env 由 yiagents 导入时通过 find_dotenv(usecwd=True) 加载，
     #    故必须从项目根目录运行，否则 os.environ 里拿不到 key）
     key = os.environ.get("DEEPSEEK_API_KEY", "")
     check("DEEPSEEK_API_KEY 已设置", bool(key),
           ".env 未加载——确认从项目根目录（含 .env 的目录）运行")
-    check("LLM provider 已设置", bool(os.environ.get("TRADINGAGENTS_LLM_PROVIDER")),
-          ".env 里 TRADINGAGENTS_LLM_PROVIDER 缺失")
+    check("LLM provider 已设置", bool(os.environ.get("YIAGENTS_LLM_PROVIDER")),
+          ".env 里 YIAGENTS_LLM_PROVIDER 缺失")
 
     # 3) 代理端口可达（解析 HTTPS_PROXY 里的 host:port，TCP 探测）
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY", "")
@@ -253,7 +253,7 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
 
 
 def main():
-    p = argparse.ArgumentParser(description="TradingAgents 一键回测")
+    p = argparse.ArgumentParser(description="YiAgents 一键回测")
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--preflight", action="store_true", help="起飞检查：零成本自检（最先跑这个）")
     mode.add_argument("--smoke", action="store_true", help="冒烟：1票1日")

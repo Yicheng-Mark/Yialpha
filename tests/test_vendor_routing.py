@@ -11,11 +11,11 @@ from unittest import mock
 
 import pytest
 
-import tradingagents.dataflows.config as config_module
-import tradingagents.default_config as default_config
-from tradingagents.dataflows import interface
-from tradingagents.dataflows.config import set_config
-from tradingagents.dataflows.symbol_utils import NoMarketDataError
+import yiagents.dataflows.config as config_module
+import yiagents.default_config as default_config
+from yiagents.dataflows import interface
+from yiagents.dataflows.config import set_config
+from yiagents.dataflows.symbol_utils import NoMarketDataError
 
 
 def _reset_config():
@@ -76,7 +76,7 @@ class VendorRoutingTests(unittest.TestCase):
         # must be visible in logs (broken primary not hidden).
         set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
         with self._route({"yfinance": _raises(ValueError("boom")), "alpha_vantage": _no_data}), \
-                self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm:
+                self.assertLogs("yiagents.dataflows.interface", level="WARNING") as cm:
             result = interface.route_to_vendor("get_stock_data", "AAPL", "2026-01-01", "2026-01-10")
         self.assertIn("NO_DATA_AVAILABLE", result)
         joined = "\n".join(cm.output)

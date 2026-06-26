@@ -7,7 +7,7 @@ override, the oversized-code rejection, and that dangerous tokens are blocked.
 
 import pytest
 
-from tradingagents.agents.utils.pot_executor import PoTExecutor, PoTResult
+from yiagents.agents.utils.pot_executor import PoTExecutor, PoTResult
 
 
 @pytest.mark.unit

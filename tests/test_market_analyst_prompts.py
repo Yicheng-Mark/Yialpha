@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tradingagents.agents.analysts.market_analyst import (
+from yiagents.agents.analysts.market_analyst import (
     INDICATOR_CATALOG,
     _fincot_system_message,
     _legacy_system_message,
@@ -46,7 +46,7 @@ def test_system_message_defaults_to_legacy():
 
 @pytest.mark.unit
 def test_system_message_switches_to_fincot_when_enabled(monkeypatch):
-    import tradingagents.dataflows.config as cfg_mod
+    import yiagents.dataflows.config as cfg_mod
     enabled = dict(cfg_mod._config)
     enabled["fin_cot_prompts"] = True
     monkeypatch.setattr(cfg_mod, "_config", enabled)

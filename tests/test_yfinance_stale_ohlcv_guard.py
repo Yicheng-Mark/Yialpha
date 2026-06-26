@@ -12,13 +12,13 @@ from unittest import mock
 import pandas as pd
 import pytest
 
-import tradingagents.dataflows.config as config_module
-import tradingagents.dataflows.y_finance as y_finance
-import tradingagents.default_config as default_config
-from tradingagents.dataflows import interface
-from tradingagents.dataflows.config import set_config
-from tradingagents.dataflows.stockstats_utils import _assert_ohlcv_not_stale
-from tradingagents.dataflows.symbol_utils import NoMarketDataError
+import yiagents.dataflows.config as config_module
+import yiagents.dataflows.y_finance as y_finance
+import yiagents.default_config as default_config
+from yiagents.dataflows import interface
+from yiagents.dataflows.config import set_config
+from yiagents.dataflows.stockstats_utils import _assert_ohlcv_not_stale
+from yiagents.dataflows.symbol_utils import NoMarketDataError
 
 
 def _frame(date):

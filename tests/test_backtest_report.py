@@ -5,8 +5,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from tradingagents.backtest.engine import BacktestResult, TradeRow, run_backtest
-from tradingagents.backtest.report import (
+from yiagents.backtest.engine import BacktestResult, TradeRow, run_backtest
+from yiagents.backtest.report import (
     multi_run,
     render_backtest_report,
     render_multi_run_report,

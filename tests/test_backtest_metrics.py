@@ -1,4 +1,4 @@
-"""Unit tests for ``tradingagents.backtest.metrics``.
+"""Unit tests for ``yiagents.backtest.metrics``.
 
 Pure-numpy, no network, no scipy required. Marked ``@pytest.mark.unit``.
 """
@@ -10,7 +10,7 @@ import math
 import numpy as np
 import pytest
 
-from tradingagents.backtest.metrics import (
+from yiagents.backtest.metrics import (
     BacktestMetrics,
     compute_metrics,
     returns_from_equity,

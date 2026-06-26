@@ -5,8 +5,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from tradingagents.backtest.cache import DecisionCache
-from tradingagents.backtest.engine import (
+from yiagents.backtest.cache import DecisionCache
+from yiagents.backtest.engine import (
     DEFAULT_RATING_TO_WEIGHT,
     BacktestResult,
     TradeRow,
@@ -15,7 +15,7 @@ from tradingagents.backtest.engine import (
 
 
 class FakeGraph:
-    """Stand-in for TradingAgentsGraph: returns scripted ratings per date."""
+    """Stand-in for YiAgentsGraph: returns scripted ratings per date."""
 
     def __init__(self, ratings: dict[str, str], benchmark: str = "SPY"):
         # Preserve insertion order so tests are deterministic.

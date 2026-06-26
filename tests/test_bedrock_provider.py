@@ -8,9 +8,9 @@ import sys
 
 import pytest
 
-from tradingagents.llm_clients.api_key_env import get_api_key_env
-from tradingagents.llm_clients.factory import create_llm_client
-from tradingagents.llm_clients.validators import validate_model
+from yiagents.llm_clients.api_key_env import get_api_key_env
+from yiagents.llm_clients.factory import create_llm_client
+from yiagents.llm_clients.validators import validate_model
 
 
 @pytest.mark.unit
@@ -28,7 +28,7 @@ def test_bedrock_any_model_and_no_key_env():
 
 @pytest.mark.unit
 def test_helpful_error_when_langchain_aws_absent(monkeypatch):
-    import tradingagents.llm_clients.bedrock_client as bc
+    import yiagents.llm_clients.bedrock_client as bc
     monkeypatch.setattr(bc, "_BEDROCK_CLASS", None)
     monkeypatch.setitem(sys.modules, "langchain_aws", None)  # force ImportError on import
     with pytest.raises(ImportError, match=r"bedrock"):
@@ -38,7 +38,7 @@ def test_helpful_error_when_langchain_aws_absent(monkeypatch):
 @pytest.mark.unit
 def test_construction_when_extra_installed(monkeypatch):
     pytest.importorskip("langchain_aws")
-    import tradingagents.llm_clients.bedrock_client as bc
+    import yiagents.llm_clients.bedrock_client as bc
     monkeypatch.setattr(bc, "_BEDROCK_CLASS", None)
     monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
     llm = create_llm_client("bedrock", "us.anthropic.claude-sonnet-4-6-v1:0").get_llm()

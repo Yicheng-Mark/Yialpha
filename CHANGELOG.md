@@ -1,5 +1,7 @@
 # Changelog
 
+> **YiAgents** 是 [TradingAgents](https://github.com/TauricResearch/TradingAgents) 的深度定制 fork，已将内部标识从 `tradingagents` 彻底重命名为 `yiagents`（包名 / import / CLI / env 前缀 `YIAGENTS_*` / 数据目录 `~/.yiagents/`）。下方 v0.3.0 及更早的条目继承自上游历史记录，保留 TradingAgents 原名；YiAgents 自身的变更自此之后开始记录。
+
 All notable changes to TradingAgents are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

@@ -1,6 +1,6 @@
 """Tests for the quantitative risk-control layer (Phase 1).
 
-Covers ``tradingagents.risk.{kelly, atr_stop, breaker, cvar}``. All tests
+Covers ``yiagents.risk.{kelly, atr_stop, breaker, cvar}``. All tests
 are unit-level: no network, no global config, deterministic inputs.
 
 The ATR path that fetches via the network loader (``latest_atr(symbol,
@@ -14,10 +14,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tradingagents.risk.atr_stop import atr_stop, latest_atr_from_frame
-from tradingagents.risk.breaker import DrawdownBreaker
-from tradingagents.risk.cvar import cvar_position_multiplier, historical_cvar
-from tradingagents.risk.kelly import (
+from yiagents.risk.atr_stop import atr_stop, latest_atr_from_frame
+from yiagents.risk.breaker import DrawdownBreaker
+from yiagents.risk.cvar import cvar_position_multiplier, historical_cvar
+from yiagents.risk.kelly import (
     RATING_TO_BAND,
     bayesian_win_rate,
     kelly_fraction,
@@ -141,7 +141,7 @@ class TestAtrStop:
         reason="latest_atr(symbol, date) hits the network loader; covered by integration tests."
     )
     def test_latest_atr_network_path(self):
-        from tradingagents.risk.atr_stop import latest_atr
+        from yiagents.risk.atr_stop import latest_atr
 
         latest_atr("AAPL", "2026-06-01")
 

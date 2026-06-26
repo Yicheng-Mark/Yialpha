@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tradingagents"
+name = "yiagents"
 version = "0.3.0"
-description = "TradingAgents: Multi-Agents LLM Financial Trading Framework"
+description = "YiAgents: Multi-Agents LLM Financial Trading Framework"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -40,16 +40,16 @@ dev = [
     "pytest-subtests>=0.13",
 ]
 # Amazon Bedrock support (AWS SigV4 auth + boto3). Optional so the core install
-# stays lean: pip install "tradingagents[bedrock]".
+# stays lean: pip install "yiagents[bedrock]".
 bedrock = [
     "langchain-aws>=1.5.0",
 ]
 
 [project.scripts]
-tradingagents = "cli.main:app"
+yiagents = "cli.main:app"
 
 [tool.setuptools.packages.find]
-include = ["tradingagents*", "cli*"]
+include = ["yiagents*", "cli*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]

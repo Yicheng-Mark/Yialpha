@@ -9,7 +9,7 @@ from datetime import datetime
 
 import pytest
 
-import tradingagents.dataflows.yfinance_news as ynews
+import yiagents.dataflows.yfinance_news as ynews
 
 
 def _epoch(date_str):

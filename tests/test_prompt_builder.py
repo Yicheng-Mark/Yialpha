@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tradingagents.agents.utils.prompt_builder import (
+from yiagents.agents.utils.prompt_builder import (
     build_fincot_prompt,
     build_mermaid_workflow,
 )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tradingagents.agents.utils.pot_integration import (
+from yiagents.agents.utils.pot_integration import (
     PotAnalyzer,
     extract_code_block,
 )

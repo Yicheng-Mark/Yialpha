@@ -6,7 +6,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from tradingagents.graph.checkpointer import (
+from yiagents.graph.checkpointer import (
     checkpoint_step,
     clear_checkpoint,
     get_checkpointer,

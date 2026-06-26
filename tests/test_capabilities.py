@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from tradingagents.llm_clients.capabilities import (
+from yiagents.llm_clients.capabilities import (
     get_capabilities,
 )
 

@@ -1,4 +1,4 @@
-"""Integration tests for the Phase-1 risk overlay wired into TradingAgentsGraph.
+"""Integration tests for the Phase-1 risk overlay wired into YiAgentsGraph.
 
 These exercise the live-flow wiring (``_apply_risk_overlay``) directly, without
 the full graph ``__init__`` (no LLM clients, no network). The backtest-side
@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import pytest
 
-from tradingagents.agents.utils.rating import parse_rating
-from tradingagents.graph.signal_processing import SignalProcessor
-from tradingagents.graph.trading_graph import TradingAgentsGraph
+from yiagents.agents.utils.rating import parse_rating
+from yiagents.graph.signal_processing import SignalProcessor
+from yiagents.graph.trading_graph import YiAgentsGraph
 
 
-def _make_graph(risk_enabled: bool) -> TradingAgentsGraph:
+def _make_graph(risk_enabled: bool) -> YiAgentsGraph:
     """Build a graph shell with just enough state for the overlay to run."""
-    g = TradingAgentsGraph.__new__(TradingAgentsGraph)
+    g = YiAgentsGraph.__new__(YiAgentsGraph)
     g.config = {
         "risk_enabled": risk_enabled,
         "kelly_fraction": 0.25,
