@@ -401,12 +401,12 @@ class TestSubmittedInvariant:
         broker = BrowserBroker()
         # Walk several gate outcomes; none should report submitted=True.
         for kwargs, expected_status in [
-            (dict(ticker="AAPL", action="buy", size=0.0), OrderStatus.BLOCKED_VALIDATION),
+            ({"ticker": "AAPL", "action": "buy", "size": 0.0}, OrderStatus.BLOCKED_VALIDATION),
             (
-                dict(ticker="AAPL", action="buy", size=1000.0, equity_value=10000.0),
+                {"ticker": "AAPL", "action": "buy", "size": 1000.0, "equity_value": 10000.0},
                 OrderStatus.BLOCKED_VALIDATION,
             ),
-            (dict(ticker="AAPL", action="hold", size=10.0), OrderStatus.BLOCKED_VALIDATION),
+            ({"ticker": "AAPL", "action": "hold", "size": 10.0}, OrderStatus.BLOCKED_VALIDATION),
         ]:
             result = broker.place_order(**kwargs)
             assert result.status is expected_status, kwargs

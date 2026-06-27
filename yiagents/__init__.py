@@ -1,5 +1,6 @@
 import contextlib
 import warnings
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 # Load .env files at package import so DEFAULT_CONFIG's env-var overlay
 # (and every llm_clients consumer) sees the user's keys regardless of
@@ -35,3 +36,11 @@ warnings.filterwarnings(
     message=r"The default value of `allowed_objects`.*",
     category=PendingDeprecationWarning,
 )
+
+# Expose the installed package version (declared in pyproject.toml). The fallback
+# covers source checkouts / editable installs where the distribution metadata
+# is absent, so `yiagents.__version__` never errors.
+try:
+    __version__ = _pkg_version("yiagents")
+except PackageNotFoundError:  # pragma: no cover
+    __version__ = "0.0.0"

@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,20 +47,18 @@ if _PROJECT_ROOT not in sys.path:
 # Windows 控制台默认 GBK(cp936)，打印 ✅/❌ 等 Unicode 会触发 UnicodeEncodeError；
 # 强制标准输出/错误流用 utf-8（Python 3.7+），让所有模式的中文与符号都能正常显示。
 for _stream in (sys.stdout, sys.stderr):
-    try:
+    with contextlib.suppress(AttributeError, ValueError):
         _stream.reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, ValueError):
-        pass
 
-import pandas as pd
+import pandas as pd  # noqa: E402
 
-from yiagents.backtest.engine import run_backtest
-from yiagents.backtest.report import write_report
-from yiagents.backtest.validation_gate import evaluate_gate
-from yiagents.default_config import DEFAULT_CONFIG
-from yiagents.graph.trading_graph import YiAgentsGraph
-from yiagents.monitoring.dashboard import write_dashboard
-from yiagents.risk.manager import RiskManager, build_backtest_weight_fn
+from yiagents.backtest.engine import run_backtest  # noqa: E402
+from yiagents.backtest.report import write_report  # noqa: E402
+from yiagents.backtest.validation_gate import evaluate_gate  # noqa: E402
+from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
+from yiagents.graph.trading_graph import YiAgentsGraph  # noqa: E402
+from yiagents.monitoring.dashboard import write_dashboard  # noqa: E402
+from yiagents.risk.manager import RiskManager, build_backtest_weight_fn  # noqa: E402
 
 
 def _rebalance_dates(start: str, end: str, step: int, n: int) -> list[str]:
@@ -124,10 +123,8 @@ def preflight(ticker: str) -> int:
         hp = proxy.split("://", 1)[1].split("/", 1)[0]
         if ":" in hp:
             host = hp.split(":", 1)[0]
-            try:
+            with contextlib.suppress(ValueError):
                 port = int(hp.rsplit(":", 1)[1])
-            except ValueError:
-                pass
     try:
         socket.create_connection((host, port), timeout=3).close()
         check(f"代理端口 {host}:{port} 可达", True)

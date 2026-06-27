@@ -1,8 +1,8 @@
 # Changelog
 
-> **YiAgents** 是 [TradingAgents](https://github.com/TauricResearch/TradingAgents) 的深度定制 fork，已将内部标识从 `tradingagents` 彻底重命名为 `yiagents`（包名 / import / CLI / env 前缀 `YIAGENTS_*` / 数据目录 `~/.yiagents/`）。下方 v0.3.0 及更早的条目继承自上游历史记录，保留 TradingAgents 原名；YiAgents 自身的变更自此之后开始记录。
+> **YiAgents** 是基于研究文献（见 [REFERENCES.md](REFERENCES.md)，收录 99 篇相关研究）独立设计的多智能体 LLM 金融交易框架，内部标识统一为 `yiagents`（包名 / import / CLI / env 前缀 `YIAGENTS_*` / 数据目录 `~/.yiagents/`）。下方早期版本的历史条目沿用了项目初创时的旧称；自 v0.3.0 起以 YiAgents 身份记录变更。
 
-All notable changes to TradingAgents are documented here.
+All notable changes to YiAgents are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
