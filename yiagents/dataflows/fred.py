@@ -39,6 +39,7 @@ MACRO_SERIES = {
     "fed_funds_rate": "FEDFUNDS",
     "federal_funds_rate": "FEDFUNDS",
     "fed_funds": "FEDFUNDS",
+    "fed_rate": "FEDFUNDS",
     "2y_treasury": "DGS2",
     "10y_treasury": "DGS10",
     "30y_treasury": "DGS30",
