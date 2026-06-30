@@ -1301,5 +1301,98 @@ def analyze(
     run_analysis(checkpoint=checkpoint)
 
 
+@app.command()
+def batch(
+    tickers: list[str] = typer.Option(
+        ...,
+        "--ticker",
+        "-t",
+        help="Ticker symbol; repeat -t for each (e.g. -t AAPL -t NVDA -t MSFT). "
+        "One asset class per batch.",
+    ),
+    date: str = typer.Option(..., "--date", "-d", help="Analysis date YYYY-MM-DD."),
+    asset_type: str = typer.Option(
+        "auto",
+        "--asset-type",
+        help="stock | crypto | auto (auto = infer from the first ticker).",
+    ),
+    workers: int | None = typer.Option(
+        None,
+        "--workers",
+        "-w",
+        help="Concurrency K (pool size). Default: YIAGENTS_BATCH_WORKERS (3).",
+    ),
+):
+    """Analyze many tickers concurrently (one API key drives many agents).
+
+    Each ticker runs the exact same analysis as ``analyze``; concurrency is
+    layered ABOVE propagate() — agent inputs/depth/reasoning are unchanged, so
+    every ticker is byte-equivalent to a serial run. One batch = one asset
+    class (all workers share one config). Reports land under results_dir per
+    ticker. Master switch: YIAGENTS_BATCH_CONCURRENCY (false = strictly serial).
+    """
+    from cli.utils import is_valid_ticker_input
+
+    from yiagents.batch.runner import BatchRunner
+
+    bad = [t for t in tickers if not is_valid_ticker_input(t)]
+    if bad:
+        console.print(f"[red]Invalid ticker(s): {bad}[/red]")
+        raise typer.Exit(code=2)
+    try:
+        datetime.datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        console.print(f"[red]Bad date (need YYYY-MM-DD): {date}[/red]")
+        raise typer.Exit(code=2)
+
+    resolved = asset_type
+    if resolved == "auto":
+        resolved = detect_asset_type(tickers[0]).value
+        mismatch = [t for t in tickers if detect_asset_type(t).value != resolved]
+        if mismatch:
+            console.print(
+                f"[red]Mixed asset classes in one batch: {tickers[0]} is "
+                f"{resolved}, but {mismatch} differ. Use one class per batch.[/red]"
+            )
+            raise typer.Exit(code=2)
+        console.print(f"[cyan]Asset type inferred: {resolved} (from {tickers[0]})[/cyan]")
+
+    config = DEFAULT_CONFIG.copy()
+    # The batch entry point opts in to concurrency by default; users can force
+    # serial with YIAGENTS_BATCH_CONCURRENCY=false for a G1 baseline.
+    config.setdefault("batch_concurrency", True)
+
+    console.print(
+        f"[bold]Batch: {len(tickers)} tickers | date={date} | type={resolved}[/bold]"
+    )
+    with BatchRunner(config, workers=workers, progress=False) as runner:
+        results = runner.run(tickers, date, asset_type=resolved)
+
+    ok = sum(1 for r in results if r["error"] is None)
+    table = Table(title=f"Batch results ({ok}/{len(results)} ok)", box=box.SIMPLE)
+    table.add_column("ticker")
+    table.add_column("status")
+    table.add_column("elapsed", justify="right")
+    table.add_column("report")
+    for r in results:
+        if r["error"] is None:
+            table.add_row(
+                r["ticker"],
+                "[green]✅[/green]",
+                f"{r['elapsed']:.1f}s",
+                str(r["report_path"] or ""),
+            )
+        else:
+            table.add_row(
+                r["ticker"],
+                "[red]❌[/red]",
+                "-",
+                f"{type(r['error']).__name__}: {r['error']}",
+            )
+    console.print(table)
+    if ok != len(results):
+        raise typer.Exit(code=1)
+
+
 if __name__ == "__main__":
     app()

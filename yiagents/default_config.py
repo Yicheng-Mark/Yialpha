@@ -42,6 +42,27 @@ _ENV_OVERRIDES = {
     # execution layer reads the same env var directly so a halt takes effect
     # without restarting the agent process.
     "YIAGENTS_KILL_SWITCH":             "kill_switch",
+    # Multi-ticker batch concurrency (Phase A/B). Off by default so every path
+    # stays strictly serial (one ticker at a time) and reproducible. See
+    # yiagents/batch/runner.py — each ticker runs through propagate() unchanged;
+    # concurrency is layered above the graph, never inside an agent.
+    "YIAGENTS_BATCH_CONCURRENCY":       "batch_concurrency",
+    "YIAGENTS_BATCH_WORKERS":           "batch_workers",
+    "YIAGENTS_BATCH_DEDUP_TICKERS":     "batch_dedup_tickers",
+    "YIAGENTS_BATCH_MEMORY_LOCK":       "batch_memory_lock",
+    "YIAGENTS_BATCH_OHLCV_LOCK":        "batch_ohlcv_lock",
+    "YIAGENTS_BATCH_FAIL_FAST":         "batch_fail_fast",
+    # Phase C: optional shared LLM rate limiter (DeepSeek RPM ceiling). Off by
+    # default — rely on per-call retries for transient 429s until the ceiling is
+    # measured (run the G4 instrumentation). Never changes reasoning params.
+    "YIAGENTS_LLM_RATE_LIMITER":        "llm_rate_limiter",
+    "YIAGENTS_LLM_RPM":                 "llm_rpm",
+    # P1a: share one httpx.Client (keepalive) across every LLM client so the K
+    # worker graphs reuse TLS/proxy connections. Transport-only; off by default.
+    "YIAGENTS_HTTP_KEEPALIVE":          "http_keepalive",
+    # P0: stream the graph + record per-analyst wall time. Observation only
+    # (serial graph final state == invoke); off by default.
+    "YIAGENTS_STREAM_TELEMETRY":        "stream_telemetry",
 }
 
 
@@ -139,6 +160,29 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Phase 4: global kill switch (env: YIAGENTS_KILL_SWITCH). Halt = no
     # new orders submitted by the browser broker; read live at order time.
     "kill_switch": False,
+    # --- Multi-ticker batch concurrency ---------------------------------------
+    # Master switch OFF by default: every entry point runs strictly serial
+    # (K=1, one ticker at a time) and is byte-equivalent to today. Flip on to
+    # fan a ticker list out across a pool of worker graphs. Concurrency lives
+    # above propagate() — agent inputs/depth/reasoning params are unchanged.
+    "batch_concurrency": False,
+    "batch_workers": 3,            # K: max concurrent tickers (pool size)
+    "batch_dedup_tickers": True,   # forbid duplicate tickers in one batch
+    "batch_memory_lock": True,     # serialize memory-log read-modify-write
+    "batch_ohlcv_lock": True,      # serialize per-symbol OHLCV cache read/write
+    "batch_fail_fast": False,      # False = a failed ticker doesn't abort the batch
+    # Phase C: optional shared DeepSeek rate limiter (requests-per-minute).
+    # Off by default; size llm_rpm from measured RPM before enabling.
+    "llm_rate_limiter": False,
+    "llm_rpm": 60,
+    # P1a: process-wide shared httpx.Client for LLM calls — concurrent worker
+    # graphs reuse TLS/SOCKS5-proxy connections instead of opening one per call.
+    # Transport-only (changes nothing sent to the model); off by default.
+    "http_keepalive": False,
+    # P0: stream the graph (stream_mode="values") and record per-analyst wall
+    # time via AnalystWallTimeTracker. The graph is fully serial, so the final
+    # values chunk is identical to graph.invoke(); this adds observation only.
+    "stream_telemetry": False,
     # News / data fetching parameters
     # Increase for longer lookback strategies or to broaden macro coverage;
     # decrease to reduce token usage in agent prompts.

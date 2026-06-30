@@ -1,6 +1,6 @@
 # Changelog
 
-> **YiAgents** 是基于研究文献（见 [REFERENCES.md](REFERENCES.md)，收录 99 篇相关研究）独立设计的多智能体 LLM 金融交易框架，内部标识统一为 `yiagents`（包名 / import / CLI / env 前缀 `YIAGENTS_*` / 数据目录 `~/.yiagents/`）。下方早期版本的历史条目沿用了项目初创时的旧称；自 v0.3.0 起以 YiAgents 身份记录变更。
+> **YiAgents** 是基于研究文献（见 [REFERENCES.md](REFERENCES.md)，收录 100+ 篇相关研究）独立设计的多智能体 LLM 金融交易框架。包名 / import / CLI / env 前缀 `YIAGENTS_*` / 数据目录 `~/.yiagents/` 全程统一。
 
 All notable changes to YiAgents are documented here.
 
@@ -25,10 +25,10 @@ structured output.
   Adds NVIDIA NIM, Kimi, Groq, Mistral, and a native Amazon Bedrock client.
 - **Macro and prediction-market vendors.** FRED macro indicators and Polymarket
   event probabilities, surfaced to the news and macro analysts.
-- **Programmatic report output.** `TradingAgentsGraph.save_reports()` writes the
+- **Programmatic report output.** `YiAgentsGraph.save_reports()` writes the
   same report tree the CLI produces, for headless and API runs. (#1037)
-- **Env-configurable reasoning depth** via `TRADINGAGENTS_OPENAI_REASONING_EFFORT`,
-  `TRADINGAGENTS_GOOGLE_THINKING_LEVEL`, and `TRADINGAGENTS_ANTHROPIC_EFFORT`,
+- **Env-configurable reasoning depth** via `YIAGENTS_OPENAI_REASONING_EFFORT`,
+  `YIAGENTS_GOOGLE_THINKING_LEVEL`, and `YIAGENTS_ANTHROPIC_EFFORT`,
   each gated to the models that accept it.
 
 ### Changed
@@ -38,7 +38,7 @@ structured output.
   resolution chain with no silent fallback to unselected vendors; a typed
   `VendorError` taxonomy; look-ahead-safe news windows; stale-OHLCV rejection;
   inclusive yfinance date ranges.
-- **Config precedence.** An explicit `TRADINGAGENTS_*` value or CLI flag now wins
+- **Config precedence.** An explicit `YIAGENTS_*` value or CLI flag now wins
   over interactive defaults for debate and risk round counts,
   `--checkpoint / --no-checkpoint`, and the Docker provider profile; invalid
   boolean env values fail loudly. (#975, #976, #977)
@@ -88,7 +88,7 @@ Thanks to everyone who shaped this release through code, design, and reports:
 - **Dual-region Qwen and GLM** with separate keys per region — international
   (`DASHSCOPE_API_KEY`, `ZHIPU_API_KEY`) and China (`DASHSCOPE_CN_API_KEY`,
   `ZHIPU_CN_API_KEY`), selectable via a secondary region prompt. (#758)
-- **`TRADINGAGENTS_*` env-var configurability for `DEFAULT_CONFIG`.** Override
+- **`YIAGENTS_*` env-var configurability for `DEFAULT_CONFIG`.** Override
   `llm_provider`, deep/quick model IDs, `backend_url`, `output_language`,
   debate-round counts, checkpoint flag, and benchmark ticker via `.env` with
   type-aware coercion (string / int / bool). (#602)
@@ -133,7 +133,7 @@ Thanks to everyone who shaped this release through code, design, and reports:
 - **Ticker prompt preserves exchange suffixes** (`.SH`, `.SZ`, `.SS`, `.HK`,
   `.T`, etc.) for A-share, HK, Tokyo, and other non-US flows. (#770)
 - **Docker permission errors** no longer block first-run write to
-  `~/.tradingagents/`. (#519, #627, #672, #771)
+  `~/.yiagents/`. (#519, #627, #672, #771)
 - **Config state no longer leaks between runs** when sub-dicts are mutated;
   `set_config` partial updates preserve sibling defaults. (#788)
 - **`max_recur_limit` config actually applies** — previously read but not
@@ -163,11 +163,11 @@ Thanks to everyone who shaped this release through code, design, and reports:
 - **LangGraph checkpoint resume** — opt-in via `--checkpoint`. State is saved
   after each node so crashed or interrupted runs resume from the last
   successful step. Per-ticker SQLite databases under
-  `~/.tradingagents/cache/checkpoints/`. `--clear-checkpoints` resets them. (#594)
+  `~/.yiagents/cache/checkpoints/`. `--clear-checkpoints` resets them. (#594)
 - **Persistent decision log** replacing the per-agent BM25 memory. Decisions
   are stored automatically at the end of `propagate()`; the next same-ticker
   run resolves prior pending entries with realised return, alpha vs SPY, and
-  a one-paragraph reflection. Override path with `TRADINGAGENTS_MEMORY_LOG_PATH`.
+  a one-paragraph reflection. Override path with `YIAGENTS_MEMORY_LOG_PATH`.
   Optional `memory_log_max_entries` config caps resolved entries; pending
   entries are never pruned. (#578, #563, #564, #579)
 - **DeepSeek, Qwen (Alibaba DashScope), GLM (Zhipu), and Azure OpenAI**
@@ -192,7 +192,7 @@ Thanks to everyone who shaped this release through code, design, and reports:
   overriding `backend_url`. The CLI flow is unaffected.
 - All file I/O passes explicit `encoding="utf-8"` so Windows users no longer
   hit `UnicodeEncodeError` with the cp1252 default. (#543, #550, #576)
-- Cache and log directories moved to `~/.tradingagents/` to resolve Docker
+- Cache and log directories moved to `~/.yiagents/` to resolve Docker
   permission issues. (#519)
 - `SignalProcessor` reads the rating from the Portfolio Manager's rendered
   markdown via a deterministic heuristic — no extra LLM call.
@@ -394,16 +394,16 @@ PRs from late 2025 also landed here.
 
 ### Added
 
-- **Initial public release** of the TradingAgents multi-agent trading
+- **Initial public release** of the YiAgents multi-agent trading
   framework: market / sentiment / news / fundamentals analysts; bull and bear
   researchers; trader; aggressive, conservative, and neutral risk debaters;
   portfolio manager. LangGraph orchestration, yfinance data, per-agent
   BM25 memory, single-provider OpenAI integration, interactive CLI.
 
-[0.2.4]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.3...v0.2.4
-[0.2.3]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.2...v0.2.3
-[0.2.2]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.1...v0.2.2
-[0.2.1]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/TauricResearch/TradingAgents/compare/v0.1.1...v0.2.0
-[0.1.1]: https://github.com/TauricResearch/TradingAgents/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/TauricResearch/TradingAgents/releases/tag/v0.1.0
+[0.2.4]: https://github.com/zhang12120113-creator/Yiagents/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/zhang12120113-creator/Yiagents/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/zhang12120113-creator/Yiagents/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/zhang12120113-creator/Yiagents/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/zhang12120113-creator/Yiagents/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/zhang12120113-creator/Yiagents/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/zhang12120113-creator/Yiagents/releases/tag/v0.1.0

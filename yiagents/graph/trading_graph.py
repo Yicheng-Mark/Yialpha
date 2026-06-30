@@ -127,6 +127,7 @@ class YiAgentsGraph:
         # State tracking
         self.curr_state = None
         self.ticker = None
+        self.selected_analysts = tuple(selected_analysts)  # for P0 telemetry plan
         self.log_states_dict = {}  # date to full state dict
 
         # Set up the graph: keep the workflow for recompilation with a checkpointer.
@@ -160,6 +161,32 @@ class YiAgentsGraph:
         temperature = self.config.get("temperature")
         if temperature is not None and temperature != "":
             kwargs["temperature"] = float(temperature)
+
+        # Phase C: optional shared rate limiter — throttles REQUEST RATE only
+        # (never prompts/reasoning/temperature). One limiter per (provider, rpm)
+        # is shared across every worker graph in the process, so the RPM ceiling
+        # bounds the whole batch rather than each graph independently. Attached
+        # only for OpenAI-compatible providers (DeepSeek, OpenAI, xAI, ...) whose
+        # client forwards it via _PASSTHROUGH_KWARGS. Off by default; enable only
+        # after measuring the ceiling (G4 instrumentation).
+        if self.config.get("llm_rate_limiter"):
+            from yiagents.llm_clients.openai_client import is_openai_compatible
+            if is_openai_compatible(provider):
+                from yiagents.llm_clients.rate_limiter import get_shared_rate_limiter
+                kwargs["rate_limiter"] = get_shared_rate_limiter(
+                    provider, int(self.config.get("llm_rpm", 60))
+                )
+
+        # P1a: optional shared httpx.Client so the K worker graphs reuse TLS/proxy
+        # connections. Transport-only; off by default. Forwarded for OpenAI-
+        # compatible providers via _PASSTHROUGH_KWARGS (http_client is allowlisted).
+        if self.config.get("http_keepalive"):
+            from yiagents.llm_clients.openai_client import is_openai_compatible
+            if is_openai_compatible(provider):
+                from yiagents.llm_clients.http_client import get_shared_http_client
+                shared = get_shared_http_client()
+                if shared is not None:
+                    kwargs["http_client"] = shared
 
         return kwargs
 
@@ -482,6 +509,47 @@ class YiAgentsGraph:
             )
         return write_report_tree(final_state, ticker, save_path)
 
+    def _invoke_or_stream(self, init_agent_state, args):
+        """Execute the graph; optionally stream for per-analyst wall-time telemetry.
+
+        Default (``stream_telemetry`` off): plain ``self.graph.invoke`` —
+        byte-identical to the historical path. When telemetry is on, stream with
+        ``stream_mode="values"`` and feed each chunk to an
+        ``AnalystWallTimeTracker``. The graph is fully serial, so the last values
+        chunk is exactly what ``invoke`` returns — telemetry adds observation
+        only, never changing inputs, depth, or the final state. If a run emits no
+        chunks (should not happen for a valid graph), falls back to ``invoke`` so
+        downstream state access doesn't KeyError.
+        """
+        if not self.config.get("stream_telemetry"):
+            return self.graph.invoke(init_agent_state, **args)
+
+        from yiagents.graph.analyst_execution import (
+            AnalystWallTimeTracker,
+            build_analyst_execution_plan,
+            sync_analyst_tracker_from_chunk,
+        )
+
+        tracker = None
+        try:
+            tracker = AnalystWallTimeTracker(
+                build_analyst_execution_plan(self.selected_analysts)
+            )
+        except ValueError:
+            # Unknown analyst shape — skip timing but still stream.
+            tracker = None
+
+        final_state = None
+        for chunk in self.graph.stream(init_agent_state, **args):
+            final_state = chunk
+            if tracker is not None:
+                sync_analyst_tracker_from_chunk(tracker, chunk)
+        if final_state is None:
+            return self.graph.invoke(init_agent_state, **args)
+        if tracker is not None:
+            logger.info("%s", tracker.format_summary())
+        return final_state
+
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock", portfolio_state=None):
         """Execute the graph and write the resulting state to disk and memory log."""
         # Initialize state — inject memory log context for PM and the
@@ -523,7 +591,7 @@ class YiAgentsGraph:
             for chunk in trace:
                 final_state.update(chunk)
         else:
-            final_state = self.graph.invoke(init_agent_state, **args)
+            final_state = self._invoke_or_stream(init_agent_state, args)
 
         # Phase 1: deterministically override size / stop / exposure (LLM kept
         # the direction). No-op when risk_enabled is off.

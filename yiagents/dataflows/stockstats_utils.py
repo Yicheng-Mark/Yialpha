@@ -1,12 +1,15 @@
 import logging
 import os
 import time
+from contextlib import nullcontext
 from typing import Annotated
 
 import pandas as pd
 import yfinance as yf
 from stockstats import wrap
 from yfinance.exceptions import YFRateLimitError
+
+from yiagents.batch.locks import FileLock
 
 from .config import get_config
 from .symbol_utils import NoMarketDataError, normalize_symbol
@@ -153,32 +156,46 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
         f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv",
     )
 
-    # A cached file may be empty if a prior fetch failed (unknown symbol,
-    # transient rate limit). Treat an empty/columnless cache as a miss and
-    # re-fetch rather than serving the poisoned file forever.
-    data = None
-    if os.path.exists(data_file):
-        cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
-        if not cached.empty and "Close" in cached.columns:
-            data = cached
+    # The cache read + (on miss) download + write must be atomic per symbol:
+    # two workers fetching the SAME symbol would otherwise both miss the cache,
+    # both download, and race the non-atomic to_csv (a concurrent reader could
+    # see a half-written file). Keyed by file path, so different symbols use
+    # different locks and stay fully concurrent. Holding the lock across the
+    # network download only blocks other workers fetching THIS symbol (rare —
+    # the batch runner dedups tickers), and the second waiter then hits the
+    # freshly-written cache instead of re-downloading.
+    lock = (
+        FileLock(data_file)
+        if config.get("batch_ohlcv_lock", True)
+        else nullcontext()
+    )
+    with lock:
+        # A cached file may be empty if a prior fetch failed (unknown symbol,
+        # transient rate limit). Treat an empty/columnless cache as a miss and
+        # re-fetch rather than serving the poisoned file forever.
+        data = None
+        if os.path.exists(data_file):
+            cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
+            if not cached.empty and "Close" in cached.columns:
+                data = cached
 
-    if data is None:
-        downloaded = yf_retry(lambda: yf.download(
-            canonical,
-            start=start_str,
-            end=end_str,
-            multi_level_index=False,
-            progress=False,
-            auto_adjust=True,
-        ))
-        downloaded = _ensure_date_column(downloaded.reset_index())
-        # Only cache real data — never persist an empty frame.
-        if downloaded.empty or "Close" not in downloaded.columns:
-            raise NoMarketDataError(
-                symbol, canonical, "Yahoo Finance returned no rows"
-            )
-        downloaded.to_csv(data_file, index=False, encoding="utf-8")
-        data = downloaded
+        if data is None:
+            downloaded = yf_retry(lambda: yf.download(
+                canonical,
+                start=start_str,
+                end=end_str,
+                multi_level_index=False,
+                progress=False,
+                auto_adjust=True,
+            ))
+            downloaded = _ensure_date_column(downloaded.reset_index())
+            # Only cache real data — never persist an empty frame.
+            if downloaded.empty or "Close" not in downloaded.columns:
+                raise NoMarketDataError(
+                    symbol, canonical, "Yahoo Finance returned no rows"
+                )
+            downloaded.to_csv(data_file, index=False, encoding="utf-8")
+            data = downloaded
 
     data = _clean_dataframe(data)
 

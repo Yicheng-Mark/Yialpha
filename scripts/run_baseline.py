@@ -34,7 +34,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import queue
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -75,6 +77,41 @@ def _rebalance_dates(start: str, end: str, step: int, n: int) -> list[str]:
 def _build_graph(debug: bool = False) -> YiAgentsGraph:
     config = DEFAULT_CONFIG.copy()
     return YiAgentsGraph(debug=debug, config=config)
+
+
+def _map_tickers(tickers, task, workers: int = 1):
+    """Run ``task(ticker, graph) -> result`` for each ticker; concurrent across tickers.
+
+    Each ticker borrows ONE graph instance from a pool of K (one graph per worker).
+    ``propagate`` mutates instance state (self.ticker / self.curr_state / self.graph
+    recompile), so a single shared graph cannot serve concurrent tickers — hence the
+    pool, never shared across threads. Within a ticker, dates/runs stay serial (the
+    task body loops them). ``workers`` <= 1 takes a strict serial path with one graph
+    and is byte-equivalent to the previous single-``ta`` loop. Results come back in
+    input ticker order.
+    """
+    if workers <= 1:
+        graph = _build_graph(debug=False)
+        return [task(t, graph) for t in tickers]
+
+    pool: queue.Queue = queue.Queue()
+    for _ in range(workers):
+        pool.put(_build_graph(debug=False))
+
+    results: dict = {}
+
+    def run(t):
+        graph = pool.get()
+        try:
+            return task(t, graph)
+        finally:
+            pool.put(graph)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        future_to_ticker = {ex.submit(run, t): t for t in tickers}
+        for fut in as_completed(future_to_ticker):
+            results[future_to_ticker[fut]] = fut.result()
+    return [results[t] for t in tickers]
 
 
 def preflight(ticker: str) -> int:
@@ -178,47 +215,58 @@ def smoke(ticker: str, date: str) -> int:
         return 2
 
 
-def baseline_backtest(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, out):
-    """档 1：现状基线（简单评级→仓位）。"""
+def baseline_backtest(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, out, workers=1):
+    """档 1：现状基线（简单评级→仓位）。
+
+    ``workers`` > 1 并发跑多个 ticker（每票借一个独立 graph 实例，内部
+    dates/runs 仍串行）。默认 ``workers``=1 与今天逐票串行完全等价。
+    """
     print(f"\n=== 基线回测：{tickers} | {start}→{end} | {n_dates}×再平衡 ×{runs} 次 ===")
-    ta = _build_graph(debug=False)
-    all_results = []
-    for t in tickers:
-        dates = _rebalance_dates(start, end, step, n_dates)
-        print(f"  {t}: 再平衡日期 {dates}")
+    dates = _rebalance_dates(start, end, step, n_dates)
+    print(f"  再平衡日期 {dates}")
+
+    def per_ticker(t, ta):
+        out_res = []
         for r in range(runs):
-            print(f"    run {r} ...", flush=True)
+            print(f"    [{t}] run {r} ...", flush=True)
             res = run_backtest(ta, t, dates, holding_days=holding_days,
                                cost_bps=cost_bps, run_tag=f"base_r{r}")
             m = res.metrics
-            print(f"      总收益 {m.total_return:.2%} | Sharpe {m.sharpe:.2f} | "
+            print(f"      [{t}] 总收益 {m.total_return:.2%} | Sharpe {m.sharpe:.2f} | "
                   f"MDD {m.max_drawdown:.2%} | vs B&H alpha {m.alpha_vs_buyhold:.2%}")
-            all_results.append(res)
+            out_res.append(res)
+        return out_res
+
+    nested = _map_tickers(tickers, per_ticker, workers)
+    all_results = [r for sub in nested for r in sub]
     path = write_report(all_results, results_dir=out)
     write_dashboard(all_results, results_dir=out)
     print(f"\n📊 基线报告: {path}")
-    print(f"📊 仪表盘(用浏览器打开): {Path(out)/ 'monitoring' / 'dashboard.html'}")
+    print(f"📊 仪表盘(用浏览器打开): {Path(out) / 'monitoring' / 'dashboard.html'}")
     return all_results
 
 
-def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, out):
-    """档 2：基线 vs 风控增强 + 闸门判定。"""
+def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, out, workers=1):
+    """档 2：基线 vs 风控增强 + 闸门判定。
+
+    ``workers`` > 1 并发跑多个 ticker（每票借独立 graph 实例）。默认 ``workers``=1
+    与今天逐票串行等价；闸门判定与报告聚合始终串行（确定性顺序）。
+    """
     print(f"\n=== 完整 A/B：基线 vs Phase-1 风控 | {tickers} ===")
-    ta = _build_graph(debug=False)
 
     # 启用风控配置
     risk_cfg = DEFAULT_CONFIG.copy()
     risk_cfg["risk_enabled"] = True
     rm = RiskManager.from_config(risk_cfg)
+    dates = _rebalance_dates(start, end, step, n_dates)
+    print(f"  再平衡日期 {dates}")
 
-    gate_inputs = []  # (ticker, baseline_result, [improved_results])
-    for t in tickers:
-        dates = _rebalance_dates(start, end, step, n_dates)
-        print(f"\n  [{t}] 再平衡日期 {dates}")
+    def per_ticker(t, ta):
+        print(f"\n  [{t}] 开始", flush=True)
         base = run_backtest(ta, t, dates, holding_days=holding_days,
                             cost_bps=cost_bps, run_tag=f"ab_base_{t}")
         mb = base.metrics
-        print(f"    基线:    总收益 {mb.total_return:.2%} | Sharpe {mb.sharpe:.2f} | "
+        print(f"    [{t}] 基线:    总收益 {mb.total_return:.2%} | Sharpe {mb.sharpe:.2f} | "
               f"MDD {mb.max_drawdown:.2%}")
 
         improved = []
@@ -228,12 +276,14 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
                                cost_bps=cost_bps, weight_fn=wfn,
                                run_tag=f"ab_risk_{t}_r{r}")
             mi = res.metrics
-            print(f"    风控 run{r}: 总收益 {mi.total_return:.2%} | Sharpe {mi.sharpe:.2f} | "
+            print(f"    [{t}] 风控 run{r}: 总收益 {mi.total_return:.2%} | Sharpe {mi.sharpe:.2f} | "
                   f"MDD {mi.max_drawdown:.2%} | DSR {mi.deflated_sharpe:.2f}")
             improved.append(res)
-        gate_inputs.append((t, base, improved))
+        return (t, base, improved)
 
-    # 每只票独立判定闸门
+    gate_inputs = _map_tickers(tickers, per_ticker, workers)
+
+    # 每只票独立判定闸门（串行，确定性顺序）
     all_render = []
     for t, base, improved in gate_inputs:
         verdict = evaluate_gate(base, improved)
@@ -266,6 +316,8 @@ def main():
     p.add_argument("--holding-days", type=int, default=5)
     p.add_argument("--cost-bps", type=float, default=5.0)
     p.add_argument("--runs", type=int, default=2)
+    p.add_argument("--workers", type=int, default=1,
+                   help="跨 ticker 并发数 K（1=串行，与今天等价；>1 并发，受 DeepSeek RPM/代理约束）")
     p.add_argument("--out", default="backtest_output")
     args = p.parse_args()
 
@@ -279,10 +331,12 @@ def main():
         sys.exit(smoke(args.ticker, args.date))
     elif args.baseline:
         baseline_backtest(args.tickers, start, end, args.step, args.rebalance,
-                          args.holding_days, args.cost_bps, args.runs, args.out)
+                          args.holding_days, args.cost_bps, args.runs, args.out,
+                          workers=args.workers)
     else:
         full_ab(args.tickers, start, end, args.step, args.rebalance,
-                args.holding_days, args.cost_bps, args.runs, args.out)
+                args.holding_days, args.cost_bps, args.runs, args.out,
+                workers=args.workers)
 
 
 if __name__ == "__main__":
