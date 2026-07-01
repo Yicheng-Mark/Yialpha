@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 from yiagents.graph.trading_graph import YiAgentsGraph
 from yiagents.llm_clients.http_client import get_shared_http_client, reset_for_test as reset_http
 
-
 # ---------------------------------------------------------------------------
 # P1a — shared httpx.Client keepalive
 # ---------------------------------------------------------------------------

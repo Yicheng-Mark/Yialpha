@@ -195,7 +195,7 @@ def _has_real_deepseek_key():
     reason="DEEPSEEK_API_KEY not set (or placeholder); skipping live API call",
 )
 class TestDeepSeekLiveStructuredOutput:
-    """End-to-end: a real DeepSeek V4-flash call returns a typed instance.
+    """End-to-end: a real DeepSeek V4-pro call returns a typed instance.
 
     Verifies the no-tool_choice path doesn't trigger the 400 reported in
     issue #678 and that the structured-output binding still parses to a
@@ -206,9 +206,9 @@ class TestDeepSeekLiveStructuredOutput:
         action: str
         confidence: float
 
-    def test_v4_flash_returns_structured_output(self):
+    def test_v4_pro_returns_structured_output(self):
         client = DeepSeekChatOpenAI(
-            model="deepseek-v4-flash",
+            model="deepseek-v4-pro",
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url="https://api.deepseek.com",
             timeout=60,

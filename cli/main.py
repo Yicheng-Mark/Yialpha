@@ -1,9 +1,18 @@
+import contextlib
 import datetime
 import os
+import sys
 import time
 from collections import deque
 from functools import wraps
 from pathlib import Path
+
+# Windows 控制台默认 GBK(cp936)，打印 ✅/❌ 等 Unicode 会触发 UnicodeEncodeError；
+# 强制标准输出/错误流用 utf-8（Python 3.7+），让所有模式的中文与符号都能正常显示。
+# 修 batch 命令打印 Rich 结果表（含 ✅/❌）时的 GBK 崩溃，对齐 scripts/run_baseline.py。
+for _stream in (sys.stdout, sys.stderr):
+    with contextlib.suppress(AttributeError, ValueError):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 import typer
 from rich import box
@@ -1332,7 +1341,6 @@ def batch(
     ticker. Master switch: YIAGENTS_BATCH_CONCURRENCY (false = strictly serial).
     """
     from cli.utils import is_valid_ticker_input
-
     from yiagents.batch.runner import BatchRunner
 
     bad = [t for t in tickers if not is_valid_ticker_input(t)]
@@ -1343,7 +1351,7 @@ def batch(
         datetime.datetime.strptime(date, "%Y-%m-%d")
     except ValueError:
         console.print(f"[red]Bad date (need YYYY-MM-DD): {date}[/red]")
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
 
     resolved = asset_type
     if resolved == "auto":

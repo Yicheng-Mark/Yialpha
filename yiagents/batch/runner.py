@@ -30,8 +30,8 @@ import logging
 import queue
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable
 
 from tqdm import tqdm
 
@@ -162,7 +162,7 @@ class BatchRunner:
             logging.getLogger().removeFilter(flt)
             self._log_filter = None
 
-    def __enter__(self) -> "BatchRunner":
+    def __enter__(self) -> BatchRunner:
         return self
 
     def __exit__(self, *exc) -> bool:

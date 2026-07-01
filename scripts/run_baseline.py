@@ -74,12 +74,17 @@ def _rebalance_dates(start: str, end: str, step: int, n: int) -> list[str]:
     return [d.strftime("%Y-%m-%d") for d in picked]
 
 
-def _build_graph(debug: bool = False) -> YiAgentsGraph:
+def _build_graph(debug: bool = False, risk_enabled: bool | None = None) -> YiAgentsGraph:
     config = DEFAULT_CONFIG.copy()
+    # Let each mode control the quantitative overlay explicitly instead of
+    # inheriting the DEFAULT_CONFIG flip (baseline forces it off, full on);
+    # None inherits the default (currently on -- the production path).
+    if risk_enabled is not None:
+        config["risk_enabled"] = risk_enabled
     return YiAgentsGraph(debug=debug, config=config)
 
 
-def _map_tickers(tickers, task, workers: int = 1):
+def _map_tickers(tickers, task, workers: int = 1, risk_enabled: bool | None = None):
     """Run ``task(ticker, graph) -> result`` for each ticker; concurrent across tickers.
 
     Each ticker borrows ONE graph instance from a pool of K (one graph per worker).
@@ -89,14 +94,18 @@ def _map_tickers(tickers, task, workers: int = 1):
     task body loops them). ``workers`` <= 1 takes a strict serial path with one graph
     and is byte-equivalent to the previous single-``ta`` loop. Results come back in
     input ticker order.
+
+    ``risk_enabled`` is threaded into every built graph so each mode controls the
+    quantitative overlay explicitly instead of inheriting the DEFAULT_CONFIG flip
+    (baseline forces it off, full forces it on); ``None`` inherits the default.
     """
     if workers <= 1:
-        graph = _build_graph(debug=False)
+        graph = _build_graph(debug=False, risk_enabled=risk_enabled)
         return [task(t, graph) for t in tickers]
 
     pool: queue.Queue = queue.Queue()
     for _ in range(workers):
-        pool.put(_build_graph(debug=False))
+        pool.put(_build_graph(debug=False, risk_enabled=risk_enabled))
 
     results: dict = {}
 
@@ -237,7 +246,9 @@ def baseline_backtest(tickers, start, end, step, n_dates, holding_days, cost_bps
             out_res.append(res)
         return out_res
 
-    nested = _map_tickers(tickers, per_ticker, workers)
+    # Pure baseline: force the quantitative overlay OFF at the graph layer so
+    # this mode stays the clean Phase-0 reference regardless of the default.
+    nested = _map_tickers(tickers, per_ticker, workers, risk_enabled=False)
     all_results = [r for sub in nested for r in sub]
     path = write_report(all_results, results_dir=out)
     write_dashboard(all_results, results_dir=out)
@@ -281,7 +292,10 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
             improved.append(res)
         return (t, base, improved)
 
-    gate_inputs = _map_tickers(tickers, per_ticker, workers)
+    # Graph-layer overlay ON, consistent with the risk_cfg/weight_fn already
+    # True above. Both A/B legs share this graph; sizing still differs only via
+    # weight_fn, so the gate stays a clean controlled comparison.
+    gate_inputs = _map_tickers(tickers, per_ticker, workers, risk_enabled=True)
 
     # 每只票独立判定闸门（串行，确定性顺序）
     all_render = []

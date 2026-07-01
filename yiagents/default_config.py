@@ -140,16 +140,23 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Output language for analyst reports and final decision
     # Internal agent debate stays in English for reasoning quality
     "output_language": "English",
-    # Debate and discussion settings
-    "max_debate_rounds": 1,
-    "max_risk_discuss_rounds": 1,
+    # Debate and discussion settings. conditional_logic terminates the
+    # investment debate at 2*N beats and the risk debate at 3*N beats, so N=1
+    # stops Bull before it can answer Bear's rebuttal; N=2 yields a full
+    # Bull->Bear->Bull->Bear cycle (and a 6-beat risk debate) -- the first
+    # setting where both sides actually exchange rebuttals. max_recur_limit=100
+    # comfortably absorbs the extra beats (longest path stays well under 100).
+    "max_debate_rounds": 2,
+    "max_risk_discuss_rounds": 2,
     "max_recur_limit": 100,
     # --- Quantitative risk-control layer (Phase 1) -------------------------
-    # Off by default: the Trader/PM keep their current LLM-driven sizing and the
-    # Phase-0 backtest baseline stays reproducible. When enabled, the risk
-    # manager overrides position size / stop-loss / exposure deterministically
-    # (LLM keeps direction; math owns size and risk).
-    "risk_enabled": False,
+    # On by default: the recommended production form. The risk manager overrides
+    # position size / stop-loss / exposure deterministically (LLM keeps
+    # direction; math owns size and risk). scripts/run_baseline.py sets this
+    # explicitly per mode (baseline=False, full=True) so the A/B gate stays
+    # clean regardless of this default; smoke inherits the default to exercise
+    # the production path.
+    "risk_enabled": True,
     "kelly_fraction": 0.25,            # quarter-Kelly by default
     "max_single_position": 0.20,       # one ticker <= 20% of equity
     "max_single_sector": 0.30,         # one sector <= 30% of equity
