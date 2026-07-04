@@ -1,5 +1,6 @@
 import logging
 import os
+import socket
 import time
 from contextlib import nullcontext
 from typing import Annotated
@@ -16,6 +17,27 @@ from .symbol_utils import NoMarketDataError, normalize_symbol
 from .utils import safe_ticker_component
 
 logger = logging.getLogger(__name__)
+
+# HTTP read-timeout safety net for yfinance. yfinance has no default read
+# timeout, so under Yahoo rate-limiting a stalled socket blocks forever and
+# hangs the whole batch — the same half-open-socket class as the LLM read
+# timeout in llm_clients/openai_client.py. Two layers, both opt-in via
+# YIAGENTS_HTTP_TIMEOUT_S (seconds), off by default:
+#   1. socket.setdefaulttimeout — process-wide backstop for the yfinance calls
+#      that take no per-call timeout (Ticker.info, get_news, Search). Every
+#      other network path here already passes an explicit timeout (Reddit,
+#      FRED, Alpha Vantage, the LLM clients), so this effectively binds only
+#      yfinance.
+#   2. timeout= on yf.download — the OHLCV path, the call that actually hangs
+#      the pipeline.
+_HTTP_TIMEOUT_ENV = os.environ.get("YIAGENTS_HTTP_TIMEOUT_S")
+YF_HTTP_TIMEOUT: float | None = None
+if _HTTP_TIMEOUT_ENV:
+    try:
+        YF_HTTP_TIMEOUT = float(_HTTP_TIMEOUT_ENV)
+        socket.setdefaulttimeout(YF_HTTP_TIMEOUT)
+    except ValueError:
+        YF_HTTP_TIMEOUT = None
 
 # A vendor's latest OHLCV row this many calendar days before the requested date
 # is treated as stale. Generous enough to span long holiday weekends, tight
@@ -187,6 +209,7 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
                 multi_level_index=False,
                 progress=False,
                 auto_adjust=True,
+                timeout=YF_HTTP_TIMEOUT,
             ))
             downloaded = _ensure_date_column(downloaded.reset_index())
             # Only cache real data — never persist an empty frame.

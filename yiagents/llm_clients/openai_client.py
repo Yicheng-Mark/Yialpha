@@ -329,6 +329,22 @@ class OpenAIClient(BaseLLMClient):
                 continue
             llm_kwargs[key] = self.kwargs[key]
 
+        # Read-timeout safety net. ChatOpenAI has no default read timeout, so a
+        # half-open socket (server accepts the connection but never responds)
+        # blocks forever and hangs the whole batch. Setting ``timeout`` here
+        # makes such a call raise, so the agent layer's "retry once as free
+        # text" fallback (see agents/utils/structured.py) can fire instead of
+        # stalling. Caller-supplied timeout always wins; otherwise the
+        # ``YIAGENTS_LLM_TIMEOUT_S`` env var (seconds) opts in. Defaults to off
+        # so slow local models (e.g. Ollama) keep their current behaviour.
+        if "timeout" not in llm_kwargs:
+            _timeout_env = os.environ.get("YIAGENTS_LLM_TIMEOUT_S")
+            if _timeout_env:
+                try:
+                    llm_kwargs["timeout"] = float(_timeout_env)
+                except ValueError:
+                    pass
+
         # The subclass (provider quirks) comes from the registry spec.
         return chat_cls(**llm_kwargs)
 

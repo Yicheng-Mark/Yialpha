@@ -1,6 +1,6 @@
 # Changelog
 
-> **YiAgents** 是基于研究文献（见 [REFERENCES.md](REFERENCES.md)，收录 100+ 篇相关研究）独立设计的多智能体 LLM 金融交易框架。包名 / import / CLI / env 前缀 `YIAGENTS_*` / 数据目录 `~/.yiagents/` 全程统一。
+> **YiAgents** 是基于研究文献（见 [REFERENCES.md](REFERENCES.md)，收录 99 篇相关研究）独立设计的多智能体 LLM 金融交易框架。包名 / import / CLI / env 前缀 `YIAGENTS_*` / 数据目录 `~/.yiagents/` 全程统一。
 
 All notable changes to YiAgents are documented here.
 
