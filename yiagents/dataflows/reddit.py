@@ -1,27 +1,37 @@
 """Reddit search fetcher for ticker-specific discussion posts.
 
-Default path is Reddit's public Atom/RSS search feed
-(``reddit.com/r/{sub}/search.rss``). The richer JSON search endpoint
-(``/search.json``) is reliably WAF-blocked (``HTTP 403``) for public clients
-(issue #862), and probing it on every call only doubled our request volume
-against Reddit's per-IP rate limit — tripping ``429`` on the RSS fallback — so
-it is kept (``_fetch_subreddit_json``) but not used by default. On a 429 we back
-off once (honouring ``Retry-After``). RSS lacks score / comment counts, so those
-posts are marked and the formatter omits the metrics rather than printing fake
-zeros.
+OAuth-API-first, RSS fallback. When ``REDDIT_CLIENT_ID`` /
+``REDDIT_CLIENT_SECRET`` are configured, the OAuth JSON search endpoint
+(``oauth.reddit.com/r/{sub}/search``) is the default path: it carries score /
+comment counts (which the sentiment prompt weighs posts by) and bypasses both
+the public JSON endpoint's WAF ``403`` (issue #862) and the RSS feed's per-IP
+``429``. The bearer token is fetched once via the ``client_credentials`` grant,
+cached in process memory with a safety margin, and short negative-cached on
+failure so a multi-subreddit / multi-ticker batch coasts on RSS rather than
+hammering the token endpoint.
 
-No API key required. Returns formatted plaintext blocks ready for prompt
-injection and degrades gracefully — returns a placeholder string rather than
-raising, so callers never special-case missing data.
+Without creds — or whenever the OAuth path fails (no token, ``401``/``403``/
+``429``/network/JSON error) — the path is byte-equivalent to the legacy public
+Atom/RSS search feed (``reddit.com/r/{sub}/search.rss``). On a 429 the RSS path
+backs off once (honouring ``Retry-After``). RSS lacks score / comment counts, so
+those posts are tagged ``source="rss"`` and the formatter omits the metrics
+rather than printing fake zeros.
+
+OAuth optional. Returns formatted plaintext blocks ready for prompt injection
+and degrades gracefully — returns a placeholder string rather than raising, so
+callers never special-case missing data.
 """
 
 from __future__ import annotations
 
+import base64
 import html
 import http.client
 import json
 import logging
+import os
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
@@ -32,14 +42,33 @@ from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
+# Public JSON search endpoint — reliably WAF-blocked (HTTP 403) for non-OAuth
+# clients (issue #862). Kept for reference; the OAuth path uses _OAUTH_API on
+# oauth.reddit.com, which serves authenticated requests without the WAF wall.
 _API = "https://www.reddit.com/r/{sub}/search.json?{qs}"
 _RSS = "https://www.reddit.com/r/{sub}/search.rss?{qs}"
+_OAUTH_API = "https://oauth.reddit.com/r/{sub}/search?{qs}"
+_OAUTH_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
+# Refresh a still-valid token this far before its real expiry, so a fetch mid-
+# batch doesn't race the clock into using a token that expires in-flight.
+_TOKEN_SAFETY_MARGIN = 300
+# After a token fetch fails, skip retrying for this long — a multi-subreddit /
+# multi-ticker batch otherwise hammers the token endpoint and trips 429s while
+# the OAuth backend is having a bad minute. The RSS path still serves throughout.
+_NEG_CACHE_TTL = 300
 # A descriptive, identified User-Agent (per Reddit's API etiquette). Reddit
 # blocks generic/anonymous tokens like bare "Mozilla/5.0" or "curl/…" but
 # serves this one on both endpoints; the RSS feed accepts it even when the
 # JSON search endpoint 403s, so no browser-spoofing is needed.
 _UA = "yiagents/0.3 (+https://github.com/zhang12120113-creator/Yiagents)"
 _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
+
+# In-memory OAuth bearer-token cache. ``None`` = never fetched. A populated
+# dict carries either a live token (``token`` set, ``expires_at`` in the future)
+# or a negative-cache window (``token`` empty, ``neg_until`` in the future).
+# Lives only in process memory; the secret never touches disk or logs.
+_token_cache: dict | None = None
+_token_lock = threading.Lock()
 
 # Default subreddits ordered roughly by signal density for ticker-specific
 # discussion. wallstreetbets has the most volume but most noise; stocks /
@@ -142,30 +171,154 @@ def _fetch_subreddit_rss(
     return posts
 
 
+def _reddit_oauth_creds() -> tuple[str, str] | None:
+    """Return ``(client_id, secret)`` when both Reddit OAuth env vars are set.
+
+    Mirrors ``fred.py``'s direct ``os.getenv`` read. A blank value (e.g. a stub
+    copied from ``.env.example``) counts as unset — OAuth only engages when real
+    creds are present, so the keyless RSS path stays the byte-level default.
+    """
+    client_id = os.getenv("REDDIT_CLIENT_ID", "").strip()
+    secret = os.getenv("REDDIT_CLIENT_SECRET", "").strip()
+    if not client_id or not secret:
+        return None
+    return client_id, secret
+
+
+def _oauth_user_agent() -> str:
+    """User-Agent for OAuth requests — the feed's ``_UA`` unless
+    ``REDDIT_USER_AGENT`` personalizes it (Reddit's API etiquette asks for a
+    unique, descriptive UA per app)."""
+    return os.getenv("REDDIT_USER_AGENT", "").strip() or _UA
+
+
+def _request_oauth_token(creds: tuple[str, str], timeout: float) -> tuple[str, int]:
+    """POST the ``client_credentials`` grant; return ``(token, expires_in)``.
+
+    Uses HTTP Basic with ``base64(client_id:secret)`` per Reddit's spec. The
+    ``client_credentials`` grant is read-only public data — no user identity, no
+    redirect — so the secret never leaves this process and the redirect URI is
+    irrelevant (it never redirects).
+    """
+    client_id, secret = creds
+    auth = "Basic " + base64.b64encode(f"{client_id}:{secret}".encode()).decode()
+    body = urlencode({"grant_type": "client_credentials"}).encode()
+    req = Request(
+        _OAUTH_TOKEN_URL,
+        data=body,
+        method="POST",
+        headers={
+            "User-Agent": _oauth_user_agent(),
+            "Authorization": auth,
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+    with urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read())
+    token = payload.get("access_token")
+    if not token:
+        raise ValueError("token endpoint returned no access_token")
+    return token, int(payload.get("expires_in", 3600))
+
+
+def _get_oauth_token(timeout: float) -> str | None:
+    """Return a live bearer token, or ``None`` if unavailable.
+
+    ``None`` means: no creds configured, the token endpoint failed (then
+    negative-cached for ``_NEG_CACHE_TTL`` seconds), or the cache is empty.
+    Double-checked locking keeps the fast path (cache hit) lock-free; only a
+    miss/expiry acquires ``_token_lock``, re-checks, then fetches — so a
+    concurrent burst (analyst fan-out / batch) shares one token rather than
+    racing N parallel fetches. The worst case is two threads each fetching once
+    (last writer wins); never incorrect.
+    """
+    global _token_cache
+    now = time.time()
+    cache = _token_cache
+    if cache and cache.get("token") and cache["expires_at"] > now + _TOKEN_SAFETY_MARGIN:
+        return cache["token"]
+    if cache and cache.get("neg_until", 0) > now:
+        return None
+    creds = _reddit_oauth_creds()
+    if not creds:
+        return None
+    with _token_lock:
+        # Re-check under the lock: another thread may have populated the cache
+        # while we were waiting.
+        now = time.time()
+        cache = _token_cache
+        if cache and cache.get("token") and cache["expires_at"] > now + _TOKEN_SAFETY_MARGIN:
+            return cache["token"]
+        if cache and cache.get("neg_until", 0) > now:
+            return None
+        try:
+            token, expires_in = _request_oauth_token(creds, timeout)
+        except (OSError, http.client.HTTPException, json.JSONDecodeError, ValueError) as exc:
+            # OSError covers HTTPError (4xx/5xx from the token endpoint incl.
+            # 429), URLError, timeouts. Negative-cache so the batch coasts on
+            # RSS instead of hammering a sick token endpoint.
+            logger.warning(
+                "Reddit OAuth token fetch failed: %s — RSS fallback for %.0fs",
+                exc, _NEG_CACHE_TTL,
+            )
+            _token_cache = {"token": None, "expires_at": 0.0, "neg_until": now + _NEG_CACHE_TTL}
+            return None
+        _token_cache = {"token": token, "expires_at": now + expires_in, "neg_until": 0.0}
+        return token
+
+
 def _fetch_subreddit_json(
     ticker: str,
     sub: str,
     limit: int,
     timeout: float,
 ) -> list[dict]:
-    """Richer JSON search path (carries score / comment counts).
+    """OAuth JSON search path — richer posts (score / comment counts), bypasses
+    the public JSON endpoint's WAF 403 and the RSS feed's per-IP 429.
 
-    Reddit's WAF currently returns ``403 Blocked`` on this endpoint for
-    non-OAuth clients (issue #862), so it is NOT used by default — calling it on
-    every request only doubled our volume against the per-IP rate limit and
-    triggered 429s on the RSS fallback. Kept for the day the WAF relaxes or an
-    OAuth token is wired in; degrades to RSS on failure.
+    Requires a bearer token. Without one (no creds, fetch failure, or within the
+    negative-cache window) this degrades straight to RSS. A search failure
+    (401/403/429/network/JSON) also falls back to RSS — ``HTTPError`` is an
+    ``OSError`` subclass, so the existing ``except`` covers OAuth error
+    responses with no new exception handling.
     """
-    url = _API.format(sub=sub, qs=_search_qs(ticker, limit))
-    req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
+    token = _get_oauth_token(timeout)
+    if not token:
+        return _fetch_subreddit_rss(ticker, sub, limit, timeout)
+    url = _OAUTH_API.format(sub=sub, qs=_search_qs(ticker, limit))
+    req = Request(
+        url,
+        headers={
+            "User-Agent": _oauth_user_agent(),
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        },
+    )
     try:
         with urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read())
         children = (payload.get("data") or {}).get("children") or []
-        return [c.get("data", {}) for c in children if isinstance(c, dict)]
+        posts = []
+        for c in children:
+            if not isinstance(c, dict):
+                continue
+            d = c.get("data", {})
+            if not isinstance(d, dict):
+                continue
+            posts.append({
+                "title": d.get("title", "") or "",
+                "score": d.get("score"),
+                "num_comments": d.get("num_comments"),
+                # OAuth already returns created_utc as a float epoch; RSS
+                # converts an ISO string to the same shape.
+                "created_utc": d.get("created_utc"),
+                "selftext": d.get("selftext", "") or "",
+                "source": "oauth",
+            })
+        return posts[:limit]
     except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
         logger.warning(
-            "Reddit JSON fetch failed for r/%s · %s: %s — falling back to RSS feed.",
+            "Reddit OAuth JSON fetch failed for r/%s · %s: %s — falling back to RSS feed.",
             sub, ticker, exc,
         )
         return _fetch_subreddit_rss(ticker, sub, limit, timeout)
@@ -177,12 +330,16 @@ def _fetch_subreddit(
     limit: int,
     timeout: float,
 ) -> list[dict]:
-    """Fetch one subreddit, RSS-first.
+    """Fetch one subreddit — OAuth-API-first, RSS fallback.
 
-    The JSON search endpoint is reliably WAF-blocked (403) for public clients,
-    so we go straight to the RSS feed — which serves our identified User-Agent
-    reliably — halving our request volume against Reddit's per-IP rate limit.
+    When ``REDDIT_CLIENT_ID`` / ``REDDIT_CLIENT_SECRET`` are set, the OAuth JSON
+    search endpoint (``oauth.reddit.com``) carries score / comment counts and
+    bypasses both the public JSON endpoint's WAF ``403`` and the RSS feed's
+    per-IP ``429``. Without creds the byte-level default is the RSS feed —
+    Reddit serves our identified User-Agent there reliably.
     """
+    if _reddit_oauth_creds():
+        return _fetch_subreddit_json(ticker, sub, limit, timeout)
     return _fetch_subreddit_rss(ticker, sub, limit, timeout)
 
 
@@ -196,9 +353,10 @@ def fetch_reddit_posts(
     """Fetch recent Reddit posts mentioning ``ticker`` across finance
     subreddits and return them as a formatted plaintext block.
 
-    ``inter_request_delay`` paces the (now RSS-only) per-subreddit requests to
-    stay under Reddit's public per-IP rate limit; combined with the RSS-first
-    path it makes 429s rare even when several analyses run back-to-back.
+    ``inter_request_delay`` paces per-subreddit requests to stay under Reddit's
+    public per-IP rate limit on the RSS path; with OAuth configured the limit is
+    per-client instead, so the delay is generous-but-harmless pacing. Either way
+    429s are rare even when several analyses run back-to-back.
     """
     blocks = []
     total_posts = 0

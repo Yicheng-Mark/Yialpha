@@ -8,6 +8,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [Unreleased]
+
+### Changed
+
+- **Reddit dataflow: OAuth-API-first.** When `REDDIT_CLIENT_ID` /
+  `REDDIT_CLIENT_SECRET` are set, the sentiment analyst's Reddit source pulls
+  posts from `oauth.reddit.com` via the `client_credentials` grant — carrying
+  the score / comment-count engagement signals the analyst prompt weighs posts
+  by, and bypassing the public JSON endpoint's WAF `403` (#862) and the RSS
+  feed's per-IP `429`. The bearer token is fetched once, cached in process
+  memory with a safety margin before expiry, and short negative-cached on
+  failure so a multi-subreddit / multi-ticker batch coasts on RSS rather than
+  hammering the token endpoint. Transport stays `urllib` (Reddit is reachable
+  from China without SOCKS5), so no new dependency and no test-mock churn.
+  Without creds — or on any OAuth failure (`401`/`403`/`429`/network/JSON) — the
+  path is byte-equivalent to the previous RSS-only behavior, so
+  `fetch_reddit_posts` keeps its signature/contract and the analyst is
+  untouched. Optional `REDDIT_USER_AGENT` personalizes the UA per Reddit's API
+  etiquette. The secret lives only in env / memory; it never touches disk or
+  logs.
+
 ## [0.3.0] — 2026-06-22
 
 Stabilization and extensibility release: a CI gate, a unified verified

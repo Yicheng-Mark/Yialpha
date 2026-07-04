@@ -74,13 +74,22 @@ def _rebalance_dates(start: str, end: str, step: int, n: int) -> list[str]:
     return [d.strftime("%Y-%m-%d") for d in picked]
 
 
-def _build_graph(debug: bool = False, risk_enabled: bool | None = None) -> YiAgentsGraph:
+def _build_graph(
+    debug: bool = False,
+    risk_enabled: bool | None = None,
+    node_perf_telemetry: bool = False,
+) -> YiAgentsGraph:
     config = DEFAULT_CONFIG.copy()
     # Let each mode control the quantitative overlay explicitly instead of
     # inheriting the DEFAULT_CONFIG flip (baseline forces it off, full on);
     # None inherits the default (currently on -- the production path).
     if risk_enabled is not None:
         config["risk_enabled"] = risk_enabled
+    # T0: opt-in node-level perf telemetry (off by default = byte-identical).
+    # `--profile` flips it on for a 1-ticker smoke so we get a node → wall-time
+    # breakdown without changing any agent's input/depth.
+    if node_perf_telemetry:
+        config["node_perf_telemetry"] = True
     return YiAgentsGraph(debug=debug, config=config)
 
 
@@ -206,15 +215,46 @@ def preflight(ticker: str) -> int:
     return 0 if ok else 2
 
 
-def smoke(ticker: str, date: str) -> int:
-    """档 0：跑一次 propagate，确认链路通。"""
-    print(f"\n=== 冒烟测试：{ticker} @ {date} ===")
+def _print_perf_table(tracker) -> None:
+    """打印「节点 → 墙钟占比 + token」表（--profile 用）。
+
+    纯观测：读 tracker.serialize()，不改任何 agent 行为。节点按墙钟降序，
+    末行汇总。token 列反映该节点触发的 LLM 调用（active-node 归因）。
+    """
+    data = tracker.serialize()
+    nodes = data.get("nodes", {})
+    if not nodes:
+        print("  (perf: 无节点耗时数据)")
+        return
+    total = data["totals"]["wall_seconds"] or 0.0
+    rows = sorted(nodes.items(), key=lambda kv: kv[1]["wall_seconds"], reverse=True)
+    print("\n=== 节点墙钟占比（--profile，仅观测） ===")
+    print(f"  {'node':28s} {'wall(s)':>9s} {'%':>6s} {'calls':>6s} "
+          f"{'tok_in':>9s} {'tok_out':>9s} {'tok_reason':>11s}")
+    for name, s in rows:
+        pct = (s["wall_seconds"] / total * 100.0) if total else 0.0
+        print(f"  {name:28s} {s['wall_seconds']:9.2f} {pct:5.1f}% {s['calls']:6d} "
+              f"{s['tokens_in']:9d} {s['tokens_out']:9d} {s['tokens_reasoning']:11d}")
+    t = data["totals"]
+    print(f"  {'TOTAL':28s} {total:9.2f}             "
+          f"{t['tokens_in']:9d} {t['tokens_out']:9d} {t['tokens_reasoning']:11d}")
+
+
+def smoke(ticker: str, date: str, profile: bool = False) -> int:
+    """档 0：跑一次 propagate，确认链路通。
+
+    ``profile`` 开启节点级耗时遥测（零影响：只观测，不改 agent 输入/深度），
+    propagate 后打印「节点→墙钟占比」表，定位真实瓶颈。
+    """
+    print(f"\n=== 冒烟测试：{ticker} @ {date}{(' + --profile') if profile else ''} ===")
     try:
-        ta = _build_graph(debug=False)
+        ta = _build_graph(debug=False, node_perf_telemetry=profile)
         final_state, rating = ta.propagate(ticker, date)
         print(f"评级: {rating}")
         decision = (final_state or {}).get("final_trade_decision", "")
         print(f"决策摘要（前 400 字）:\n{(decision or '')[:400]}")
+        if profile and ta.perf_tracker is not None:
+            _print_perf_table(ta.perf_tracker)
         print("\n✅ 链路打通，LLM/网络/key 都正常。可以进 --baseline。")
         return 0
     except Exception as exc:  # noqa: BLE001
@@ -332,6 +372,8 @@ def main():
     p.add_argument("--runs", type=int, default=2)
     p.add_argument("--workers", type=int, default=1,
                    help="跨 ticker 并发数 K（1=串行，与今天等价；>1 并发，受 DeepSeek RPM/代理约束）")
+    p.add_argument("--profile", action="store_true",
+                   help="（配合 --smoke）开启节点级耗时遥测，propagate 后打印 节点→墙钟占比 表（零影响，仅观测）")
     p.add_argument("--out", default="backtest_output")
     args = p.parse_args()
 
@@ -342,7 +384,7 @@ def main():
     if args.preflight:
         sys.exit(preflight(args.ticker))
     elif args.smoke:
-        sys.exit(smoke(args.ticker, args.date))
+        sys.exit(smoke(args.ticker, args.date, profile=args.profile))
     elif args.baseline:
         baseline_backtest(args.tickers, start, end, args.step, args.rebalance,
                           args.holding_days, args.cost_bps, args.runs, args.out,

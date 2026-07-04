@@ -66,6 +66,24 @@ class YiAgentsGraph:
         self.config = config or DEFAULT_CONFIG
         self.callbacks = callbacks or []
 
+        # T0: optional node-level perf telemetry. Create the shared tracker up
+        # front so it can be (a) wrapped around every node handler in setup.py,
+        # (b) fed LLM tokens via NodePerfTokenCallback below, and (c)
+        # serialized to node_perf_<date>.json at the end of each run. Off by
+        # default = no tracker, no wrapping, byte-identical to today.
+        self.perf_tracker = None
+        if self.config.get("node_perf_telemetry"):
+            from yiagents.graph.perf_telemetry import (
+                NodePerfTracker,
+                NodePerfTokenCallback,
+            )
+            self.perf_tracker = NodePerfTracker()
+            # The token callback rides the LLM callbacks channel so on_llm_end
+            # attributes token usage to the active node (set by wrap_node).
+            self.callbacks = list(self.callbacks) + [
+                NodePerfTokenCallback(self.perf_tracker)
+            ]
+
         # Update the interface's config
         set_config(self.config)
 
@@ -111,6 +129,11 @@ class YiAgentsGraph:
             self.deep_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
+            perf_tracker=self.perf_tracker,
+            analyst_parallel=self.config.get("analyst_parallel", False),
+            analyst_parallel_max_threads=self.config.get(
+                "analyst_parallel_max_threads", 16
+            ),
         )
 
         self.propagator = Propagator(
@@ -187,6 +210,14 @@ class YiAgentsGraph:
                 shared = get_shared_http_client()
                 if shared is not None:
                     kwargs["http_client"] = shared
+
+        # T1.3: per-call retry count forwarded to provider clients via
+        # _PASSTHROUGH_KWARGS (max_retries). Default 2 == langchain-openai's
+        # own default, so the success path is byte-equivalent to today; only
+        # the failure/retry path can differ when a user lowers it. Exposed as
+        # YIAGENTS_LLM_MAX_RETRIES so flaky periods can tune it down (the outer
+        # safety net is run_robust's per-ticker rerun, not in-call retry).
+        kwargs["max_retries"] = int(self.config.get("llm_max_retries", 2))
 
         return kwargs
 
@@ -552,6 +583,12 @@ class YiAgentsGraph:
 
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock", portfolio_state=None):
         """Execute the graph and write the resulting state to disk and memory log."""
+        # Reset per-node perf telemetry so this run's node_perf_<date>.json
+        # reflects only this run (graph instances are reused across tickers in
+        # batch mode). No-op when telemetry is off.
+        if self.perf_tracker is not None:
+            self.perf_tracker.reset()
+
         # Initialize state — inject memory log context for PM and the
         # deterministically resolved instrument identity for all agents.
         past_context = self.memory_log.get_past_context(company_name)
@@ -604,6 +641,11 @@ class YiAgentsGraph:
 
         # Log state to disk.
         self._log_state(trade_date, final_state)
+
+        # T0: dump per-node perf telemetry next to full_states_log. No-op when
+        # telemetry is off (perf_tracker is None).
+        if self.perf_tracker is not None:
+            self._dump_perf(trade_date)
 
         # Store decision for deferred reflection on the next same-ticker run.
         self.memory_log.store_decision(
@@ -661,6 +703,20 @@ class YiAgentsGraph:
         log_path = directory / f"full_states_log_{trade_date}.json"
         with open(log_path, "w", encoding="utf-8") as f:
             json.dump(self.log_states_dict[str(trade_date)], f, indent=4)
+
+    def _dump_perf(self, trade_date):
+        """Write per-node perf telemetry to node_perf_<trade_date>.json.
+
+        Sits beside ``full_states_log_<trade_date>.json`` in the same per-ticker
+        ``YiAgentsStrategy_logs`` directory. Callers gate on
+        ``self.perf_tracker is not None``; this method assumes a live tracker.
+        """
+        from yiagents.graph.perf_telemetry import dump_perf_report
+
+        safe_ticker = safe_ticker_component(self.ticker)
+        directory = Path(self.config["results_dir"]) / safe_ticker / "YiAgentsStrategy_logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        dump_perf_report(self.perf_tracker, directory / f"node_perf_{trade_date}.json")
 
     def process_signal(self, full_signal):
         """Process a signal to extract the core decision."""

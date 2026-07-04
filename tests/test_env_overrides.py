@@ -127,3 +127,49 @@ def test_unknown_env_var_is_ignored(monkeypatch):
         YIAGENTS_NONEXISTENT_KEY="oops",
     )
     assert "nonexistent_key" not in dc.DEFAULT_CONFIG
+
+
+def test_perf_parallel_defaults(monkeypatch):
+    """T0/T1.3/T2 knobs default to off / byte-equivalent values when unset."""
+    dc = _reload_with_env(monkeypatch)
+    assert dc.DEFAULT_CONFIG["node_perf_telemetry"] is False
+    assert dc.DEFAULT_CONFIG["llm_max_retries"] == 2          # == langchain default
+    assert isinstance(dc.DEFAULT_CONFIG["llm_max_retries"], int)
+    assert dc.DEFAULT_CONFIG["analyst_parallel"] is False     # gate stays shut
+    assert dc.DEFAULT_CONFIG["analyst_parallel_max_threads"] == 16
+    assert isinstance(dc.DEFAULT_CONFIG["analyst_parallel_max_threads"], int)
+
+
+def test_perf_parallel_overrides(monkeypatch):
+    """T0/T1.3/T2 env vars coerce bool/int correctly."""
+    dc = _reload_with_env(
+        monkeypatch,
+        YIAGENTS_NODE_PERF_TELEMETRY="true",
+        YIAGENTS_LLM_MAX_RETRIES="0",
+        YIAGENTS_ANALYST_PARALLEL="on",
+        YIAGENTS_ANALYST_PARALLEL_MAX_THREADS="8",
+    )
+    assert dc.DEFAULT_CONFIG["node_perf_telemetry"] is True
+    assert dc.DEFAULT_CONFIG["llm_max_retries"] == 0
+    assert isinstance(dc.DEFAULT_CONFIG["llm_max_retries"], int)
+    assert dc.DEFAULT_CONFIG["analyst_parallel"] is True
+    assert dc.DEFAULT_CONFIG["analyst_parallel_max_threads"] == 8
+
+
+@pytest.mark.parametrize("bad", ["treu", "flase", "maybe", "2", "enabled"])
+def test_invalid_analyst_parallel_bool_raises(monkeypatch, bad):
+    """A misspelled analyst_parallel bool must fail loudly, like other bools."""
+    monkeypatch.setenv("YIAGENTS_ANALYST_PARALLEL", bad)
+    with pytest.raises(ValueError, match="YIAGENTS_ANALYST_PARALLEL"):
+        importlib.reload(default_config_module)
+    monkeypatch.delenv("YIAGENTS_ANALYST_PARALLEL", raising=False)
+    importlib.reload(default_config_module)
+
+
+def test_invalid_max_retries_int_raises(monkeypatch):
+    """A non-numeric llm_max_retries must fail loudly at import."""
+    monkeypatch.setenv("YIAGENTS_LLM_MAX_RETRIES", "not-a-number")
+    with pytest.raises(ValueError, match="YIAGENTS_LLM_MAX_RETRIES"):
+        importlib.reload(default_config_module)
+    monkeypatch.delenv("YIAGENTS_LLM_MAX_RETRIES", raising=False)
+    importlib.reload(default_config_module)

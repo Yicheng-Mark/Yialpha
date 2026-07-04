@@ -63,6 +63,22 @@ _ENV_OVERRIDES = {
     # P0: stream the graph + record per-analyst wall time. Observation only
     # (serial graph final state == invoke); off by default.
     "YIAGENTS_STREAM_TELEMETRY":        "stream_telemetry",
+    # P0+: node-level wall-time + token telemetry (NodePerfTracker wraps every
+    # graph node handler). Observation only; off by default = handlers pass
+    # through unwrapped (byte-equivalent). See yiagents/graph/perf_telemetry.py.
+    "YIAGENTS_NODE_PERF_TELEMETRY":     "node_perf_telemetry",
+    # T1.3: per-call LLM retry count forwarded to the provider client via
+    # _PASSTHROUGH_KWARGS (max_retries). Default 2 == langchain-openai's own
+    # default, so UNSET behaviour is byte-equivalent; expose so flaky periods
+    # can tune it (run_robust's per-ticker rerun is the outer safety net).
+    "YIAGENTS_LLM_MAX_RETRIES":         "llm_max_retries",
+    # T2: fan the 4 analysts out inside ONE wrapper node (each analyst runs in
+    # its own sub-graph with its own state, so the shared `messages` /
+    # clear_node coupling that assumes serial execution is structurally
+    # avoided). OFF by default = today's serial analyst chain runs verbatim.
+    # Flip on only after scripts/run_analyst_parallel_ab.py passes its gate.
+    "YIAGENTS_ANALYST_PARALLEL":             "analyst_parallel",
+    "YIAGENTS_ANALYST_PARALLEL_MAX_THREADS": "analyst_parallel_max_threads",
 }
 
 
@@ -190,6 +206,20 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # time via AnalystWallTimeTracker. The graph is fully serial, so the final
     # values chunk is identical to graph.invoke(); this adds observation only.
     "stream_telemetry": False,
+    # P0+: node-level perf telemetry — per-node wall time + token totals,
+    # dumped to node_perf_<date>.json next to full_states_log. Off by default
+    # = node handlers pass through unwrapped, i.e. byte-equivalent to today.
+    "node_perf_telemetry": False,
+    # T1.3: per-call retry count forwarded to provider clients via
+    # _PASSTHROUGH_KWARGS (max_retries). Default 2 == langchain-openai's own
+    # default, so leaving it at 2 is byte-equivalent to the prior behaviour.
+    "llm_max_retries": 2,
+    # T2: parallel analysts inside one wrapper node. OFF by default = today's
+    # serial analyst chain verbatim. max_threads caps nested concurrency
+    # (batch_workers * 4); above the cap the runner silently falls back to
+    # serial analysts per graph so total in-flight LLM calls stay predictable.
+    "analyst_parallel": False,
+    "analyst_parallel_max_threads": 16,
     # News / data fetching parameters
     # Increase for longer lookback strategies or to broaden macro coverage;
     # decrease to reduce token usage in agent prompts.
