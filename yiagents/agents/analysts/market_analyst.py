@@ -16,11 +16,14 @@ from yiagents.agents.utils.prompt_builder import build_fincot_prompt
 # to use the perp-native OHLCV and to treat funding/OI as required signals.
 # Non-perp runs append nothing, so the prompt is byte-identical to the baseline.
 _PERP_NUDGE = (
-    " Prefer get_binance_klines for OHLCV (not get_stock_data), since this is a "
-    "Binance USDT-M perpetual rather than a spot pair. You MUST call "
-    "get_binance_funding_rate and get_binance_open_interest and discuss "
-    "funding-rate direction, open-interest crowding, and liquidation risk in "
-    "your report."
+    " This is a Binance USDT-M PERPETUAL, not a spot pair. The spot-style tools "
+    "(get_stock_data, get_indicators, get_verified_market_snapshot) are NOT "
+    "available for this instrument — they would resolve the symbol to a "
+    "different spot pair and return the wrong market. Use get_binance_klines "
+    "for OHLCV (you may compute trend/volatility observations directly from "
+    "those candles). You MUST call get_binance_funding_rate and "
+    "get_binance_open_interest and discuss funding-rate direction, open-interest "
+    "crowding, and liquidation risk in your report."
 )
 
 # The indicator catalog the analyst selects from. Shared by both prompt forms so
@@ -119,16 +122,26 @@ def create_market_analyst(llm):
         current_date = state["trade_date"]
         instrument_context = get_instrument_context_from_state(state)
 
+        # Baseline stock tools. Non-perp runs bind exactly this 3-element list
+        # (same objects, same order) so the baseline path is byte-identical.
         tools = [
             get_stock_data,
             get_indicators,
             get_verified_market_snapshot,
         ]
 
-        # Perp runs get three Binance tools; non-perp runs bind the exact same
-        # 3-element list (same objects, same order) as the baseline.
         if state.get("asset_type") == "crypto_perp":
-            tools = tools + [
+            # Spot tools resolve a perp symbol to a *different* Yahoo spot pair
+            # (normalize_symbol("BTCUSDT") -> "BTC-USD"), so get_stock_data /
+            # get_indicators / get_verified_market_snapshot would silently return
+            # spot OHLCV/indicators while the analyst's primary data is the
+            # Binance USDT-M perp. The spot-vs-perp basis would corrupt the
+            # "ground truth" snapshot the anti-hallucination layer relies on, so
+            # hide them for perp runs and bind only the perp-native tools. RSI/
+            # MACD-style indicators are therefore not computed for perp (the
+            # analyst reads the klines CSV directly) — an accepted trade-off.
+            # The non-perp branch is untouched, so stock runs are unaffected.
+            tools = [
                 get_binance_klines,
                 get_binance_funding_rate,
                 get_binance_open_interest,

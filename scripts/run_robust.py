@@ -152,6 +152,31 @@ def _kill_tree(pid: int) -> None:
             os.killpg(os.getpgid(pid), 9)
 
 
+def _reap(proc: subprocess.Popen, label: str, timeout: float = 30.0) -> None:
+    """等被强杀的子进程退出；30s 仍不退则升级 proc.kill() 强 reap。
+
+    ``proc.wait(timeout=...)`` 在子进程无视 kill（如抓数据的孙进程占着管道
+    不放）时会抛 ``TimeoutExpired``。若不捕获，该异常会窜出
+    ``_run_one_ticker`` → ``ThreadPoolExecutor`` → ``fut.result()`` → 整个
+    编排器崩溃，丢失所有其它 ticker 已完成的结果。这里捕获后升级强杀并
+    无条件 reap，让重试循环继续。
+    """
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(
+            f"[{label}] child did not exit within {timeout:.0f}s after kill; "
+            f"force-killing and reaping",
+            file=sys.stderr,
+            flush=True,
+        )
+        with contextlib.suppress(ProcessLookupError, OSError):
+            proc.kill()
+        # 无 timeout 充分 reap，避免僵尸；此分支下进程已不可恢复。
+        with contextlib.suppress(Exception):  # noqa: BLE001 -- best-effort reap
+            proc.wait()
+
+
 def _cpu_seconds(pid: int) -> float | None:
     """子进程累计 CPU 秒（PowerShell Get-Process；不可用/已退出返回 None）。"""
     if not IS_WINDOWS:
@@ -229,14 +254,25 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                     f"stall_timeout={opts.stall_timeout}s\n"
                 )
                 logf.flush()
-                proc = subprocess.Popen(
-                    cmd_base,
+                # Windows: CREATE_NEW_PROCESS_GROUP gives a clean tree root so
+                # taskkill /T reaches every descendant. POSIX: start_new_session
+                # puts the child in its own process group so os.killpg() below
+                # kills the child tree and NOT this orchestrator (without it the
+                # child shares our pgid and the watchdog would suicide). Each
+                # kwarg is platform-only — Popen rejects start_new_session on
+                # Windows and creationflags is a no-op 0 on POSIX — so the
+                # Windows argv/flags stay byte-identical to the old behavior.
+                popen_kwargs = dict(
                     cwd=str(_PROJECT_ROOT),
                     env=child_env,
                     stdout=logf,
                     stderr=subprocess.STDOUT,
-                    creationflags=_CREATE_FLAGS,
                 )
+                if IS_WINDOWS:
+                    popen_kwargs["creationflags"] = _CREATE_FLAGS
+                else:
+                    popen_kwargs["start_new_session"] = True
+                proc = subprocess.Popen(cmd_base, **popen_kwargs)
         except OSError as exc:
             result["reason"] = f"spawn_failed: {exc}"
             break
@@ -254,7 +290,7 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                     f"wall_clock {elapsed:.0f}s > {opts.per_ticker_timeout:.0f}s"
                 )
                 _kill_tree(proc.pid)
-                proc.wait(timeout=30)
+                _reap(proc, ticker)
                 break
             # CPU 停滞（可选）
             if opts.stall_timeout > 0:
@@ -325,7 +361,26 @@ def main() -> int:
             pool.submit(_run_one_ticker, t, opts.date, opts): t for t in opts.tickers
         }
         for fut in as_completed(futs):
-            results.append(fut.result())
+            # 一个 ticker 的看门狗循环抛异常（如 _reap 之外的未预期错误）
+            # 绝不能炸掉整批：构造一个失败 result，对齐 in-process BatchRunner
+            # 已有的容错风格，让其它 ticker 的成果照样落盘/汇报。
+            try:
+                results.append(fut.result())
+            except Exception as exc:  # noqa: BLE001 -- isolate per-ticker failure
+                ticker = futs[fut]
+                print(
+                    f"[{ticker}] ❌ orchestrator error: {exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                results.append({
+                    "ticker": ticker,
+                    "ok": False,
+                    "attempts": 0,
+                    "reason": f"orchestrator_error: {exc!r}",
+                    "report_path": None,
+                    "log_path": None,
+                })
 
     results.sort(key=lambda r: opts.tickers.index(r["ticker"]))
     ok = sum(1 for r in results if r["ok"])

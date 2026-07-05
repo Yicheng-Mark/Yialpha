@@ -230,8 +230,15 @@ def route_to_vendor(method: str, *args, **kwargs):
 
         try:
             return impl_func(*args, **kwargs)
-        except VendorRateLimitError:
+        except VendorRateLimitError as e:
+            # Surface the rate-limit if no other vendor can serve the call:
+            # an optional category (e.g. binance_perp) then degrades to a
+            # sentinel at :283-289 instead of crashing at :292, and a core
+            # category re-raises the typed error at :290 so the throttle is
+            # visible upstream. Matches the other except clauses' pattern.
             logger.warning("Vendor %r rate-limited for %s; trying next vendor.", vendor, method)
+            if first_error is None:
+                first_error = e
             continue
         except VendorNotConfiguredError as e:
             logger.warning("Vendor %r not configured for %s; trying next vendor.", vendor, method)

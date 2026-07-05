@@ -341,5 +341,12 @@ def dump_perf_report(
     if parent:
         os.makedirs(parent, exist_ok=True)
     payload = tracker.serialize()
-    with open(path, "w", encoding="utf-8") as fh:
+    # Atomic write: dump to a sibling temp file then os.replace() onto the
+    # final path (same-volume rename is atomic on both Windows and POSIX).
+    # node_perf_<date>.json is written next to full_states_log and can be
+    # interrupted by run_robust's taskkill /F /T; a half-written file would
+    # crash the next json.load. Mirrors the atomic pattern in memory.py.
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
+    os.replace(tmp, path)

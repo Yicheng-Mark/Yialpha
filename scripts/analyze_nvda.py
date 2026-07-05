@@ -6,6 +6,12 @@
 import argparse
 import json
 import sys
+
+# Windows 控制台默认 GBK，打印 ❌/✅ 会触发 UnicodeEncodeError；强制 utf-8。
+for _stream in (sys.stdout, sys.stderr):
+    with __import__("contextlib").suppress(AttributeError, ValueError):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 from pathlib import Path
 
 from yiagents.default_config import DEFAULT_CONFIG

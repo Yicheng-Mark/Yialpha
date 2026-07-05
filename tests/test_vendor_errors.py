@@ -100,6 +100,44 @@ class RouterHandlesBaseTypesTests(unittest.TestCase):
         ), self.assertRaises(AlphaVantageNotConfiguredError):
             interface.route_to_vendor("get_stock_data", "AAPL", "2026-01-01", "2026-01-10")
 
+    def test_rate_limited_optional_vendor_degrades_to_sentinel(self):
+        # binance_perp is OPTIONAL and single-vendor: a rate limit must degrade
+        # to the DATA_UNAVAILABLE sentinel, NOT crash with RuntimeError("No
+        # available vendor"). Regression guard for the VendorRateLimitError
+        # branch that previously dropped first_error.
+        set_config({})  # default chain for get_binance_klines == ["binance"]
+
+        def _throttled(*a, **k):
+            raise VendorRateLimitError("Binance HTTP 429")
+
+        with mock.patch.dict(
+            interface.VENDOR_METHODS,
+            {"get_binance_klines": {"binance": _throttled}},
+            clear=False,
+        ):
+            out = interface.route_to_vendor(
+                "get_binance_klines", "BTCUSDT", "2026-01-01", "2026-01-10"
+            )
+        self.assertIsInstance(out, str)
+        self.assertIn("DATA_UNAVAILABLE", out)
+        self.assertIn("binance_perp", out)
+
+    def test_rate_limited_core_vendor_surfaces_the_error(self):
+        # A CORE category with no fallback must re-raise VendorRateLimitError so
+        # the throttle is visible upstream — not swallow it and later hit a bare
+        # RuntimeError("No available vendor").
+        set_config({"data_vendors": {"core_stock_apis": "alpha_vantage"}})
+
+        def _throttled(*a, **k):
+            raise VendorRateLimitError("slow down")
+
+        with mock.patch.dict(
+            interface.VENDOR_METHODS,
+            {"get_stock_data": {"alpha_vantage": _throttled}},
+            clear=False,
+        ), self.assertRaises(VendorRateLimitError):
+            interface.route_to_vendor("get_stock_data", "AAPL", "2026-01-01", "2026-01-10")
+
 
 if __name__ == "__main__":
     unittest.main()

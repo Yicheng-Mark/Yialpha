@@ -6,6 +6,8 @@ Both are gated off by default; these lock (a) the default path is unchanged and
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from yiagents.graph.trading_graph import YiAgentsGraph
 from yiagents.llm_clients.http_client import get_shared_http_client, reset_for_test as reset_http
 
@@ -87,12 +89,18 @@ def test_invoke_or_stream_on_uses_stream_returns_last_chunk():
     assert result == {"final_trade_decision": "BUY"}  # last chunk
 
 
-def test_invoke_or_stream_empty_falls_back_to_invoke():
-    """A run that emits no chunks falls back to invoke (no KeyError downstream)."""
+def test_invoke_or_stream_empty_raises_not_reinvokes():
+    """A run that emits no chunks must RAISE, not silently re-invoke.
+
+    The old fallback re-ran the whole graph (analysts + debate + trader + risk
+    + PM, ~10 min, many LLM calls) and double-billed the user with no signal.
+    Now it raises so the failure is visible and run_robust can retry cleanly.
+    """
     mock = _graph_mock({"stream_telemetry": True})
     mock.selected_analysts = ("market",)
     mock.graph.stream.return_value = iter([])
     mock.graph.invoke.return_value = {"final_trade_decision": "BUY"}
-    result = YiAgentsGraph._invoke_or_stream(mock, {"s": 1}, {"stream_mode": "values"})
-    mock.graph.invoke.assert_called_once()
-    assert result == {"final_trade_decision": "BUY"}
+    with pytest.raises(RuntimeError):
+        YiAgentsGraph._invoke_or_stream(mock, {"s": 1}, {"stream_mode": "values"})
+    # Must NOT have silently re-invoked the whole graph.
+    mock.graph.invoke.assert_not_called()

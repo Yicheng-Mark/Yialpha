@@ -399,3 +399,62 @@ class TestDryRunMain:
             "--n", "0", "--out-dir", str(tmp_path),
         ])
         assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# _compute_metrics — Bug 8: clean analyst segment required for the speedup
+# gate; otherwise the gate is honestly N/A instead of a diluted whole-run ratio.
+# ---------------------------------------------------------------------------
+
+def _seg_run(rating="Buy", seg=None, wall=100.0):
+    return {
+        "rating": rating,
+        "market_report": "m", "sentiment_report": "s",
+        "news_report": "n", "fundamentals_report": "f",
+        "final_trade_decision": "BUY",
+        "risk_overlay": None,
+        "wall_full": wall,
+        "analyst_segment": seg,
+    }
+
+
+class TestComputeMetricsSpeedup:
+    def test_segments_present_computes_speedup(self):
+        serial = [_seg_run(seg=100.0) for _ in range(3)]
+        par = [_seg_run(seg=25.0) for _ in range(3)]
+        m = ab._compute_metrics(serial, par, dry_run=False)
+        assert m["speedup"] == pytest.approx(4.0)
+        assert m["speedup_na"] is False
+        # The whole-run ratio is still recorded as informational.
+        assert m["speedup_wall_full"] is not None
+
+    def test_parallel_segments_missing_marks_na_not_diluted(self):
+        # The parallel leg's per-analyst subgraph nodes are not yet wrapped by
+        # telemetry, so its segment is None. The OLD code fell back to a
+        # whole-propagate ratio (diluted by the serial debate/trader/risk/PM
+        # tail) and enforced 2.5x on it -> false fail. Now it must mark N/A.
+        serial = [_seg_run(seg=100.0, wall=100.0) for _ in range(3)]
+        par = [_seg_run(seg=None, wall=80.0) for _ in range(3)]
+        m = ab._compute_metrics(serial, par, dry_run=False)
+        assert m["speedup"] is None
+        assert m["speedup_na"] is True
+        # Informational whole-run ratio still computed (100/80 = 1.25x), but
+        # NOT promoted to the gated ``speedup`` field.
+        assert m["speedup_wall_full"] == pytest.approx(1.25)
+
+    def test_serial_segments_missing_marks_na(self):
+        serial = [_seg_run(seg=None) for _ in range(3)]
+        par = [_seg_run(seg=25.0) for _ in range(3)]
+        m = ab._compute_metrics(serial, par, dry_run=False)
+        assert m["speedup"] is None
+        assert m["speedup_na"] is True
+
+    def test_na_metrics_pass_gate(self):
+        # End-to-end: segments unavailable -> gate skips the 2.5x rule and PASSes
+        # on the other criteria instead of falsely failing on a diluted ratio.
+        serial = [_seg_run(seg=None, wall=100.0) for _ in range(6)]
+        par = [_seg_run(seg=None, wall=90.0) for _ in range(6)]
+        m = ab._compute_metrics(serial, par, dry_run=False)
+        ok, reasons = ab.summarize_gate(m)
+        # speedup_na=True -> the 2.5x rule is not enforced; no speedup reason.
+        assert "speedup" not in " ".join(reasons).lower()

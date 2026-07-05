@@ -311,6 +311,22 @@ def test_dump_perf_report_accepts_string_path(tmp_path):
         assert json.load(fh) == tracker.serialize()
 
 
+def test_dump_perf_report_atomic_no_tmp_leftover(tmp_path):
+    # Atomic write (tmp + os.replace) must not leave a sibling .tmp file behind
+    # on success. A leftover .tmp would accumulate run-over-run and a truncated
+    # final file (the failure mode this guards against) can't be produced
+    # deterministically in-process, so we assert the clean-path contract.
+    tracker = NodePerfTracker()
+    tracker.record("A", 1.0)
+    out_file = tmp_path / "node_perf_2026-07-06.json"
+    dump_perf_report(tracker, out_file)
+    assert out_file.exists()
+    assert not (tmp_path / "node_perf_2026-07-06.json.tmp").exists()
+    # And the file is valid JSON (not half-written).
+    with open(out_file, "r", encoding="utf-8") as fh:
+        assert "nodes" in json.load(fh)
+
+
 # --------------------------------------------------------------------------- #
 # Bonus: serialize() shape sanity
 # --------------------------------------------------------------------------- #

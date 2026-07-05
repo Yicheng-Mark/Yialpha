@@ -46,6 +46,67 @@ _FAPI_BASE = "https://fapi.binance.com"
 # safety net; run_robust's watchdog is the OS-level floor).
 _TIMEOUT = (5, 30)
 
+# fapi per-request caps. klines tops out at 1500, fundingRate at 1000; without
+# paging, a long range returns only the OLDEST page and silently drops the
+# recent, decision-critical rows.
+_FAPI_KLINES_LIMIT = 1500
+_FAPI_FUNDING_LIMIT = 1000
+# Runaway guard: ~50000 daily bars ≈ 137 years. Purely a safety ceiling so a
+# mis-sized range can never spin the paginator unboundedly.
+_FAPI_PAGINATION_SAFETY_CAP = 50000
+
+
+def _paginate_fapi(
+    path: str,
+    base_params: dict,
+    page_limit: int,
+    cursor_of,
+    start_ms: int,
+    end_ms: int,
+    symbol_for_error: str,
+    canonical: str,
+) -> list:
+    """Page through a Binance fapi history endpoint over ``[start_ms, end_ms]``.
+
+    Binance caps each request at ``page_limit`` rows and returns them oldest-
+    first, so a range longer than the cap would silently drop the most recent
+    rows (the ones that matter most for a decision) without paging. Cursor by
+    each page's last row (``cursor_of(item) -> ms``) +1ms until a page is short,
+    the cursor passes ``end_ms``, or the safety cap is hit. Each page is its own
+    ``_http_get`` so the proactive-backoff / reactive-429 handling still applies
+    per request. Data is unchanged — only missing rows are filled in.
+    """
+    cursor = start_ms
+    out: list = []
+    while cursor <= end_ms and len(out) < _FAPI_PAGINATION_SAFETY_CAP:
+        params = dict(base_params)
+        params["startTime"] = cursor
+        params["endTime"] = end_ms
+        params["limit"] = page_limit
+        page = _http_get(path, params, symbol_for_error, canonical)
+        if not isinstance(page, list) or not page:
+            break
+        out.extend(page)
+        try:
+            last_ms = cursor_of(page[-1])
+        except (TypeError, KeyError, IndexError):
+            break
+        nxt = int(last_ms) + 1
+        if nxt <= cursor:  # no forward progress — avoid an infinite loop
+            break
+        cursor = nxt
+        if len(page) < page_limit:  # final partial page reached
+            break
+    if len(out) >= _FAPI_PAGINATION_SAFETY_CAP:
+        # NOTE: hit pagination safety cap. Older rows may be truncated; the
+        # recent rows (which drive the decision) are still complete.
+        logger.warning(
+            "Binance %s pagination hit safety cap (%d rows) for %s; "
+            "older rows may be truncated",
+            path, _FAPI_PAGINATION_SAFETY_CAP, symbol_for_error,
+        )
+    return out
+
 
 def _proxies() -> dict[str, str | None]:
     """Build a proxies dict from the run environment (read at call time).
@@ -172,14 +233,13 @@ def get_binance_klines(
     # End-of-day so the requested end_date row is included.
     end_ms = int((end_dt.timestamp() + 86399) * 1000)
 
-    rows = _http_get(
+    rows = _paginate_fapi(
         "/fapi/v1/klines",
-        {
-            "symbol": canonical,
-            "interval": interval,
-            "startTime": start_ms,
-            "endTime": end_ms,
-        },
+        {"symbol": canonical, "interval": interval},
+        _FAPI_KLINES_LIMIT,
+        lambda k: k[0],  # kline open_time (ms) is element 0
+        start_ms,
+        end_ms,
         symbol,
         canonical,
     )
@@ -250,14 +310,13 @@ def get_binance_funding_rate(
     end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_ms = int((end_dt.timestamp() + 86399) * 1000)
 
-    rows = _http_get(
+    rows = _paginate_fapi(
         "/fapi/v1/fundingRate",
-        {
-            "symbol": canonical,
-            "startTime": start_ms,
-            "endTime": end_ms,
-            "limit": 1000,
-        },
+        {"symbol": canonical},
+        _FAPI_FUNDING_LIMIT,
+        lambda r: r["fundingTime"],  # ms timestamp on each funding row
+        start_ms,
+        end_ms,
         symbol,
         canonical,
     )

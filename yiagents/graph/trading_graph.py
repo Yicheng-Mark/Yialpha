@@ -559,8 +559,8 @@ class YiAgentsGraph:
         ``AnalystWallTimeTracker``. The graph is fully serial, so the last values
         chunk is exactly what ``invoke`` returns — telemetry adds observation
         only, never changing inputs, depth, or the final state. If a run emits no
-        chunks (should not happen for a valid graph), falls back to ``invoke`` so
-        downstream state access doesn't KeyError.
+        chunks (should not happen for a valid graph), raise rather than silently
+        re-invoking — a hidden full-graph re-run would double the LLM cost.
         """
         if not self.config.get("stream_telemetry"):
             return self.graph.invoke(init_agent_state, **args)
@@ -586,7 +586,17 @@ class YiAgentsGraph:
             if tracker is not None:
                 sync_analyst_tracker_from_chunk(tracker, chunk)
         if final_state is None:
-            return self.graph.invoke(init_agent_state, **args)
+            # A valid graph always emits at least one chunk. Treat zero chunks
+            # as a hard failure rather than silently re-invoking the whole graph
+            # — that would re-run every analyst/debate/risk/PM LLM call (~10min,
+            # many DeepSeek requests) and double-bill the user with no signal.
+            # Raise so the failure is visible and run_robust can retry cleanly.
+            raise RuntimeError(
+                "graph.stream emitted no chunks for this run; aborting instead "
+                "of silently re-invoking (which would double the LLM cost). "
+                "This usually indicates a langgraph regression or an exception "
+                "swallowed inside stream()."
+            )
         if tracker is not None:
             logger.info("%s", tracker.format_summary())
         return final_state
@@ -711,8 +721,15 @@ class YiAgentsGraph:
         directory.mkdir(parents=True, exist_ok=True)
 
         log_path = directory / f"full_states_log_{trade_date}.json"
-        with open(log_path, "w", encoding="utf-8") as f:
+        # Atomic write: dump to a sibling temp file then os.replace() onto the
+        # final path (same-volume rename is atomic on both Windows and POSIX).
+        # A kill mid-write (run_robust's taskkill /F /T) would otherwise leave a
+        # half-truncated JSON that masquerades as the "run complete" signal this
+        # file is used as. Mirrors the atomic pattern in memory.py.
+        tmp_path = directory / f".full_states_log_{trade_date}.json.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(self.log_states_dict[str(trade_date)], f, indent=4)
+        os.replace(tmp_path, log_path)
 
     def _dump_perf(self, trade_date):
         """Write per-node perf telemetry to node_perf_<trade_date>.json.

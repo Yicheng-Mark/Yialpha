@@ -49,14 +49,34 @@ def _format_portfolio_state(portfolio_state) -> str:
     if cash is not None:
         parts.append(f"Cash: {float(cash):,.0f}")
     if positions:
-        holdings = ", ".join(
-            f"{k} {float(v):,.0f}" for k, v in positions.items() if float(v) != 0
-        )
+        # Guard each value: an external schema may pass non-numeric holdings
+        # (e.g. {"NVDA": "100 shares"} or nested dicts). A ValueError/TypeError
+        # here used to propagate and fail the whole PM node, so coerce to None
+        # and drop the row instead. Numeric inputs render byte-identically.
+        def _qty(k, v):
+            q = _safe_float(v)
+            return None if q is None or q == 0 else f"{k} {q:,.0f}"
+
+        holdings = ", ".join(q for q in (_qty(k, v) for k, v in positions.items()) if q)
         if holdings:
             parts.append(f"Holdings: {holdings}")
     if not parts:
         return ""
     return "- Current portfolio: " + " | ".join(parts) + "\n"
+
+
+def _safe_float(value) -> float | None:
+    """Coerce ``value`` to float, returning ``None`` on any non-numeric input.
+
+    Guards the portfolio-state renderer against schemas that pass strings
+    (``"100 shares"``) or nested structures as holding quantities. Pure
+    numeric inputs round-trip exactly, so well-formed portfolio_state renders
+    byte-identically to the unguarded path.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def create_portfolio_manager(llm):

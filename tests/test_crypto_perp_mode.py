@@ -146,7 +146,10 @@ class RecordingLLM(Runnable):
 
 
 class MarketAnalystToolBindingTests(unittest.TestCase):
-    """T15.4 — perp binds 6 tools; stock/crypto bind the baseline 3."""
+    """T15.4 — perp binds ONLY the 3 Binance tools (spot tools hidden, since
+    they resolve a perp symbol to a different Yahoo spot pair and would corrupt
+    the anti-hallucination "ground truth"); stock/crypto bind the baseline 3
+    spot tools byte-for-byte."""
 
     @staticmethod
     def _state(asset_type):
@@ -176,16 +179,18 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
             ["get_stock_data", "get_indicators", "get_verified_market_snapshot"],
         )
 
-    def test_perp_binds_six_tools_with_binance_set(self):
+    def test_perp_hides_spot_tools_binds_only_binance(self):
         names = self._tool_names("crypto_perp")
-        self.assertEqual(len(names), 6)
-        # First three are the baseline (unchanged order); last three are perp.
+        # Spot tools are hidden for perp runs — they would resolve the perp
+        # symbol to a different Yahoo spot pair (BTCUSDT -> BTC-USD) and return
+        # the wrong market as the "verified" ground truth.
+        self.assertNotIn("get_stock_data", names)
+        self.assertNotIn("get_indicators", names)
+        self.assertNotIn("get_verified_market_snapshot", names)
+        # Only the 3 perp-native Binance tools remain.
+        self.assertEqual(len(names), 3)
         self.assertEqual(
-            names[:3],
-            ["get_stock_data", "get_indicators", "get_verified_market_snapshot"],
-        )
-        self.assertEqual(
-            sorted(names[3:]),
+            sorted(names),
             ["get_binance_funding_rate", "get_binance_klines", "get_binance_open_interest"],
         )
 
