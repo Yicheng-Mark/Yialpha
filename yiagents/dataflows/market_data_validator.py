@@ -15,6 +15,7 @@ from collections.abc import Iterable
 import pandas as pd
 from stockstats import wrap
 
+from yiagents.dataflows.errors import NoMarketDataError
 from yiagents.dataflows.stockstats_utils import load_ohlcv
 
 # A fixed, common indicator set so the snapshot is the same shape every run.
@@ -69,7 +70,24 @@ def build_verified_market_snapshot(
     # `df` keeps the original capitalized OHLCV columns (Open/High/Low/Close/
     # Volume); stockstats `wrap()` lowercases columns and adds indicator
     # columns, so read raw prices from `df` and indicators from `stock_df`.
-    df = _verified_rows(symbol, curr_date)
+    try:
+        df = _verified_rows(symbol, curr_date)
+    except NoMarketDataError as exc:
+        # The OHLCV vendor (Yahoo via load_ohlcv) returned no usable rows —
+        # most often a transient rate-limit, or a symbol/coverage gap. The
+        # snapshot is a cross-check, not the only data source, so a missing
+        # snapshot must NOT abort the whole analysis: return a clear sentinel
+        # so the analyst leans on its other tool output (for perps, the
+        # Binance klines) and flags that exact-level verification was
+        # unavailable, rather than crashing the market node. Success path
+        # (vendor returns rows) is unchanged — this only alters recovery.
+        return (
+            f"DATA_UNAVAILABLE: verified market snapshot for {symbol!r} could "
+            f"not be retrieved ({exc}). Proceed using the OHLCV / indicator "
+            f"output from your other tools; do not fabricate exact price "
+            f"levels, and note that the deterministic verification snapshot "
+            f"was unavailable for this run."
+        )
     stock_df = wrap(df.copy())
 
     selected = tuple(indicators or DEFAULT_SNAPSHOT_INDICATORS)

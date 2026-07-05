@@ -60,6 +60,13 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--tickers", nargs="+", required=True, help="代码列表，如 SNDK INTC")
     p.add_argument("--date", required=True, help="分析日期 YYYY-MM-DD")
+    p.add_argument(
+        "--asset-type",
+        default=None,
+        choices=["stock", "crypto", "crypto_perp"],
+        help="透传给 run_batch --asset-type（不传则不附加，与历史字节一致）；"
+        "crypto_perp=Binance USDT-M 永续",
+    )
     p.add_argument("--workers", type=int, default=2, help="并发子进程数 K（默认 2）")
     p.add_argument(
         "--per-ticker-timeout",
@@ -187,6 +194,10 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         "1",
         "--no-progress",
     ]
+    # Only forward --asset-type when explicitly set, so a normal run's cmd_base
+    # stays byte-identical to the historical watchdog contract (no extra argv).
+    if getattr(opts, "asset_type", None):
+        cmd_base += ["--asset-type", opts.asset_type]
 
     for attempt in range(1, opts.max_attempts + 1):
         result["attempts"] = attempt

@@ -44,13 +44,31 @@ if _HTTP_TIMEOUT_ENV:
 # enough to catch the year-old frames yfinance occasionally returns (#1021).
 MAX_OHLCV_STALE_DAYS = 10
 
+# Transport-level failures from yfinance's HTTP stack. ``OSError`` is the single
+# root: socket.timeout and ConnectionError are OSError subclasses; requests'
+# RequestException derives from IOError (== OSError); and curl_cffi's CurlError
+# (Timeout/ConnectionError/etc., yfinance's browser-impersonation backend) also
+# derives from OSError. Used in yf_retry to convert "Yahoo unreachable" into the
+# typed NoMarketDataError so the routing layer degrades instead of crashing the
+# node — Yahoo unreachability must never abort an analysis (perps fall back to
+# Binance; stock/crypto runs degrade rather than hard-fail).
+_YF_NETWORK_ERRORS: tuple[type[BaseException], ...] = (OSError,)
 
-def yf_retry(func, max_retries=3, base_delay=2.0):
+
+def yf_retry(func, max_retries=3, base_delay=2.0, symbol=None, canonical=None):
     """Execute a yfinance call with exponential backoff on rate limits.
 
     yfinance raises YFRateLimitError on HTTP 429 responses but does not
     retry them internally. This wrapper adds retry logic specifically
-    for rate limits. Other exceptions propagate immediately.
+    for rate limits. Transport-level failures (connection timeout, DNS, TLS,
+    curl_cffi errors) and exhausted rate-limit retries are converted to
+    NoMarketDataError so the routing layer degrades gracefully instead of
+    crashing the node — Yahoo unreachability must never abort an analysis.
+    The success path (Yahoo returns data) is unchanged.
+
+    ``symbol``/``canonical`` are passed so the typed error names the right
+    instrument; callers without context leave them None and the sentinel
+    carries a placeholder.
     """
     for attempt in range(max_retries + 1):
         try:
@@ -60,8 +78,16 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                 delay = base_delay * (2 ** attempt)
                 logger.warning(f"Yahoo Finance rate limited, retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})")
                 time.sleep(delay)
-            else:
-                raise
+                continue
+            raise NoMarketDataError(
+                symbol or "?", canonical or symbol or "?",
+                "Yahoo Finance rate-limited after retries",
+            )
+        except _YF_NETWORK_ERRORS as exc:
+            raise NoMarketDataError(
+                symbol or "?", canonical or symbol or "?",
+                f"Yahoo unreachable ({type(exc).__name__})",
+            ) from exc
 
 
 def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:
@@ -202,15 +228,19 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
                 data = cached
 
         if data is None:
-            downloaded = yf_retry(lambda: yf.download(
-                canonical,
-                start=start_str,
-                end=end_str,
-                multi_level_index=False,
-                progress=False,
-                auto_adjust=True,
-                timeout=YF_HTTP_TIMEOUT,
-            ))
+            downloaded = yf_retry(
+                lambda: yf.download(
+                    canonical,
+                    start=start_str,
+                    end=end_str,
+                    multi_level_index=False,
+                    progress=False,
+                    auto_adjust=True,
+                    timeout=YF_HTTP_TIMEOUT,
+                ),
+                symbol=symbol,
+                canonical=canonical,
+            )
             downloaded = _ensure_date_column(downloaded.reset_index())
             # Only cache real data — never persist an empty frame.
             if downloaded.empty or "Close" not in downloaded.columns:

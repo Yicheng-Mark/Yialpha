@@ -60,9 +60,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--date", required=True, help="分析日期 YYYY-MM-DD")
     p.add_argument(
         "--asset-type",
-        choices=["auto", "stock", "crypto"],
+        choices=["auto", "stock", "crypto", "crypto_perp"],
         default="auto",
-        help="auto=按首个 ticker 判定；一个批次需同一类",
+        help="auto=按首个 ticker 判定；一个批次需同一类；crypto_perp=Binance USDT-M 永续（显式指定）",
     )
     p.add_argument(
         "--workers",

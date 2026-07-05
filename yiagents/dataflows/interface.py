@@ -11,6 +11,11 @@ from .alpha_vantage import (
     get_news as get_alpha_vantage_news,
     get_stock as get_alpha_vantage_stock,
 )
+from .binance import (
+    get_binance_funding_rate,
+    get_binance_klines,
+    get_binance_open_interest,
+)
 from .config import get_config
 from .errors import (
     NoMarketDataError,
@@ -74,7 +79,20 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_prediction_markets",
         ]
-    }
+    },
+    # Binance USDT-M perpetuals (Track A, analysis-only). klines covers OHLCV
+    # (the market analyst prefers it for perps); funding/OI are the perp-specific
+    # cost-of-carry and crowding signals. All three live behind one optional
+    # category so a Binance block / rate-limit degrades to a sentinel and the
+    # analyst falls back to the Yahoo spot OHLCV rather than aborting the run.
+    "binance_perp": {
+        "description": "Binance USDT-M perpetual (klines/funding/openInterest)",
+        "tools": [
+            "get_binance_klines",
+            "get_binance_funding_rate",
+            "get_binance_open_interest",
+        ],
+    },
 }
 
 VENDOR_LIST = [
@@ -82,6 +100,7 @@ VENDOR_LIST = [
     "fred",
     "polymarket",
     "alpha_vantage",
+    "binance",
 ]
 
 # Optional enrichment categories. These add macro/event context to the news
@@ -89,7 +108,7 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets"}
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "binance_perp"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -140,6 +159,17 @@ VENDOR_METHODS = {
     # prediction_markets
     "get_prediction_markets": {
         "polymarket": get_polymarket_prediction_markets,
+    },
+    # binance_perp — single vendor each; the category is optional so a Binance
+    # failure degrades to a sentinel rather than aborting the perp run.
+    "get_binance_klines": {
+        "binance": get_binance_klines,
+    },
+    "get_binance_funding_rate": {
+        "binance": get_binance_funding_rate,
+    },
+    "get_binance_open_interest": {
+        "binance": get_binance_open_interest,
     },
 }
 

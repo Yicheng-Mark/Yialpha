@@ -21,6 +21,11 @@ dependencies = [
     "pandas>=2.3.0",
     "parsel>=1.10.0",
     "python-dotenv>=1.0.0",
+    # PySocks is load-bearing: yfinance / market data must traverse the SOCKS5
+    # proxy (socks5h://127.0.0.1:1080), and the Binance USDT-M vendor reaches
+    # fapi.binance.com through the same proxy via `requests`. Declared so a
+    # fresh install actually resolves hostnames instead of hanging on DNS.
+    "PySocks>=1.7.1",
     "pytz>=2025.2",
     "questionary>=2.1.0",
     "redis>=6.2.0",

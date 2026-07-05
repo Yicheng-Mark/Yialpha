@@ -7,6 +7,11 @@ import yfinance as yf
 from langchain_core.messages import HumanMessage, RemoveMessage
 
 # Import tools from separate utility files
+from yiagents.agents.utils.binance_perp_tools import (
+    get_binance_funding_rate,
+    get_binance_klines,
+    get_binance_open_interest,
+)
 from yiagents.agents.utils.core_stock_tools import get_stock_data
 from yiagents.agents.utils.fundamental_data_tools import (
     get_balance_sheet,
@@ -29,6 +34,9 @@ from yiagents.agents.utils.technical_indicators_tools import get_indicators
 __all__ = [
     "get_stock_data",
     "get_indicators",
+    "get_binance_klines",
+    "get_binance_funding_rate",
+    "get_binance_open_interest",
     "get_fundamentals",
     "get_balance_sheet",
     "get_cashflow",
@@ -132,7 +140,8 @@ def build_instrument_context(
     than pattern-matching the price chart to a wrong one (#814).
     """
     is_crypto = asset_type == "crypto"
-    instrument_label = "asset" if is_crypto else "instrument"
+    is_perp = asset_type == "crypto_perp"
+    instrument_label = "asset" if (is_crypto or is_perp) else "instrument"
     context = (
         f"The {instrument_label} to analyze is `{ticker}`. "
         "Use this exact ticker in every tool call, report, and recommendation, "
@@ -161,6 +170,13 @@ def build_instrument_context(
             "result explicitly disproves this resolved identity."
         )
 
+    if is_perp:
+        context += (
+            " This is a Binance USDT-M perpetual futures contract (crypto_perp). "
+            "Funding rate, open interest, and basis are first-class signals; "
+            "mind leverage and funding-cost drag. Do not assume company "
+            "fundamentals are available."
+        )
     if is_crypto:
         context += (
             " Treat it as a crypto asset rather than a company, and do not "

@@ -109,5 +109,42 @@ class StaleGuardRoutingTests(unittest.TestCase):
         self.assertIn("stale", out)  # the typed detail is surfaced to the agent
 
 
+@pytest.mark.unit
+class TestYfRetryTransportConversion(unittest.TestCase):
+    """Yahoo unreachability must degrade, not crash the node.
+
+    yfinance surfaces transport failures (connection timeout, DNS, curl_cffi
+    errors) as raw exceptions that bypass the routing layer's graceful
+    degradation. yf_retry converts them — and exhausted rate-limit retries — to
+    the typed NoMarketDataError so perp runs complete on Binance data and
+    stock/crypto runs degrade rather than hard-fail. The success path is
+    unchanged.
+    """
+
+    def test_curl_cffi_timeout_converts_to_no_market_data(self):
+        import curl_cffi.requests.exceptions as curl_exc
+
+        from yiagents.dataflows.stockstats_utils import yf_retry
+
+        def _timeout():
+            raise curl_exc.Timeout("curl: (28) Connection timed out")
+
+        with self.assertRaises(NoMarketDataError) as cm:
+            yf_retry(_timeout, symbol="BTCUSDT", canonical="BTC-USD")
+        self.assertEqual(cm.exception.symbol, "BTCUSDT")
+        self.assertIn("Yahoo unreachable", cm.exception.detail)
+
+    def test_plain_oserror_converts(self):
+        from yiagents.dataflows.stockstats_utils import yf_retry
+
+        with self.assertRaises(NoMarketDataError):
+            yf_retry(lambda: (_ for _ in ()).throw(OSError("dns boom")))
+
+    def test_success_path_unchanged(self):
+        from yiagents.dataflows.stockstats_utils import yf_retry
+
+        self.assertEqual(yf_retry(lambda: "DATA", symbol="X"), "DATA")
+
+
 if __name__ == "__main__":
     unittest.main()

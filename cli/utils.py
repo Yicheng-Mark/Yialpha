@@ -90,7 +90,10 @@ def detect_asset_type(ticker: str) -> AssetType:
 def filter_analysts_for_asset_type(
     analysts: list[AnalystType], asset_type: AssetType
 ) -> list[AnalystType]:
-    if asset_type != AssetType.CRYPTO:
+    # Both crypto spot and Binance USDT-M perpetuals lack company
+    # fundamentals, so the Fundamentals Analyst is dropped for either. STOCK
+    # is not in this set -> returns the full list unchanged (baseline behavior).
+    if asset_type not in (AssetType.CRYPTO, AssetType.CRYPTO_PERP):
         return analysts
     return [
         analyst

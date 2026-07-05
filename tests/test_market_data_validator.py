@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import yiagents.dataflows.market_data_validator as validator
+from yiagents.dataflows.errors import NoMarketDataError
 
 
 def _sample_ohlcv() -> pd.DataFrame:
@@ -61,6 +62,19 @@ class TestVerifiedSnapshot:
         # last-N closes table has at most 30 data rows
         close_rows = [ln for ln in snap.splitlines() if ln.startswith("| 2026-")]
         assert 0 < len(close_rows) <= 30
+
+    def test_degrades_to_sentinel_when_vendor_has_no_data(self, monkeypatch):
+        # Yahoo rate-limit / no-rows surfaces as NoMarketDataError from
+        # load_ohlcv. The snapshot is a cross-check, not the only data source,
+        # so it must return a sentinel instead of crashing the market node.
+        def _raise(symbol, curr_date):
+            raise NoMarketDataError(symbol, "BTC-USD", "Yahoo Finance returned no rows")
+
+        monkeypatch.setattr(validator, "load_ohlcv", _raise)
+        snap = validator.build_verified_market_snapshot("BTCUSDT", "2026-07-01")
+        assert snap.startswith("DATA_UNAVAILABLE")
+        assert "BTCUSDT" in snap
+        assert "Yahoo Finance returned no rows" in snap
 
 
 @pytest.mark.unit

@@ -136,3 +136,59 @@ def normalize_symbol(raw: str) -> str:
 def is_yahoo_safe(symbol: str) -> bool:
     """True when ``symbol`` only contains characters Yahoo symbols use."""
     return bool(symbol) and _YAHOO_SAFE.fullmatch(symbol) is not None
+
+
+def normalize_symbol_for_venue(raw: str, venue: str = "binance_perp") -> str:
+    """Map a user/broker symbol to a venue's canonical symbol.
+
+    ``venue="yahoo"`` delegates to :func:`normalize_symbol` so the Yahoo path
+    is 100% unchanged (same function, same output). For ``"binance_perp"``,
+    the symbol is normalized to a Binance USDT-M perpetual pair (``<BASE>USDT``):
+
+      - upper-cased; trailing ``+`` (broker CFD marker) stripped
+      - dashes removed (``BTC-USDT`` -> ``BTCUSDT``)
+      - quote suffix collapsed to ``USDT``: ``USD``/``USDC`` endings become
+        ``USDT`` (Binance USDT-M lists against USDT), ``USDT`` kept as-is
+      - pairs already ending in ``USDT`` are returned upper-cased and un-dashed
+
+    A degenerate guard rejects a result that does not separate a base from the
+    ``USDT`` quote (e.g. an input that normalizes to a bare ``USDTUSDT``),
+    which would otherwise price the wrong instrument.
+
+    Purely syntactic — no network calls — so it is safe to apply on every
+    request. Does not alter :func:`normalize_symbol` or any Yahoo call site.
+    """
+    if venue == "yahoo":
+        return normalize_symbol(raw)
+
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"Cannot normalize empty symbol for venue {venue!r}")
+
+    s = raw.strip().upper().rstrip("+").replace("-", "")
+
+    if venue != "binance_perp":
+        # Unknown venue: fall back to the cleaned form rather than guessing.
+        return s
+
+    # Collapse USD/USDC quote suffixes to USDT (USDT-M book). Order matters:
+    # match the longest suffix first so "USDT" is not shadowed by "USD".
+    if s.endswith("USDT"):
+        base = s[:-4]
+    elif s.endswith("USDC"):
+        base = s[:-4]
+        logger.info("Binance perp symbol %r quoted in USDC; mapping to USDT pair", raw)
+    elif s.endswith("USD"):
+        base = s[:-3]
+        logger.info("Binance perp symbol %r quoted in USD; mapping to USDT pair", raw)
+    else:
+        # No recognized quote suffix: assume the caller passed a bare base
+        # (e.g. "BTC") and append USDT so it prices the USDT-M pair.
+        base = s
+
+    if not base or base == "USDT":
+        raise ValueError(
+            f"Symbol {raw!r} normalizes to a degenerate Binance perp pair "
+            f"(base={base!r}); pass an explicit base like 'BTC' or 'BTCUSDT'."
+        )
+
+    return base + "USDT"

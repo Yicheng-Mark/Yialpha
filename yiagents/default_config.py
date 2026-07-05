@@ -79,6 +79,11 @@ _ENV_OVERRIDES = {
     # Flip on only after scripts/run_analyst_parallel_ab.py passes its gate.
     "YIAGENTS_ANALYST_PARALLEL":             "analyst_parallel",
     "YIAGENTS_ANALYST_PARALLEL_MAX_THREADS": "analyst_parallel_max_threads",
+    # Binance IP-weight proactive backoff (perp data vendor). When on, the
+    # vendor reads X-MBX-USED-WEIGHT-1M and backs off before the ceiling. Off
+    # by default = the vendor neither reads the header nor sleeps (byte-equivalent).
+    "YIAGENTS_BINANCE_PROACTIVE_BACKOFF":    "binance_proactive_backoff",
+    "YIAGENTS_BINANCE_WEIGHT_THRESHOLD":     "binance_weight_threshold",
 }
 
 
@@ -198,6 +203,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Off by default; size llm_rpm from measured RPM before enabling.
     "llm_rate_limiter": False,
     "llm_rpm": 60,
+    # Binance IP-weight proactive backoff for the perp data vendor. When on,
+    # the vendor reads the X-MBX-USED-WEIGHT-1M response header and sleeps
+    # before the per-minute ceiling so it avoids a 429 rather than only
+    # reacting to one. Off by default = the vendor neither reads the header
+    # nor sleeps, byte-equivalent to today. binance_weight_threshold is the
+    # fapi USDT-M default (2400/min); override for a VIP-tier IP.
+    "binance_proactive_backoff": False,
+    "binance_weight_threshold": 2400,
     # P1a: process-wide shared httpx.Client for LLM calls — concurrent worker
     # graphs reuse TLS/SOCKS5-proxy connections instead of opening one per call.
     # Transport-only (changes nothing sent to the model); off by default.

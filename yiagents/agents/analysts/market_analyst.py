@@ -1,6 +1,9 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from yiagents.agents.utils.agent_utils import (
+    get_binance_funding_rate,
+    get_binance_klines,
+    get_binance_open_interest,
     get_indicators,
     get_instrument_context_from_state,
     get_language_instruction,
@@ -8,6 +11,17 @@ from yiagents.agents.utils.agent_utils import (
     get_verified_market_snapshot,
 )
 from yiagents.agents.utils.prompt_builder import build_fincot_prompt
+
+# Appended to the system message ONLY for crypto_perp runs. Nudges the analyst
+# to use the perp-native OHLCV and to treat funding/OI as required signals.
+# Non-perp runs append nothing, so the prompt is byte-identical to the baseline.
+_PERP_NUDGE = (
+    " Prefer get_binance_klines for OHLCV (not get_stock_data), since this is a "
+    "Binance USDT-M perpetual rather than a spot pair. You MUST call "
+    "get_binance_funding_rate and get_binance_open_interest and discuss "
+    "funding-rate direction, open-interest crowding, and liquidation risk in "
+    "your report."
+)
 
 # The indicator catalog the analyst selects from. Shared by both prompt forms so
 # the available tool vocabulary never depends on which framing is active.
@@ -111,7 +125,19 @@ def create_market_analyst(llm):
             get_verified_market_snapshot,
         ]
 
+        # Perp runs get three Binance tools; non-perp runs bind the exact same
+        # 3-element list (same objects, same order) as the baseline.
+        if state.get("asset_type") == "crypto_perp":
+            tools = tools + [
+                get_binance_klines,
+                get_binance_funding_rate,
+                get_binance_open_interest,
+            ]
+
         system_message = _system_message()
+        # Perp-only system-message append; non-perp leaves system_message unchanged.
+        if state.get("asset_type") == "crypto_perp":
+            system_message = system_message + _PERP_NUDGE
 
         prompt = ChatPromptTemplate.from_messages(
             [

@@ -14,6 +14,9 @@ from langgraph.prebuilt import ToolNode
 from yiagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_balance_sheet,
+    get_binance_funding_rate,
+    get_binance_klines,
+    get_binance_open_interest,
     get_cashflow,
     get_fundamentals,
     get_global_news,
@@ -234,6 +237,13 @@ class YiAgentsGraph:
                     # LLM and required by its prompt; must be executable here or
                     # the call fails and the model reports it "unavailable").
                     get_verified_market_snapshot,
+                    # Binance USDT-M perp tools. Dormant for non-perp runs: the
+                    # market analyst only advertises them when asset_type ==
+                    # "crypto_perp", so the LLM never names them otherwise and
+                    # they are simply extra entries in ToolNode's name->tool map.
+                    get_binance_klines,
+                    get_binance_funding_rate,
+                    get_binance_open_interest,
                 ]
             ),
             "social": ToolNode(
