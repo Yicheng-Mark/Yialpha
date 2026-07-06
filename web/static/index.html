@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YiAgents</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <a class="brand" href="#/"><span class="logo"></span>YiAgents</a>
+      <nav class="nav">
+        <a href="#/" data-i18n="nav_home">历史报告</a>
+        <a href="#/new" data-i18n="nav_new">提交新分析</a>
+        <a href="#/health" data-i18n="nav_health">环境自检</a>
+      </nav>
+    </div>
+    <div class="topbar-right">
+      <button id="lang-toggle" class="btn btn-ghost" data-i18n="lang_btn">🌐 EN</button>
+    </div>
+  </header>
+
+  <main id="view" class="container">
+    <p class="muted" data-i18n="common_loading">加载中…</p>
+  </main>
+
+  <footer class="footer">
+    <span class="muted">YiAgents · <span data-i18n="footer_note">agent 输出原样渲染，未翻译</span></span>
+  </footer>
+
+  <!-- Offline markdown renderer (marked v15, MIT). No CDN at runtime. -->
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/i18n.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

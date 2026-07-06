@@ -50,6 +50,16 @@ dev = [
 bedrock = [
     "langchain-aws>=1.5.0",
 ]
+# Local web UI (FastAPI + vanilla JS). Optional so a headless / server install
+# stays lean: pip install "yiagents[web]". The web/ source tree is NOT a
+# packaged module (excluded from packages.find below) — it's run in place from
+# the project root (it spawns scripts/run_robust.py and reads ~/.yiagents/logs).
+# Plain ``uvicorn`` (no [standard] extra) is enough for the default run; the
+# [standard] extra only adds auto-reload/websockets deps we don't use.
+web = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+]
 
 [project.scripts]
 yiagents = "cli.main:app"
