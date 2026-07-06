@@ -84,6 +84,11 @@ _ENV_OVERRIDES = {
     # by default = the vendor neither reads the header nor sleeps (byte-equivalent).
     "YIAGENTS_BINANCE_PROACTIVE_BACKOFF":    "binance_proactive_backoff",
     "YIAGENTS_BINANCE_WEIGHT_THRESHOLD":     "binance_weight_threshold",
+    # Binance SPOT host: when on, the spot vendor uses the key-free market-data
+    # mirror data-api.binance.vision instead of api.binance.com. Off by default
+    # (api.binance.com is the proven host through the SOCKS5 proxy); the mirror
+    # is Binance's recommended read-only host and carries the same data.
+    "YIAGENTS_BINANCE_SPOT_MIRROR":          "binance_spot_mirror",
 }
 
 
@@ -211,6 +216,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # fapi USDT-M default (2400/min); override for a VIP-tier IP.
     "binance_proactive_backoff": False,
     "binance_weight_threshold": 2400,
+    # Binance SPOT host mirror switch (env: YIAGENTS_BINANCE_SPOT_MIRROR). Off
+    # by default = spot vendor hits api.binance.com (proven through the SOCKS5
+    # proxy); on = key-free market-data mirror data-api.binance.vision. The
+    # spot vendor reads this at call time, so it is byte-equivalent to today
+    # when off (and spot is new code regardless, so no prior output to perturb).
+    "binance_spot_mirror": False,
     # P1a: process-wide shared httpx.Client for LLM calls — concurrent worker
     # graphs reuse TLS/SOCKS5-proxy connections instead of opening one per call.
     # Transport-only (changes nothing sent to the model); off by default.

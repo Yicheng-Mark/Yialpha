@@ -10,8 +10,11 @@ dataflow code is touched (the project's "铁律").
 - **Submit**: a form spawns `scripts/run_robust.py` as a subprocess (the same
   watchdog-backed path the CLI uses); the UI polls every 4 s and links to the
   finished report. One analysis at a time (409 while one is running).
-- **i18n**: static UI chrome toggles 中 / EN (🌐 button, top-right). Agent
-  markdown is rendered verbatim — never translated.
+- **i18n**: the 🌐 toggle (top-right) sets BOTH the UI chrome language AND the
+  report language. On submit the language is routed to the `run_robust` child
+  via `YIAGENTS_OUTPUT_LANGUAGE`, so the existing `get_language_instruction()`
+  localizes every agent's output. Static chrome is translated in place; agent
+  markdown is rendered verbatim (no in-browser post-translation).
 
 ## Run it
 
@@ -57,7 +60,7 @@ scripts/run_robust.py --tickers <T> --date <D> [--asset-type <X>] --workers 1
 | `GET /api/tickers/{t}/runs` | `{ticker, dates:[…], reports:[{dir, mtime, complete}]}` |
 | `GET /api/tickers/{t}/runs/{date}` | rating + overlay + 5 sections + `node_perf?` |
 | `GET /api/health` | replicated preflight (deps / key / proxy / yfinance / DeepSeek) |
-| `POST /api/analyze` | `{ticker, date, asset_type}` → `{task_id, started_at}` (409 if busy) |
+| `POST /api/analyze` | `{ticker, date, asset_type, language?}` → `{task_id, started_at}` (409 if busy) |
 | `GET /api/tasks/{task_id}` | `{status, elapsed_s, attempt, max_attempts, report_url, …}` |
 
 ## Notes / gotchas

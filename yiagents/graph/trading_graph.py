@@ -14,9 +14,15 @@ from langgraph.prebuilt import ToolNode
 from yiagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_balance_sheet,
+    get_binance_basis,
     get_binance_funding_rate,
     get_binance_klines,
+    get_binance_long_short_ratio,
     get_binance_open_interest,
+    get_binance_spot_klines,
+    get_binance_spot_perp_basis,
+    get_binance_spot_ticker24,
+    get_binance_taker_buy_sell,
     get_cashflow,
     get_fundamentals,
     get_global_news,
@@ -244,6 +250,16 @@ class YiAgentsGraph:
                     get_binance_klines,
                     get_binance_funding_rate,
                     get_binance_open_interest,
+                    get_binance_long_short_ratio,
+                    get_binance_taker_buy_sell,
+                    get_binance_basis,
+                    # Binance SPOT tools. Same dormant contract as the perp
+                    # tools above: only advertised when asset_type ==
+                    # "crypto_spot", so they sit unused in the name->tool map
+                    # for stock/crypto/perp runs.
+                    get_binance_spot_klines,
+                    get_binance_spot_ticker24,
+                    get_binance_spot_perp_basis,
                 ]
             ),
             "social": ToolNode(

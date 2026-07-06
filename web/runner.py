@@ -39,6 +39,13 @@ _ATTEMPT_RE = re.compile(r"attempt\s+(\d+)/(\d+)")
 # Keep this many recent stdout lines for the (P1) log-tail view.
 _LOG_TAIL_MAX = 50
 
+# UI language code -> config output_language value. English matches the config
+# default (get_language_instruction() then adds no prompt tokens). Used only to
+# set YIAGENTS_OUTPUT_LANGUAGE on the child env — run_robust's argv is untouched
+# (byte-identical to a plain CLI run); default_config._apply_env_overrides
+# applies it in the child.
+_LANG_MAP = {"en": "English", "zh": "Chinese"}
+
 
 @dataclass
 class TaskState:
@@ -47,6 +54,7 @@ class TaskState:
     date: str
     asset_type: str
     started_at: float
+    language: str = "en"  # UI language code; routed to child as output_language
     status: str = "running"  # running | done | error
     attempt: int = 0
     max_attempts: int = 0
@@ -98,7 +106,7 @@ def _build_cmd(ticker: str, date: str, asset_type: str) -> list[str]:
     return cmd
 
 
-async def spawn(ticker: str, date: str, asset_type: str) -> str:
+async def spawn(ticker: str, date: str, asset_type: str, language: str = "en") -> str:
     """Start a run_robust subprocess and register it; return the task_id.
 
     Caller must have already checked ``registry.is_busy()``.
@@ -110,12 +118,17 @@ async def spawn(ticker: str, date: str, asset_type: str) -> str:
         date=date,
         asset_type=asset_type,
         started_at=time.time(),
+        language=language,
     )
     registry.tasks[task_id] = state
     registry._running_id = task_id
 
     # PYTHONUTF8 so the child's emoji/中文 stdout never trips GBK (cp936).
     env = {**os.environ, "PYTHONUTF8": "1"}
+    # Route the UI language to the child's output_language config so the
+    # already-wired get_language_instruction() localizes every agent's report.
+    # Env (not argv) so run_robust's cmd stays byte-identical to a plain CLI run.
+    env["YIAGENTS_OUTPUT_LANGUAGE"] = _LANG_MAP.get(language, "English")
     cmd = _build_cmd(ticker, date, asset_type)
     proc = await asyncio.create_subprocess_exec(
         *cmd,

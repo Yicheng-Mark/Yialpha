@@ -187,11 +187,21 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
         self.assertNotIn("get_stock_data", names)
         self.assertNotIn("get_indicators", names)
         self.assertNotIn("get_verified_market_snapshot", names)
-        # Only the 3 perp-native Binance tools remain.
-        self.assertEqual(len(names), 3)
+        # The 6 perp-native Binance tools: OHLCV/funding/OI (the original cost-
+        # of-carry & crowding trio) plus the positioning/order-flow/basis trio
+        # (long_short_ratio, taker_buy_sell, basis) that supplies the perp-native
+        # "sentiment" signal social sources can't provide for a *USDT contract.
+        self.assertEqual(len(names), 6)
         self.assertEqual(
             sorted(names),
-            ["get_binance_funding_rate", "get_binance_klines", "get_binance_open_interest"],
+            [
+                "get_binance_basis",
+                "get_binance_funding_rate",
+                "get_binance_klines",
+                "get_binance_long_short_ratio",
+                "get_binance_open_interest",
+                "get_binance_taker_buy_sell",
+            ],
         )
 
 

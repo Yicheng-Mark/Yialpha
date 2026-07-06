@@ -12,9 +12,15 @@ from .alpha_vantage import (
     get_stock as get_alpha_vantage_stock,
 )
 from .binance import (
+    get_binance_basis,
     get_binance_funding_rate,
     get_binance_klines,
+    get_binance_long_short_ratio,
     get_binance_open_interest,
+    get_binance_spot_klines,
+    get_binance_spot_perp_basis,
+    get_binance_spot_ticker24,
+    get_binance_taker_buy_sell,
 )
 from .config import get_config
 from .errors import (
@@ -82,15 +88,35 @@ TOOLS_CATEGORIES = {
     },
     # Binance USDT-M perpetuals (Track A, analysis-only). klines covers OHLCV
     # (the market analyst prefers it for perps); funding/OI are the perp-specific
-    # cost-of-carry and crowding signals. All three live behind one optional
-    # category so a Binance block / rate-limit degrades to a sentinel and the
-    # analyst falls back to the Yahoo spot OHLCV rather than aborting the run.
+    # cost-of-carry and crowding signals. long_short_ratio / taker_buy_sell /
+    # basis add the perp-native positioning pillar (the leveraged long/short
+    # crowd and order-flow aggression) that social-sentiment sources can't
+    # supply for a *USDT contract. All live behind one optional category so a
+    # Binance block / rate-limit degrades to a sentinel and the analyst falls
+    # back to the Yahoo spot OHLCV rather than aborting the run.
     "binance_perp": {
-        "description": "Binance USDT-M perpetual (klines/funding/openInterest)",
+        "description": "Binance USDT-M perpetual (klines/funding/openInterest/long_short_ratio/taker_buy_sell/basis)",
         "tools": [
             "get_binance_klines",
             "get_binance_funding_rate",
             "get_binance_open_interest",
+            "get_binance_long_short_ratio",
+            "get_binance_taker_buy_sell",
+            "get_binance_basis",
+        ],
+    },
+    # Binance SPOT (crypto_spot). Spot only carries OHLCV + 24h ticker (no
+    # funding/OI/leverage — those are perp-only). The spot-perp basis tool is
+    # the genuinely new signal: it cross-references the spot price against the
+    # USDT-M perpetual to expose the perp premium/discount. Same optional-
+    # category contract as binance_perp — a Binance block / rate-limit degrades
+    # to a sentinel and the analyst falls back to Yahoo spot OHLCV.
+    "binance_spot": {
+        "description": "Binance spot (klines/ticker24/spot-perp basis)",
+        "tools": [
+            "get_binance_spot_klines",
+            "get_binance_spot_ticker24",
+            "get_binance_spot_perp_basis",
         ],
     },
 }
@@ -108,7 +134,7 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "binance_perp"}
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "binance_perp", "binance_spot"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -170,6 +196,33 @@ VENDOR_METHODS = {
     },
     "get_binance_open_interest": {
         "binance": get_binance_open_interest,
+    },
+    # Perp positioning / order-flow / basis — single vendor each, same optional
+    # category as above; degrade to sentinel on 429/unsupported (e.g. basis is
+    # not supported for newer TRADIFI stock-perps).
+    "get_binance_long_short_ratio": {
+        "binance": get_binance_long_short_ratio,
+    },
+    "get_binance_taker_buy_sell": {
+        "binance": get_binance_taker_buy_sell,
+    },
+    "get_binance_basis": {
+        "binance": get_binance_basis,
+    },
+    # binance_spot — single vendor each; the category is optional so a Binance
+    # failure (429 / unsupported symbol / no spot listing) degrades to a
+    # sentinel rather than aborting the spot run.
+    "get_binance_spot_klines": {
+        "binance": get_binance_spot_klines,
+    },
+    "get_binance_spot_ticker24": {
+        "binance": get_binance_spot_ticker24,
+    },
+    # Cross-venue basis: pulls both the perp and the spot leg internally, so a
+    # failure on either side raises NoMarketDataError here and the router emits
+    # the optional-category sentinel.
+    "get_binance_spot_perp_basis": {
+        "binance": get_binance_spot_perp_basis,
     },
 }
 

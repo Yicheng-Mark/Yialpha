@@ -8,9 +8,17 @@ from langchain_core.messages import HumanMessage, RemoveMessage
 
 # Import tools from separate utility files
 from yiagents.agents.utils.binance_perp_tools import (
+    get_binance_basis,
     get_binance_funding_rate,
     get_binance_klines,
+    get_binance_long_short_ratio,
     get_binance_open_interest,
+    get_binance_taker_buy_sell,
+)
+from yiagents.agents.utils.binance_spot_tools import (
+    get_binance_spot_klines,
+    get_binance_spot_perp_basis,
+    get_binance_spot_ticker24,
 )
 from yiagents.agents.utils.core_stock_tools import get_stock_data
 from yiagents.agents.utils.fundamental_data_tools import (
@@ -37,6 +45,12 @@ __all__ = [
     "get_binance_klines",
     "get_binance_funding_rate",
     "get_binance_open_interest",
+    "get_binance_long_short_ratio",
+    "get_binance_taker_buy_sell",
+    "get_binance_basis",
+    "get_binance_spot_klines",
+    "get_binance_spot_ticker24",
+    "get_binance_spot_perp_basis",
     "get_fundamentals",
     "get_balance_sheet",
     "get_cashflow",
@@ -141,7 +155,8 @@ def build_instrument_context(
     """
     is_crypto = asset_type == "crypto"
     is_perp = asset_type == "crypto_perp"
-    instrument_label = "asset" if (is_crypto or is_perp) else "instrument"
+    is_spot = asset_type == "crypto_spot"
+    instrument_label = "asset" if (is_crypto or is_perp or is_spot) else "instrument"
     context = (
         f"The {instrument_label} to analyze is `{ticker}`. "
         "Use this exact ticker in every tool call, report, and recommendation, "
@@ -176,6 +191,14 @@ def build_instrument_context(
             "Funding rate, open interest, and basis are first-class signals; "
             "mind leverage and funding-cost drag. Do not assume company "
             "fundamentals are available."
+        )
+    if is_spot:
+        context += (
+            " This is a Binance SPOT pair (crypto_spot). No funding rate, open "
+            "interest, leverage, or liquidations apply — it is the spot "
+            "reference price the perpetual trades around. The spot-perp basis "
+            "tool shows the perpetual's premium/discount vs this spot price. "
+            "Do not assume company fundamentals are available."
         )
     if is_crypto:
         context += (

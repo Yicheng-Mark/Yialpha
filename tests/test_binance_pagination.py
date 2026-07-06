@@ -18,7 +18,7 @@ _FUND_MS = 28_800_000  # 8h funding interval
 
 def _fake_klines_server(all_klines):
     """A mock ``_http_get`` that pages /fapi/v1/klines like Binance."""
-    def _mock(path, params, symbol, canonical):  # noqa: ARG001
+    def _mock(path, params, symbol, canonical, **kwargs):  # noqa: ARG001
         start, end, limit = params["startTime"], params["endTime"], params["limit"]
         return [k for k in all_klines if start <= k[0] <= end][:limit]
     return _mock
@@ -26,7 +26,7 @@ def _fake_klines_server(all_klines):
 
 def _fake_funding_server(all_rows):
     """A mock ``_http_get`` that pages /fapi/v1/fundingRate like Binance."""
-    def _mock(path, params, symbol, canonical):  # noqa: ARG001
+    def _mock(path, params, symbol, canonical, **kwargs):  # noqa: ARG001
         start, end, limit = params["startTime"], params["endTime"], params["limit"]
         return [r for r in all_rows if start <= r["fundingTime"] <= end][:limit]
     return _mock

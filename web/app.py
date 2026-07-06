@@ -103,6 +103,9 @@ class AnalyzeReq(BaseModel):
     ticker: str
     date: str
     asset_type: str = "auto"
+    # UI language ("en" | "zh"); routed to run_robust via YIAGENTS_OUTPUT_LANGUAGE
+    # so the existing get_language_instruction() localizes the agent reports.
+    language: str = "en"
 
 
 @app.get("/")
@@ -152,6 +155,8 @@ async def api_analyze(req: AnalyzeReq):
         raise HTTPException(status_code=400, detail=f"bad date: {req.date!r}") from None
     if req.asset_type not in ("auto", "stock", "crypto", "crypto_perp"):
         raise HTTPException(status_code=400, detail=f"bad asset_type: {req.asset_type!r}")
+    if req.language not in ("en", "zh"):
+        raise HTTPException(status_code=400, detail=f"bad language: {req.language!r}")
 
     # Canonical Yahoo symbol — the pipeline stores results under this exact
     # spelling (e.g. BTCUSD → BTC-USD), so normalizing here makes the post-run
@@ -161,7 +166,7 @@ async def api_analyze(req: AnalyzeReq):
     if runner.registry.is_busy():
         raise HTTPException(status_code=409, detail="an analysis is already running")
 
-    task_id = await runner.spawn(ticker, req.date, req.asset_type)
+    task_id = await runner.spawn(ticker, req.date, req.asset_type, req.language)
     st = runner.registry.get(task_id)
     return {"task_id": task_id, "started_at": st.started_at}
 

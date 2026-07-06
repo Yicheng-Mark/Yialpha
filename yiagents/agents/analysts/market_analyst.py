@@ -1,9 +1,15 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from yiagents.agents.utils.agent_utils import (
+    get_binance_basis,
     get_binance_funding_rate,
     get_binance_klines,
+    get_binance_long_short_ratio,
     get_binance_open_interest,
+    get_binance_spot_klines,
+    get_binance_spot_perp_basis,
+    get_binance_spot_ticker24,
+    get_binance_taker_buy_sell,
     get_indicators,
     get_instrument_context_from_state,
     get_language_instruction,
@@ -13,8 +19,9 @@ from yiagents.agents.utils.agent_utils import (
 from yiagents.agents.utils.prompt_builder import build_fincot_prompt
 
 # Appended to the system message ONLY for crypto_perp runs. Nudges the analyst
-# to use the perp-native OHLCV and to treat funding/OI as required signals.
-# Non-perp runs append nothing, so the prompt is byte-identical to the baseline.
+# to use the perp-native OHLCV and to treat funding/OI + positioning/order-flow
+# as required signals. Non-perp runs append nothing, so the prompt is byte-
+# identical to the baseline (stock/crypto unaffected).
 _PERP_NUDGE = (
     " This is a Binance USDT-M PERPETUAL, not a spot pair. The spot-style tools "
     "(get_stock_data, get_indicators, get_verified_market_snapshot) are NOT "
@@ -23,7 +30,34 @@ _PERP_NUDGE = (
     "for OHLCV (you may compute trend/volatility observations directly from "
     "those candles). You MUST call get_binance_funding_rate and "
     "get_binance_open_interest and discuss funding-rate direction, open-interest "
-    "crowding, and liquidation risk in your report."
+    "crowding, and liquidation risk in your report. You MUST ALSO call "
+    "get_binance_long_short_ratio and discuss how the leveraged crowd is "
+    "positioned (longShortRatio > 1 = longs dominate; top-trader vs global "
+    "divergence is a contrary signal) — this is the perp-native sentiment signal "
+    "and it frequently contradicts funding/OI inferences, so reconcile them "
+    "explicitly. Call get_binance_taker_buy_sell (order-flow aggression) and, "
+    "where available, get_binance_basis (perp-vs-index premium/discount) to "
+    "round out the positioning picture; if a tool returns a sentinel/unavailable "
+    "marker, say so plainly rather than inventing values."
+)
+
+# Appended to the system message ONLY for crypto_spot runs. Spot shares the
+# generic OHLCV/indicator/snapshot tools with the stock baseline (the symbol
+# resolves correctly), so this nudge only directs the analyst to the spot-
+# native OHLCV source and the cross-venue basis signal. Non-spot runs append
+# nothing, so their prompts are byte-identical to the baseline.
+_SPOT_NUDGE = (
+    " This is a Binance SPOT pair (crypto_spot), not a perpetual and not a "
+    "Yahoo pair. Use get_binance_spot_klines for the spot OHLCV (the actual "
+    "Binance spot book) and get_binance_spot_ticker24 for the 24h snapshot. "
+    "There is no funding rate, open interest, leverage, or liquidation for a "
+    "spot pair — do not discuss them. Call get_binance_spot_perp_basis to show "
+    "where the USDT-M perpetual trades relative to this spot price (positive "
+    "basis = perp rich / long premium; negative = discount / short pressure) "
+    "and reconcile it with the spot trend. The get_indicators / "
+    "get_verified_market_snapshot tools are available and resolve correctly for "
+    "this symbol — use them as usual. If a tool returns a sentinel/unavailable "
+    "marker, say so plainly rather than inventing values."
 )
 
 # The indicator catalog the analyst selects from. Shared by both prompt forms so
@@ -145,12 +179,33 @@ def create_market_analyst(llm):
                 get_binance_klines,
                 get_binance_funding_rate,
                 get_binance_open_interest,
+                get_binance_long_short_ratio,
+                get_binance_taker_buy_sell,
+                get_binance_basis,
+            ]
+        elif state.get("asset_type") == "crypto_spot":
+            # A Binance SPOT pair. Unlike perp, the symbol resolves correctly
+            # via Yahoo (BTCUSDT -> BTC-USD), so get_indicators /
+            # get_verified_market_snapshot are kept — they price the same spot
+            # market. The spot-native klines + 24h ticker are bound to the
+            # actual Binance spot book, and the cross-venue spot-perp basis
+            # tool exposes the perpetual's premium/discount vs this spot
+            # reference. Stock/crypto/perp branches are untouched.
+            tools = [
+                get_binance_spot_klines,
+                get_binance_spot_ticker24,
+                get_binance_spot_perp_basis,
+                get_indicators,
+                get_verified_market_snapshot,
             ]
 
         system_message = _system_message()
-        # Perp-only system-message append; non-perp leaves system_message unchanged.
+        # Perp/spot-only system-message append; other asset types leave
+        # system_message unchanged (byte-identical to the baseline).
         if state.get("asset_type") == "crypto_perp":
             system_message = system_message + _PERP_NUDGE
+        elif state.get("asset_type") == "crypto_spot":
+            system_message = system_message + _SPOT_NUDGE
 
         prompt = ChatPromptTemplate.from_messages(
             [

@@ -1323,8 +1323,9 @@ def batch(
     asset_type: str = typer.Option(
         "auto",
         "--asset-type",
-        help="stock | crypto | crypto_perp | auto (auto = infer from the first "
-        "ticker; crypto_perp = Binance USDT-M perpetual, explicit opt-in).",
+        help="stock | crypto | crypto_spot | crypto_perp | auto (auto = infer "
+        "from the first ticker; crypto_spot = Binance spot, crypto_perp = "
+        "Binance USDT-M perpetual — both explicit opt-in).",
     ),
     workers: int | None = typer.Option(
         None,

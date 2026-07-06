@@ -142,8 +142,11 @@ def normalize_symbol_for_venue(raw: str, venue: str = "binance_perp") -> str:
     """Map a user/broker symbol to a venue's canonical symbol.
 
     ``venue="yahoo"`` delegates to :func:`normalize_symbol` so the Yahoo path
-    is 100% unchanged (same function, same output). For ``"binance_perp"``,
-    the symbol is normalized to a Binance USDT-M perpetual pair (``<BASE>USDT``):
+    is 100% unchanged (same function, same output). For ``"binance_perp"`` and
+    ``"binance_spot"``, the symbol is normalized to a Binance USDT pair
+    (``<BASE>USDT``) — both the USDT-M perpetual book and the spot USDT book
+    trade under the same ``<BASE>USDT`` symbol, so the two venues share one
+    normalization:
 
       - upper-cased; trailing ``+`` (broker CFD marker) stripped
       - dashes removed (``BTC-USDT`` -> ``BTCUSDT``)
@@ -166,7 +169,7 @@ def normalize_symbol_for_venue(raw: str, venue: str = "binance_perp") -> str:
 
     s = raw.strip().upper().rstrip("+").replace("-", "")
 
-    if venue != "binance_perp":
+    if venue not in ("binance_perp", "binance_spot"):
         # Unknown venue: fall back to the cleaned form rather than guessing.
         return s
 

@@ -222,3 +222,6 @@ __marimo__/
 .env.enterprise
 reports/
 analysis_output/
+
+# Claude Code local settings (personal, machine-specific — not for the repo)
+.claude/settings.local.json

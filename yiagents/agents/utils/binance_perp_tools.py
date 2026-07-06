@@ -77,3 +77,65 @@ def get_binance_open_interest(
         str: Header + CSV of open-interest rows (history then live snapshot).
     """
     return route_to_vendor("get_binance_open_interest", symbol, look_back_days)
+
+
+@tool
+def get_binance_long_short_ratio(
+    symbol: Annotated[str, "Binance USDT-M perpetual symbol, e.g. BTCUSDT"],
+    look_back_days: Annotated[int, "Number of past days of history (default 7)"] = 7,
+) -> str:
+    """Retrieve trader long/short positioning for a Binance USDT-M perpetual.
+
+    The perp-native "sentiment" signal: how the leveraged crowd is actually
+    positioned (not what social media says). Returns three series in one table —
+    top-trader account ratio, top-trader position ratio, and global account
+    ratio (column ``series``) — with ``longAccount`` (long share 0-1),
+    ``longShortRatio`` (>1 = longs dominate), and ``shortAccount``.
+    Args:
+        symbol: Binance USDT-M perp symbol, e.g. BTCUSDT, AAPLUSDT.
+        look_back_days: Days of daily history (default 7, capped at 30).
+    Returns:
+        str: Header + CSV of long/short ratio rows across the 3 series.
+    """
+    return route_to_vendor("get_binance_long_short_ratio", symbol, look_back_days)
+
+
+@tool
+def get_binance_taker_buy_sell(
+    symbol: Annotated[str, "Binance USDT-M perpetual symbol, e.g. BTCUSDT"],
+    look_back_days: Annotated[int, "Number of past days of history (default 7)"] = 7,
+) -> str:
+    """Retrieve taker buy/sell volume for a Binance USDT-M perpetual.
+
+    Aggressive market order-flow: ``buySellRatio`` > 1 = takers buying more
+    than selling (urgent long pressure); < 1 = selling pressure. A rally on a
+    sub-1 ratio is low-conviction; a dump on a above-1 ratio is often
+    capitulation. Returns ``time, buySellRatio, buyVol, sellVol``.
+    Args:
+        symbol: Binance USDT-M perp symbol, e.g. BTCUSDT.
+        look_back_days: Days of daily history (default 7, capped at 30).
+    Returns:
+        str: Header + CSV of taker buy/sell rows.
+    """
+    return route_to_vendor("get_binance_taker_buy_sell", symbol, look_back_days)
+
+
+@tool
+def get_binance_basis(
+    symbol: Annotated[str, "Binance USDT-M perpetual symbol, e.g. BTCUSDT"],
+    look_back_days: Annotated[int, "Number of past days of history (default 7)"] = 7,
+) -> str:
+    """Retrieve the perp-vs-index basis for a Binance USDT-M perpetual.
+
+    Premium/discount of the perpetual vs its underlying index. Positive basis
+    = perp trades rich (long demand); negative = discount (short pressure).
+    Returns ``time, basis, futuresPrice, indexPrice, basisRate``. Unsupported
+    for newer TRADIFI stock-perps (e.g. AAPLUSDT/MUUSDT) — degrades to a
+    sentinel rather than failing the run.
+    Args:
+        symbol: Binance USDT-M perp symbol, e.g. BTCUSDT.
+        look_back_days: Days of daily history (default 7, capped at 30).
+    Returns:
+        str: Header + CSV of basis rows.
+    """
+    return route_to_vendor("get_binance_basis", symbol, look_back_days)

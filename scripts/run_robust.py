@@ -63,9 +63,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--asset-type",
         default=None,
-        choices=["stock", "crypto", "crypto_perp"],
+        choices=["stock", "crypto", "crypto_spot", "crypto_perp"],
         help="透传给 run_batch --asset-type（不传则不附加，与历史字节一致）；"
-        "crypto_perp=Binance USDT-M 永续",
+        "crypto_spot=Binance 现货，crypto_perp=Binance USDT-M 永续",
     )
     p.add_argument("--workers", type=int, default=2, help="并发子进程数 K（默认 2）")
     p.add_argument(

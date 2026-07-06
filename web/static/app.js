@@ -8,8 +8,10 @@
 //   #/task/<id>              task monitor (polls /api/tasks/<id> every 4s)
 //   #/health                 preflight self-check
 //
-// Agent markdown is rendered verbatim with the offline marked.js copy; it is
-// never translated. Only static chrome goes through t() / data-i18n.
+// Agent markdown is rendered verbatim with the offline marked.js copy. The
+// report language itself follows the 🌐 toggle (window.lang() is sent on submit
+// and routed to the run_robust child via YIAGENTS_OUTPUT_LANGUAGE); there is no
+// in-browser post-translation. Only static chrome goes through t() / data-i18n.
 
 (function () {
   "use strict";
@@ -460,7 +462,7 @@
         const res = await fetchJSON("/api/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ticker, date, asset_type: asset }),
+          body: JSON.stringify({ ticker, date, asset_type: asset, language: window.lang() }),
         });
         location.hash = `#/task/${res.task_id}`;
       } catch (err) {

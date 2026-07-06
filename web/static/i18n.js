@@ -1,5 +1,8 @@
-// Static-UI i18n for YiAgents web. Only static chrome is translated; agent
-// report markdown is rendered as-is (the LLM's own output language stands).
+// i18n for YiAgents web. Static chrome is translated here via data-i18n / t().
+// The 🌐 toggle ALSO sets the report language: window.lang() is sent on submit
+// and routed to the run_robust child via YIAGENTS_OUTPUT_LANGUAGE, so the
+// existing get_language_instruction() localizes every agent's output. Agent
+// markdown is still rendered as-is — there is no in-browser post-translation.
 //
 // Usage: elements with data-i18n="key" get textContent rewritten on language
 // switch; data-i18n-ph="key" rewrites placeholder. Dynamic strings in app.js
@@ -15,7 +18,7 @@
       nav_new: "提交新分析",
       nav_health: "环境自检",
       lang_btn: "🌐 EN",
-      footer_note: "agent 输出原样渲染，未翻译",
+      footer_note: "报告语言跟随 🌐 切换",
 
       common_loading: "加载中…",
       common_error: "出错了",
@@ -114,7 +117,7 @@
       nav_new: "New Analysis",
       nav_health: "Health Check",
       lang_btn: "🌐 中",
-      footer_note: "agent output rendered as-is, not translated",
+      footer_note: "report language follows the 🌐 toggle",
 
       common_loading: "Loading…",
       common_error: "Something went wrong",
