@@ -110,7 +110,19 @@ def _map_tickers(tickers, task, workers: int = 1, risk_enabled: bool | None = No
     """
     if workers <= 1:
         graph = _build_graph(debug=False, risk_enabled=risk_enabled)
-        return [task(t, graph) for t in tickers]
+        # Isolate per-ticker failures: one bad ticker (yfinance 404, a single
+        # propagate error, ...) must not abort the whole batch and discard the
+        # other tickers' already-computed results. A failed ticker becomes a
+        # None placeholder in input order; callers skip None entries.
+        out: list = []
+        for t in tickers:
+            try:
+                out.append(task(t, graph))
+            except Exception as exc:  # noqa: BLE001 -- isolate per-ticker failure
+                print(f"[{t}] ❌ ticker failed, skipping: {exc!r}",
+                      file=sys.stderr, flush=True)
+                out.append(None)
+        return out
 
     pool: queue.Queue = queue.Queue()
     for _ in range(workers):
@@ -128,8 +140,17 @@ def _map_tickers(tickers, task, workers: int = 1, risk_enabled: bool | None = No
     with ThreadPoolExecutor(max_workers=workers) as ex:
         future_to_ticker = {ex.submit(run, t): t for t in tickers}
         for fut in as_completed(future_to_ticker):
-            results[future_to_ticker[fut]] = fut.result()
-    return [results[t] for t in tickers]
+            t = future_to_ticker[fut]
+            try:
+                results[t] = fut.result()
+            except Exception as exc:  # noqa: BLE001 -- isolate per-ticker failure
+                # Same isolation as the serial path: a raised task here would
+                # otherwise exit the loop, drop every other ticker's result in
+                # shutdown(wait=True), and crash baseline_backtest/full_ab.
+                print(f"[{t}] ❌ ticker failed, skipping: {exc!r}",
+                      file=sys.stderr, flush=True)
+                results[t] = None
+    return [results.get(t) for t in tickers]
 
 
 def preflight(ticker: str) -> int:
@@ -289,12 +310,22 @@ def baseline_backtest(tickers, start, end, step, n_dates, holding_days, cost_bps
     # Pure baseline: force the quantitative overlay OFF at the graph layer so
     # this mode stays the clean Phase-0 reference regardless of the default.
     nested = _map_tickers(tickers, per_ticker, workers, risk_enabled=False)
-    all_results = [r for sub in nested for r in sub]
+    # _map_tickers yields None for any ticker whose task raised; skip those so
+    # one failure does not crash the report step.
+    all_results = [r for sub in nested if sub for r in sub]
+    failures = sum(1 for sub in nested if sub is None)
+    if not all_results:
+        print("\n❌ 基线回测：所有 ticker 均失败，无报告可写。", file=sys.stderr)
+        return False
     path = write_report(all_results, results_dir=out)
     write_dashboard(all_results, results_dir=out)
     print(f"\n📊 基线报告: {path}")
     print(f"📊 仪表盘(用浏览器打开): {Path(out) / 'monitoring' / 'dashboard.html'}")
-    return all_results
+    if failures:
+        print(f"⚠️ {failures}/{len(nested)} ticker 失败（已跳过，不影响其余报告）。",
+              file=sys.stderr)
+    # Return ok so main() can exit non-zero when any ticker failed (CI signal).
+    return failures == 0
 
 
 def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, out, workers=1):
@@ -337,9 +368,15 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
     # weight_fn, so the gate stays a clean controlled comparison.
     gate_inputs = _map_tickers(tickers, per_ticker, workers, risk_enabled=True)
 
-    # 每只票独立判定闸门（串行，确定性顺序）
+    # 每只票独立判定闸门（串行，确定性顺序）。_map_tickers 对失败的 ticker
+    # 返回 None 占位 —— 跳过它（无 base/improved 可判定），并计入整体失败。
     all_render = []
-    for t, base, improved in gate_inputs:
+    all_pass = True
+    for gi in gate_inputs:
+        if gi is None:
+            all_pass = False
+            continue
+        t, base, improved = gi
         verdict = evaluate_gate(base, improved)
         md = verdict.render()
         print(f"\n  [{t}] 闸门判定: {'✅ PASS' if verdict.passes else '❌ FAIL'} "
@@ -347,10 +384,17 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
         print(f"    建议: {verdict.recommendation[:160]}...")
         (Path(out) / f"gate_{t}.md").write_text(md, encoding="utf-8")
         all_render += [base] + improved
+        if not verdict.passes:
+            all_pass = False
 
-    write_report(all_render, results_dir=out)
-    write_dashboard([gi[1] for gi in gate_inputs], results_dir=out, kill_switch=False)
+    if all_render:
+        write_report(all_render, results_dir=out)
+    write_dashboard([gi[1] for gi in gate_inputs if gi is not None],
+                    results_dir=out, kill_switch=False)
     print(f"\n📊 报告/仪表盘/闸门判定 都写到: {out}")
+    # CLAUDE.md: 「闸门 PASS 才做券商适配」—— return the aggregated verdict so
+    # main() exits non-zero on any FAIL (or any ticker failure), for CI gating.
+    return all_pass
 
 
 def main():
@@ -386,13 +430,15 @@ def main():
     elif args.smoke:
         sys.exit(smoke(args.ticker, args.date, profile=args.profile))
     elif args.baseline:
-        baseline_backtest(args.tickers, start, end, args.step, args.rebalance,
-                          args.holding_days, args.cost_bps, args.runs, args.out,
-                          workers=args.workers)
+        ok = baseline_backtest(args.tickers, start, end, args.step, args.rebalance,
+                               args.holding_days, args.cost_bps, args.runs, args.out,
+                               workers=args.workers)
+        sys.exit(0 if ok else 1)
     else:
-        full_ab(args.tickers, start, end, args.step, args.rebalance,
-                args.holding_days, args.cost_bps, args.runs, args.out,
-                workers=args.workers)
+        ok = full_ab(args.tickers, start, end, args.step, args.rebalance,
+                     args.holding_days, args.cost_bps, args.runs, args.out,
+                     workers=args.workers)
+        sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

@@ -272,7 +272,12 @@ def filter_financials_by_date(data: pd.DataFrame, curr_date: str) -> pd.DataFram
     if not curr_date or data.empty:
         return data
     cutoff = pd.Timestamp(curr_date)
-    mask = pd.to_datetime(data.columns, errors="coerce") <= cutoff
+    parsed = pd.to_datetime(data.columns, errors="coerce")
+    # Keep non-date columns (NaT after coerce) instead of dropping them: a
+    # metadata column (e.g. a "symbol"/"currency" annotation) is not future data
+    # and must survive the look-ahead filter. Date columns are unaffected (their
+    # parsed value is not NaT), so the all-date case stays byte-equivalent.
+    mask = (parsed <= cutoff) | parsed.isna()
     return data.loc[:, mask]
 
 

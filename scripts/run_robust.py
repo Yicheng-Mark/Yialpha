@@ -32,6 +32,7 @@ import argparse
 import contextlib
 import os
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -193,6 +194,41 @@ def _cpu_seconds(pid: int) -> float | None:
         return None
 
 
+# ---- Ctrl+C / abort tracking ------------------------------------------------
+# Default Ctrl+C behaviour hangs for up to per_ticker_timeout: the `with
+# ThreadPoolExecutor` form runs shutdown(wait=True) in __exit__, which joins
+# worker threads stuck in time.sleep(5)/proc.poll() (non-interruptible on
+# Windows), while the CREATE_NEW_PROCESS_GROUP children ignore Ctrl+C and keep
+# burning API quota. main() breaks this by (a) killing every active child and
+# (b) setting _abort before shutdown joins — each worker's proc.poll() then
+# turns non-None, its watchdog loop exits, and shutdown rejoins in seconds.
+_abort = threading.Event()
+_active_procs: list[subprocess.Popen] = []
+_active_lock = threading.Lock()
+
+
+def _register_proc(proc: subprocess.Popen) -> None:
+    with _active_lock:
+        _active_procs.append(proc)
+
+
+def _unregister_proc(proc: subprocess.Popen) -> None:
+    with _active_lock:
+        try:
+            _active_procs.remove(proc)
+        except ValueError:
+            pass  # already removed (Ctrl+C handler killed and cleared it)
+
+
+def _kill_all_active() -> None:
+    """Kill every registered child process tree (Ctrl+C / abort path)."""
+    with _active_lock:
+        procs = list(_active_procs)
+    for proc in procs:
+        if proc.poll() is None:
+            _kill_tree(proc.pid)
+
+
 def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
     """单 ticker 的「启动子进程 → 看门狗 → 杀/重试」循环。返回结果 dict。"""
     reports_root = _reports_root(opts.reports_root)
@@ -225,6 +261,8 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         cmd_base += ["--asset-type", opts.asset_type]
 
     for attempt in range(1, opts.max_attempts + 1):
+        if _abort.is_set():
+            break  # Ctrl+C during a prior attempt: stop launching fresh children
         result["attempts"] = attempt
         pre_mtime = _complete_mtime(reports_root, ticker)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -273,12 +311,20 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                 else:
                     popen_kwargs["start_new_session"] = True
                 proc = subprocess.Popen(cmd_base, **popen_kwargs)
+                _register_proc(proc)  # so the Ctrl+C handler can reach this child
         except OSError as exc:
             result["reason"] = f"spawn_failed: {exc}"
             break
 
         # —— 看门狗循环 ——
-        win_start = (time.time(), _cpu_seconds(proc.pid))
+        # Only sample CPU when stall detection is on (the sole reader of
+        # win_start[1] is the `if opts.stall_timeout > 0` block below). With it
+        # off (the default), each _cpu_seconds call spawns a PowerShell process
+        # (0.5–2s cold start) per attempt whose result is never read.
+        win_start = (
+            time.time(),
+            _cpu_seconds(proc.pid) if opts.stall_timeout > 0 else None,
+        )
         while True:
             rc = proc.poll()
             if rc is not None:
@@ -305,11 +351,23 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                                 f"{opts.stall_timeout:.0f}s window"
                             )
                             _kill_tree(proc.pid)
-                            proc.wait(timeout=30)
+                            # Mirror the wall-clock kill path: _reap catches the
+                            # TimeoutExpired that proc.wait(timeout=30) raises when
+                            # a killed grandchild (the ssl.read hang case) still
+                            # holds the stdout pipe, escalates to proc.kill(), and
+                            # unconditionally reaps. A bare proc.wait(timeout=30)
+                            # here would let that exception escape _run_one_ticker
+                            # → the pool → fut.result(), dropping this ticker's
+                            # result and skipping its remaining retries.
+                            _reap(proc, ticker)
                             break
                     win_start = (now, cpu_now)
             time.sleep(5)
 
+        # Child has exited (or was killed+reaped above): drop it from the active
+        # set so the Ctrl+C handler no longer targets it. Done before the result
+        # verdict so an exception in the verdict block cannot leak a stale entry.
+        _unregister_proc(proc)
         rc = proc.returncode
         wall = time.time() - t0
 
@@ -356,7 +414,16 @@ def main() -> int:
     )
 
     results: list[dict] = []
-    with ThreadPoolExecutor(max_workers=opts.workers) as pool:
+    # Manage the pool manually (not `with`) so a KeyboardInterrupt can kill every
+    # in-flight child BEFORE shutdown joins the worker threads. With the default
+    # `with` form, __exit__'s shutdown(wait=True) would run first, joining threads
+    # stuck in time.sleep(5)/proc.poll() (non-interruptible on Windows) while the
+    # CREATE_NEW_PROCESS_GROUP children ignore Ctrl+C and keep running — a hang
+    # of up to per_ticker_timeout (default 1800s). Here the except kills children
+    # first; worker threads then see proc.poll() turn non-None, exit their
+    # watchdog loop, and shutdown(wait=True) in finally rejoins within seconds.
+    pool = ThreadPoolExecutor(max_workers=opts.workers)
+    try:
         futs = {
             pool.submit(_run_one_ticker, t, opts.date, opts): t for t in opts.tickers
         }
@@ -381,6 +448,15 @@ def main() -> int:
                     "report_path": None,
                     "log_path": None,
                 })
+    except KeyboardInterrupt:
+        _abort.set()  # stop workers mid-retry from launching fresh children
+        _kill_all_active()
+        print(
+            "\n🛑 已中断：已强杀所有活跃子进程，等待工作线程退出…",
+            file=sys.stderr, flush=True,
+        )
+    finally:
+        pool.shutdown(wait=True)
 
     results.sort(key=lambda r: opts.tickers.index(r["ticker"]))
     ok = sum(1 for r in results if r["ok"])

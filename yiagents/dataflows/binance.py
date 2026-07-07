@@ -28,11 +28,13 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import requests
 
+from .binance_http import get_shared_binance_session
 from .binance_rate_limiter import get_binance_weight_limiter
 from .config import get_config
 from .errors import NoMarketDataError, VendorRateLimitError
@@ -65,6 +67,22 @@ _SPOT_BASE = "https://api.binance.com"
 _SPOT_MIRROR_BASE = "https://data-api.binance.vision"
 # Spot /api/v3/klines caps at 1000 rows/page (fapi is 1500).
 _SPOT_KLINES_LIMIT = 1000
+
+# ---- Transport resilience (env: YIAGENTS_BINANCE_HTTP_*) --------------------
+# All default-off / zero below; binance_http_retries=0 and binance_http_keepalive
+# =False leave _http_get byte-equivalent to today (single requests.get, raw
+# exception propagation). Flipped on, they only change WHEN/WHETHER a request is
+# issued or HOW a transient failure recovers — never the successful-response
+# bytes. See _request_with_retry / _parse_retry_after.
+# Exponential backoff base (seconds); mirrors yf_retry's base_delay.
+_RETRY_BASE_DELAY = 2.0
+# HTTP statuses that are transient + idempotent-safe to retry on a read-only GET
+# (server-side UNKNOWN per Binance docs). 429/418 are NOT here — those stay on
+# the reactive VendorRateLimitError path (optionally with Retry-After).
+_RETRIABLE_STATUS = frozenset({500, 502, 503, 504})
+# Cap on a Retry-After sleep (seconds). Binance IP bans scale 2min..3days; a long
+# ban must not hang the ticker — defer it to run_robust's per-ticker rerun.
+_RETRY_AFTER_CAP_S = 60
 
 
 def _paginate_history(
@@ -162,6 +180,92 @@ def _observe_weight(resp, weight_key: str = "fapi") -> None:
     get_binance_weight_limiter(weight_key).observe(used)
 
 
+def _do_request(url: str, params: dict, use_session: bool):
+    """Fire ONE transport attempt and return the raw ``requests.Response``.
+
+    When ``use_session`` is true, reuse the process-wide shared
+    ``requests.Session`` (keepalive) so the TLS / SOCKS5-proxy connection is
+    pooled across calls; otherwise a one-shot ``requests.get`` (today's form).
+    Both paths take identical ``proxies`` / ``timeout`` so the response bytes are
+    the same either way — the session only adds connection reuse.
+    """
+    if use_session:
+        return get_shared_binance_session().get(
+            url, params=params, proxies=_proxies(), timeout=_TIMEOUT,
+        )
+    return requests.get(url, params=params, proxies=_proxies(), timeout=_TIMEOUT)
+
+
+def _request_with_retry(do_request, max_retries: int, symbol_for_error: str, canonical: str):
+    """Call ``do_request()`` with exponential backoff on transient failures.
+
+    Mirrors :func:`yiagents.dataflows.stockstats_utils.yf_retry`. Retries on
+    ``requests.RequestException`` (DNS / connection / TLS / timeout — the
+    transport stack) AND on HTTP 5xx (server-side UNKNOWN, idempotent-safe for a
+    read-only GET). 429/418 are NOT retried here — they stay on the reactive
+    ``VendorRateLimitError`` path so the router/vendor-chain handles them.
+
+    Success path: a non-retriable status is returned on the first attempt, so
+    output is byte-identical regardless of ``max_retries``. Failure path:
+    ``max_retries == 0`` re-raises the raw transport exception (byte-equivalent
+    to today); ``max_retries > 0`` exhausted raises
+    :class:`NoMarketDataError` so the routing layer degrades instead of crashing
+    the node (matches ``yf_retry``). A 5xx that exhausts retries is returned so
+    ``_http_get``'s existing non-200 → ``NoMarketDataError`` path fires (today's
+    behaviour).
+    """
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = do_request()
+        except requests.RequestException as exc:
+            last_exc = exc
+            resp = None
+        if resp is not None and resp.status_code not in _RETRIABLE_STATUS:
+            return resp  # success, or a non-retriable status for _http_get to handle
+        # Transient (transport error or 5xx) — retry if budget remains.
+        if attempt < max_retries:
+            reason = (
+                type(last_exc).__name__ if last_exc is not None
+                else f"HTTP {resp.status_code}"
+            )
+            delay = _RETRY_BASE_DELAY * (2 ** attempt)
+            logger.warning(
+                "Binance transient (%s) for %s; retrying in %.0fs (attempt %d/%d)",
+                reason, symbol_for_error, delay, attempt + 1, max_retries,
+            )
+            time.sleep(delay)
+            continue
+        # Budget exhausted.
+        if resp is not None:
+            return resp  # 5xx exhausted → let _http_get's non-200 path run (today's behaviour)
+        if max_retries > 0:
+            raise NoMarketDataError(
+                symbol_for_error, canonical,
+                f"Binance unreachable after {max_retries} retries "
+                f"({type(last_exc).__name__})",
+            ) from last_exc
+        raise last_exc  # max_retries == 0: propagate raw, byte-equivalent to today
+
+
+def _parse_retry_after(headers) -> int | None:
+    """Parse the ``Retry-After`` response header as whole seconds (or ``None``).
+
+    Binance sends the delay as an integer number of seconds. The HTTP-date form
+    is not supported (and not used by Binance); a missing or unparseable header
+    returns ``None`` so the caller falls back to today's immediate-raise path.
+    """
+    if not headers:
+        return None
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return None
+
+
 def _http_get(
     path: str,
     params: dict,
@@ -187,8 +291,20 @@ def _http_get(
     if the last server-reported IP weight was near the ceiling, then feeds the
     fresh ``X-MBX-USED-WEIGHT-1M`` header back to the limiter. This only changes
     *when* the request fires, never the data; off by default = byte-equivalent.
+
+    Transport resilience (all default-off = byte-equivalent to today):
+    ``binance_http_keepalive`` reuses a process-wide ``requests.Session`` so the
+    TLS/SOCKS5 connection is pooled across calls; ``binance_http_retries`` adds
+    exponential backoff on transient transport errors (DNS/timeout/TLS) and 5xx
+    (mirrors ``yf_retry``; exhausted → ``NoMarketDataError``);
+    ``binance_honor_retry_after`` sleeps the server's ``Retry-After`` window
+    before raising on 429/418. None change the successful-response bytes.
     """
-    proactive = get_config().get("binance_proactive_backoff", False)
+    cfg = get_config()
+    proactive = cfg.get("binance_proactive_backoff", False)
+    use_session = cfg.get("binance_http_keepalive", False)
+    max_retries = int(cfg.get("binance_http_retries", 0))
+    honor_retry_after = cfg.get("binance_honor_retry_after", False)
     if proactive:
         # Back off BEFORE the request if the budget is hot, so we avoid tripping
         # a 429 rather than only reacting to one. The reactive 429/418 handling
@@ -196,12 +312,34 @@ def _http_get(
         get_binance_weight_limiter(weight_key).acquire()
 
     url = f"{base}{path}"
-    resp = requests.get(url, params=params, proxies=_proxies(), timeout=_TIMEOUT)
+    resp = _request_with_retry(
+        lambda: _do_request(url, params, use_session),
+        max_retries, symbol_for_error, canonical,
+    )
 
     if proactive:
         _observe_weight(resp, weight_key)
 
     if resp.status_code in (429, 418):
+        # Honor the server's Retry-After (IP ban window) before raising, so the
+        # next call (pagination / vendor chain / run_robust rerun) does not
+        # immediately re-trip the ban. Off by default = raise immediately
+        # (byte-equivalent to today); a ban longer than _RETRY_AFTER_CAP_S is
+        # deferred to run_robust rather than slept out inline.
+        if honor_retry_after:
+            wait = _parse_retry_after(resp.headers)
+            if wait is not None and 0 < wait <= _RETRY_AFTER_CAP_S:
+                logger.info(
+                    "Binance HTTP %d for %s; honoring Retry-After %ds before raising",
+                    resp.status_code, symbol_for_error, wait,
+                )
+                time.sleep(wait)
+            elif wait is not None and wait > _RETRY_AFTER_CAP_S:
+                logger.info(
+                    "Binance HTTP %d ban Retry-After %ds > cap %ds for %s; "
+                    "deferring to run_robust rerun",
+                    resp.status_code, wait, _RETRY_AFTER_CAP_S, symbol_for_error,
+                )
         raise VendorRateLimitError(
             f"Binance rate-limited {symbol_for_error} (HTTP {resp.status_code})"
         )
@@ -291,7 +429,7 @@ def get_binance_klines(
         records.append(
             {
                 "Date": datetime.fromtimestamp(open_ms / 1000, tz=timezone.utc)
-                .strftime("%Y-%m-%d"),
+                .strftime("%Y-%m-%d" if interval == "1d" else "%Y-%m-%d %H:%M:%S"),
                 "Open": float(k[1]),
                 "High": float(k[2]),
                 "Low": float(k[3]),
@@ -393,6 +531,12 @@ def get_binance_open_interest(symbol: str, look_back_days: int = 7) -> str:
     price confirms a trend; rising OI + falling price signals crowded shorts
     (or longs unwinding). The live row is appended last with ``openInterestValue``
     blank (the snapshot endpoint exposes only the raw OI).
+
+    .. warning:: Backtest look-ahead — returns the most recent ``limit`` days as
+       of *now*. The ``/futures/data/openInterestHist`` endpoint accepts only
+       ``limit`` (no historical ``startTime``/``endTime``), so during a backtest
+       (``curr_date`` in the past) this surfaces future positioning. Live
+       analysis only; treat as unavailable for backtested dates.
     """
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
     limit = max(1, int(look_back_days))
@@ -487,6 +631,11 @@ def get_binance_long_short_ratio(symbol: str, look_back_days: int = 7) -> str:
     fetched independently and a 429/unsupported one is skipped, so a partial
     block still returns the surviving series; only an outright failure of all
     three raises ``NoMarketDataError`` (router then emits a sentinel).
+
+    .. warning:: Backtest look-ahead — returns the most recent ``limit`` days as
+       of *now*. The ``/futures/data/*Ratio`` endpoints accept only ``limit``
+       (no historical window), so during a backtest (``curr_date`` in the past)
+       this surfaces future positioning. Live analysis only.
     """
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
     # Cap so a runaway look_back_days can't request more than the decision-useful
@@ -554,6 +703,11 @@ def get_binance_taker_buy_sell(symbol: str, look_back_days: int = 7) -> str:
     taker volumes. A rally on buySellRatio < 1 (sellers dominant) is a low-
     conviction move; a dump on buySellRatio > 1 is often a capitulation wash.
     Returns ``time, buySellRatio, buyVol, sellVol``.
+
+    .. warning:: Backtest look-ahead — returns the most recent ``limit`` days as
+       of *now*. The ``/futures/data/takerlongshortRatio`` endpoint accepts only
+       ``limit`` (no historical window), so during a backtest (``curr_date`` in
+       the past) this surfaces future order-flow. Live analysis only.
     """
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
     limit = max(1, min(int(look_back_days), _LSR_LIMIT_CAP))
@@ -607,6 +761,11 @@ def get_binance_basis(symbol: str, look_back_days: int = 7) -> str:
     ``_http_get`` surfaces as ``NoMarketDataError`` — the router then degrades
     to a sentinel so the analyst notes "basis unavailable" rather than crashing.
     Major crypto perps (BTCUSDT, ETHUSDT, …) return real data.
+
+    .. warning:: Backtest look-ahead — returns the most recent ``limit`` days as
+       of *now*. The ``/futures/data/basis`` endpoint accepts only ``limit`` (no
+       historical window), so during a backtest (``curr_date`` in the past) this
+       surfaces future basis. Live analysis only.
     """
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
     limit = max(1, min(int(look_back_days), _LSR_LIMIT_CAP))
@@ -724,7 +883,7 @@ def get_binance_spot_klines(
         records.append(
             {
                 "Date": datetime.fromtimestamp(open_ms / 1000, tz=timezone.utc)
-                .strftime("%Y-%m-%d"),
+                .strftime("%Y-%m-%d" if interval == "1d" else "%Y-%m-%d %H:%M:%S"),
                 "Open": float(k[1]),
                 "High": float(k[2]),
                 "Low": float(k[3]),
@@ -813,6 +972,12 @@ def get_binance_spot_perp_basis(symbol: str, look_back_days: int = 7) -> str:
     continues without the basis column). Major USDT pairs (BTC/ETH/…) have both
     a deep perp and spot book; newer TRADIFI perps without a spot listing will
     cleanly degrade.
+
+    .. warning:: Backtest look-ahead — the window anchors to ``datetime.now()``,
+       so during a backtest (``curr_date`` in the past) this surfaces future
+       closes. Unlike the ``/futures/data/*`` endpoints, the klines endpoints do
+       support historical windows, so a future caller passing ``start_date``/
+       ``end_date`` could make this backtest-safe; today it is live-only.
     """
     canonical = normalize_symbol_for_venue(symbol, "binance_spot")
     # Cap the window like the other perp daily series; older rows add noise.

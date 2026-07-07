@@ -89,6 +89,13 @@ _ENV_OVERRIDES = {
     # (api.binance.com is the proven host through the SOCKS5 proxy); the mirror
     # is Binance's recommended read-only host and carries the same data.
     "YIAGENTS_BINANCE_SPOT_MIRROR":          "binance_spot_mirror",
+    # Binance transport resilience (read-only public market data). keepalive
+    # reuses one requests.Session across calls; retries recover transient
+    # DNS/timeout/TLS/5xx without an OS-level run_robust rerun; honor_retry_after
+    # backs off a real IP ban. All default-off/zero = byte-equivalent to today.
+    "YIAGENTS_BINANCE_HTTP_KEEPALIVE":       "binance_http_keepalive",
+    "YIAGENTS_BINANCE_HTTP_RETRIES":         "binance_http_retries",
+    "YIAGENTS_BINANCE_HONOR_RETRY_AFTER":    "binance_honor_retry_after",
 }
 
 
@@ -222,6 +229,16 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # spot vendor reads this at call time, so it is byte-equivalent to today
     # when off (and spot is new code regardless, so no prior output to perturb).
     "binance_spot_mirror": False,
+    # Binance transport resilience (env: YIAGENTS_BINANCE_HTTP_*). All
+    # default-off/zero = byte-equivalent to today (per-call fresh requests.get,
+    # no retry, no Retry-After sleep). keepalive reuses the TLS/SOCKS5 connection
+    # across calls (mirrors http_keepalive for the LLM client); retries recover
+    # transient DNS/timeout/TLS/5xx with exponential backoff (mirrors yf_retry,
+    # exhausted → NoMarketDataError); honor_retry_after sleeps the server's
+    # Retry-After window (≤60s) before raising on 429/418.
+    "binance_http_keepalive": False,
+    "binance_http_retries": 0,
+    "binance_honor_retry_after": False,
     # P1a: process-wide shared httpx.Client for LLM calls — concurrent worker
     # graphs reuse TLS/SOCKS5-proxy connections instead of opening one per call.
     # Transport-only (changes nothing sent to the model); off by default.
