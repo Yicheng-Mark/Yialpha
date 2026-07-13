@@ -343,10 +343,22 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
     dates = _rebalance_dates(start, end, step, n_dates)
     print(f"  再平衡日期 {dates}")
 
+    # DSR multiple-testing deflation: n_trials = number of DISTINCT strategy
+    # configurations compared in this A/B and from which the gate selects.
+    # Here that is 2 (baseline rating→weight vs risk-overlay weight_fn). The
+    # `runs` loop below re-realizes the SAME risk config under LLM
+    # non-determinism -- those are repeated measurements, not independent
+    # strategies, so they do not inflate the trial count. With n_trials=1
+    # (the prior hard-coded value) the DSR hurdle collapses to 0 and any
+    # positive Sharpe trivially "clears" it, making the live-go/no-go gate
+    # (evaluate_gate below) nearly vacuous. n_trials=2 makes the hurdle real.
+    n_trials = 2
+
     def per_ticker(t, ta):
         print(f"\n  [{t}] 开始", flush=True)
         base = run_backtest(ta, t, dates, holding_days=holding_days,
-                            cost_bps=cost_bps, run_tag=f"ab_base_{t}")
+                            cost_bps=cost_bps, run_tag=f"ab_base_{t}",
+                            n_trials=n_trials)
         mb = base.metrics
         print(f"    [{t}] 基线:    总收益 {mb.total_return:.2%} | Sharpe {mb.sharpe:.2f} | "
               f"MDD {mb.max_drawdown:.2%}")
@@ -356,7 +368,8 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
         for r in range(runs):
             res = run_backtest(ta, t, dates, holding_days=holding_days,
                                cost_bps=cost_bps, weight_fn=wfn,
-                               run_tag=f"ab_risk_{t}_r{r}")
+                               run_tag=f"ab_risk_{t}_r{r}",
+                               n_trials=n_trials)
             mi = res.metrics
             print(f"    [{t}] 风控 run{r}: 总收益 {mi.total_return:.2%} | Sharpe {mi.sharpe:.2f} | "
                   f"MDD {mi.max_drawdown:.2%} | DSR {mi.deflated_sharpe:.2f}")

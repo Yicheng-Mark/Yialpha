@@ -187,6 +187,7 @@ def run_backtest(
     price_provider: Callable[[str, str, str], pd.Series] = _yfinance_price_provider,
     periods_per_year: int = 252,
     cost_bps: float = 0.0,
+    n_trials: int = 1,
     compute_index_alpha: bool = True,
     progress: bool = False,
 ) -> BacktestResult:
@@ -213,6 +214,14 @@ def run_backtest(
     cost_bps:
         Transaction cost in basis points applied to the traded notional on each
         rebalance (round-trip costs can be split across two calls by the caller).
+    n_trials:
+        Number of independent strategy variants being compared in this research
+        run, forwarded to :func:`compute_metrics` for the Deflated Sharpe Ratio
+        multiple-testing deflation. ``1`` (default) applies no deflation penalty
+        and is byte-equivalent to the prior behaviour. Set to the count of
+        strategies/configurations actually tried (e.g. in ``run_baseline --full``
+        the baseline + improved variants) so the DSR hurdle reflects the real
+        selection bias rather than being deflated to a near-trivial test.
     compute_index_alpha:
         If True, fetch the regional index benchmark and record ``alpha_vs_index``
         per trade (reuses ``graph._resolve_benchmark``).
@@ -221,6 +230,8 @@ def run_backtest(
         raise ValueError("run_backtest requires at least one decision date")
     if holding_days < 1:
         raise ValueError("holding_days must be >= 1")
+    if not isinstance(n_trials, int) or n_trials < 1:
+        raise ValueError(f"n_trials must be an integer >= 1, got {n_trials!r}")
 
     weight_fn = weight_fn or _default_weight_fn(rating_to_weight or DEFAULT_RATING_TO_WEIGHT)
 
@@ -349,7 +360,7 @@ def run_backtest(
         equity_curve,
         benchmark_equity=bh_curve,
         periods_per_year=periods_per_year,
-        n_trials=1,
+        n_trials=n_trials,
     )
 
     return BacktestResult(

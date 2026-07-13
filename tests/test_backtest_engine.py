@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -209,3 +210,54 @@ def test_trade_row_fields_populated():
     assert isinstance(t.raw_return, float)
     # Rising prices -> positive realized asset return over the holding window.
     assert t.raw_return > 0
+
+
+def _moderate_edge_prices(ticker, start, end):
+    """Synthetic close with a modest positive edge + noise.
+
+    Used by the DSR n_trials test: a non-saturated Sharpe keeps DSR in a
+    mid-range where raising the multiple-testing hurdle visibly moves it, so
+    the strict-inequality assertion bites. Fixed seed -> identical series on
+    every call, so two backtests differ ONLY in n_trials.
+    """
+    rng = np.random.default_rng(7)
+    idx = pd.bdate_range(start, end)
+    returns = 0.0011 + rng.normal(0.0, 0.013, size=len(idx))
+    values = (100.0 * np.cumprod(1.0 + returns)).tolist()
+    return pd.Series(values, index=idx.strftime("%Y-%m-%d"), dtype=float)
+
+
+@pytest.mark.unit
+def test_engine_n_trials_threads_through_to_dsr():
+    """Regression guard: run_backtest must forward n_trials to compute_metrics.
+
+    Previously the engine's compute_metrics call site hard-coded n_trials=1,
+    which collapses the Bailey-Lopez de Prado hurdle to 0 and makes any
+    positive Sharpe trivially "clear" it -- turning the live-go/no-go
+    validation gate into a near-vacuous test. With the param threaded through,
+    more trials -> higher hurdle -> strictly lower DSR on the SAME equity
+    curve. The strict inequality is what makes this a guard: if n_trials were
+    ever re-hard-coded, both DSR values would be identical and the assertion
+    would fail.
+    """
+    dates = _decision_dates(12)
+    ratings = dict.fromkeys(dates, "Buy")
+    single = run_backtest(
+        FakeGraph(ratings), "AAPL", dates, holding_days=5,
+        price_provider=_moderate_edge_prices, n_trials=1,
+    )
+    many = run_backtest(
+        FakeGraph(ratings), "AAPL", dates, holding_days=5,
+        price_provider=_moderate_edge_prices, n_trials=30,
+    )
+    assert 0.0 < single.metrics.deflated_sharpe < 1.0
+    assert many.metrics.deflated_sharpe < single.metrics.deflated_sharpe
+
+
+@pytest.mark.unit
+def test_engine_rejects_invalid_n_trials():
+    dates = _decision_dates(4)
+    graph = FakeGraph(dict.fromkeys(dates, "Buy"))
+    with pytest.raises(ValueError):
+        run_backtest(graph, "AAPL", dates, holding_days=5,
+                     price_provider=_rising_prices, n_trials=0)
