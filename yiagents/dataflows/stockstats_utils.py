@@ -14,7 +14,7 @@ from yiagents.batch.locks import FileLock
 
 from .config import get_config
 from .symbol_utils import NoMarketDataError, normalize_symbol
-from .utils import safe_ticker_component
+from .utils import is_filing_public, safe_ticker_component
 
 logger = logging.getLogger(__name__)
 
@@ -263,22 +263,29 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
 
 
 def filter_financials_by_date(data: pd.DataFrame, curr_date: str) -> pd.DataFrame:
-    """Drop financial statement columns (fiscal period timestamps) after curr_date.
+    """Drop financial-statement columns that were not yet public on ``curr_date``.
 
-    yfinance financial statements use fiscal period end dates as columns.
-    Columns after curr_date represent future data and are removed to
-    prevent look-ahead bias.
+    yfinance financial statements use fiscal period end dates as columns. A
+    column whose period ends on or before ``curr_date`` is NOT necessarily
+    public knowledge on that date -- the report is filed days to weeks later
+    (see :func:`yiagents.dataflows.utils.is_filing_public`). We keep a column
+    only once its fiscal period end + filing lag is on/before ``curr_date``,
+    so a backtest cannot read a report the market could not yet have seen.
+
+    Non-date columns (NaT after coerce -- e.g. a "symbol"/"currency" annotation,
+    or the trailing-"ttm" aggregate) are not fiscal periods and are kept as
+    metadata; they survive the filter just as before.
     """
     if not curr_date or data.empty:
         return data
-    cutoff = pd.Timestamp(curr_date)
     parsed = pd.to_datetime(data.columns, errors="coerce")
-    # Keep non-date columns (NaT after coerce) instead of dropping them: a
-    # metadata column (e.g. a "symbol"/"currency" annotation) is not future data
-    # and must survive the look-ahead filter. Date columns are unaffected (their
-    # parsed value is not NaT), so the all-date case stays byte-equivalent.
-    mask = (parsed <= cutoff) | parsed.isna()
-    return data.loc[:, mask]
+    keep = []
+    for col, col_ts in zip(data.columns, parsed):
+        if pd.isna(col_ts):
+            keep.append(True)  # non-date metadata column
+        else:
+            keep.append(is_filing_public(str(col), curr_date))
+    return data.loc[:, keep]
 
 
 class StockstatsUtils:

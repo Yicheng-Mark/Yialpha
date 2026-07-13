@@ -13,6 +13,7 @@ from .stockstats_utils import (
     yf_retry,
 )
 from .symbol_utils import NoMarketDataError, normalize_symbol
+from .utils import overview_would_leak_future
 
 
 def get_YFin_data_online(
@@ -277,10 +278,24 @@ def get_stockstats_indicator(
 
 def get_fundamentals(
     ticker: Annotated[str, "ticker symbol of the company"],
-    curr_date: Annotated[str, "current date (not used for yfinance)"] = None
+    curr_date: Annotated[str, "current date, yyyy-mm-dd"] = None
 ):
-    """Get company fundamentals overview from yfinance."""
+    """Get company fundamentals overview from yfinance.
+
+    yfinance ``.info`` is a single current-point snapshot with no date
+    dimension -- PE, marketCap, EPS, beta are always *today's* values. On an
+    explicit past ``curr_date`` (a backtest decision date) surfacing them would
+    leak the future, so we refuse and let the router emit its NO_DATA_AVAILABLE
+    sentinel (the fundamentals analyst is grounded to report "data not
+    available" rather than fabricate). Live mode (``curr_date`` empty or
+    today/future) keeps the snapshot -- it is legitimately current then.
+    """
     canonical = normalize_symbol(ticker)
+    if overview_would_leak_future(curr_date):
+        raise NoMarketDataError(
+            ticker, canonical,
+            f"overview snapshot is point-in-time (today only); not valid as of {curr_date}",
+        )
     try:
         ticker_obj = yf.Ticker(canonical)
         info = yf_retry(lambda: ticker_obj.info)

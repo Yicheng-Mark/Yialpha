@@ -1,3 +1,4 @@
+import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Annotated
@@ -5,6 +6,82 @@ from typing import Annotated
 import pandas as pd
 
 SavePathType = Annotated[str, "File path to save data. If None, data is not saved."]
+
+
+# ---------------------------------------------------------------------------
+# Point-in-time (PIT) guards for fundamental data.
+#
+# A backtest may only see data that was actually public on the simulated date.
+# Two distinct lookahead leaks are guarded here:
+#
+#   1. Financial statements (balance sheet / cash flow / income statement).
+#      yfinance and Alpha Vantage key these by ``fiscalDateEnding`` (the fiscal
+#      PERIOD end), but a period ending e.g. Sep 30 is NOT public on Oct 1 --
+#      the 10-Q is filed days to weeks later (SEC large accelerated filers:
+#      10-K ~60 days, 10-Q ~40 days after period end). Filtering on
+#      ``fiscalDateEnding <= curr_date`` lets a backtest read a report the
+#      market could not yet have seen. ``is_filing_public`` adds a filing lag
+#      so a period is visible only once it was plausibly filed.
+#
+#   2. Overview snapshots (yfinance ``.info`` / Alpha Vantage ``OVERVIEW``).
+#      These are single current-point values (PE, marketCap, EPS, beta) with NO
+#      date dimension -- they are always *today's* values. Surfacing them on a
+#      past backtest date leaks the future wholesale. ``overview_would_leak_future``
+#      flags this so the vendor can refuse (the router turns the resulting
+#      NoMarketDataError into the NO_DATA_AVAILABLE sentinel the fundamentals
+#      analyst is grounded to handle).
+#
+# These are correctness fixes, not opt-in enhancements: they apply by default.
+# The filing lag is tunable via env for conservatism (set to 0 to revert to the
+# old lookahead-leaking behaviour).
+# ---------------------------------------------------------------------------
+_FILING_LAG_ENV = os.environ.get("YIAGENTS_FUNDAMENTALS_FILING_LAG_DAYS")
+try:
+    FUNDAMENTALS_FILING_LAG_DAYS: int = (
+        int(_FILING_LAG_ENV) if _FILING_LAG_ENV not in (None, "") else 45
+    )
+except ValueError:
+    FUNDAMENTALS_FILING_LAG_DAYS = 45
+
+
+def is_filing_public(
+    fiscal_period_end,
+    curr_date: str,
+    lag_days: int = FUNDAMENTALS_FILING_LAG_DAYS,
+) -> bool:
+    """True iff a report for the fiscal period ending ``fiscal_period_end`` was
+    plausibly public by ``curr_date`` (period end + ``lag_days``).
+
+    Conservative on parse failure: if we cannot prove a report was public, drop
+    it rather than risk lookahead. ``curr_date`` empty/None means live mode (no
+    as-of constraint) -> keep everything.
+    """
+    if not curr_date:
+        return True
+    try:
+        period_end = datetime.strptime(str(fiscal_period_end)[:10], "%Y-%m-%d")
+        as_of = datetime.strptime(str(curr_date)[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return False
+    return period_end + timedelta(days=lag_days) <= as_of
+
+
+def overview_would_leak_future(curr_date: str) -> bool:
+    """True iff ``curr_date`` is an explicit past date, for which a vendor's
+    current-point overview snapshot would leak future information.
+
+    Such snapshots (yfinance ``.info`` / Alpha Vantage ``OVERVIEW``) carry no
+    date dimension, so they are only valid when ``curr_date`` is empty (live,
+    no as-of constraint) or today/future.
+    """
+    if not curr_date:
+        return False
+    try:
+        as_of = datetime.strptime(str(curr_date)[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return False
+    return as_of < date.today()
+
 
 # Tickers can contain letters, digits, dot, dash, underscore, caret
 # (index symbols like ^GSPC), equals (futures like GC=F), and plus
