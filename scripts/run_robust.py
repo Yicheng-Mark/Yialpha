@@ -259,6 +259,11 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
     # stays byte-identical to the historical watchdog contract (no extra argv).
     if getattr(opts, "asset_type", None):
         cmd_base += ["--asset-type", opts.asset_type]
+    # 可测试性 hook：用自定义脚本替换 run_batch 子进程（默认关 = 字节等价）。
+    # 用于韧性测试：注入确定崩溃的 crasher 验证看门狗 + 重试契约。
+    _child_script = os.environ.get("YIAGENTS_ROBUST_CHILD_SCRIPT")
+    if _child_script:
+        cmd_base = [sys.executable, _child_script] + cmd_base[2:]
 
     for attempt in range(1, opts.max_attempts + 1):
         if _abort.is_set():
@@ -276,6 +281,10 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         )
         child_env.setdefault("YIAGENTS_URLOPEN_HARD_TIMEOUT_S", "20")
         child_env.setdefault("YIAGENTS_FAULT_DUMP_S", "0")
+        # 让 run_batch 子进程 stdout/stderr 实时 flush：崩溃 traceback 不会闷在块缓冲里
+        # 丢失（AAPL#1 偶发崩溃时 a1 日志只剩 7 行就是这个盲区）。字节等价——只改
+        # flush 时机，不改输出内容；run_batch 的 LLM 决策不读自己的 stdout。
+        child_env.setdefault("PYTHONUNBUFFERED", "1")
 
         print(
             f"[{ticker}] ▶️ attempt {attempt}/{opts.max_attempts} → "
@@ -428,13 +437,19 @@ def main() -> int:
             pool.submit(_run_one_ticker, t, opts.date, opts): t for t in opts.tickers
         }
         for fut in as_completed(futs):
-            # 一个 ticker 的看门狗循环抛异常（如 _reap 之外的未预期错误）
-            # 绝不能炸掉整批：构造一个失败 result，对齐 in-process BatchRunner
-            # 已有的容错风格，让其它 ticker 的成果照样落盘/汇报。
+            ticker = futs[fut]
+            # 一个 ticker 的看门狗循环抛异常（如 _reap 之外的未预期错误，或线程内
+            # SystemExit）绝不能炸掉整批：构造一个失败 result，对齐 in-process
+            # BatchRunner 已有的容错风格，让其它 ticker 的成果照样落盘/汇报。
+            # 关键：用 BaseException 而非 Exception —— SystemExit 继承 BaseException
+            # 而非 Exception，若不捕获会传播出 try/finally，跳过末尾的汇总表打印
+            # （表现为「没重试、没汇总就退出」）。KeyboardInterrupt 单独 re-raise，
+            # 交给外层 except KeyboardInterrupt 做 _abort + 杀子清理。
             try:
                 results.append(fut.result())
-            except Exception as exc:  # noqa: BLE001 -- isolate per-ticker failure
-                ticker = futs[fut]
+            except KeyboardInterrupt:
+                raise
+            except BaseException as exc:  # noqa: BLE001 -- isolate per-ticker failure
                 print(
                     f"[{ticker}] ❌ orchestrator error: {exc!r}",
                     file=sys.stderr,
