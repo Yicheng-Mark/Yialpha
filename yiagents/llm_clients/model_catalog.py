@@ -126,13 +126,15 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Grok 4.20 Multi-Agent - Multi-agent reasoning", "grok-4.20-multi-agent-0309"),
         ],
     },
-    # DeepSeek: standardize on V4 Pro (the flagship) for both quick and deep
-    # engines — V4 Flash is intentionally not offered as a preset. The capability
-    # entry in capabilities.py is retained so a hand-entered deepseek-v4-flash
-    # still gets correct tool_choice handling. The DeepSeekChatOpenAI client
-    # handles the reasoning_content round-trip for thinking mode.
+    # DeepSeek two-tier split (see CLAUDE.md): the quick channel (4 analysts /
+    # debates / trader / risk / reflection) runs on V4 Flash for speed; the deep
+    # channel (Research Manager / Portfolio Manager) runs on V4 Pro for verdict
+    # quality. capabilities.py registers both IDs for tool_choice handling; this
+    # catalog lists both so the web-UI dropdown and warn_if_unknown_model stay in
+    # sync with the .env YIAGENTS_QUICK_THINK_LLM=deepseek-v4-flash default.
     "deepseek": {
         "quick": [
+            ("DeepSeek V4 Flash - Fast, multi-turn quick channel", "deepseek-v4-flash"),
             ("DeepSeek V4 Pro - Latest flagship", "deepseek-v4-pro"),
             ("Custom model ID", "custom"),
         ],
