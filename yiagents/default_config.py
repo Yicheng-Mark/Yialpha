@@ -79,6 +79,13 @@ _ENV_OVERRIDES = {
     # Flip on only after scripts/run_analyst_parallel_ab.py passes its gate.
     "YIAGENTS_ANALYST_PARALLEL":             "analyst_parallel",
     "YIAGENTS_ANALYST_PARALLEL_MAX_THREADS": "analyst_parallel_max_threads",
+    # Deterministic intrinsic-value math (Graham number / NCAV / PEG / DCF /
+    # WACC / margin of safety) exposed to the fundamentals analyst as a
+    # Program-of-Thought tool. OFF by default = the analyst's tool list, and
+    # therefore its prompt and capabilities, are byte-for-byte unchanged when
+    # the flag is unset. The tool only adds a deterministic arithmetic sink for
+    # line items the analyst already gathers; it changes no agent input.
+    "YIAGENTS_VALUATION_TOOLS":              "valuation_tools",
     # Binance IP-weight proactive backoff (perp data vendor). When on, the
     # vendor reads X-MBX-USED-WEIGHT-1M and backs off before the ceiling. Off
     # by default = the vendor neither reads the header nor sleeps (byte-equivalent).
@@ -197,6 +204,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "atr_stop_mult": 2.0,              # stop = last_close - mult*ATR (long)
     # Phase 2b: FinCoT de-persona structured prompts for analysts.
     "fin_cot_prompts": False,
+    # Deterministic valuation tool (env: YIAGENTS_VALUATION_TOOLS). Off by
+    # default = the fundamentals analyst's tool list is unchanged (byte-
+    # equivalent). When on, a get_valuation_metrics PoT tool is appended so the
+    # analyst can delegate intrinsic-value arithmetic to Python rather than
+    # confabulating it.
+    "valuation_tools": False,
     # Phase 4: global kill switch (env: YIAGENTS_KILL_SWITCH). Halt = no
     # new orders submitted by the browser broker; read live at order time.
     "kill_switch": False,

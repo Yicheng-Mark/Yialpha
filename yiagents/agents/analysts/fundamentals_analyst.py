@@ -8,6 +8,8 @@ from yiagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
 )
+from yiagents.agents.utils.valuation_tools import get_valuation_metrics
+from yiagents.dataflows.config import get_config
 
 
 def create_fundamentals_analyst(llm):
@@ -21,6 +23,15 @@ def create_fundamentals_analyst(llm):
             get_cashflow,
             get_income_statement,
         ]
+        # Deterministic intrinsic-value PoT tool (env: YIAGENTS_VALUATION_TOOLS,
+        # off by default). When off, the tool list -- and therefore the tool
+        # names injected into the prompt -- is byte-for-byte identical to the
+        # prior behaviour, so the analyst's inputs/capabilities/depth are
+        # unchanged. When on, the analyst delegates Graham number / NCAV / PEG /
+        # owner-earnings / two-stage DCF / WACC / margin-of-safety arithmetic to
+        # Python instead of confabulating it.
+        if get_config().get("valuation_tools"):
+            tools.append(get_valuation_metrics)
 
         system_message = (
             "You are a researcher tasked with analyzing fundamental information over the past week about a company. Please write a comprehensive report of the company's fundamental information such as financial documents, company profile, basic company financials, and company financial history to gain a full view of the company's fundamental information to inform traders. Focus on the most decision-relevant figures rather than exhaustive detail, and tie every claim to a specific number and reporting period pulled from the tools. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
