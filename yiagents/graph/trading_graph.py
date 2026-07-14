@@ -100,6 +100,24 @@ class YiAgentsGraph:
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
         os.makedirs(self.config["results_dir"], exist_ok=True)
 
+        # T3: optional per-call LLM response disk cache (langchain global
+        # set_llm_cache). Installed BEFORE any LLM is created/invoked so the
+        # first call is already covered. Off by default = no cache installed,
+        # byte-equivalent. See yiagents/llm_clients/response_cache.py for the
+        # distribution-safety caveat (never use with the A/B gate / DSR runs).
+        if self.config.get("llm_cache"):
+            from langchain_core.globals import set_llm_cache
+
+            from yiagents.llm_clients.response_cache import DiskLLMCache
+
+            _llm_cache_dir = Path(self.config["data_cache_dir"]) / "llm_responses"
+            set_llm_cache(DiskLLMCache(_llm_cache_dir))
+            logger.info(
+                "LLM response cache enabled at %s (iteration replay only; "
+                "do NOT use with analyst A/B gate or DSR multi-run).",
+                _llm_cache_dir,
+            )
+
         # Initialize LLMs with provider-specific thinking configuration
         llm_kwargs = self._get_provider_kwargs()
 

@@ -72,6 +72,17 @@ _ENV_OVERRIDES = {
     # default, so UNSET behaviour is byte-equivalent; expose so flaky periods
     # can tune it (run_robust's per-ticker rerun is the outer safety net).
     "YIAGENTS_LLM_MAX_RETRIES":         "llm_max_retries",
+    # T3: per-call LLM response disk cache (langchain global set_llm_cache).
+    # Off by default = byte-equivalent (no cache, no I/O). When on, an identical
+    # (model + prompt + temperature + bound tools) replays the cached
+    # ChatGeneration instead of re-calling the model — saves the ~11
+    # intermediate agent calls when re-running the same smoke / single analysis
+    # while iterating on prompts or risk code. DO NOT combine with
+    # scripts/run_analyst_parallel_ab.py or run_baseline --full (DSR n_trials):
+    # caching collapses the temperature>0 run-to-run variability those
+    # distribution checks measure. Backtest whole-graph replay is already free
+    # via yiagents/backtest/cache.py DecisionCache.
+    "YIAGENTS_LLM_CACHE":               "llm_cache",
     # T2: fan the 4 analysts out inside ONE wrapper node (each analyst runs in
     # its own sub-graph with its own state, so the shared `messages` /
     # clear_node coupling that assumes serial execution is structurally
@@ -268,6 +279,13 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # _PASSTHROUGH_KWARGS (max_retries). Default 2 == langchain-openai's own
     # default, so leaving it at 2 is byte-equivalent to the prior behaviour.
     "llm_max_retries": 2,
+    # T3: per-call LLM response disk cache (env: YIAGENTS_LLM_CACHE). Off by
+    # default = no set_llm_cache call, byte-equivalent to today. When on, a
+    # DiskLLMCache is installed via langchain's global set_llm_cache and replay
+    # identical (model, prompt, temperature, bound tools) from disk. Iteration-
+    # speed tool only — never use with the A/B gate or DSR multi-run; see
+    # yiagents/llm_clients/response_cache.py docstring.
+    "llm_cache": False,
     # T2: parallel analysts inside one wrapper node. OFF by default = today's
     # serial analyst chain verbatim. max_threads caps nested concurrency
     # (batch_workers * 4); above the cap the runner silently falls back to
