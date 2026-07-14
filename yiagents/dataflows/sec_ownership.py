@@ -47,6 +47,7 @@ import io
 import json
 import logging
 import os
+import zipfile
 import xml.etree.ElementTree as ET
 from datetime import date, timedelta
 
@@ -57,6 +58,7 @@ from .sec_edgar import (
     _cache_dir,
     _cached_or_fetch,
     _cik_for_ticker,
+    _fetch_company_facts,
     _sec_get,
 )
 
@@ -423,4 +425,327 @@ def get_ftd_data(
         f"\nPeak fail-day: {peak['date']} ({peak_v:,.0f} fails @ ${peak['price']}). "
         f"Total fail-days in window: {len(rows)}."
     )
+    return out.getvalue().rstrip("\n")
+
+
+# --------------------------------------------------------------------------- #
+# 13F institutional holdings (bulk Form 13F Data Sets)
+# --------------------------------------------------------------------------- #
+# SEC publishes quarterly bulk ZIPs (COVER + HOLDING TSVs) covering every 13F
+# filer's positions. One ZIP per 3-month filing window (period-end = the last
+# day of Feb/May/Aug/Nov). Reverse aggregation — "who holds this issuer" — is
+# then a single fetch + a local CUSIP filter, no per-filer XML crawl and no EFTS
+# full-text-search dependency.
+_13F_ZIP_BASE = "https://www.sec.gov/files/structureddata/data/form-13f-data-sets/"
+_13F_TOP_N = 15
+_13F_PERIOD_MONTHS = (2, 5, 8, 11)
+_MON_ABBR = ("jan", "feb", "mar", "apr", "may", "jun",
+             "jul", "aug", "sep", "oct", "nov", "dec")
+
+
+def _sec_13f_pub_lag_days() -> int:
+    """Days after a bulk 13F dataset's period-end before it is treated as public.
+
+    SEC releases each quarterly ZIP a few days after the window closes;
+    configurable via ``YIAGENTS_SEC_13F_PUB_LAG_DAYS`` (default 5). The lag gates
+    the ~45-day window between quarter-end and ZIP publication honestly — no
+    EFTS fallback fills it (by design)."""
+    raw = get_config().get("sec_13f_pub_lag_days", 5)
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 5
+    return n if n >= 0 else 0
+
+
+def _normalize_cusip(raw: str) -> str:
+    """Strip separators, uppercase, take up to 9 chars (issuer 6 + issue 2 +
+    check digit). Returns '' for missing/garbage input."""
+    if not raw:
+        return ""
+    return raw.strip().upper().replace("-", "").replace(" ", "")[:9]
+
+
+def _extract_cusip(facts: dict, curr_date: str | None) -> str:
+    """PIT extract the issuer's 9-char CUSIP from companyfacts ``dei:EntityCusip``.
+
+    Picks the record with the latest period ``end`` whose ``filed <= curr_date``
+    (live mode: the latest overall), then normalizes. Raises
+    :class:`NoMarketDataError` if the concept or any PIT-visible record is
+    absent — the single-source CUSIP contract (no FTD/13D fallback by design)."""
+    try:
+        records = facts["dei"]["EntityCusip"]["units"]["NONE"]
+    except (KeyError, TypeError):
+        raise NoMarketDataError(
+            "cusip", detail="dei:EntityCusip not reported in companyfacts")
+    upper = (curr_date or "")[:10]
+    upper_d = date.fromisoformat(upper) if upper else None
+
+    valid: list[tuple[date, str]] = []
+    for rec in records:
+        val = rec.get("val")
+        if not val:
+            continue
+        end = (rec.get("end") or "")[:10]
+        filed = (rec.get("filed") or "")[:10]
+        if upper_d:
+            try:
+                if filed and date.fromisoformat(filed) > upper_d:
+                    continue
+            except ValueError:
+                continue
+        try:
+            end_d = date.fromisoformat(end) if end else date.min
+        except ValueError:
+            end_d = date.min
+        if upper_d and end_d > upper_d:
+            continue
+        valid.append((end_d, val))
+    if not valid:
+        raise NoMarketDataError(
+            "cusip", detail="no PIT-visible EntityCusip record")
+    valid.sort(key=lambda x: x[0], reverse=True)
+    cusip = _normalize_cusip(valid[0][1])
+    if len(cusip) < 6:
+        raise NoMarketDataError(
+            "cusip", detail=f"EntityCusip too short: {valid[0][1]!r}")
+    return cusip
+
+
+def _13f_report_quarter(period_end: date) -> tuple[int, int]:
+    """Map a dataset period-end (Feb/May/Aug/Nov month-end) to the (year, q) of
+    the report quarter it predominantly covers."""
+    m = period_end.month
+    if m == 2:
+        return (period_end.year - 1, 4)
+    if m == 5:
+        return (period_end.year, 1)
+    if m == 8:
+        return (period_end.year, 2)
+    return (period_end.year, 3)  # Nov -> Q3 (Sep 30 report)
+
+
+def _13f_zip_filename(period_end: date) -> str:
+    """Construct the bulk ZIP filename for a period-end. 2024+ uses
+    ``ddmmmyyyy-ddmmmyyyy_form13f.zip`` (after the Mar-2024 SEC scheme change);
+    2021-2023 used ``{yyyy}q{N}_form13f.zip``."""
+    m = period_end.month
+    if m == 2:
+        start = date(period_end.year - 1, 12, 1)
+    elif m == 5:
+        start = date(period_end.year, 3, 1)
+    elif m == 8:
+        start = date(period_end.year, 6, 1)
+    else:  # 11
+        start = date(period_end.year, 9, 1)
+    if period_end.year >= 2024:
+        return (f"01{_MON_ABBR[start.month - 1]}{start.year}-"
+                f"{period_end.day}{_MON_ABBR[period_end.month - 1]}{period_end.year}"
+                f"_form13f.zip")
+    ry, rq = _13f_report_quarter(period_end)
+    return f"{ry}q{rq}_form13f.zip"
+
+
+def _13f_candidate_period_ends(visible_end: date, lower: date) -> list[date]:
+    """Dataset period-end dates (Feb/May/Aug/Nov month-ends) within [lower,
+    visible_end], most-recent-first."""
+    cands: list[date] = []
+    y, mo = lower.year, lower.month
+    while (y, mo) <= (visible_end.year, visible_end.month):
+        if mo in _13F_PERIOD_MONTHS:
+            d = date(y, mo, _last_day_of_month(y, mo))
+            if lower <= d <= visible_end:
+                cands.append(d)
+        mo += 1
+        if mo > 12:
+            mo = 1
+            y += 1
+    cands.sort(reverse=True)
+    return cands
+
+
+def _tsv_header_lines(raw: bytes) -> tuple[list[str], list[str]]:
+    """Decode a TSV blob into (header_fields, data_lines)."""
+    text = raw.decode("utf-8", errors="replace")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return [], []
+    return [h.strip() for h in lines[0].split("\t")], lines[1:]
+
+
+def _idx(header: list[str], *needles: str) -> int | None:
+    """First column index whose lowercased name contains any needle."""
+    for i, name in enumerate(header):
+        n = name.lower()
+        if any(nd in n for nd in needles):
+            return i
+    return None
+
+
+def _cell(parts: list[str], i: int | None) -> str:
+    if i is None or i >= len(parts):
+        return ""
+    return parts[i].strip()
+
+
+def _parse_13f_tsv(zip_bytes: bytes) -> tuple[list[dict], list[dict]]:
+    """Unzip a bulk 13F ZIP and parse COVER + HOLDING TSVs into row dicts.
+
+    Header-driven (tolerates minor SEC column-label drift). Cover keeps
+    accession / filer CIK / filing date / filing manager; holding keeps
+    accession / CUSIP / issuer / value / shares / share-type / put-call. Raises
+    :class:`NoMarketDataError` on a corrupt or incomplete ZIP."""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile as exc:
+        raise NoMarketDataError("13f", detail=f"could not open 13F ZIP: {exc}") from exc
+    cover_raw = holding_raw = None
+    for name in zf.namelist():
+        low = name.lower()
+        if not low.endswith((".tsv", ".txt")):
+            continue
+        if cover_raw is None and "cover" in low:
+            cover_raw = zf.read(name)
+        elif holding_raw is None and ("holding" in low or "infotable" in low):
+            holding_raw = zf.read(name)
+    if cover_raw is None or holding_raw is None:
+        raise NoMarketDataError(
+            "13f", detail="13F ZIP missing cover/holding TSV members")
+
+    ch, cl = _tsv_header_lines(cover_raw)
+    cai = _idx(ch, "accession"); cci = _idx(ch, "filer_cik", "cik")
+    cdi = _idx(ch, "filing_date"); cmi = _idx(ch, "filing_manager", "manager")
+    cover = []
+    for ln in cl:
+        p = ln.split("\t")
+        cover.append({"accession": _cell(p, cai), "filer_cik": _cell(p, cci),
+                      "filing_date": _cell(p, cdi), "manager": _cell(p, cmi)})
+
+    hh, hl = _tsv_header_lines(holding_raw)
+    hai = _idx(hh, "accession"); hcu = _idx(hh, "cusip")
+    hni = _idx(hh, "name_of_issuer", "issuer"); hvi = _idx(hh, "value")
+    hsh = hst = hpc = None
+    for i, name in enumerate(hh):
+        n = name.lower()
+        if "ssh_prnamt_type" in n:
+            hst = i
+        elif "ssh_prnamt" in n:
+            hsh = i
+        elif n == "put_call":
+            hpc = i
+    holding = []
+    for ln in hl:
+        p = ln.split("\t")
+        holding.append({"accession": _cell(p, hai), "cusip": _cell(p, hcu),
+                        "issuer": _cell(p, hni), "value": _cell(p, hvi),
+                        "shares": _cell(p, hsh), "share_type": _cell(p, hst),
+                        "put_call": _cell(p, hpc)})
+    return cover, holding
+
+
+def get_institutional_holdings(
+    ticker: str, curr_date: str | None = None, look_back_days: int = 180
+) -> str:
+    """Top institutional 13F holders of a US ticker as of curr_date, PIT-aware.
+
+    Resolves the CIK, reads the issuer CUSIP from companyfacts
+    (``dei:EntityCusip``, PIT by filed date), locates the most recent bulk 13F
+    Data Set ZIP whose publication lag has elapsed by curr_date, fetches it once
+    (cached 90 days — the file is immutable), and filters the holding table by
+    CUSIP joined to the cover table for filer names. Denoise: drops ``PRN``
+    (principal / bonds) and non-empty ``PUT_CALL`` (options) rows. Aggregates by
+    filing manager and renders the top-N table plus a concentration summary.
+
+    Non-US / no CIK, or no EntityCusip -> :class:`NoMarketDataError` (router
+    ``NO_DATA_AVAILABLE`` sentinel). No 13F ZIP public as of curr_date (the
+    ~45-day window after quarter-end) -> an honest 'not yet published' string.
+    CUSIP with no matching holders -> an honest empty string.
+    """
+    cik = _cik_for_ticker(ticker)
+    facts = _fetch_company_facts(cik)
+    cusip = _extract_cusip(facts, curr_date)
+
+    upper = (curr_date or "")[:10]
+    upper_d = date.fromisoformat(upper) if upper else date.today()
+    lower_d = upper_d - timedelta(days=int(look_back_days))
+    lag = _sec_13f_pub_lag_days()
+    visible_end = upper_d - timedelta(days=lag)
+
+    cands = _13f_candidate_period_ends(visible_end, lower_d)
+
+    out = io.StringIO()
+    out.write(f"# 13F Institutional Holdings for {ticker} (as of {curr_date or 'now'})\n")
+
+    if not cands:
+        out.write(f"\nNo bulk 13F data set was public as of {curr_date or 'now'} "
+                  f"(the most recent report quarter's ZIP publishes ~45 days after "
+                  f"quarter-end). Try a later as-of date.")
+        return out.getvalue().rstrip("\n")
+
+    period_end = cands[0]
+    fname = _13f_zip_filename(period_end)
+    url = _13F_ZIP_BASE + fname
+    cache_path = os.path.join(_cache_dir(), f"13f_{fname}")
+    try:
+        raw = _cached_or_fetch(cache_path, url, ttl_days=90.0)
+        cover_rows, holding_rows = _parse_13f_tsv(raw)
+    except NoMarketDataError as exc:
+        logger.debug("sec_ownership: 13F ZIP fetch/parse failed for %s: %s", ticker, exc)
+        raise
+
+    cover_by_acc = {c["accession"]: c for c in cover_rows if c["accession"]}
+
+    # Reverse aggregate: every holding row matching this issuer's CUSIP.
+    agg: dict[str, dict] = {}
+    for h in holding_rows:
+        if _normalize_cusip(h["cusip"]) != cusip:
+            continue
+        if h["share_type"] == "PRN":          # principal/bonds, not common stock
+            continue
+        if h["put_call"]:                      # options position, not a holding
+            continue
+        val = _num(h["value"])
+        if val is None:
+            continue
+        cov = cover_by_acc.get(h["accession"], {})
+        fd = cov.get("filing_date", "")[:10]
+        if fd:
+            try:
+                if date.fromisoformat(fd) > upper_d:
+                    continue
+            except ValueError:
+                pass
+        name = cov.get("manager") or cov.get("filer_cik") or h["accession"]
+        slot = agg.setdefault(name, {"shares": 0.0, "value": 0.0, "filing_date": ""})
+        slot["shares"] += _num(h["shares"]) or 0.0
+        slot["value"] += val * 1000.0          # VALUE column is $ thousands
+        if fd and (not slot["filing_date"] or fd > slot["filing_date"]):
+            slot["filing_date"] = fd
+
+    ry, rq = _13f_report_quarter(period_end)
+    rq_label = f"{ry} Q{rq}"
+    out.write(f"# Source: SEC Form 13F Data Sets (report quarter {rq_label}; "
+              f"PIT: dataset period-end {period_end} + {lag}d <= {curr_date or 'now'}; "
+              f"CUSIP {cusip}; CIK {cik})\n")
+    out.write("# Note: 13F data is inherently ~45 days stale (quarter-end as-of).\n")
+
+    if not agg:
+        out.write(f"\nNo 13F institutional holders reported owning {ticker} "
+                  f"(CUSIP {cusip}) in report quarter {rq_label}.")
+        return out.getvalue().rstrip("\n")
+
+    ranked = sorted(agg.items(), key=lambda kv: kv[1]["value"], reverse=True)[:_13F_TOP_N]
+    total_val = sum(s["value"] for s in agg.values())
+    top_val = sum(s["value"] for _, s in ranked)
+    out.write(f"# {len(agg)} holder(s); top {len(ranked)} shown (reported total "
+              f"${total_val / 1e6:,.1f}M)\n\n")
+    out.write("Holder                              | Shares       | Value ($M) | Filing Date\n")
+    out.write("-" * 86 + "\n")
+    for name, s in ranked:
+        out.write(f"{name[:34]:<34} | {s['shares']:>12,.0f} | "
+                  f"{s['value'] / 1e6:>10,.2f} | {s['filing_date'] or 'n/a'}\n")
+    out.write(
+        f"\nSummary: {len(agg)} institutional holder(s) for {ticker} in {rq_label}; "
+        f"top {len(ranked)} = ${top_val / 1e6:,.1f}M "
+        f"({100 * top_val / total_val:.1f}% of reported ${total_val / 1e6:,.1f}M).")
     return out.getvalue().rstrip("\n")

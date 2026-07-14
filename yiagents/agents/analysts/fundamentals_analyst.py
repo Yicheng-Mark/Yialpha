@@ -7,6 +7,7 @@ from yiagents.agents.utils.agent_utils import (
     get_fundamentals,
     get_ftd_data,
     get_income_statement,
+    get_institutional_holdings,
     get_instrument_context_from_state,
     get_language_instruction,
 )
@@ -19,12 +20,15 @@ from yiagents.dataflows.config import get_config
 _SEC_OWNERSHIP_NUDGE = (
     " Additional ownership & short-interest tools (US-listed only): "
     "`get_form4_insider_trading` (insider / officer / director >10% buys-sells "
-    "from SEC Form 4, point-in-time by filing date) and `get_ftd_data` (SEC "
-    "fails-to-deliver balances, a naked-short / bearish-pressure proxy). Use "
-    "them to qualify the ownership and shorting picture when relevant. Both are "
-    "US-listed only; if a tool returns 'data not available' or 'no fails "
-    "reported' for this symbol, report that honestly and do not estimate "
-    "insider activity or short pressure."
+    "from SEC Form 4, point-in-time by filing date), `get_ftd_data` (SEC "
+    "fails-to-deliver balances, a naked-short / bearish-pressure proxy), and "
+    "`get_institutional_holdings` (top institutional 13F holders reverse-"
+    "aggregated from the SEC bulk Form 13F Data Sets by CUSIP, inherently "
+    "~45 days stale). Use them to qualify the ownership and shorting picture "
+    "when relevant. All three are US-listed only; if a tool returns 'data not "
+    "available', 'no fails reported', or 'not yet published' for this symbol, "
+    "report that honestly and do not estimate insider activity, short "
+    "pressure, or institutional positioning."
 )
 
 
@@ -55,7 +59,7 @@ def create_fundamentals_analyst(llm):
         # analyst's inputs/capabilities/depth are unchanged. When on, two
         # PIT-correct US-only tools are appended plus a short nudge.
         if get_config().get("sec_ownership"):
-            tools.extend([get_form4_insider_trading, get_ftd_data])
+            tools.extend([get_form4_insider_trading, get_ftd_data, get_institutional_holdings])
 
         system_message = (
             "You are a researcher tasked with analyzing fundamental information over the past week about a company. Please write a comprehensive report of the company's fundamental information such as financial documents, company profile, basic company financials, and company financial history to gain a full view of the company's fundamental information to inform traders. Focus on the most decision-relevant figures rather than exhaustive detail, and tie every claim to a specific number and reporting period pulled from the tools. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."

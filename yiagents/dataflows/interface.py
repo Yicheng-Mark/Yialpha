@@ -39,6 +39,7 @@ from .sec_edgar import (
 from .sec_ownership import (
     get_form4_insider_trading as get_sec_form4,
     get_ftd_data as get_sec_ftd,
+    get_institutional_holdings as get_sec_13f,
 )
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
@@ -129,15 +130,17 @@ TOOLS_CATEGORIES = {
             "get_binance_spot_perp_basis",
         ],
     },
-    # SEC ownership & short-interest signals (Track B2). US-listed only, PIT
-    # correct (Form 4 by filingDate; FTD by cutoff + publication lag). Lives
-    # behind an optional category so a SEC block / non-US ticker / no-data
-    # degrades to a sentinel instead of aborting the run. 13F deferred to B2.1.
+    # SEC ownership & short-interest signals (Track B2 + B2.1). US-listed only,
+    # PIT correct (Form 4 by filingDate; FTD by cutoff + publication lag; 13F by
+    # dataset period-end + publication lag). Lives behind an optional category so
+    # a SEC block / non-US ticker / no-data degrades to a sentinel instead of
+    # aborting the run.
     "sec_ownership": {
-        "description": "SEC ownership & short-interest (Form 4 insider trading, fails-to-deliver). US-listed only.",
+        "description": "SEC ownership & short-interest (Form 4 insider trading, fails-to-deliver, 13F institutional holdings). US-listed only.",
         "tools": [
             "get_form4_insider_trading",
             "get_ftd_data",
+            "get_institutional_holdings",
         ],
     },
 }
@@ -259,6 +262,9 @@ VENDOR_METHODS = {
     },
     "get_ftd_data": {
         "sec_edgar": get_sec_ftd,
+    },
+    "get_institutional_holdings": {
+        "sec_edgar": get_sec_13f,
     },
 }
 

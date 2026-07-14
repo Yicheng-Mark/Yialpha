@@ -1,6 +1,6 @@
 """LangChain ``@tool`` wrappers for the SEC ownership/short-interest vendors.
 
-Two thin pass-throughs to ``route_to_vendor`` — same shape as the Binance tool
+Three thin pass-throughs to ``route_to_vendor`` — same shape as the Binance tool
 modules — so the optional-category fallback (429/network/non-US -> sentinel) is
 reused verbatim. Only the fundamentals analyst advertises these, and only when
 ``YIAGENTS_SEC_OWNERSHIP`` is on; the fundamentals ``ToolNode`` carries them too
@@ -11,9 +11,14 @@ so they stay dormant.
   CIK); a non-US ticker degrades to the ``NO_DATA_AVAILABLE`` sentinel.
 * ``get_ftd_data`` — fails-to-deliver balances (CNS). Ticker-keyed; a non-US
   ticker yields an honest "no fails reported" string rather than an error.
+* ``get_institutional_holdings`` — top institutional 13F holders, reverse-
+  aggregated from the SEC bulk Form 13F Data Sets by CUSIP (Track B2.1).
+  US-only (needs a CIK + a companyfacts EntityCusip); a non-US ticker or
+  missing CUSIP degrades to the ``NO_DATA_AVAILABLE`` sentinel.
 
-Both are point-in-time correct (Form 4 by ``filingDate``; FTD by
-cutoff + publication lag) so they are safe to use in backtests.
+All three are point-in-time correct (Form 4 by ``filingDate``; FTD by
+cutoff + publication lag; 13F by dataset period-end + publication lag) so
+they are safe to use in backtests.
 """
 
 from typing import Annotated
@@ -70,3 +75,33 @@ def get_ftd_data(
         "no fails reported" string if the ticker had no FTDs in the window.
     """
     return route_to_vendor("get_ftd_data", ticker, curr_date, look_back_days)
+
+
+@tool
+def get_institutional_holdings(
+    ticker: Annotated[str, "US-listed ticker symbol, e.g. AAPL"],
+    curr_date: Annotated[str, "current/as-of date in yyyy-mm-dd (the trade date)"],
+    look_back_days: Annotated[int, "look-back window in days (default 180)"] = 180,
+) -> str:
+    """Retrieve top institutional 13F holders for a US-listed ticker.
+
+    Aggregated from the SEC's quarterly bulk Form 13F Data Sets (one ZIP per
+    3-month filing window): the issuer CUSIP is read from companyfacts
+    (dei:EntityCusip, PIT by filed date) and the holding table is filtered by
+    CUSIP, joined to the cover table for filer names, with PRN (bonds) and
+    options (non-empty PUT_CALL) rows dropped. Returns a top-N holders table
+    (manager, shares, value, filing date) plus a concentration summary.
+    Point-in-time: only a dataset whose period-end + publication lag is on or
+    before curr_date is read, so the ~45-day window after quarter-end degrades
+    to an honest 'not yet published' string. 13F data is inherently ~45 days
+    stale (quarter-end as-of).
+    Args:
+        ticker: US-listed ticker, e.g. AAPL.
+        curr_date: As-of date yyyy-mm-dd (the trade date being analyzed).
+        look_back_days: Look-back window in days (default 180).
+    Returns:
+        str: Header + top-holders table + concentration summary, an honest
+        "not yet published" string if no dataset is public as of curr_date, or
+        the NO_DATA_AVAILABLE sentinel for a non-US ticker / missing CUSIP.
+    """
+    return route_to_vendor("get_institutional_holdings", ticker, curr_date, look_back_days)

@@ -114,18 +114,25 @@ _ENV_OVERRIDES = {
     "YIAGENTS_BINANCE_HTTP_KEEPALIVE":       "binance_http_keepalive",
     "YIAGENTS_BINANCE_HTTP_RETRIES":         "binance_http_retries",
     "YIAGENTS_BINANCE_HONOR_RETRY_AFTER":    "binance_honor_retry_after",
-    # Track B2: SEC ownership & short-interest (Form 4 insider trading + FTD)
-    # exposed to the fundamentals analyst as two opt-in tools. Off by default =
-    # the analyst's tool list / prompt / capabilities are byte-for-byte unchanged
-    # when the flag is unset (same contract as valuation_tools). The tools only
-    # add two PIT-correct US-only signals the analyst may consult; they change
-    # no agent input. 13F deferred to B2.1.
+    # Track B2 + B2.1: SEC ownership & short-interest (Form 4 insider trading,
+    # fails-to-deliver, 13F institutional holdings) exposed to the fundamentals
+    # analyst as opt-in tools behind one flag. Off by default = the analyst's
+    # tool list / prompt / capabilities are byte-for-byte unchanged when the
+    # flag is unset (same contract as valuation_tools). The tools only add
+    # PIT-correct US-only signals the analyst may consult; they change no agent
+    # input.
     "YIAGENTS_SEC_OWNERSHIP":                "sec_ownership",
     # FTD point-in-time: a semi-monthly cutoff file is treated as public
     # `cutoff + ftd_pub_lag_days` days later (conservative; SEC publishes a few
     # days after the cutoff). Default 10 keeps backtests from peeking at a file
     # that had not yet been disseminated on curr_date.
     "YIAGENTS_FTD_PUB_LAG_DAYS":             "ftd_pub_lag_days",
+    # 13F point-in-time: a bulk Form 13F Data Set ZIP (period-end = last day of
+    # Feb/May/Aug/Nov) is treated as public `period-end + sec_13f_pub_lag_days`
+    # days later (conservative; SEC publishes each quarterly ZIP a few days
+    # after the window closes). Default 5 keeps backtests from peeking at a ZIP
+    # that had not yet been released on curr_date.
+    "YIAGENTS_SEC_13F_PUB_LAG_DAYS":         "sec_13f_pub_lag_days",
 }
 
 
@@ -243,6 +250,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # semi-monthly cutoff file is treated as public `cutoff + this` days later;
     # 10 is conservative so a backtest can't peek at a not-yet-disseminated file.
     "ftd_pub_lag_days": 10,
+    # 13F bulk-data-set point-in-time publication lag (env:
+    # YIAGENTS_SEC_13F_PUB_LAG_DAYS). A quarterly ZIP is treated as public
+    # `period-end + this` days later; 5 is conservative so a backtest can't
+    # peek at a not-yet-released dataset.
+    "sec_13f_pub_lag_days": 5,
     # Phase 4: global kill switch (env: YIAGENTS_KILL_SWITCH). Halt = no
     # new orders submitted by the browser broker; read live at order time.
     "kill_switch": False,

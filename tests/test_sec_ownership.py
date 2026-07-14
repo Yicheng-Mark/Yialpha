@@ -9,13 +9,15 @@ contracts, and router integration round out the dataflow coverage.
 
 The wiring tests pin the byte-equivalence contract (the project "iron rule"):
 with ``sec_ownership`` off (the default) the fundamentals analyst binds exactly
-its 4 baseline tools and an unchanged prompt; with it on the two new tools are
+its 4 baseline tools and an unchanged prompt; with it on the three new tools are
 appended in order. Pure mock-LLM, zero network, zero LLM cost.
 """
 
 from __future__ import annotations
 
+import io
 import unittest
+import zipfile
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -314,12 +316,13 @@ class FundamentalsWiringTests(unittest.TestCase):
              "get_income_statement"],
         )
 
-    def test_on_appends_two_tools(self):
+    def test_on_appends_three_tools(self):
         names = self._tool_names({"sec_ownership": True})
         self.assertEqual(
             names,
             ["get_fundamentals", "get_balance_sheet", "get_cashflow",
-             "get_income_statement", "get_form4_insider_trading", "get_ftd_data"],
+             "get_income_statement", "get_form4_insider_trading", "get_ftd_data",
+             "get_institutional_holdings"],
         )
 
     def test_valuation_tools_independent(self):
@@ -327,6 +330,198 @@ class FundamentalsWiringTests(unittest.TestCase):
         names = self._tool_names({"sec_ownership": False, "valuation_tools": True})
         self.assertIn("get_valuation_metrics", names)
         self.assertNotIn("get_form4_insider_trading", names)
+
+
+# --------------------------------------------------------------------------- #
+# 13F institutional holdings (Track B2.1)
+# --------------------------------------------------------------------------- #
+COVER_HEADER = (
+    "ACCESSION_NUMBER\tFILER_CIK\tFILING_DATE\tFILING_MANAGER_NAME\t"
+    "REPORT_CALENDAR_OR_QUARTER"
+)
+HOLDING_HEADER = (
+    "ACCESSION_NUMBER\tNAME_OF_ISSUER\tCUSIP\tTITLE_OF_CLASS\tVALUE\t"
+    "SSH_PRNAMT\tSSH_PRNAMT_TYPE\tPUT_CALL\tINVESTMENT_DISCRETION\t"
+    "VOTING_AUTH_SOLE\tVOTING_AUTH_SHARED\tVOTING_AUTH_NONE"
+)
+COMPANYFACTS_AAPL = {
+    "dei": {"EntityCusip": {"units": {"NONE": [
+        {"end": "2023-12-31", "filed": "2024-02-02", "val": "037833100"},
+        {"end": "2024-03-31", "filed": "2024-04-26", "val": "037833100"},
+    ]}}}
+}
+
+
+def _13f_zip(cover_tsv: str, holding_tsv: str) -> bytes:
+    """Build a synthetic bulk-13F ZIP from TSV strings (cover + holding)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("filing_cover.tsv", cover_tsv.encode("utf-8"))
+        zf.writestr("filing_holding.tsv", holding_tsv.encode("utf-8"))
+    return buf.getvalue()
+
+
+def _patch_13f(monkeypatch, tmp_path, zip_bytes, facts=None):
+    """Point sec_ownership at a synthetic CIK + companyfacts + 13F ZIP.
+
+    Records requested URLs so a PIT test can assert a not-yet-published dataset
+    was never fetched."""
+    monkeypatch.setattr(sec_ownership, "_cache_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(sec_ownership, "_cik_for_ticker", lambda t: 320193)
+    monkeypatch.setattr(
+        sec_ownership, "_fetch_company_facts",
+        lambda cik: facts if facts is not None else COMPANYFACTS_AAPL)
+    requested = []
+
+    def fake_fetch(_path, url, ttl_days):
+        requested.append(url)
+        if "form13f.zip" in url:
+            return zip_bytes
+        raise NoMarketDataError(url, detail="404")
+
+    monkeypatch.setattr(sec_ownership, "_cached_or_fetch", fake_fetch)
+    return requested
+
+
+@pytest.mark.unit
+def test_normalize_cusip():
+    assert sec_ownership._normalize_cusip("037-833-100") == "037833100"
+    assert sec_ownership._normalize_cusip(" 037833100 ") == "037833100"
+    assert sec_ownership._normalize_cusip("") == ""
+    assert sec_ownership._normalize_cusip("037833100EXTRA") == "037833100"
+
+
+@pytest.mark.unit
+def test_13f_basic_aggregation(monkeypatch, tmp_path):
+    cover = COVER_HEADER + "\n" + (
+        "00001A\t0001067983\t2024-05-15\tBERKSHIRE HATHAWAY INC\t2024-03-31\n"
+        "00001B\t0001357790\t2024-05-14\tVANGUARD GROUP INC\t2024-03-31"
+    )
+    holding = HOLDING_HEADER + "\n" + (
+        "00001A\tAPPLE INC\t037833100\tCOM\t150000000\t780000000\tSH\t\tSOLE\t780000000\t0\t0\n"
+        "00001B\tAPPLE INC\t037833100\tCOM\t90000000\t470000000\tSH\t\tSOLE\t470000000\t0\t0\n"
+        "00001C\tMICROSOFT CORP\t594918104\tCOM\t9999\t10\tSH\t\tSOLE\t10\t0\t0"
+    )
+    requested = _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
+    out = sec_ownership.get_institutional_holdings("AAPL", "2024-06-15", 180)
+    # Most-recent PIT-visible dataset is the Mar-May 2024 window (report Q1).
+    assert "01mar2024-31may2024_form13f.zip" in requested[0]
+    assert "2024 Q1" in out
+    assert "BERKSHIRE HATHAWAY" in out
+    assert "VANGUARD" in out
+    assert "MICROSOFT" not in out          # wrong CUSIP filtered out
+    assert out.index("BERKSHIRE") < out.index("VANGUARD")  # value desc
+
+
+@pytest.mark.unit
+def test_13f_pit_quarter_not_yet_published(monkeypatch, tmp_path):
+    requested = _patch_13f(monkeypatch, tmp_path, _13f_zip(COVER_HEADER, HOLDING_HEADER))
+    # curr_date 2024-03-01, look-back 10d -> visible_end 2024-02-24, lower
+    # 2024-02-20. No Feb/May/Aug/Nov month-end lies in [2024-02-20, 2024-02-24]
+    # (2024-02-29 is after it), so no dataset is PIT-visible.
+    out = sec_ownership.get_institutional_holdings("AAPL", "2024-03-01", 10)
+    assert "No bulk 13F data set was public" in out
+    assert requested == []                 # the ZIP was never fetched
+
+
+@pytest.mark.unit
+def test_13f_cusip_missing_degrades(monkeypatch, tmp_path):
+    _patch_13f(monkeypatch, tmp_path, _13f_zip(COVER_HEADER, HOLDING_HEADER),
+               facts={"dei": {}})
+    with pytest.raises(NoMarketDataError):
+        sec_ownership.get_institutional_holdings("AAPL", "2024-06-15", 180)
+
+
+@pytest.mark.unit
+def test_13f_non_us_raises_no_market_data(monkeypatch, tmp_path):
+    monkeypatch.setattr(sec_ownership, "_cik_for_ticker",
+                        lambda t: (_ for _ in ()).throw(
+                            NoMarketDataError(t, detail="US-listed only")))
+    with pytest.raises(NoMarketDataError):
+        sec_ownership.get_institutional_holdings("0700.HK", "2024-06-15", 180)
+
+
+@pytest.mark.unit
+def test_13f_denoise_skips_options_and_prn(monkeypatch, tmp_path):
+    cover = COVER_HEADER + "\n" + "00002A\t0000914201\t2024-05-15\tBLACKROCK INC\t2024-03-31"
+    holding = HOLDING_HEADER + "\n" + (
+        # Common-stock holding: 1000 shares, value 100000 ($000s) = $100M.
+        "00002A\tAPPLE INC\t037833100\tCOM\t100000\t1000\tSH\t\tSOLE\t1000\t0\t0\n"
+        # Same holder, AAPL CALL option -> dropped (non-empty PUT_CALL).
+        "00002A\tAPPLE INC\t037833100\tCOM\t50000\t500\tSH\tCALL\tSOLE\t500\t0\t0\n"
+        # Same holder, principal/bond (PRN) -> dropped.
+        "00002A\tAPPLE INC\t037833100\tCOM\t20000\t200\tPRN\t\tSOLE\t200\t0\t0"
+    )
+    _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
+    out = sec_ownership.get_institutional_holdings("AAPL", "2024-06-15", 180)
+    assert "BLACKROCK" in out
+    assert "1,000" in out       # only the SH row's shares survived
+    assert "100.00" in out      # value $100M = 100000 * 1000 / 1e6
+
+
+@pytest.mark.unit
+def test_13f_row_pit_filing_date_gate(monkeypatch, tmp_path):
+    cover = COVER_HEADER + "\n" + (
+        "00003A\t0001\t2024-05-15\tEARLY CAPITAL\t2024-03-31\n"
+        "00003B\t0002\t2024-08-15\tLATE CAPITAL\t2024-06-30"
+    )
+    holding = HOLDING_HEADER + "\n" + (
+        "00003A\tAPPLE INC\t037833100\tCOM\t10000\t100\tSH\t\tSOLE\t100\t0\t0\n"
+        "00003B\tAPPLE INC\t037833100\tCOM\t99999\t999\tSH\t\tSOLE\t999\t0\t0"
+    )
+    _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
+    out = sec_ownership.get_institutional_holdings("AAPL", "2024-06-15", 180)
+    assert "EARLY CAPITAL" in out
+    assert "LATE CAPITAL" not in out      # FILING_DATE 2024-08-15 > curr_date
+
+
+@pytest.mark.unit
+def test_13f_no_holders_honest_empty(monkeypatch, tmp_path):
+    holding = HOLDING_HEADER + "\n" + (
+        "00004A\tMICROSOFT CORP\t594918104\tCOM\t9999\t10\tSH\t\tSOLE\t10\t0\t0"
+    )
+    _patch_13f(monkeypatch, tmp_path, _13f_zip(COVER_HEADER, holding))
+    out = sec_ownership.get_institutional_holdings("AAPL", "2024-06-15", 180)
+    assert "No 13F institutional holders reported owning AAPL" in out
+
+
+@pytest.mark.unit
+def test_router_routes_13f_via_sec_edgar(monkeypatch, tmp_path):
+    cover = COVER_HEADER + "\n" + "00005A\t0001\t2024-05-15\tTEST HOLDER\t2024-03-31"
+    holding = HOLDING_HEADER + "\n" + (
+        "00005A\tAPPLE INC\t037833100\tCOM\t1000\t10\tSH\t\tSOLE\t10\t0\t0"
+    )
+    _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
+    from yiagents.dataflows import config as cfgmod
+    from yiagents.dataflows.interface import route_to_vendor
+
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
+                                                    "sec_ownership": "sec_edgar"}})
+        out = route_to_vendor("get_institutional_holdings", "AAPL", "2024-06-15", 180)
+    finally:
+        cfgmod.set_config(orig)
+    assert "13F Institutional Holdings" in out
+    assert "TEST HOLDER" in out
+
+
+@pytest.mark.unit
+def test_13f_router_optional_category_degrades_to_sentinel(monkeypatch, tmp_path):
+    monkeypatch.setattr(sec_ownership, "_cik_for_ticker",
+                        lambda t: (_ for _ in ()).throw(
+                            NoMarketDataError(t, detail="US-listed only")))
+    from yiagents.dataflows import config as cfgmod
+    from yiagents.dataflows.interface import route_to_vendor
+
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
+                                                    "sec_ownership": "sec_edgar"}})
+        out = route_to_vendor("get_institutional_holdings", "0700.HK", "2024-06-15", 180)
+    finally:
+        cfgmod.set_config(orig)
+    assert out.startswith("NO_DATA_AVAILABLE")
 
 
 if __name__ == "__main__":

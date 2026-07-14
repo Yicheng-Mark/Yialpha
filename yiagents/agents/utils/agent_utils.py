@@ -38,6 +38,7 @@ from yiagents.agents.utils.prediction_markets_tools import get_prediction_market
 from yiagents.agents.utils.sec_ownership_tools import (
     get_form4_insider_trading,
     get_ftd_data,
+    get_institutional_holdings,
 )
 from yiagents.agents.utils.technical_indicators_tools import get_indicators
 
@@ -61,6 +62,7 @@ __all__ = [
     "get_income_statement",
     "get_form4_insider_trading",
     "get_ftd_data",
+    "get_institutional_holdings",
     "get_news",
     "get_global_news",
     "get_insider_transactions",

@@ -31,6 +31,7 @@ from yiagents.agents.utils.agent_utils import (
     get_income_statement,
     get_indicators,
     get_insider_transactions,
+    get_institutional_holdings,
     get_macro_indicators,
     get_news,
     get_prediction_markets,
@@ -313,6 +314,7 @@ class YiAgentsGraph:
                     # Binance tools in the market ToolNode).
                     get_form4_insider_trading,
                     get_ftd_data,
+                    get_institutional_holdings,
                 ]
             ),
         }
