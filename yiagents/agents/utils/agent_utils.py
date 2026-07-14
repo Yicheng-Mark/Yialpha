@@ -35,6 +35,10 @@ from yiagents.agents.utils.news_data_tools import (
     get_news,
 )
 from yiagents.agents.utils.prediction_markets_tools import get_prediction_markets
+from yiagents.agents.utils.sec_ownership_tools import (
+    get_form4_insider_trading,
+    get_ftd_data,
+)
 from yiagents.agents.utils.technical_indicators_tools import get_indicators
 
 # Public surface: the data tools are imported here so agents and the graph
@@ -55,6 +59,8 @@ __all__ = [
     "get_balance_sheet",
     "get_cashflow",
     "get_income_statement",
+    "get_form4_insider_trading",
+    "get_ftd_data",
     "get_news",
     "get_global_news",
     "get_insider_transactions",

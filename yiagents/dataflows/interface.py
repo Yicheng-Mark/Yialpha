@@ -36,6 +36,10 @@ from .sec_edgar import (
     get_fundamentals as get_sec_fundamentals,
     get_income_statement as get_sec_income_statement,
 )
+from .sec_ownership import (
+    get_form4_insider_trading as get_sec_form4,
+    get_ftd_data as get_sec_ftd,
+)
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -125,6 +129,17 @@ TOOLS_CATEGORIES = {
             "get_binance_spot_perp_basis",
         ],
     },
+    # SEC ownership & short-interest signals (Track B2). US-listed only, PIT
+    # correct (Form 4 by filingDate; FTD by cutoff + publication lag). Lives
+    # behind an optional category so a SEC block / non-US ticker / no-data
+    # degrades to a sentinel instead of aborting the run. 13F deferred to B2.1.
+    "sec_ownership": {
+        "description": "SEC ownership & short-interest (Form 4 insider trading, fails-to-deliver). US-listed only.",
+        "tools": [
+            "get_form4_insider_trading",
+            "get_ftd_data",
+        ],
+    },
 }
 
 VENDOR_LIST = [
@@ -141,7 +156,7 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "binance_perp", "binance_spot"}
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "binance_perp", "binance_spot", "sec_ownership"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -234,6 +249,16 @@ VENDOR_METHODS = {
     # the optional-category sentinel.
     "get_binance_spot_perp_basis": {
         "binance": get_binance_spot_perp_basis,
+    },
+    # sec_ownership — single SEC vendor each; the category is optional so a SEC
+    # block / non-US ticker / no-data degrades to a sentinel rather than
+    # aborting the run. Vendor key reuses "sec_edgar" (the SEC infra namespace,
+    # already in VENDOR_LIST) — no new vendor label.
+    "get_form4_insider_trading": {
+        "sec_edgar": get_sec_form4,
+    },
+    "get_ftd_data": {
+        "sec_edgar": get_sec_ftd,
     },
 }
 

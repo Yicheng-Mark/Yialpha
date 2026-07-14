@@ -24,7 +24,9 @@ from yiagents.agents.utils.agent_utils import (
     get_binance_spot_ticker24,
     get_binance_taker_buy_sell,
     get_cashflow,
+    get_form4_insider_trading,
     get_fundamentals,
+    get_ftd_data,
     get_global_news,
     get_income_statement,
     get_indicators,
@@ -303,6 +305,14 @@ class YiAgentsGraph:
                     get_balance_sheet,
                     get_cashflow,
                     get_income_statement,
+                    # SEC ownership & short-interest tools (Track B2). Dormant for
+                    # default runs: the fundamentals analyst only advertises them
+                    # when YIAGENTS_SEC_OWNERSHIP is on, so the LLM never names
+                    # them otherwise and they are simply extra entries in
+                    # ToolNode's name->tool map (same dormant contract as the
+                    # Binance tools in the market ToolNode).
+                    get_form4_insider_trading,
+                    get_ftd_data,
                 ]
             ),
         }

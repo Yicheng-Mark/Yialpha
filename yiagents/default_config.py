@@ -114,6 +114,18 @@ _ENV_OVERRIDES = {
     "YIAGENTS_BINANCE_HTTP_KEEPALIVE":       "binance_http_keepalive",
     "YIAGENTS_BINANCE_HTTP_RETRIES":         "binance_http_retries",
     "YIAGENTS_BINANCE_HONOR_RETRY_AFTER":    "binance_honor_retry_after",
+    # Track B2: SEC ownership & short-interest (Form 4 insider trading + FTD)
+    # exposed to the fundamentals analyst as two opt-in tools. Off by default =
+    # the analyst's tool list / prompt / capabilities are byte-for-byte unchanged
+    # when the flag is unset (same contract as valuation_tools). The tools only
+    # add two PIT-correct US-only signals the analyst may consult; they change
+    # no agent input. 13F deferred to B2.1.
+    "YIAGENTS_SEC_OWNERSHIP":                "sec_ownership",
+    # FTD point-in-time: a semi-monthly cutoff file is treated as public
+    # `cutoff + ftd_pub_lag_days` days later (conservative; SEC publishes a few
+    # days after the cutoff). Default 10 keeps backtests from peeking at a file
+    # that had not yet been disseminated on curr_date.
+    "YIAGENTS_FTD_PUB_LAG_DAYS":             "ftd_pub_lag_days",
 }
 
 
@@ -221,6 +233,16 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # analyst can delegate intrinsic-value arithmetic to Python rather than
     # confabulating it.
     "valuation_tools": False,
+    # Track B2: SEC ownership & short-interest (env: YIAGENTS_SEC_OWNERSHIP).
+    # Off by default = the fundamentals analyst's tool list is unchanged
+    # (byte-equivalent). When on, two PIT-correct US-only tools (Form 4 insider
+    # trading + fails-to-deliver) are appended so the analyst can consult
+    # ownership/short-interest signals the other vendors don't supply.
+    "sec_ownership": False,
+    # FTD point-in-time publication lag (env: YIAGENTS_FTD_PUB_LAG_DAYS). A
+    # semi-monthly cutoff file is treated as public `cutoff + this` days later;
+    # 10 is conservative so a backtest can't peek at a not-yet-disseminated file.
+    "ftd_pub_lag_days": 10,
     # Phase 4: global kill switch (env: YIAGENTS_KILL_SWITCH). Halt = no
     # new orders submitted by the browser broker; read live at order time.
     "kill_switch": False,
