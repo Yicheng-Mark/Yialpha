@@ -35,7 +35,7 @@ import pandas as pd
 
 from yiagents.agents.utils.rating import parse_rating
 from yiagents.backtest.cache import DecisionCache
-from yiagents.backtest.metrics import BacktestMetrics, compute_metrics
+from yiagents.backtest.metrics import BacktestMetrics, compute_metrics, returns_from_equity
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +189,8 @@ def run_backtest(
     cost_bps: float = 0.0,
     n_trials: int = 1,
     compute_index_alpha: bool = True,
+    factor_model: str | None = None,
+    event_study: bool = False,
     progress: bool = False,
 ) -> BacktestResult:
     """Run the agent graph over ``dates`` and price the resulting strategy.
@@ -225,6 +227,24 @@ def run_backtest(
     compute_index_alpha:
         If True, fetch the regional index benchmark and record ``alpha_vs_index``
         per trade (reuses ``graph._resolve_benchmark``).
+    factor_model:
+        Optional Fama-French attribution: ``"3"`` (Mkt-RF / SMB / HML) or ``"5"``
+        (+ RMW / CMA). When set, daily strategy returns are regressed on French
+        factor data and ``metrics.factor_alpha`` / ``factor_betas`` /
+        ``factor_r_squared`` are filled. ``None`` (default) skips attribution
+        entirely — byte-equivalent to the prior behaviour. Fail-open: a missing
+        factor file leaves the fields at None without breaking the backtest.
+    event_study:
+        If True, run a market-model event study over the decision dates: for
+        each rebalance, fit ``R_asset = a + b*R_benchmark`` on a preceding
+        estimation window, then test whether cumulative abnormal returns in the
+        holding window are reliably non-zero (mean CAR, Brown & Warner
+        cross-sectional t, bootstrap 95% CI). Fills ``metrics.event_study_*``.
+        ``False`` (default) skips it entirely — byte-equivalent. Needs ~250
+        trading days of asset + benchmark prices *before* the first decision,
+        so an extra wide-window price pull is made when opted in. Advisory /
+        fail-open: too few decidable events or a missing benchmark leaves the
+        fields at their defaults without breaking the backtest.
     """
     if not dates:
         raise ValueError("run_backtest requires at least one decision date")
@@ -279,6 +299,7 @@ def run_backtest(
     trades: list[TradeRow] = []
     cached_hits = 0
     cached_misses = 0
+    total_traded_notional = 0.0
 
     for trade_date, price in prices.items():
         if trade_date < sorted_dates[0]:
@@ -314,6 +335,7 @@ def run_backtest(
             desired_value = target_weight * equity
             current_value = shares * float(price)
             traded_notional = abs(desired_value - current_value)
+            total_traded_notional += traded_notional
             cost = traded_notional * (cost_bps / 10_000.0)
 
             # Execute rebalance at this close, net of cost.
@@ -363,6 +385,32 @@ def run_backtest(
         n_trials=n_trials,
     )
 
+    # Pure post-processing: fill the trade-/equity-derived metric fields
+    # (win-rate, annualized turnover, max-drawdown date) that the equity-only
+    # ``compute_metrics`` cannot. Deterministic, no I/O, no agent interaction.
+    _augment_metrics(metrics, trades, equity_curve, equity_dates,
+                     total_traded_notional, periods_per_year)
+
+    # Optional Fama-French factor attribution. Advisory only, fail-open: a
+    # missing factor file / failed fit leaves the metrics fields at None and
+    # never changes the equity-derived statistics above.
+    if factor_model is not None:
+        _attribute_factors(
+            metrics, equity_curve, equity_dates,
+            start_date, end_date, factor_model, periods_per_year,
+        )
+
+    # Optional market-model event study over the decision dates. Advisory only,
+    # fail-open: too few decidable events / a missing wide-window price pull
+    # leaves the metrics fields at their defaults and never changes anything
+    # above. Needs benchmark prices, so it resolves + pulls the index itself
+    # when compute_index_alpha was off.
+    if event_study:
+        _run_event_study(
+            metrics, graph, ticker, price_provider, trades,
+            index_name, end_date,
+        )
+
     return BacktestResult(
         ticker=ticker,
         initial_capital=initial_capital,
@@ -383,6 +431,174 @@ def run_backtest(
         cached_hits=cached_hits,
         cached_misses=cached_misses,
     )
+
+
+def _augment_metrics(
+    metrics: BacktestMetrics,
+    trades: list[TradeRow],
+    equity: list[float],
+    equity_dates: list[str],
+    total_traded_notional: float,
+    periods_per_year: int,
+) -> None:
+    """Fill the trade-/equity-derived metric fields in place.
+
+    :func:`compute_metrics` is a pure function of the equity curve (no trade
+    rows, no calendar), so win-rate / annualized turnover / max-drawdown date --
+    which need exactly those -- are computed here. Deterministic post-processing
+    only: no I/O, no effect on any agent input or on the equity-derived metrics
+    themselves.
+    """
+    # Win rate: share of rebalances whose holding-window asset return was
+    # positive. Trades whose ``raw_return`` is None (not enough forward price
+    # data to measure) are excluded from the denominator rather than counted as
+    # losses, so the rate reflects only decidable rebalances.
+    decided = [t for t in trades if t.raw_return is not None]
+    if decided:
+        wins = sum(1 for t in decided if t.raw_return is not None and t.raw_return > 0)
+        metrics.win_rate = wins / len(decided)
+    metrics.num_trades = len(trades)
+
+    # Annualized turnover: traded notional per unit of average equity, per year.
+    if equity and len(equity) >= 2 and periods_per_year > 0:
+        years = (len(equity) - 1) / periods_per_year
+        mean_equity = sum(float(x) for x in equity) / len(equity)
+        if years > 0 and mean_equity > 0:
+            metrics.turnover_annual = total_traded_notional / (mean_equity * years)
+
+    # Date the equity curve bottomed relative to its running peak (pairs with
+    # ``max_drawdown``). On a monotonically rising curve drawdown is always 0
+    # and argmin returns the first index, so the date is the window start.
+    if len(equity) >= 2 and len(equity_dates) == len(equity):
+        eq = np.asarray(equity, dtype=float)
+        running_max = np.maximum.accumulate(eq)
+        drawdowns = eq / running_max - 1.0
+        trough_idx = int(np.argmin(drawdowns))
+        metrics.max_drawdown_date = equity_dates[trough_idx]
+
+
+def _attribute_factors(
+    metrics: BacktestMetrics,
+    equity_curve: list[float],
+    equity_dates: list[str],
+    start_date: str,
+    end_date: str,
+    factor_model: str,
+    periods_per_year: int,
+) -> None:
+    """Fill the Fama-French attribution fields on ``metrics`` in place.
+
+    Loads French daily factor returns over the backtest window, builds the
+    strategy's daily return series from the equity curve, regresses excess
+    returns on the factor matrix, and stamps ``factor_model`` / ``factor_alpha``
+    / ``factor_betas`` / ``factor_r_squared``. Pure post-processing: no agent
+    interaction, no effect on any other metric. Fail-open on every step so a
+    bad/offline factor file degrades to "no attribution" rather than aborting.
+    """
+    try:
+        from yiagents.backtest.factor_model import (
+            factor_attribution,
+            label_for,
+            load_factor_returns,
+        )
+
+        factors = load_factor_returns(start_date, end_date, model=factor_model)
+        if factors is None or factors.empty:
+            return
+        # returns_from_equity yields len(equity)-1 returns; pair them with the
+        # dates of each return's *end* point (equity_dates[1:]).
+        rets = returns_from_equity(equity_curve)
+        if len(rets) != len(equity_dates) - 1 or len(rets) < 2:
+            return
+        strat = pd.Series(rets, index=pd.to_datetime(equity_dates[1:]))
+        label = label_for(factor_model)
+        attr = factor_attribution(
+            strat, factors, periods_per_year=periods_per_year, model=label
+        )
+        if attr is None:
+            return
+        metrics.factor_model = label
+        metrics.factor_alpha = attr.alpha_annual
+        metrics.factor_betas = attr.betas
+        metrics.factor_r_squared = attr.r_squared
+    except Exception as exc:  # noqa: BLE001 -- attribution is advisory; never break a run
+        logger.warning(
+            "factor attribution failed for %s..%s (%s): %s",
+            start_date, end_date, factor_model, exc,
+        )
+
+
+def _run_event_study(
+    metrics: BacktestMetrics,
+    graph: _GraphLike,
+    ticker: str,
+    price_provider: Callable[[str, str, str], pd.Series],
+    trades: list[TradeRow],
+    index_name: str,
+    end_date: str,
+) -> None:
+    """Fill the event-study fields on ``metrics`` in place.
+
+    Runs a market-model event study over the rebalance dates: for each event,
+    fit ``R_asset = a + b*R_benchmark`` on a preceding estimation window, then
+    test whether cumulative abnormal returns in the holding window are reliably
+    non-zero. Pure post-processing: no agent interaction, no effect on any
+    other metric. Fail-open on every step so a bad/missing price window or too
+    few decidable events degrades to "no event study" rather than aborting.
+
+    ``run_backtest``'s ``prices`` start at the first decision date, but the
+    estimation window needs ~250 trading days *before* the earliest event, so a
+    wider asset + benchmark window is re-pulled here. The benchmark is resolved
+    via the same helper the index-alpha path uses (``_resolve_index_benchmark``)
+    and pulled over the wide window; run_backtest's narrower ``index_prices``
+    copy is not reused because it does not cover the estimation window.
+    """
+    try:
+        from datetime import datetime, timedelta
+
+        from yiagents.backtest.event_study import event_study as _event_study
+
+        if not trades:
+            return
+        event_dates = [t.date for t in trades]
+        ratings = [t.rating for t in trades]
+
+        # Widen backwards ~400 calendar days (~270 trading days) to cover the
+        # default 250-return estimation window + pre-event gap before event[0].
+        first_dt = datetime.strptime(str(event_dates[0]), "%Y-%m-%d")
+        wide_start = (first_dt - timedelta(days=400)).strftime("%Y-%m-%d")
+
+        asset_prices = price_provider(ticker, wide_start, end_date).sort_index()
+        if asset_prices.empty:
+            return
+
+        # Benchmark must span the SAME wide window as the asset (the estimation
+        # window sits before the first event), so pull it from wide_start
+        # regardless of whether compute_index_alpha already fetched a copy.
+        bench_name = index_name or _resolve_index_benchmark(graph, ticker)
+        bench = price_provider(bench_name, wide_start, end_date).sort_index()
+        if bench.empty:
+            return
+
+        result = _event_study(
+            asset_prices, bench, event_dates,
+            ratings=ratings,
+            benchmark_name=bench_name or "benchmark",
+        )
+        if result.n_events == 0:
+            return
+        metrics.event_study_n = result.n_events
+        metrics.event_study_mean_car = result.mean_car
+        metrics.event_study_t_stat = result.t_stat
+        metrics.event_study_p_value = result.p_value
+        metrics.event_study_ci = (
+            (result.ci_low, result.ci_high)
+            if result.ci_low is not None and result.ci_high is not None
+            else None
+        )
+        metrics.event_study_benchmark = result.benchmark
+    except Exception as exc:  # noqa: BLE001 -- event study is advisory; never break a run
+        logger.warning("event study failed for %s: %s", ticker, exc)
 
 
 def _resolve_decision(

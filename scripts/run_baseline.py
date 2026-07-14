@@ -300,7 +300,8 @@ def baseline_backtest(tickers, start, end, step, n_dates, holding_days, cost_bps
         for r in range(runs):
             print(f"    [{t}] run {r} ...", flush=True)
             res = run_backtest(ta, t, dates, holding_days=holding_days,
-                               cost_bps=cost_bps, run_tag=f"base_r{r}")
+                               cost_bps=cost_bps, run_tag=f"base_r{r}",
+                               factor_model="3")
             m = res.metrics
             print(f"      [{t}] 总收益 {m.total_return:.2%} | Sharpe {m.sharpe:.2f} | "
                   f"MDD {m.max_drawdown:.2%} | vs B&H alpha {m.alpha_vs_buyhold:.2%}")
@@ -358,7 +359,7 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
         print(f"\n  [{t}] 开始", flush=True)
         base = run_backtest(ta, t, dates, holding_days=holding_days,
                             cost_bps=cost_bps, run_tag=f"ab_base_{t}",
-                            n_trials=n_trials)
+                            n_trials=n_trials, factor_model="3")
         mb = base.metrics
         print(f"    [{t}] 基线:    总收益 {mb.total_return:.2%} | Sharpe {mb.sharpe:.2f} | "
               f"MDD {mb.max_drawdown:.2%}")
@@ -369,7 +370,7 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
             res = run_backtest(ta, t, dates, holding_days=holding_days,
                                cost_bps=cost_bps, weight_fn=wfn,
                                run_tag=f"ab_risk_{t}_r{r}",
-                               n_trials=n_trials)
+                               n_trials=n_trials, factor_model="3")
             mi = res.metrics
             print(f"    [{t}] 风控 run{r}: 总收益 {mi.total_return:.2%} | Sharpe {mi.sharpe:.2f} | "
                   f"MDD {mi.max_drawdown:.2%} | DSR {mi.deflated_sharpe:.2f}")

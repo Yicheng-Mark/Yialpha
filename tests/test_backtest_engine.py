@@ -261,3 +261,108 @@ def test_engine_rejects_invalid_n_trials():
     with pytest.raises(ValueError):
         run_backtest(graph, "AAPL", dates, holding_days=5,
                      price_provider=_rising_prices, n_trials=0)
+
+
+@pytest.mark.unit
+def test_engine_win_rate_turnover_drawdown_date_populated():
+    """Trade-/equity-derived extras are filled post-hoc by the engine.
+
+    compute_metrics is equity-only, so win_rate / turnover_annual /
+    max_drawdown_date default to None; the engine must populate them from its
+    trade rows and equity dates. Rising tape -> every decidable rebalance is a
+    winner (win_rate 1.0), Buy every round churns capital (turnover > 0), and
+    the drawdown date is a real date string.
+    """
+    dates = _decision_dates(8)
+    graph = FakeGraph(dict.fromkeys(dates, "Buy"))
+    result = run_backtest(graph, "AAPL", dates, holding_days=5,
+                          price_provider=_rising_prices)
+    m = result.metrics
+    assert m.win_rate == 1.0
+    assert m.num_trades == len(dates)
+    assert m.turnover_annual is not None and m.turnover_annual > 0
+    assert isinstance(m.max_drawdown_date, str) and len(m.max_drawdown_date) == 10
+
+
+@pytest.mark.unit
+def test_engine_win_rate_none_when_no_decidable_returns():
+    """A flat price tape yields raw_return 0.0, not None -- so win_rate is a
+    number (0.0, zero winners), never None, when rebalances exist."""
+    dates = _decision_dates(5)
+    graph = FakeGraph(dict.fromkeys(dates, "Buy"))
+    result = run_backtest(graph, "AAPL", dates, holding_days=5,
+                          price_provider=_flat_index)
+    # Flat asset -> no positive holding returns -> win_rate 0.0 (decided, none win).
+    assert result.metrics.win_rate == 0.0
+
+
+@pytest.mark.unit
+def test_engine_event_study_off_leaves_defaults():
+    """event_study=False (the default) must not run the post-processing: the
+    event_study_* metric fields stay at their defaults, so every existing
+    caller that does not opt in is byte-equivalent."""
+    dates = _decision_dates(6)
+    graph = FakeGraph(dict.fromkeys(dates, "Buy"))
+    result = run_backtest(graph, "AAPL", dates, holding_days=5,
+                          price_provider=_rising_prices)
+    m = result.metrics
+    assert m.event_study_n == 0
+    assert m.event_study_mean_car is None
+    assert m.event_study_t_stat is None
+    assert m.event_study_p_value is None
+    assert m.event_study_ci is None
+    assert m.event_study_benchmark is None
+
+
+@pytest.mark.unit
+def test_engine_event_study_populated_when_opted_in():
+    """event_study=True fills the event_study_* fields when the wide-window
+    price pull covers the 250-return estimation window before the first event.
+
+    The first decision is pushed ~6 months in so the -400d wide pull still
+    leaves a full estimation window ahead of event[0]; a flat benchmark makes
+    the asset's holding-window drift read as abnormal return, so n_events > 0
+    and the aggregate stats are populated (the opt-in path actually ran).
+    """
+    dates = _decision_dates(6, start="2024-06-01")
+    graph = FakeGraph(dict.fromkeys(dates, "Buy"), benchmark="SPY")
+
+    def prices(ticker, start, end):
+        # Asset rises; benchmark flat -> abnormal return = asset drift.
+        if ticker == "SPY":
+            return _flat_index(ticker, start, end)
+        return _rising_prices(ticker, start, end)
+
+    result = run_backtest(graph, "AAPL", dates, holding_days=5,
+                          price_provider=prices, compute_index_alpha=True,
+                          event_study=True)
+    m = result.metrics
+    assert m.event_study_n > 0
+    assert m.event_study_mean_car is not None
+    assert m.event_study_t_stat is not None
+    assert m.event_study_benchmark == "SPY"
+
+
+@pytest.mark.unit
+def test_engine_event_study_fail_open_on_missing_wide_prices():
+    """When the wide-window asset pull comes back empty (the estimation-window
+    data is unavailable), event_study degrades to n_events=0 without raising --
+    the backtest itself is unaffected (advisory, fail-open)."""
+    dates = _decision_dates(4, start="2024-06-01")
+    graph = FakeGraph(dict.fromkeys(dates, "Buy"), benchmark="SPY")
+
+    def prices(ticker, start, end):
+        s = _rising_prices(ticker, start, end)
+        # The event-study wide pull starts ~400d before the first decision
+        # (well before 2024-05-01); return empty there so asset_prices.empty
+        # trips the fail-open return. run_backtest's own window starts at the
+        # first decision (>= 2024-06-01) and gets real prices.
+        if str(start) < "2024-05-01":
+            return pd.Series(dtype=float)
+        return s
+
+    result = run_backtest(graph, "AAPL", dates, holding_days=5,
+                          price_provider=prices, event_study=True)
+    assert isinstance(result, BacktestResult)
+    assert result.metrics.event_study_n == 0
+    assert result.metrics.event_study_mean_car is None

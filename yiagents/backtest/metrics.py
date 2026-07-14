@@ -163,6 +163,37 @@ class BacktestMetrics:
     alpha_vs_buyhold: float | None
     num_periods: int
     periods_per_year: int
+    # Trade-/equity-derived extras. ``compute_metrics`` is a pure function of
+    # the equity curve alone (no trade rows, no calendar dates), so these --
+    # which need exactly those -- are left at their defaults here and filled in
+    # by ``run_backtest`` from its trade rows and equity dates. Defaulting keeps
+    # the dataclass constructible without them, so the pure metric path and
+    # every existing caller are unchanged.
+    win_rate: float | None = None
+    turnover_annual: float | None = None
+    max_drawdown_date: str | None = None
+    num_trades: int = 0
+    # Fama-French factor attribution. Populated by run_backtest only when the
+    # caller opts in via its ``factor_model`` param; left at None otherwise.
+    # compute_metrics is pure-equity and never touches these, so every existing
+    # caller / test that does not ask for attribution is byte-equivalent.
+    factor_model: str | None = None       # "FF3" / "FF5" / None
+    factor_alpha: float | None = None     # annualized Jensen's alpha
+    factor_betas: dict[str, float] | None = None
+    factor_r_squared: float | None = None
+    # Event-study (market-model abnormal returns). Populated by run_backtest
+    # only when the caller opts in via its ``event_study`` param; left at
+    # None/0 otherwise. Like the factor fields, compute_metrics never touches
+    # these, so every existing caller that does not ask for an event study is
+    # byte-equivalent. Advisory/fail-open: a missing wide-window price pull or
+    # too few decidable events leaves the fields at their defaults without
+    # breaking the backtest.
+    event_study_n: int = 0                            # decidable events used
+    event_study_mean_car: float | None = None         # cross-event mean CAR
+    event_study_t_stat: float | None = None           # Brown & Warner cross-sectional t
+    event_study_p_value: float | None = None          # two-sided, None without scipy
+    event_study_ci: tuple[float, float] | None = None  # bootstrap 95% CI of mean CAR
+    event_study_benchmark: str | None = None          # market-model benchmark name
 
 
 # ---------------------------------------------------------------------------

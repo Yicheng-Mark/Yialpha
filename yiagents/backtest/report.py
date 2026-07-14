@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Metrics whose distribution we summarize across runs (annualized where relevant).
 _DISTRIBUTION_KEYS: tuple[str, ...] = (
     "total_return", "cagr", "sharpe", "sortino", "max_drawdown", "calmar",
-    "deflated_sharpe", "alpha_vs_buyhold",
+    "deflated_sharpe", "alpha_vs_buyhold", "factor_alpha",
 )
 
 _SPARK_BARS = "▁▂▃▄▅▆▇█"
@@ -100,7 +100,51 @@ def render_backtest_report(result: BacktestResult) -> str:
     lines.append(f"| Calmar | {_fmt_num(m.get('calmar'))} | n/a |")
     lines.append(f"| Deflated Sharpe | {_fmt_num(m.get('deflated_sharpe'))} | n/a |")
     lines.append(f"| Alpha vs B&H (ann.) | {_fmt_pct(m.get('alpha_vs_buyhold'))} | -- |")
+    lines.append(f"| Win rate (per rebalance) | {_fmt_pct(m.get('win_rate'))} | n/a |")
+    lines.append(f"| Turnover (ann.) | {_fmt_pct(m.get('turnover_annual'))} | n/a |")
+    _mdd_date = m.get("max_drawdown_date")
+    lines.append(f"| Max drawdown date | {_mdd_date if _mdd_date else 'n/a'} | n/a |")
     lines.append("")
+    # Fama-French attribution section, only when the run opted in (factor_model
+    # set). Shows factor-adjusted alpha, R² and each factor's loading so a
+    # reader can tell how much of the return is common-factor beta vs residual.
+    if m.get("factor_model"):
+        betas = m.get("factor_betas") or {}
+        lines += [
+            "## Factor attribution",
+            "",
+            (f"- Model: **{m['factor_model']}**"
+             f"  |  R²: {_fmt_num(m.get('factor_r_squared'))}"
+             f"  |  Factor alpha (ann.): {_fmt_pct(m.get('factor_alpha'))}"),
+            "",
+            "| Factor | Beta |",
+            "|---|---:|",
+        ]
+        for k in sorted(betas):
+            lines.append(f"| {k} | {float(betas[k]):+.3f} |")
+        lines.append("")
+    # Event-study section, only when the run opted in and produced decidable
+    # events. A beta-controlled test of whether the asset moved abnormally in
+    # the holding window after each analyst decision (vs the naive
+    # raw-minus-index alpha shown per-trade above).
+    if m.get("event_study_n"):
+        _es_ci = m.get("event_study_ci")
+        _es_ci_str = (f"[{_fmt_num(_es_ci[0])}, {_fmt_num(_es_ci[1])}]"
+                      if _es_ci else "n/a")
+        lines += [
+            "## Event study (market-model abnormal returns)",
+            "",
+            (f"- Benchmark: `{m.get('event_study_benchmark') or 'benchmark'}`"
+             f"  |  Events used: {m['event_study_n']}"),
+            "",
+            "| Statistic | Value |",
+            "|---|---:|",
+            f"| Mean CAR | {_fmt_num(m.get('event_study_mean_car'))} |",
+            f"| t-statistic | {_fmt_num(m.get('event_study_t_stat'))} |",
+            f"| p-value (two-sided) | {_fmt_num(m.get('event_study_p_value'))} |",
+            f"| Bootstrap 95% CI (mean CAR) | {_es_ci_str} |",
+            "",
+        ]
     lines.append(f"**Verdict: {result.ticker} strategy {beats} buy-and-hold on total return.**")
     lines.append("")
     if result.trades:
@@ -168,8 +212,9 @@ def render_multi_run_report(results: Sequence[BacktestResult]) -> str:
         "total_return": "Total return", "cagr": "CAGR", "sharpe": "Sharpe",
         "sortino": "Sortino", "max_drawdown": "Max drawdown", "calmar": "Calmar",
         "deflated_sharpe": "Deflated Sharpe", "alpha_vs_buyhold": "Alpha vs B&H",
+        "factor_alpha": "Factor alpha (ann.)",
     }
-    pct_keys = {"total_return", "cagr", "max_drawdown", "alpha_vs_buyhold"}
+    pct_keys = {"total_return", "cagr", "max_drawdown", "alpha_vs_buyhold", "factor_alpha"}
     for key in _DISTRIBUTION_KEYS:
         if key not in summary:
             continue
