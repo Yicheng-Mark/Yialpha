@@ -34,6 +34,7 @@ from yiagents.agents.utils.news_data_tools import (
     get_insider_transactions,
     get_news,
 )
+from yiagents.agents.utils.eastmoney_tools import get_margin_trading
 from yiagents.agents.utils.prediction_markets_tools import get_prediction_markets
 from yiagents.agents.utils.sec_ownership_tools import (
     get_form4_insider_trading,
@@ -63,6 +64,7 @@ __all__ = [
     "get_form4_insider_trading",
     "get_ftd_data",
     "get_institutional_holdings",
+    "get_margin_trading",
     "get_news",
     "get_global_news",
     "get_insider_transactions",

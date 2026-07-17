@@ -133,6 +133,15 @@ _ENV_OVERRIDES = {
     # after the window closes). Default 5 keeps backtests from peeking at a ZIP
     # that had not yet been released on curr_date.
     "YIAGENTS_SEC_13F_PUB_LAG_DAYS":         "sec_13f_pub_lag_days",
+    # Track A: China A-share margin trading (Eastmoney 融资融券) exposed to the
+    # fundamentals analyst as an opt-in tool behind one flag, AND only for A-share
+    # tickers (.SS/.SH/.SZ) via the is_a_stock double-gate. Off by default = the
+    # analyst's tool list / prompt / capabilities are byte-for-byte unchanged when
+    # the flag is unset (same contract as valuation_tools). The tool only adds a
+    # PIT-correct A-share-only signal the analyst may consult; it changes no agent
+    # input. The vendor connects directly (bypassing the SOCKS5 VPN proxy) since
+    # Eastmoney is a domestic source.
+    "YIAGENTS_A_STOCK":                      "a_stock",
 }
 
 
@@ -255,6 +264,13 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # `period-end + this` days later; 5 is conservative so a backtest can't
     # peek at a not-yet-released dataset.
     "sec_13f_pub_lag_days": 5,
+    # Track A: China A-share margin trading (env: YIAGENTS_A_STOCK). Off by
+    # default = the fundamentals analyst's tool list is unchanged (byte-
+    # equivalent). Double-gated: when on AND the ticker is an A-share
+    # (.SS/.SH/.SZ), one PIT-correct A-share-only tool (margin trading 融资融券)
+    # is appended so the analyst can consult a money-flow signal the default
+    # yfinance path cannot supply. US/crypto/HK tickers never enter the branch.
+    "a_stock": False,
     # Phase 4: global kill switch (env: YIAGENTS_KILL_SWITCH). Halt = no
     # new orders submitted by the browser broker; read live at order time.
     "kill_switch": False,
@@ -353,6 +369,9 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "news_data": "yfinance",             # Options: alpha_vantage, yfinance
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
+        # a_stock tools are single-vendor (eastmoney); the category is optional
+        # and only advertised for A-share tickers, so no category-level default
+        # is needed — route_to_vendor uses the sole configured vendor.
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

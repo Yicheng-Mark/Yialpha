@@ -138,6 +138,27 @@ def is_yahoo_safe(symbol: str) -> bool:
     return bool(symbol) and _YAHOO_SAFE.fullmatch(symbol) is not None
 
 
+def is_a_stock(ticker: str) -> bool:
+    """True when ``ticker`` is a China A-share (Shanghai or Shenzhen) symbol.
+
+    Recognizes the Yahoo-style exchange suffixes ``.SS``/``.SH`` (Shanghai SSE)
+    and ``.SZ`` (Shenzhen SZSE) on a 6-digit code — the same form yfinance
+    accepts for A-shares (e.g. ``600519.SS``, ``000001.SZ``). Purely syntactic
+    (no network), so it is safe as a per-call gate. Used to decide whether the
+    optional ``a_stock`` Eastmoney tools (margin trading + capital flow) are
+    advertised to the fundamentals analyst, so US / crypto / HK tickers never
+    enter that branch (byte-equivalent to a default-off run for them).
+    """
+    if not isinstance(ticker, str):
+        return False
+    t = ticker.strip().upper()
+    for suf in (".SS", ".SH", ".SZ"):
+        if t.endswith(suf):
+            code = t[: -len(suf)]
+            return code.isdigit() and len(code) == 6
+    return False
+
+
 def normalize_symbol_for_venue(raw: str, venue: str = "binance_perp") -> str:
     """Map a user/broker symbol to a venue's canonical symbol.
 

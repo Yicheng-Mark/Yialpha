@@ -10,9 +10,11 @@ from yiagents.agents.utils.agent_utils import (
     get_institutional_holdings,
     get_instrument_context_from_state,
     get_language_instruction,
+    get_margin_trading,
 )
 from yiagents.agents.utils.valuation_tools import get_valuation_metrics
 from yiagents.dataflows.config import get_config
+from yiagents.dataflows.symbol_utils import is_a_stock
 
 
 # Appended to the fundamentals system prompt only when YIAGENTS_SEC_OWNERSHIP is
@@ -32,10 +34,25 @@ _SEC_OWNERSHIP_NUDGE = (
 )
 
 
+# Appended to the fundamentals system prompt only when YIAGENTS_A_STOCK is on
+# AND the ticker is a China A-share (.SS/.SH/.SZ). When off (or non-A-share),
+# the analyst's prompt (and tool list) are byte-for-byte unchanged.
+_A_STOCK_NUDGE = (
+    " Additional China A-share margin-trading tool (A-share only): "
+    "`get_margin_trading` (融资融券 — margin balance 融资余额, short balance "
+    "融券余额, margin buy 融资买入额, net margin buy 融资净买入额; exchange-"
+    "disclosed daily with full history). Rising 融资余额 = bullish leverage "
+    "build-up; rising 融券余额 = growing short interest. If the tool returns "
+    "'data not available' for this symbol/date, report that honestly and do "
+    "not estimate margin positions."
+)
+
+
 def create_fundamentals_analyst(llm):
     def fundamentals_analyst_node(state):
         current_date = state["trade_date"]
         instrument_context = get_instrument_context_from_state(state)
+        ticker = str(state["company_of_interest"])
 
         tools = [
             get_fundamentals,
@@ -60,6 +77,15 @@ def create_fundamentals_analyst(llm):
         # PIT-correct US-only tools are appended plus a short nudge.
         if get_config().get("sec_ownership"):
             tools.extend([get_form4_insider_trading, get_ftd_data, get_institutional_holdings])
+        # China A-share margin trading (Track A, env: YIAGENTS_A_STOCK, off by
+        # default). Same byte-equivalence contract as the flags above — gated
+        # TWICE: the flag AND is_a_stock(ticker). When either fails, the tool
+        # list / prompt / capabilities are byte-for-byte identical to the prior
+        # behaviour, so US / crypto / HK tickers never enter this branch and the
+        # analyst's inputs/capabilities/depth are unchanged. When both hold, one
+        # PIT-correct A-share-only tool is appended plus a short nudge.
+        if get_config().get("a_stock") and is_a_stock(ticker):
+            tools.append(get_margin_trading)
 
         system_message = (
             "You are a researcher tasked with analyzing fundamental information over the past week about a company. Please write a comprehensive report of the company's fundamental information such as financial documents, company profile, basic company financials, and company financial history to gain a full view of the company's fundamental information to inform traders. Focus on the most decision-relevant figures rather than exhaustive detail, and tie every claim to a specific number and reporting period pulled from the tools. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
@@ -74,6 +100,10 @@ def create_fundamentals_analyst(llm):
             # preserving the tuple shape so prompt formatting is identical in
             # structure to the off-path (byte-equivalent when off).
             system_message = (system_message[0] + _SEC_OWNERSHIP_NUDGE,)
+        # A-share nudge uses the SAME double gate (flag AND is_a_stock) as the
+        # tool extension above, so the prompt only changes when the tools do.
+        if get_config().get("a_stock") and is_a_stock(ticker):
+            system_message = (system_message[0] + _A_STOCK_NUDGE,)
 
         prompt = ChatPromptTemplate.from_messages(
             [

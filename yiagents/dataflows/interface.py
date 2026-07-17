@@ -23,6 +23,7 @@ from .binance import (
     get_binance_taker_buy_sell,
 )
 from .config import get_config
+from .eastmoney import get_margin_trading as get_eastmoney_margin_trading
 from .errors import (
     NoMarketDataError,
     VendorNotConfiguredError,
@@ -143,6 +144,18 @@ TOOLS_CATEGORIES = {
             "get_institutional_holdings",
         ],
     },
+    # China A-share margin-trading signal (Track A, Eastmoney 东方财富). One
+    # A-share-only signal the default yfinance path cannot supply: 融资融券
+    # (margin trading — full exchange-disclosed history). Reached directly
+    # (bypassing the SOCKS5 VPN proxy) via a domestic host. Lives behind an
+    # optional category so a host block / non-A-share ticker / no-data degrades
+    # to a sentinel instead of aborting the run.
+    "a_stock": {
+        "description": "China A-share margin trading (Eastmoney 融资融券). A-share only.",
+        "tools": [
+            "get_margin_trading",
+        ],
+    },
 }
 
 VENDOR_LIST = [
@@ -152,6 +165,7 @@ VENDOR_LIST = [
     "alpha_vantage",
     "binance",
     "sec_edgar",
+    "eastmoney",
 ]
 
 # Optional enrichment categories. These add macro/event context to the news
@@ -159,7 +173,7 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "binance_perp", "binance_spot", "sec_ownership"}
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "binance_perp", "binance_spot", "sec_ownership", "a_stock"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -266,6 +280,13 @@ VENDOR_METHODS = {
     "get_institutional_holdings": {
         "sec_edgar": get_sec_13f,
     },
+    # a_stock — a single Eastmoney vendor; the category is optional so an
+    # Eastmoney host block / non-A-share ticker / no-data degrades to a sentinel
+    # rather than aborting the run. Vendor key "eastmoney" (the domestic direct-
+    # connect transport, distinct from the SOCKS5-proxied SEC/Binance vendors).
+    "get_margin_trading": {
+        "eastmoney": get_eastmoney_margin_trading,
+    },
 }
 
 def get_category_for_method(method: str) -> str:
@@ -328,9 +349,9 @@ def route_to_vendor(method: str, *args, **kwargs):
         except VendorRateLimitError as e:
             # Surface the rate-limit if no other vendor can serve the call:
             # an optional category (e.g. binance_perp) then degrades to a
-            # sentinel at :283-289 instead of crashing at :292, and a core
-            # category re-raises the typed error at :290 so the throttle is
-            # visible upstream. Matches the other except clauses' pattern.
+            # sentinel in the post-loop block instead of crashing there, and a
+            # core category re-raises the typed error so the throttle is visible
+            # upstream. Matches the other except clauses' pattern.
             logger.warning("Vendor %r rate-limited for %s; trying next vendor.", vendor, method)
             if first_error is None:
                 first_error = e

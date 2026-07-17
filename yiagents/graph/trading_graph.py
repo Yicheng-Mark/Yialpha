@@ -33,6 +33,7 @@ from yiagents.agents.utils.agent_utils import (
     get_insider_transactions,
     get_institutional_holdings,
     get_macro_indicators,
+    get_margin_trading,
     get_news,
     get_prediction_markets,
     get_stock_data,
@@ -315,6 +316,13 @@ class YiAgentsGraph:
                     get_form4_insider_trading,
                     get_ftd_data,
                     get_institutional_holdings,
+                    # China A-share margin-trading tool (Track A). Dormant for
+                    # default runs: the fundamentals analyst only advertises it
+                    # when YIAGENTS_A_STOCK is on AND the ticker is an A-share
+                    # (.SS/.SH/.SZ), so the LLM never names it otherwise and it
+                    # is simply an extra entry in ToolNode's name->tool map
+                    # (same dormant contract as the SEC/Binance tools above).
+                    get_margin_trading,
                 ]
             ),
         }
