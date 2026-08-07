@@ -21,27 +21,63 @@ the sentiment header (band + score + confidence) is deterministic across
 runs and providers instead of free-form per-model prose.
 """
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from langchain_core.messages import AIMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from yiagents.agents.schemas import SentimentReport, render_sentiment_report
+from yiagents.agents.utils.prompt_builder import build_collaborator_prompt
 from yiagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
     get_news,
 )
 from yiagents.agents.utils.structured import (
+    NO_EXTERNAL_TOOLS,
     bind_structured,
     invoke_structured_or_freetext,
 )
 from yiagents.dataflows.reddit import fetch_reddit_posts
 from yiagents.dataflows.stocktwits import fetch_stocktwits_messages
 
+# Opt-in (default OFF = byte-equivalent sequential fetch). Fan out the three
+# independent source fetches (Yahoo news / StockTwits / Reddit) on a thread
+# pool. Each block is written to a FIXED prompt slot, so completion order does
+# not change the assembled prompt -- only wall-clock. Fetchers degrade to a
+# string and do not raise, so the parallel path preserves sequential semantics.
+_SENTIMENT_PARALLEL_FETCH = os.environ.get(
+    "YIAGENTS_SENTIMENT_PARALLEL_FETCH", ""
+).lower() in ("1", "true", "yes", "on")
+
 
 def _seven_days_back(trade_date: str) -> str:
     return (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+
+
+def _fetch_sentiment_sources(ticker: str, start_date: str, end_date: str):
+    """Fetch the three sentiment sources, returning (news, stocktwits, reddit).
+
+    Sequential by default; fanned out on a thread pool when
+    ``YIAGENTS_SENTIMENT_PARALLEL_FETCH`` is on. Byte-equivalent -- each block
+    is returned to a fixed slot, so completion order does not affect the result.
+    Fetchers degrade to a string and do not raise, so the parallel path
+    preserves the sequential semantics.
+    """
+    if _SENTIMENT_PARALLEL_FETCH:
+        # Lambdas preserve each call's exact form so the result is byte-
+        # identical to the sequential path; only fetch order differs.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            fut_news = pool.submit(lambda: get_news.func(ticker, start_date, end_date))
+            fut_stocktwits = pool.submit(lambda: fetch_stocktwits_messages(ticker, limit=30))
+            fut_reddit = pool.submit(lambda: fetch_reddit_posts(ticker))
+            return fut_news.result(), fut_stocktwits.result(), fut_reddit.result()
+    return (
+        get_news.func(ticker, start_date, end_date),
+        fetch_stocktwits_messages(ticker, limit=30),
+        fetch_reddit_posts(ticker),
+    )
 
 
 def create_sentiment_analyst(llm):
@@ -63,9 +99,9 @@ def create_sentiment_analyst(llm):
         # Pre-fetch all three sources. Each fetcher degrades gracefully and
         # returns a string (no exceptions surface from here), so the LLM
         # always sees something — either real data or a clear placeholder.
-        news_block = get_news.func(ticker, start_date, end_date)
-        stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
-        reddit_block = fetch_reddit_posts(ticker)
+        news_block, stocktwits_block, reddit_block = _fetch_sentiment_sources(
+            ticker, start_date, end_date
+        )
 
         system_message = _build_system_message(
             ticker=ticker,
@@ -76,19 +112,7 @@ def create_sentiment_analyst(llm):
             reddit_block=reddit_block,
         )
 
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "You are a helpful AI assistant, collaborating with other assistants."
-                    " If you or any other assistant has the FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** or deliverable,"
-                    " prefix your response with FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** so the team knows to stop."
-                    " Today's date is {current_date}; treat it as 'now' for all analysis and tool-call date ranges. {instrument_context}"
-                    "\n{system_message}",
-                ),
-                MessagesPlaceholder(variable_name="messages"),
-            ]
-        )
+        prompt = build_collaborator_prompt(include_tools=False)
 
         prompt = prompt.partial(system_message=system_message)
         prompt = prompt.partial(current_date=end_date)
@@ -177,7 +201,7 @@ Fill the following fields:
 - **confidence**: low / medium / high, based on data quality and sample size.
 - **narrative**: Full source-by-source breakdown, divergences, dominant narrative themes, catalysts and risks, and a markdown summary table of key sentiment signals (direction, source, supporting evidence).
 
-{get_language_instruction()}"""
+{get_language_instruction()}""" + NO_EXTERNAL_TOOLS
 
 
 # ---------------------------------------------------------------------------

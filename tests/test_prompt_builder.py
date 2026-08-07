@@ -5,9 +5,75 @@ from __future__ import annotations
 import pytest
 
 from yiagents.agents.utils.prompt_builder import (
+    build_collaborator_prompt,
     build_fincot_prompt,
     build_mermaid_workflow,
 )
+
+
+def _render_collaborator(include_tools, **partials):
+    p = build_collaborator_prompt(include_tools)
+    for k, v in partials.items():
+        p = p.partial(**{k: v})
+    return p.format_messages(messages=[])[0].content
+
+
+# Golden rendering of the shared "collaborating with other assistants" scaffolding.
+# Captured from each analyst's prior inline ChatPromptTemplate (byte-identical across
+# news / fundamentals / market for the tool variant; sentiment uses the no-tool variant).
+# Any drift in build_collaborator_prompt changes a tool-calling analyst's LLM input, so
+# these exact strings are the byte-equivalence contract.
+_TOOLS_TRUE_GOLDEN = (
+    "You are a helpful AI assistant, collaborating with other assistants."
+    " Use the provided tools to progress towards answering the question."
+    " If you are unable to fully answer, that's OK; another assistant with different tools"
+    " will help where you left off. Execute what you can to make progress."
+    " If you or any other assistant has the FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** or deliverable,"
+    " prefix your response with FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** so the team knows to stop."
+    " You have access to the following tools: A, B."
+    " Today's date is 2026-01-01; treat it as 'now' for all analysis and tool-call date ranges. CTX\n"
+    "SYS"
+)
+_TOOLS_FALSE_GOLDEN = (
+    "You are a helpful AI assistant, collaborating with other assistants."
+    " If you or any other assistant has the FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** or deliverable,"
+    " prefix your response with FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** so the team knows to stop."
+    " Today's date is 2026-01-01; treat it as 'now' for all analysis. CTX\n"
+    "SYS"
+)
+
+
+@pytest.mark.unit
+def test_collaborator_prompt_tools_variant_matches_golden():
+    out = _render_collaborator(
+        True,
+        system_message="SYS",
+        tool_names="A, B",
+        current_date="2026-01-01",
+        instrument_context="CTX",
+    )
+    assert out == _TOOLS_TRUE_GOLDEN
+
+
+@pytest.mark.unit
+def test_collaborator_prompt_no_tools_variant_matches_golden():
+    out = _render_collaborator(
+        False,
+        system_message="SYS",
+        current_date="2026-01-01",
+        instrument_context="CTX",
+    )
+    assert out == _TOOLS_FALSE_GOLDEN
+
+
+@pytest.mark.unit
+def test_collaborator_prompt_no_tools_has_no_tool_names_slot():
+    # The no-tool variant must NOT carry a {tool_names} placeholder (sentiment
+    # never partials one), and must NOT advertise tools.
+    out = _render_collaborator(False, system_message="SYS", current_date="D", instrument_context="I")
+    assert "{tool_names}" not in out
+    assert "Use the provided tools" not in out
+    assert "tool-call date ranges" not in out
 
 
 @pytest.mark.unit

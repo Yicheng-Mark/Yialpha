@@ -17,7 +17,7 @@ public market-data endpoints carry no auth/cookies so there is no session-level
 state to race on. This matches the already-trusted LLM keepalive pattern.
 ``requests.Session`` defaults to ``trust_env=True``, so it reads
 ``HTTP_PROXY``/``HTTPS_PROXY``/``NO_PROXY`` from the environment exactly as
-:func:`yiagents.dataflows.binance._proxies` already does — the SOCKS5 proxy in
+:func:`yiagents.dataflows.utils.proxy_map` already does — the SOCKS5 proxy in
 ``.env`` is honoured with no new proxy configuration here.
 """
 from __future__ import annotations
@@ -42,7 +42,7 @@ def get_shared_binance_session() -> requests.Session:
         if _session is None:
             # trust_env=True (the default) makes requests read
             # HTTP_PROXY/HTTPS_PROXY/NO_PROXY from the environment, matching how
-            # binance._proxies() routes through the SOCKS5 proxy.
+            # utils.proxy_map() routes through the SOCKS5 proxy.
             _session = requests.Session()
         return _session
 
