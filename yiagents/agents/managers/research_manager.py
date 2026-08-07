@@ -8,6 +8,7 @@ from yiagents.agents.utils.agent_utils import (
     get_language_instruction,
 )
 from yiagents.agents.utils.structured import (
+    NO_EXTERNAL_TOOLS,
     bind_structured,
     invoke_structured_or_freetext,
 )
@@ -40,7 +41,7 @@ Commit to a clear stance whenever the debate's strongest arguments warrant one; 
 ---
 
 **Debate History:**
-{history}""" + get_language_instruction()
+{history}""" + get_language_instruction() + NO_EXTERNAL_TOOLS
 
         investment_plan = invoke_structured_or_freetext(
             structured_llm,

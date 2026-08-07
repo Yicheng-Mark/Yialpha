@@ -129,6 +129,25 @@ def get_current_date():
     return date.today().strftime("%Y-%m-%d")
 
 
+def proxy_map() -> dict[str, str | None]:
+    """requests-style proxy dict for US/quote data sources, read at call time.
+
+    ``http`` <- ``HTTP_PROXY`` else ``ALL_PROXY``; ``https`` <- ``HTTPS_PROXY``
+    else ``ALL_PROXY``. The ``ALL_PROXY`` fallback matters: a user who sets
+    only ``ALL_PROXY`` (a single config knob) must get proxied traffic on
+    *every* US source, not just the ones that happened to read it -- otherwise
+    one vendor hangs or leaks the real IP while another is proxied. Missing
+    values fall back to ``None`` (requests' default behaviour).
+
+    Domestic sources that must bypass the proxy (e.g. Eastmoney) do NOT use
+    this -- they disable env merging via ``Session(trust_env=False)`` instead.
+    """
+    return {
+        "http": os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY"),
+        "https": os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY"),
+    }
+
+
 def decorate_all_methods(decorator):
     def class_decorator(cls):
         for attr_name, attr_value in cls.__dict__.items():

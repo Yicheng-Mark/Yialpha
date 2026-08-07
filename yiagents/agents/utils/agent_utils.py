@@ -263,4 +263,42 @@ def create_msg_delete():
     return delete_messages
 
 
+def build_risk_debate_update(
+    risk_debate_state: Mapping[str, Any], speaker: str, argument: str
+) -> dict:
+    """Assemble the next ``risk_debate_state`` after a risk debator speaks.
+
+    ``speaker`` is one of ``"aggressive"`` / ``"conservative"`` / ``"neutral"``.
+    The speaker's own ``<speaker>_history`` and ``current_<speaker>_response``
+    receive the new ``argument``; the shared ``history`` log always appends it;
+    every other field is carried over unchanged from ``risk_debate_state``;
+    ``count`` advances by 1.
+
+    Centralises the ~13-field state dict the three risk debators each rebuilt
+    inline (differing only in which history/response field receives the argument
+    and the speaker label), so the three cannot drift apart. Byte-equivalent to
+    each debator's prior dict.
+    """
+    update: dict[str, Any] = {
+        "history": risk_debate_state.get("history", "") + "\n" + argument,
+        "aggressive_history": risk_debate_state.get("aggressive_history", ""),
+        "conservative_history": risk_debate_state.get("conservative_history", ""),
+        "neutral_history": risk_debate_state.get("neutral_history", ""),
+        "latest_speaker": speaker.capitalize(),
+        "current_aggressive_response": risk_debate_state.get(
+            "current_aggressive_response", ""
+        ),
+        "current_conservative_response": risk_debate_state.get(
+            "current_conservative_response", ""
+        ),
+        "current_neutral_response": risk_debate_state.get("current_neutral_response", ""),
+        "count": risk_debate_state["count"] + 1,
+    }
+    update[f"{speaker}_history"] = (
+        risk_debate_state.get(f"{speaker}_history", "") + "\n" + argument
+    )
+    update[f"current_{speaker}_response"] = argument
+    return update
+
+
 

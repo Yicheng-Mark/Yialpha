@@ -1,5 +1,3 @@
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-
 from yiagents.agents.utils.agent_utils import (
     get_binance_basis,
     get_binance_funding_rate,
@@ -16,7 +14,7 @@ from yiagents.agents.utils.agent_utils import (
     get_stock_data,
     get_verified_market_snapshot,
 )
-from yiagents.agents.utils.prompt_builder import build_fincot_prompt
+from yiagents.agents.utils.prompt_builder import build_collaborator_prompt, build_fincot_prompt
 
 # Appended to the system message ONLY for crypto_perp runs. Nudges the analyst
 # to use the perp-native OHLCV and to treat funding/OI + positioning/order-flow
@@ -207,23 +205,7 @@ def create_market_analyst(llm):
         elif state.get("asset_type") == "crypto_spot":
             system_message = system_message + _SPOT_NUDGE
 
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "You are a helpful AI assistant, collaborating with other assistants."
-                    " Use the provided tools to progress towards answering the question."
-                    " If you are unable to fully answer, that's OK; another assistant with different tools"
-                    " will help where you left off. Execute what you can to make progress."
-                    " If you or any other assistant has the FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** or deliverable,"
-                    " prefix your response with FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** so the team knows to stop."
-                    " You have access to the following tools: {tool_names}."
-                    " Today's date is {current_date}; treat it as 'now' for all analysis and tool-call date ranges. {instrument_context}\n"
-                    "{system_message}",
-                ),
-                MessagesPlaceholder(variable_name="messages"),
-            ]
-        )
+        prompt = build_collaborator_prompt(include_tools=True)
 
         prompt = prompt.partial(system_message=system_message)
         prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))

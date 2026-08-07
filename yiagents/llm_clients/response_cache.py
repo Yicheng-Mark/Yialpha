@@ -20,6 +20,13 @@ per-call cache collapses that variability to a single realization, so:
     multi-trial DSR backtest.** Both run with it off by default — simply do not
     set ``YIAGENTS_LLM_CACHE=true`` for those workflows.
 
+    The one workflow that *deliberately* enables it is ``scripts/run_robust.py``:
+    a mid-response ssl.read hang leaves completed nodes' generations cached and
+    the hung node un-cached, so a retry replays the finished work and only
+    re-bills the call that actually hung. That is live single-config analysis
+    (not a distribution measurement), so the variability collapse above does not
+    apply. Pass ``--no-llm-cache`` to opt out.
+
 Byte-equivalent when OFF (default): no file I/O, no ``set_llm_cache`` call,
 langchain behaves exactly as today.
 """

@@ -95,6 +95,15 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--backoff", type=float, default=15.0, help="重试间退避秒（默认 15）")
     p.add_argument(
+        "--no-llm-cache",
+        action="store_true",
+        help="禁用 per-call LLM 响应缓存（默认开）。robust 重跑默认复用缓存："
+        "首跑缓存冷=字节等价；卡死重试时已完成节点按 (model+prompt+temp+tools) "
+        "回放、未产出 generation 的卡死节点重新执行——正是 hang 恢复想要的行为，"
+        "避免每次重试把整张图重新计费。setdefault 尊重用户在 env 里显式设的值；"
+        "本 flag 强制关闭。注意：勿用于 A/B gate / DSR 多 run 分布检验（那些仍需关）",
+    )
+    p.add_argument(
         "--reports-root",
         default=str(Path.home() / ".yiagents" / "logs" / "reports"),
         help="报告根目录（默认 ~/.yiagents/logs/reports）",
@@ -229,6 +238,25 @@ def _kill_all_active() -> None:
             _kill_tree(proc.pid)
 
 
+def _apply_robust_llm_cache(child_env: dict, no_llm_cache: bool) -> None:
+    """Set ``YIAGENTS_LLM_CACHE`` on a robust child subprocess env, in place.
+
+    Default-on for hang-recovery: a retry replays the completed nodes' cached
+    LLM generations and only re-bills the call that actually hung (which never
+    produced a generation, so it was never cached). First attempt is a cache
+    miss → byte-equivalent to running with the cache off. ``--no-llm-cache``
+    forces it off. A user who already exported ``YIAGENTS_LLM_CACHE`` is
+    respected (``setdefault``) unless ``--no-llm-cache`` explicitly overrides —
+    run_robust is live single-config analysis, not an A/B-gate / DSR
+    distribution measurement, so the response_cache distribution caveat does
+    not apply.
+    """
+    if no_llm_cache:
+        child_env["YIAGENTS_LLM_CACHE"] = "false"
+    else:
+        child_env.setdefault("YIAGENTS_LLM_CACHE", "true")
+
+
 def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
     """单 ticker 的「启动子进程 → 看门狗 → 杀/重试」循环。返回结果 dict。"""
     reports_root = _reports_root(opts.reports_root)
@@ -285,6 +313,7 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         # 丢失（AAPL#1 偶发崩溃时 a1 日志只剩 7 行就是这个盲区）。字节等价——只改
         # flush 时机，不改输出内容；run_batch 的 LLM 决策不读自己的 stdout。
         child_env.setdefault("PYTHONUNBUFFERED", "1")
+        _apply_robust_llm_cache(child_env, opts.no_llm_cache)
 
         print(
             f"[{ticker}] ▶️ attempt {attempt}/{opts.max_attempts} → "

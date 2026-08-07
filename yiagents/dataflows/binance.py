@@ -39,6 +39,7 @@ from .binance_rate_limiter import get_binance_weight_limiter
 from .config import get_config
 from .errors import NoMarketDataError, VendorRateLimitError
 from .symbol_utils import normalize_symbol_for_venue
+from .utils import proxy_map
 
 logger = logging.getLogger(__name__)
 
@@ -146,19 +147,6 @@ def _paginate_history(
     return out
 
 
-def _proxies() -> dict[str, str | None]:
-    """Build a proxies dict from the run environment (read at call time).
-
-    Returns ``{"http": ..., "https": ...}`` so requests routes through the
-    SOCKS5 proxy the rest of the data layer uses (socks5h://127.0.0.1:1080).
-    Missing env values fall back to ``None`` (requests' default behavior).
-    """
-    return {
-        "http": os.environ.get("HTTP_PROXY"),
-        "https": os.environ.get("HTTPS_PROXY"),
-    }
-
-
 def _observe_weight(resp, weight_key: str = "fapi") -> None:
     """Feed the server-reported IP weight to the process-wide limiter.
 
@@ -191,9 +179,9 @@ def _do_request(url: str, params: dict, use_session: bool):
     """
     if use_session:
         return get_shared_binance_session().get(
-            url, params=params, proxies=_proxies(), timeout=_TIMEOUT,
+            url, params=params, proxies=proxy_map(), timeout=_TIMEOUT,
         )
-    return requests.get(url, params=params, proxies=_proxies(), timeout=_TIMEOUT)
+    return requests.get(url, params=params, proxies=proxy_map(), timeout=_TIMEOUT)
 
 
 def _request_with_retry(do_request, max_retries: int, symbol_for_error: str, canonical: str):
@@ -814,7 +802,7 @@ def get_binance_basis(symbol: str, look_back_days: int = 7) -> str:
 # the host (api.binance.com vs fapi.binance.com) and the weight budget differ.
 # Spot has NO funding / open-interest / long-short / taker / basis endpoints;
 # it contributes OHLCV + 24h ticker, and the cross-venue spot-perp basis below.
-# All spot calls reuse _proxies() (SOCKS5) and the reactive 429/418 floor via
+# All spot calls reuse proxy_map() (SOCKS5) and the reactive 429/418 floor via
 # _http_get; they count against the "spot" product-line limiter budget, which
 # Binance tallies independently from fapi on the same IP.
 

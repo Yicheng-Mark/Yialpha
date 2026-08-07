@@ -540,6 +540,24 @@ class YiAgentsGraph:
         identity = resolve_instrument_identity(ticker)
         return build_instrument_context(ticker, asset_type, identity)
 
+    def _run_signature(self, asset_type: str) -> str:
+        """Graph-shape inputs that must invalidate a checkpoint if changed.
+
+        Folded into the checkpoint thread_id so resuming under a different
+        selection of analysts, debate/risk depth, asset type, or parallel
+        mode starts fresh instead of continuing a graph with a different
+        shape. ``analyst_parallel`` is read from config (YiAgents-only; the
+        fan-out changes the graph topology, so it must be part of the
+        signature even though the upstream contract doesn't carry it).
+        """
+        return "|".join([
+            "analysts=" + ",".join(self.selected_analysts),
+            f"debate={self.config['max_debate_rounds']}",
+            f"risk={self.config['max_risk_discuss_rounds']}",
+            f"asset={asset_type}",
+            f"parallel={self.config.get('analyst_parallel', False)}",
+        ])
+
     def propagate(self, company_name, trade_date, asset_type: str = "stock", portfolio_state=None):
         """Run the trading agents graph for a company on a specific date.
 
@@ -570,7 +588,8 @@ class YiAgentsGraph:
             self.graph = self.workflow.compile(checkpointer=saver)
 
             step = checkpoint_step(
-                self.config["data_cache_dir"], company_name, str(trade_date)
+                self.config["data_cache_dir"], company_name, str(trade_date),
+                self._run_signature(asset_type),
             )
             if step is not None:
                 logger.info(
@@ -677,9 +696,10 @@ class YiAgentsGraph:
         )
         args = self.propagator.get_graph_args()
 
-        # Inject thread_id so same ticker+date resumes, different date starts fresh.
+        # Inject thread_id so same ticker+date+graph-shape resumes; a different
+        # date or graph shape starts fresh (#1089).
         if self.config.get("checkpoint_enabled"):
-            tid = thread_id(company_name, str(trade_date))
+            tid = thread_id(company_name, str(trade_date), self._run_signature(asset_type))
             args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
 
         if self.debug:
@@ -731,7 +751,8 @@ class YiAgentsGraph:
         # Clear checkpoint on successful completion to avoid stale state.
         if self.config.get("checkpoint_enabled"):
             clear_checkpoint(
-                self.config["data_cache_dir"], company_name, str(trade_date)
+                self.config["data_cache_dir"], company_name, str(trade_date),
+                self._run_signature(asset_type),
             )
 
         return final_state, self.process_signal(final_state["final_trade_decision"])

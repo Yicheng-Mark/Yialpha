@@ -44,6 +44,13 @@ if _HTTP_TIMEOUT_ENV:
 # enough to catch the year-old frames yfinance occasionally returns (#1021).
 MAX_OHLCV_STALE_DAYS = 10
 
+# How long a same-day cache that does not yet reach the requested day may be
+# reused before it is refetched (#1150). Short enough that an intraday run picks
+# up today's close soon after it publishes, long enough that a day with no bar
+# at all (weekend, holiday) cannot trigger a download on every call. Historical
+# days are immutable, so they never trigger a refresh (see _needs_same_day_refresh).
+OHLCV_CACHE_TTL_SECONDS = 900
+
 # Transport-level failures from yfinance's HTTP stack. ``OSError`` is the single
 # root: socket.timeout and ConnectionError are OSError subclasses; requests'
 # RequestException derives from IOError (== OSError); and curl_cffi's CurlError
@@ -173,6 +180,19 @@ def _assert_ohlcv_not_stale(
         )
 
 
+def _needs_same_day_refresh(data_file, curr_date_dt, today_date) -> bool:
+    """Whether a cached frame must be refetched to reflect the requested day.
+
+    The cache file is keyed per day, so without this a run started before the
+    day's bar was final keeps serving that snapshot to every later run (#1150).
+    Only the current day is affected: a historical date's rows are immutable,
+    so the cache is reused unconditionally (byte-equivalent to the old path).
+    """
+    if curr_date_dt.date() < today_date.date():
+        return False
+    return time.time() - os.path.getmtime(data_file) > OHLCV_CACHE_TTL_SECONDS
+
+
 def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     """Fetch OHLCV data with caching, filtered to prevent look-ahead bias.
 
@@ -224,7 +244,11 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
         data = None
         if os.path.exists(data_file):
             cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
-            if not cached.empty and "Close" in cached.columns:
+            if (
+                not cached.empty
+                and "Close" in cached.columns
+                and not _needs_same_day_refresh(data_file, curr_date_dt, today_date)
+            ):
                 data = cached
 
         if data is None:

@@ -42,7 +42,7 @@ from typing import Any
 
 from .config import get_config
 from .errors import NoMarketDataError, VendorRateLimitError
-from .utils import is_filing_public
+from .utils import is_filing_public, proxy_map
 
 logger = logging.getLogger(__name__)
 
@@ -58,18 +58,6 @@ _throttle_lock = threading.Lock()
 
 def _user_agent() -> str:
     return os.environ.get("YIAGENTS_SEC_USER_AGENT") or "YiAgents research (sec-edgar vendor)"
-
-
-def _proxies() -> dict[str, str | None]:
-    """SOCKS5/HTTP proxy map, mirroring dataflows/binance.py.
-
-    SEC hosts are US-based; reads HTTP_PROXY/HTTPS_PROXY/ALL_PROXY at call time
-    so the project's socks5h:// settings (set in .env) are honoured.
-    """
-    return {
-        "http": os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY"),
-        "https": os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY"),
-    }
 
 
 def _cache_dir() -> str:
@@ -98,7 +86,7 @@ def _sec_get(url: str) -> bytes:
         resp = requests.get(
             url,
             headers={"User-Agent": _user_agent()},
-            proxies=_proxies(),
+            proxies=proxy_map(),
             timeout=_TIMEOUT,
         )
     except Exception as exc:  # noqa: BLE001 -- network failure -> NoMarketDataError

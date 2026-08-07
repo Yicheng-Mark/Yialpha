@@ -142,6 +142,14 @@ _ENV_OVERRIDES = {
     # input. The vendor connects directly (bypassing the SOCKS5 VPN proxy) since
     # Eastmoney is a domestic source.
     "YIAGENTS_A_STOCK":                      "a_stock",
+    # Market turbulence index (FinRL-derived, see yiagents.dataflows.market_regime).
+    # Off by default = the conservative risk debater's prompt is byte-for-byte
+    # unchanged (same opt-in contract as sec_ownership / valuation_tools). When
+    # on, a one-line market-stress reading (benchmark 252d squared-z) is appended
+    # to the conservative debater's data sources — a market-level ex-ante cue
+    # complementary to the portfolio-level reactive DrawdownBreaker. Advisory and
+    # fail-soft; it changes agent input only when explicitly enabled.
+    "YIAGENTS_MARKET_REGIME":                "market_regime",
 }
 
 
@@ -271,6 +279,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # is appended so the analyst can consult a money-flow signal the default
     # yfinance path cannot supply. US/crypto/HK tickers never enter the branch.
     "a_stock": False,
+    # Market turbulence index (env: YIAGENTS_MARKET_REGIME). Off by default =
+    # the conservative risk debater's prompt is unchanged (byte-equivalent).
+    # When on, a one-line benchmark market-stress reading (252d rolling
+    # squared-z, FinRL-derived) is appended to the conservative debater's data
+    # sources. Advisory + fail-soft; only the conservative debater sees it.
+    "market_regime": False,
     # Phase 4: global kill switch (env: YIAGENTS_KILL_SWITCH). Halt = no
     # new orders submitted by the browser broker; read live at order time.
     "kill_switch": False,

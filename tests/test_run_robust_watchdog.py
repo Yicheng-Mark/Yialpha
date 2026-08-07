@@ -59,6 +59,32 @@ class TestReap(unittest.TestCase):
         self.assertEqual(events["reap_wait"], 1)
 
 
+class TestRobustLLMCacheEnv(unittest.TestCase):
+    """The robust child subprocess gets YIAGENTS_LLM_CACHE set so retries
+    replay completed nodes (hang recovery) instead of re-billing the graph."""
+
+    def test_default_enables_cache(self):
+        env = {}
+        rr._apply_robust_llm_cache(env, no_llm_cache=False)
+        self.assertEqual(env.get("YIAGENTS_LLM_CACHE"), "true")
+
+    def test_no_llm_cache_forces_off(self):
+        env = {"YIAGENTS_LLM_CACHE": "true"}  # user pre-set on
+        rr._apply_robust_llm_cache(env, no_llm_cache=True)
+        self.assertEqual(env.get("YIAGENTS_LLM_CACHE"), "false")
+
+    def test_respects_user_preset_off(self):
+        # A user who exported YIAGENTS_LLM_CACHE=false is respected (setdefault).
+        env = {"YIAGENTS_LLM_CACHE": "false"}
+        rr._apply_robust_llm_cache(env, no_llm_cache=False)
+        self.assertEqual(env.get("YIAGENTS_LLM_CACHE"), "false")
+
+    def test_respects_user_preset_on(self):
+        env = {"YIAGENTS_LLM_CACHE": "true"}
+        rr._apply_robust_llm_cache(env, no_llm_cache=False)
+        self.assertEqual(env.get("YIAGENTS_LLM_CACHE"), "true")
+
+
 class TestMainResilience(unittest.TestCase):
     def test_per_ticker_exception_does_not_crash_batch(self):
         # If _run_one_ticker raises (any unexpected error), main() must catch
