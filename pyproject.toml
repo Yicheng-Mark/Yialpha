@@ -60,6 +60,21 @@ web = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
 ]
+# Native China A-share data vendors for the optional ``a_share_native`` category
+# (BaoStock OHLC/TTM valuation + AKShare 东财 news). Optional so the core install
+# stays lean: ``pip install "yiagents[a-share]"``. The vendors are lazy-imported,
+# so default-off runs (and machines without this extra) are unaffected — the
+# category degrades to a sentinel when the libs are absent. curl_cffi is an
+# optional anti-bot enhancer for AKShare (not required; degrades gracefully).
+a-share = [
+    "baostock>=0.8.8",
+    "akshare>=1.17.86",
+]
+# Tushare Pro — opt-in quality tier (needs TUSHARE_TOKEN). Separate extra because
+# it requires a token the keyless vendors do not. ``pip install "yiagents[a-share-tushare]"``.
+a-share-tushare = [
+    "tushare>=1.4.21",
+]
 
 [project.scripts]
 yiagents = "cli.main:app"

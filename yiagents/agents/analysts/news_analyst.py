@@ -1,4 +1,5 @@
 from yiagents.agents.utils.agent_utils import (
+    get_a_share_news_native,
     get_global_news,
     get_instrument_context_from_state,
     get_language_instruction,
@@ -7,6 +8,22 @@ from yiagents.agents.utils.agent_utils import (
     get_prediction_markets,
 )
 from yiagents.agents.utils.prompt_builder import build_collaborator_prompt
+from yiagents.dataflows.config import get_config
+from yiagents.dataflows.symbol_utils import is_a_stock
+
+
+# Appended to the news system prompt only when YIAGENTS_A_SHARE_NATIVE is on AND
+# the ticker is a China A-share (.SS/.SH/.SZ). When off (or non-A-share), the
+# analyst's prompt (and tool list) are byte-for-byte unchanged. Same double-gate
+# contract as the fundamentals analyst's a_share_native nudge.
+_A_SHARE_NATIVE_NUDGE = (
+    " Additional native China A-share news tool (A-share only): "
+    "`get_a_share_news_native` (东财 per-stock Chinese headlines via AKShare, "
+    "point-in-time by publish date). Use it to surface A-share-specific news "
+    "the default Reddit/StockTwits/yfinance path covers thinly. Headlines are "
+    "Chinese-language. If the tool returns 'no coverage found' for this symbol/"
+    "date, report that honestly and do not fabricate headlines."
+)
 
 
 def create_news_analyst(llm):
@@ -15,6 +32,7 @@ def create_news_analyst(llm):
         asset_type = state.get("asset_type", "stock")
         asset_label = "company" if asset_type == "stock" else "asset"
         instrument_context = get_instrument_context_from_state(state)
+        ticker = str(state["company_of_interest"])
 
         tools = [
             get_news,
@@ -22,6 +40,13 @@ def create_news_analyst(llm):
             get_macro_indicators,
             get_prediction_markets,
         ]
+        # Native A-share news (env: YIAGENTS_A_SHARE_NATIVE, off by default).
+        # Double-gated byte-equivalence contract: flag AND is_a_stock(ticker).
+        # When either fails the tool list / prompt are byte-for-byte identical to
+        # the prior behaviour, so US / crypto / HK tickers never enter this branch.
+        # When both hold, one PIT-correct A-share-only news tool is appended.
+        if get_config().get("a_share_native") and is_a_stock(ticker):
+            tools.append(get_a_share_news_native)
 
         system_message = (
             f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(query, start_date, end_date) for {asset_label}-specific or targeted news searches, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve'), and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events). Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
@@ -29,6 +54,11 @@ def create_news_analyst(llm):
             + " Grounding rules (anti-hallucination): (1) Every news item or macro claim must cite its source and date (e.g. 'per FRED, core_pce was X% on YYYY-MM-DD' or 'headline from get_news, YYYY-MM-DD'). (2) If two sources conflict, flag the discrepancy rather than inventing a reconciled narrative. (3) If a tool returns no results for the query/period, write 'no coverage found' for that angle instead of speculating or filling gaps from prior knowledge."
             + get_language_instruction()
         )
+        # A-share news nudge uses the SAME double gate as the tool extension
+        # above, so the prompt only changes when the tools do. (news keeps
+        # system_message as a plain string, unlike fundamentals' 1-tuple.)
+        if get_config().get("a_share_native") and is_a_stock(ticker):
+            system_message = system_message + _A_SHARE_NATIVE_NUDGE
 
         prompt = build_collaborator_prompt(include_tools=True)
 

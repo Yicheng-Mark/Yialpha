@@ -13,6 +13,9 @@ from langgraph.prebuilt import ToolNode
 # Import the abstract tool methods from agent_utils
 from yiagents.agents.utils.agent_utils import (
     build_instrument_context,
+    get_a_share_fundamentals_native,
+    get_a_share_news_native,
+    get_a_share_ohlc_native,
     get_balance_sheet,
     get_binance_basis,
     get_binance_funding_rate,
@@ -298,6 +301,13 @@ class YiAgentsGraph:
                     get_insider_transactions,
                     get_macro_indicators,
                     get_prediction_markets,
+                    # Native A-share news (a_share_native). Dormant for default
+                    # runs: the news analyst only advertises it when
+                    # YIAGENTS_A_SHARE_NATIVE is on AND the ticker is an A-share
+                    # (.SS/.SH/.SZ), so the LLM never names it otherwise and it
+                    # is simply an extra entry in ToolNode's name->tool map (same
+                    # dormant contract as the fundamentals A-share tools).
+                    get_a_share_news_native,
                 ]
             ),
             "fundamentals": ToolNode(
@@ -323,6 +333,14 @@ class YiAgentsGraph:
                     # is simply an extra entry in ToolNode's name->tool map
                     # (same dormant contract as the SEC/Binance tools above).
                     get_margin_trading,
+                    # Native A-share OHLC + TTM valuation (a_share_native). Dormant
+                    # for default runs: the fundamentals analyst only advertises
+                    # them when YIAGENTS_A_SHARE_NATIVE is on AND the ticker is an
+                    # A-share (.SS/.SH/.SZ), so the LLM never names them otherwise
+                    # and they are simply extra entries in ToolNode's name->tool
+                    # map (same dormant contract as the margin tool above).
+                    get_a_share_fundamentals_native,
+                    get_a_share_ohlc_native,
                 ]
             ),
         }

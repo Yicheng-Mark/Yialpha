@@ -142,6 +142,20 @@ _ENV_OVERRIDES = {
     # input. The vendor connects directly (bypassing the SOCKS5 VPN proxy) since
     # Eastmoney is a domestic source.
     "YIAGENTS_A_STOCK":                      "a_stock",
+    # Native A-share OHLC + TTM valuation + news / money flow / dragon-tiger
+    # (a_share_native) exposed to the fundamentals + news analysts as opt-in
+    # tools behind one flag, AND only for A-share tickers (.SS/.SH/.SZ) via the
+    # is_a_stock double-gate. Off by default = the analyst tool list / prompt /
+    # capabilities are byte-for-byte unchanged when the flag is unset (same
+    # contract as a_stock / sec_ownership). When on, PIT-correct 前复权 OHLC +
+    # server-computed TTM/MRQ multiples (PE/PB/PS/PCF) are appended so the
+    # analyst can consult native A-share data the default yfinance path covers
+    # thinly, plus 资金流 (主力 net inflow) and 龙虎榜 (dragon-tiger) smart-money
+    # signals via AKShare. The BaoStock vendor reaches a domestic TCP socket (no
+    # proxy bypass needed); the AKShare vendor pops the SOCKS5 proxy env around
+    # its domestic HTTP calls. Optional deps are lazy-imported, so default-off
+    # runs never import baostock/akshare (zero overhead).
+    "YIAGENTS_A_SHARE_NATIVE":               "a_share_native",
     # Market turbulence index (FinRL-derived, see yiagents.dataflows.market_regime).
     # Off by default = the conservative risk debater's prompt is byte-for-byte
     # unchanged (same opt-in contract as sec_ownership / valuation_tools). When
@@ -279,6 +293,16 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # is appended so the analyst can consult a money-flow signal the default
     # yfinance path cannot supply. US/crypto/HK tickers never enter the branch.
     "a_stock": False,
+    # Native A-share data (env: YIAGENTS_A_SHARE_NATIVE). Off by default = the
+    # fundamentals/news analyst tool lists are unchanged (byte-equivalent).
+    # Double-gated: when on AND the ticker is an A-share (.SS/.SH/.SZ),
+    # PIT-correct A-share-only tools are appended — OHLC qfq + TTM valuation
+    # (BaoStock), 资金流 money flow + 龙虎榜 dragon-tiger (AKShare), and 东财 news
+    # (AKShare) — so the analyst can consult native data the default yfinance
+    # path covers thinly/sparsely. US/crypto/HK tickers never enter the branch.
+    # baostock/akshare are optional lazy-imported dependencies, so default-off
+    # runs (and machines without the 'a-share' extra) are unaffected.
+    "a_share_native": False,
     # Market turbulence index (env: YIAGENTS_MARKET_REGIME). Off by default =
     # the conservative risk debater's prompt is unchanged (byte-equivalent).
     # When on, a one-line benchmark market-stress reading (252d rolling
