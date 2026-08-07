@@ -2,7 +2,7 @@
 
 AI 多智能体量化投资框架（前身 TradingAgents v0.3.0 fork，已于 2026-06-27 彻底重命名为 YiAgents）。
 
-- **GitHub**：https://github.com/zhang12120113-creator/Yiagents （SSH push）
+- **GitHub**：https://github.com/Yicheng-Mark/Yiagents
 - **环境**：Windows 11 + git-bash，DeepSeek API
 
 ## 命名约定（已统一）
