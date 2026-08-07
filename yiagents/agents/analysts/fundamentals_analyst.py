@@ -1,4 +1,8 @@
 from yiagents.agents.utils.agent_utils import (
+    get_a_share_dragon_tiger_native,
+    get_a_share_fundamentals_native,
+    get_a_share_money_flow_native,
+    get_a_share_ohlc_native,
     get_balance_sheet,
     get_cashflow,
     get_form4_insider_trading,
@@ -47,6 +51,27 @@ _A_STOCK_NUDGE = (
 )
 
 
+# Appended to the fundamentals system prompt only when YIAGENTS_A_SHARE_NATIVE
+# is on AND the ticker is a China A-share (.SS/.SH/.SZ). When off (or non-
+# A-share), the analyst's prompt (and tool list) are byte-for-byte unchanged.
+_A_SHARE_NATIVE_NUDGE = (
+    " Additional native China A-share data tools (A-share only): "
+    "`get_a_share_fundamentals_native` (daily TTM valuation — PE-TTM / PB-MRQ / "
+    "PS-TTM / PCF-TTM, server-computed so no single-period distortion, plus the "
+    "ST flag) and `get_a_share_ohlc_native` (daily 前复权 OHLCV). These are more "
+    "reliable for A-shares than the default Yahoo path; use them to cross-check "
+    "multiples and prices. A negative PE = trailing loss. Also "
+    "`get_a_share_money_flow_native` (daily 资金流 — 主力/超大单/大单/中单/小单 "
+    "net inflow; a persistent positive 主力净流入 = institutional accumulation / "
+    "bullish, persistent negative = distribution / bearish) and "
+    "`get_a_share_dragon_tiger_native` (龙虎榜 appearances — net institutional "
+    "buy-in vs sell-out, a smart-money signal; most stocks do not appear in a "
+    "given window, which is normal, not bearish). If a tool returns 'data not "
+    "available' or 'no coverage found' for this symbol/date, report that honestly "
+    "and do not estimate multiples, prices, capital flow, or dragon-tiger activity."
+)
+
+
 def create_fundamentals_analyst(llm):
     def fundamentals_analyst_node(state):
         current_date = state["trade_date"]
@@ -85,6 +110,19 @@ def create_fundamentals_analyst(llm):
         # PIT-correct A-share-only tool is appended plus a short nudge.
         if get_config().get("a_stock") and is_a_stock(ticker):
             tools.append(get_margin_trading)
+        # Native A-share OHLC + TTM valuation (env: YIAGENTS_A_SHARE_NATIVE,
+        # off by default). Same double-gate byte-equivalence contract as a_stock
+        # above — flag AND is_a_stock(ticker). When either fails the tool list /
+        # prompt / capabilities are byte-for-byte identical to the prior
+        # behaviour, so US / crypto / HK tickers never enter this branch. When
+        # both hold, two PIT-correct A-share-only tools are appended plus a nudge.
+        if get_config().get("a_share_native") and is_a_stock(ticker):
+            tools.extend([
+                get_a_share_fundamentals_native,
+                get_a_share_ohlc_native,
+                get_a_share_money_flow_native,
+                get_a_share_dragon_tiger_native,
+            ])
 
         system_message = (
             "You are a researcher tasked with analyzing fundamental information over the past week about a company. Please write a comprehensive report of the company's fundamental information such as financial documents, company profile, basic company financials, and company financial history to gain a full view of the company's fundamental information to inform traders. Focus on the most decision-relevant figures rather than exhaustive detail, and tie every claim to a specific number and reporting period pulled from the tools. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
@@ -103,6 +141,10 @@ def create_fundamentals_analyst(llm):
         # tool extension above, so the prompt only changes when the tools do.
         if get_config().get("a_stock") and is_a_stock(ticker):
             system_message = (system_message[0] + _A_STOCK_NUDGE,)
+        # Native A-share nudge uses the SAME double gate (flag AND is_a_stock) as
+        # its tool extension above, so the prompt only changes when the tools do.
+        if get_config().get("a_share_native") and is_a_stock(ticker):
+            system_message = (system_message[0] + _A_SHARE_NATIVE_NUDGE,)
 
         prompt = build_collaborator_prompt(include_tools=True)
 

@@ -35,6 +35,13 @@ from yiagents.agents.utils.news_data_tools import (
     get_news,
 )
 from yiagents.agents.utils.eastmoney_tools import get_margin_trading
+from yiagents.agents.utils.a_share_native_tools import (
+    get_a_share_dragon_tiger_native,
+    get_a_share_fundamentals_native,
+    get_a_share_money_flow_native,
+    get_a_share_news_native,
+    get_a_share_ohlc_native,
+)
 from yiagents.agents.utils.prediction_markets_tools import get_prediction_markets
 from yiagents.agents.utils.sec_ownership_tools import (
     get_form4_insider_trading,
@@ -65,6 +72,11 @@ __all__ = [
     "get_ftd_data",
     "get_institutional_holdings",
     "get_margin_trading",
+    "get_a_share_fundamentals_native",
+    "get_a_share_ohlc_native",
+    "get_a_share_news_native",
+    "get_a_share_money_flow_native",
+    "get_a_share_dragon_tiger_native",
     "get_news",
     "get_global_news",
     "get_insider_transactions",
