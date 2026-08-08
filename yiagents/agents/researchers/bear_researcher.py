@@ -1,4 +1,5 @@
 from yiagents.agents.utils.agent_utils import (
+    build_investment_debate_update,
     get_instrument_context_from_state,
     get_language_instruction,
 )
@@ -8,7 +9,6 @@ def create_bear_researcher(llm):
     def bear_node(state) -> dict:
         investment_debate_state = state["investment_debate_state"]
         history = investment_debate_state.get("history", "")
-        bear_history = investment_debate_state.get("bear_history", "")
 
         current_response = investment_debate_state.get("current_response", "")
         market_research_report = state["market_report"]
@@ -50,13 +50,9 @@ Use this information to deliver a compelling bear argument, refute the bull's cl
 
         argument = f"Bear Analyst: {response.content}"
 
-        new_investment_debate_state = {
-            "history": history + "\n" + argument,
-            "bear_history": bear_history + "\n" + argument,
-            "bull_history": investment_debate_state.get("bull_history", ""),
-            "current_response": argument,
-            "count": investment_debate_state["count"] + 1,
-        }
+        new_investment_debate_state = build_investment_debate_update(
+            investment_debate_state, "bear", argument
+        )
 
         return {"investment_debate_state": new_investment_debate_state}
 

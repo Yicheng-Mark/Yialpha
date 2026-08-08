@@ -88,6 +88,10 @@ __all__ = [
     "get_instrument_context_from_state",
     "get_language_instruction",
     "create_msg_delete",
+    "build_clear_placeholder",
+    "get_clear_placeholder_from_state",
+    "build_risk_debate_update",
+    "build_investment_debate_update",
 ]
 
 logger = logging.getLogger(__name__)
@@ -248,28 +252,54 @@ def get_instrument_context_from_state(state: Mapping[str, Any]) -> str:
     )
 
 
+def build_clear_placeholder(instrument_context: str, trade_date: str) -> HumanMessage:
+    """Build the context-anchored placeholder emitted after messages are cleared.
+
+    The placeholder must not be a bare ``"Continue"``: some OpenAI-compatible
+    providers interpret that literally as the user task and produce output
+    about the word "continue" instead of analysing the instrument (#888).
+    Anchoring it to the resolved instrument context and date keeps the next
+    analyst on-task even if the provider treats the placeholder as a
+    standalone request.
+
+    This is the SINGLE source of truth for the placeholder text — both
+    :func:`create_msg_delete` (serial path) and
+    :func:`~yiagents.graph.analyst_fanout.create_analyst_fanout_node` (parallel
+    path) MUST call this so serial and parallel produce byte-identical
+    placeholders. Duplicating the string would risk the two paths silently
+    diverging, violating the parallel iron law.
+    """
+    return HumanMessage(
+        content=(
+            f"Proceed with your assigned analysis for this workflow. "
+            f"{instrument_context} The analysis date is {trade_date}."
+        )
+    )
+
+
+def get_clear_placeholder_from_state(state: Mapping[str, Any]) -> HumanMessage:
+    """Resolve the clear-placeholder for a run from its state.
+
+    Thin wrapper over :func:`build_clear_placeholder` that pulls
+    ``instrument_context`` and ``trade_date`` from ``state`` with the same
+    fallbacks :func:`create_msg_delete` uses, so every caller builds the
+    identical placeholder for the same state.
+    """
+    instrument_context = get_instrument_context_from_state(state)
+    trade_date = state.get("trade_date", "the requested date")
+    return build_clear_placeholder(instrument_context, trade_date)
+
+
 def create_msg_delete():
     def delete_messages(state):
         """Clear messages and add a context-anchored placeholder.
 
-        The placeholder must not be a bare ``"Continue"``: some
-        OpenAI-compatible providers interpret that literally as the user task
-        and produce output about the word "continue" instead of analysing the
-        instrument (#888). Anchoring it to the resolved instrument context and
-        date keeps the next analyst on-task even if the provider treats the
-        placeholder as a standalone request.
+        Delegates to :func:`get_clear_placeholder_from_state` so the serial
+        clear-node and the parallel fan-out node share one placeholder builder.
         """
         messages = state["messages"]
         removal_operations = [RemoveMessage(id=m.id) for m in messages]
-
-        instrument_context = get_instrument_context_from_state(state)
-        trade_date = state.get("trade_date", "the requested date")
-        placeholder = HumanMessage(
-            content=(
-                f"Proceed with your assigned analysis for this workflow. "
-                f"{instrument_context} The analysis date is {trade_date}."
-            )
-        )
+        placeholder = get_clear_placeholder_from_state(state)
         return {"messages": removal_operations + [placeholder]}
 
     return delete_messages
@@ -311,6 +341,38 @@ def build_risk_debate_update(
     )
     update[f"current_{speaker}_response"] = argument
     return update
+
+
+def build_investment_debate_update(
+    investment_debate_state: Mapping[str, Any], speaker: str, argument: str
+) -> dict:
+    """Assemble the next ``investment_debate_state`` after a researcher speaks.
+
+    ``speaker`` is one of ``"bull"`` / ``"bear"``. The speaker's own
+    ``<speaker>_history`` receives the new ``argument``; the shared ``history``
+    log always appends it; ``current_response`` is set to ``argument``; the
+    opposing side's history is carried over unchanged; ``count`` advances by 1.
+
+    Centralises the 5-field state dict the bull/bear researchers each rebuilt
+    inline, so the two cannot drift apart — the same role
+    :func:`build_risk_debate_update` plays for the three risk debators.
+    Byte-equivalent to each researcher's prior dict.
+
+    Note: ``judge_decision`` (present on :class:`InvestDebateState`) is
+    intentionally NOT emitted — neither researcher writes it (it is reserved
+    for the Research Manager's downstream use), and emitting it here would
+    change the dict's key set and break the byte-equivalence contract.
+    """
+    opponent = "bear" if speaker == "bull" else "bull"
+    return {
+        "history": investment_debate_state.get("history", "") + "\n" + argument,
+        f"{speaker}_history": (
+            investment_debate_state.get(f"{speaker}_history", "") + "\n" + argument
+        ),
+        f"{opponent}_history": investment_debate_state.get(f"{opponent}_history", ""),
+        "current_response": argument,
+        "count": investment_debate_state["count"] + 1,
+    }
 
 
 
