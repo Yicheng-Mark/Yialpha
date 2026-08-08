@@ -43,7 +43,7 @@ class NormalizedChatAnthropic(ChatAnthropic):
     downstream handling.
     """
 
-    def invoke(self, input, config=None, **kwargs):
+    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
         return normalize_content(super().invoke(input, config, **kwargs))
 
 
@@ -56,7 +56,7 @@ class AnthropicClient(BaseLLMClient):
     def get_llm(self) -> Any:
         """Return configured ChatAnthropic instance."""
         self.warn_if_unknown_model()
-        llm_kwargs = {"model": self.model}
+        llm_kwargs: dict[str, Any] = {"model": self.model}
 
         if self.base_url:
             llm_kwargs["base_url"] = self.base_url

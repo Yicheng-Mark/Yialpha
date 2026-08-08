@@ -12,6 +12,8 @@ responsibility (negate and mirror the offset).
 
 from __future__ import annotations
 
+from typing import TypeAlias
+
 import numpy as np
 import pandas as pd
 from stockstats import wrap
@@ -19,7 +21,7 @@ from stockstats import wrap
 from yiagents.dataflows.stockstats_utils import load_ohlcv
 
 # A precomputed OHLCV frame OR a ticker symbol. Accepted by atr_stop.
-SymbolOrFrame = str | pd.DataFrame
+SymbolOrFrame: TypeAlias = str | pd.DataFrame
 
 
 def latest_atr(symbol: str, curr_date: str) -> tuple[float, float]:

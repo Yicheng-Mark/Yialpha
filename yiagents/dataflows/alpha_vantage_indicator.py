@@ -142,6 +142,8 @@ def get_indicator(
             return f"Error: Indicator {indicator} not implemented yet."
 
         # Parse CSV data and extract values for the date range
+        if not isinstance(data, str):
+            return f"Error: No CSV data returned for {indicator}"
         lines = data.strip().split('\n')
         if len(lines) < 2:
             return f"Error: No data returned for {indicator}"

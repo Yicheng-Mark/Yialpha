@@ -32,10 +32,10 @@ class NormalizedChatOpenAI(ChatOpenAI):
     stays small.
     """
 
-    def invoke(self, input, config=None, **kwargs):
+    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
         return normalize_content(super().invoke(input, config, **kwargs))
 
-    def with_structured_output(self, schema, *, method=None, **kwargs):
+    def with_structured_output(self, schema: Any, *, method: Any = None, include_raw: bool = False, **kwargs: Any) -> Any:  # type: ignore[override]  # intentional: adds method-dispatch logic the base signature doesn't model
         caps = get_capabilities(self.model_name)
         if caps.preferred_structured_method == "none":
             raise NotImplementedError(
@@ -61,14 +61,14 @@ class LocalCompatibleChatOpenAI(NormalizedChatOpenAI):
     across local servers regardless of the model ID's capabilities (#1057).
     """
 
-    def with_structured_output(self, schema, *, method=None, **kwargs):
+    def with_structured_output(self, schema: Any, *, method: Any = None, include_raw: bool = False, **kwargs: Any) -> Any:  # type: ignore[override]  # intentional: adds tool_choice suppression the base signature doesn't model
         resolved = method or get_capabilities(self.model_name).preferred_structured_method
         if resolved == "function_calling":
             kwargs.setdefault("tool_choice", None)
         return super().with_structured_output(schema, method=method, **kwargs)
 
 
-def _input_to_messages(input_: Any) -> list:
+def _input_to_messages(input_: Any) -> list[Any]:
     """Normalise a langchain LLM input to a list of message objects.
 
     Accepts a list of messages, a ``ChatPromptValue`` (from a
@@ -100,7 +100,7 @@ class DeepSeekChatOpenAI(NormalizedChatOpenAI):
     ``NormalizedChatOpenAI.with_structured_output``, not here.
     """
 
-    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+    def _get_request_payload(self, input_: Any, *, stop: Any = None, **kwargs: Any) -> Any:
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
         outgoing = payload.get("messages", [])
         for message_dict, message in zip(outgoing, _input_to_messages(input_), strict=False):
@@ -111,7 +111,7 @@ class DeepSeekChatOpenAI(NormalizedChatOpenAI):
                 message_dict["reasoning_content"] = reasoning
         return payload
 
-    def _create_chat_result(self, response, generation_info=None):
+    def _create_chat_result(self, response: Any, generation_info: Any = None) -> Any:
         chat_result = super()._create_chat_result(response, generation_info)
         response_dict = (
             response
@@ -150,7 +150,7 @@ class MinimaxChatOpenAI(NormalizedChatOpenAI):
     ``NormalizedChatOpenAI.with_structured_output``, not here.
     """
 
-    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+    def _get_request_payload(self, input_: Any, *, stop: Any = None, **kwargs: Any) -> Any:
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
         if get_capabilities(self.model_name).requires_reasoning_split:
             # Pass via extra_body, not as a top-level kwarg: the openai SDK
@@ -276,9 +276,9 @@ class OpenAIClient(BaseLLMClient):
     def get_llm(self) -> Any:
         """Return a configured ChatOpenAI instance, driven by the provider registry."""
         self.warn_if_unknown_model()
-        llm_kwargs = {"model": self.model}
+        llm_kwargs: dict[str, Any] = {"model": self.model}
         spec = OPENAI_COMPATIBLE_PROVIDERS.get(self.provider)
-        chat_cls = NormalizedChatOpenAI
+        chat_cls: type = NormalizedChatOpenAI
 
         if spec is not None:
             chat_cls = spec.chat_class

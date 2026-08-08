@@ -1,5 +1,12 @@
 import logging
+from collections.abc import Callable
+from typing import Any
 
+from .akshare_vendor import (
+    get_a_share_dragon_tiger_native as get_akshare_a_share_dragon_tiger,
+    get_a_share_money_flow_native as get_akshare_a_share_money_flow,
+    get_a_share_news_native as get_akshare_a_share_news,
+)
 from .alpha_vantage import (
     get_balance_sheet as get_alpha_vantage_balance_sheet,
     get_cashflow as get_alpha_vantage_cashflow,
@@ -10,6 +17,10 @@ from .alpha_vantage import (
     get_insider_transactions as get_alpha_vantage_insider_transactions,
     get_news as get_alpha_vantage_news,
     get_stock as get_alpha_vantage_stock,
+)
+from .baostock_vendor import (
+    get_a_share_fundamentals_native as get_baostock_a_share_fundamentals,
+    get_a_share_ohlc_native as get_baostock_a_share_ohlc,
 )
 from .binance import (
     get_binance_basis,
@@ -23,19 +34,6 @@ from .binance import (
     get_binance_taker_buy_sell,
 )
 from .config import get_config
-from .akshare_vendor import (
-    get_a_share_dragon_tiger_native as get_akshare_a_share_dragon_tiger,
-    get_a_share_money_flow_native as get_akshare_a_share_money_flow,
-    get_a_share_news_native as get_akshare_a_share_news,
-)
-from .tushare_vendor import (
-    get_a_share_fundamentals_native as get_tushare_a_share_fundamentals,
-    get_a_share_news_native as get_tushare_a_share_news,
-)
-from .baostock_vendor import (
-    get_a_share_fundamentals_native as get_baostock_a_share_fundamentals,
-    get_a_share_ohlc_native as get_baostock_a_share_ohlc,
-)
 from .eastmoney import get_margin_trading as get_eastmoney_margin_trading
 from .errors import (
     NoMarketDataError,
@@ -54,6 +52,10 @@ from .sec_ownership import (
     get_form4_insider_trading as get_sec_form4,
     get_ftd_data as get_sec_ftd,
     get_institutional_holdings as get_sec_13f,
+)
+from .tushare_vendor import (
+    get_a_share_fundamentals_native as get_tushare_a_share_fundamentals,
+    get_a_share_news_native as get_tushare_a_share_news,
 )
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
@@ -210,7 +212,7 @@ VENDOR_LIST = [
 OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "binance_perp", "binance_spot", "sec_ownership", "a_stock", "a_share_native"}
 
 # Mapping of methods to their vendor-specific implementations
-VENDOR_METHODS = {
+VENDOR_METHODS: dict[str, dict[str, Callable[..., Any] | list[Any]]] = {
     # core_stock_apis
     "get_stock_data": {
         "alpha_vantage": get_alpha_vantage_stock,
@@ -362,7 +364,7 @@ def get_category_for_method(method: str) -> str:
             return category
     raise ValueError(f"Method '{method}' not found in any category")
 
-def get_vendor(category: str, method: str = None) -> str:
+def get_vendor(category: str, method: str | None = None) -> str:
     """Get the configured vendor for a data category or specific tool method.
     Tool-level configuration takes precedence over category-level.
     """
@@ -377,7 +379,7 @@ def get_vendor(category: str, method: str = None) -> str:
     # Fall back to category-level configuration
     return config.get("data_vendors", {}).get(category, "default")
 
-def route_to_vendor(method: str, *args, **kwargs):
+def route_to_vendor(method: str, *args: Any, **kwargs: Any) -> str:
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
     vendor_config = get_vendor(category, method)

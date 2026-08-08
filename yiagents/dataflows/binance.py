@@ -202,7 +202,7 @@ def _request_with_retry(do_request, max_retries: int, symbol_for_error: str, can
     ``_http_get``'s existing non-200 → ``NoMarketDataError`` path fires (today's
     behaviour).
     """
-    last_exc = None
+    last_exc: BaseException | None = None
     for attempt in range(max_retries + 1):
         try:
             resp = do_request()
@@ -233,6 +233,7 @@ def _request_with_retry(do_request, max_retries: int, symbol_for_error: str, can
                 f"Binance unreachable after {max_retries} retries "
                 f"({type(last_exc).__name__})",
             ) from last_exc
+        assert last_exc is not None  # resp is None only when do_request() raised
         raise last_exc  # max_retries == 0: propagate raw, byte-equivalent to today
 
 

@@ -295,7 +295,7 @@ def _enumerate_ftd_cutoffs(start_d: date, end_d: date) -> list[str]:
     return out
 
 
-def _detect_delimiter(header: str) -> str:
+def _detect_delimiter(header: str) -> str | None:
     """Pick the delimiter that splits the header into the most fields."""
     best, n = "|", header.count("|")
     for cand in ("\t", ","):

@@ -69,7 +69,7 @@ def is_filing_public(
     return period_end + timedelta(days=lag_days) <= as_of
 
 
-def overview_would_leak_future(curr_date: str) -> bool:
+def overview_would_leak_future(curr_date: str | None) -> bool:
     """True iff ``curr_date`` is an explicit past date, for which a vendor's
     current-point overview snapshot would leak future information.
 
@@ -122,7 +122,7 @@ def safe_ticker_component(value: str, *, max_len: int = 32) -> str:
     return value
 
 
-def save_output(data: pd.DataFrame, tag: str, save_path: SavePathType = None) -> None:
+def save_output(data: pd.DataFrame, tag: str, save_path: SavePathType | None = None) -> None:
     if save_path:
         data.to_csv(save_path, encoding="utf-8")
         logger.info("%s saved to %s", tag, save_path)

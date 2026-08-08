@@ -5,6 +5,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
+from contextlib import AbstractContextManager
 from typing import Any
 
 import yfinance as yf
@@ -67,7 +68,7 @@ class YiAgentsGraph:
         self,
         selected_analysts=("market", "social", "news", "fundamentals"),
         debug=False,
-        config: dict[str, Any] = None,
+        config: dict[str, Any] | None = None,
         callbacks: list | None = None,
     ):
         """Initialize the trading agents graph and components.
@@ -186,12 +187,12 @@ class YiAgentsGraph:
         self.curr_state = None
         self.ticker = None
         self.selected_analysts = tuple(selected_analysts)  # for P0 telemetry plan
-        self.log_states_dict = {}  # date to full state dict
+        self.log_states_dict: dict[str, dict[str, Any]] = {}  # date to full state dict
 
         # Set up the graph: keep the workflow for recompilation with a checkpointer.
         self.workflow = self.graph_setup.setup_graph(selected_analysts)
         self.graph = self.workflow.compile()
-        self._checkpointer_ctx = None
+        self._checkpointer_ctx: AbstractContextManager[Any] | None = None
 
     def _get_provider_kwargs(self) -> dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
@@ -570,7 +571,7 @@ class YiAgentsGraph:
             reflection = self.reflector.reflect_on_final_decision(
                 final_decision=entry.get("decision", ""),
                 raw_return=raw,
-                alpha_return=alpha,
+                alpha_return=alpha if alpha is not None else 0.0,
                 benchmark_name=benchmark,
             )
             updates.append({

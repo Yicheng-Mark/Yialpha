@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 
-def normalize_content(response):
+def normalize_content(response: Any) -> Any:
     """Normalize LLM response content to a plain string.
 
     Multiple providers (OpenAI Responses API, Google Gemini 3) return content

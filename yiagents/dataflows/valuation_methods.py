@@ -35,7 +35,7 @@ __all__ = [
 ]
 
 
-def _is_finite_number(*xs: float) -> bool:
+def _is_finite_number(*xs: float | None) -> bool:
     """True iff every argument is a real finite number (rejects NaN/inf/None)."""
     for x in xs:
         if x is None:
@@ -49,29 +49,35 @@ def _is_finite_number(*xs: float) -> bool:
     return True
 
 
-def pe_ratio(price: float, eps: float) -> float | None:
+def pe_ratio(price: float | None, eps: float | None) -> float | None:
     """Price-to-earnings ratio ``price / eps``.
 
     Returns ``None`` when ``eps <= 0`` (P/E is undefined for loss-makers; a
     negative P/E is not a valuation signal, it is a flag).
     """
-    if not _is_finite_number(price, eps) or eps <= 0 or price <= 0:
+    if not _is_finite_number(price, eps):
+        return None
+    assert price is not None and eps is not None
+    if eps <= 0 or price <= 0:
         return None
     return float(price) / float(eps)
 
 
-def earnings_yield(price: float, eps: float) -> float | None:
+def earnings_yield(price: float | None, eps: float | None) -> float | None:
     """Inverse P/E, ``eps / price`` -- the earnings return on the price paid.
 
     Returns ``None`` when ``price <= 0``; a negative ``eps`` is preserved (a
     negative yield is itself a signal, unlike a negative P/E).
     """
-    if not _is_finite_number(price, eps) or price <= 0:
+    if not _is_finite_number(price, eps):
+        return None
+    assert price is not None and eps is not None
+    if price <= 0:
         return None
     return float(eps) / float(price)
 
 
-def graham_number(eps: float, book_value_per_share: float) -> float | None:
+def graham_number(eps: float | None, book_value_per_share: float | None) -> float | None:
     """Benjamin Graham's original number: ``sqrt(22.5 * EPS * BVPS)``.
 
     The 22.5 factor is Graham's ceiling of 15x earnings times 1.5x book value
@@ -80,16 +86,18 @@ def graham_number(eps: float, book_value_per_share: float) -> float | None:
     otherwise it returns ``None`` (Graham's own precondition -- the number is a
     "screen", not a rescue for impaired balance sheets).
     """
-    if (not _is_finite_number(eps, book_value_per_share)
-            or eps <= 0 or book_value_per_share <= 0):
+    if not _is_finite_number(eps, book_value_per_share):
+        return None
+    assert eps is not None and book_value_per_share is not None
+    if eps <= 0 or book_value_per_share <= 0:
         return None
     return math.sqrt(22.5 * float(eps) * float(book_value_per_share))
 
 
 def net_current_asset_value_per_share(
-    current_assets: float,
-    total_liabilities: float,
-    shares_outstanding: float,
+    current_assets: float | None,
+    total_liabilities: float | None,
+    shares_outstanding: float | None,
 ) -> float | None:
     """Graham's "net-net": ``(current_assets - total_liabilities) / shares``.
 
@@ -98,13 +106,15 @@ def net_current_asset_value_per_share(
     worth zero (*Security Analysis*). Per-share form lets the caller compare to
     price directly. Returns ``None`` when shares are not a positive number.
     """
-    if (not _is_finite_number(current_assets, total_liabilities, shares_outstanding)
-            or shares_outstanding <= 0):
+    if not _is_finite_number(current_assets, total_liabilities, shares_outstanding):
+        return None
+    assert current_assets is not None and total_liabilities is not None and shares_outstanding is not None
+    if shares_outstanding <= 0:
         return None
     return (float(current_assets) - float(total_liabilities)) / float(shares_outstanding)
 
 
-def peg_ratio(pe_ratio_value: float, earnings_growth_pct: float) -> float | None:
+def peg_ratio(pe_ratio_value: float | None, earnings_growth_pct: float | None) -> float | None:
     """Peter Lynch's PEG: ``PE / earnings_growth_%``.
 
     Growth is expressed in percentage points (e.g. 15 for 15%); PEG < 1 is
@@ -112,16 +122,18 @@ def peg_ratio(pe_ratio_value: float, earnings_growth_pct: float) -> float | None
     Returns ``None`` when growth is <= 0 (PEG is meaningless for shrinking or
     flat earnings -- a negative-growth PEG inverts the signal) or PE is invalid.
     """
-    if (not _is_finite_number(pe_ratio_value, earnings_growth_pct)
-            or pe_ratio_value <= 0 or earnings_growth_pct <= 0):
+    if not _is_finite_number(pe_ratio_value, earnings_growth_pct):
+        return None
+    assert pe_ratio_value is not None and earnings_growth_pct is not None
+    if pe_ratio_value <= 0 or earnings_growth_pct <= 0:
         return None
     return float(pe_ratio_value) / float(earnings_growth_pct)
 
 
 def owner_earnings(
-    net_income: float,
-    depreciation_amortization: float,
-    maintenance_capex: float,
+    net_income: float | None,
+    depreciation_amortization: float | None,
+    maintenance_capex: float | None,
 ) -> float | None:
     """Warren Buffett's owner earnings: ``net_income + D&A - maintenance_capex``.
 
@@ -133,15 +145,16 @@ def owner_earnings(
     """
     if not _is_finite_number(net_income, depreciation_amortization, maintenance_capex):
         return None
+    assert net_income is not None and depreciation_amortization is not None and maintenance_capex is not None
     return (float(net_income) + float(depreciation_amortization)
             - float(maintenance_capex))
 
 
 def intrinsic_value_two_stage_dcf(
-    free_cash_flow_per_share: float,
-    growth_rate: float,
-    discount_rate: float,
-    terminal_growth_rate: float,
+    free_cash_flow_per_share: float | None,
+    growth_rate: float | None,
+    discount_rate: float | None,
+    terminal_growth_rate: float | None,
     high_growth_years: int = 10,
 ) -> float | None:
     """Two-stage discounted-cash-flow intrinsic value per share (Damodaran).
@@ -154,9 +167,12 @@ def intrinsic_value_two_stage_dcf(
     """
     if (not _is_finite_number(free_cash_flow_per_share, growth_rate,
                              discount_rate, terminal_growth_rate)
-            or discount_rate <= terminal_growth_rate
             or not isinstance(high_growth_years, int)
             or high_growth_years <= 0):
+        return None
+    assert (free_cash_flow_per_share is not None and growth_rate is not None
+            and discount_rate is not None and terminal_growth_rate is not None)
+    if discount_rate <= terminal_growth_rate:
         return None
 
     fcf = float(free_cash_flow_per_share)
@@ -179,10 +195,10 @@ def intrinsic_value_two_stage_dcf(
 
 
 def weighted_average_cost_of_capital(
-    market_value_equity: float,
-    market_value_debt: float,
-    cost_of_equity: float,
-    after_tax_cost_of_debt: float,
+    market_value_equity: float | None,
+    market_value_debt: float | None,
+    cost_of_equity: float | None,
+    after_tax_cost_of_debt: float | None,
 ) -> float | None:
     """WACC = ``E/(E+D) * Re + D/(E+D) * Rd`` (Damodaran).
 
@@ -193,6 +209,8 @@ def weighted_average_cost_of_capital(
     if (not _is_finite_number(market_value_equity, market_value_debt,
                              cost_of_equity, after_tax_cost_of_debt)):
         return None
+    assert (market_value_equity is not None and market_value_debt is not None
+            and cost_of_equity is not None and after_tax_cost_of_debt is not None)
     total = float(market_value_equity) + float(market_value_debt)
     if total <= 0:
         return None
@@ -201,7 +219,7 @@ def weighted_average_cost_of_capital(
     return (e / total) * float(cost_of_equity) + (d / total) * float(after_tax_cost_of_debt)
 
 
-def margin_of_safety(intrinsic_value: float, price: float) -> float | None:
+def margin_of_safety(intrinsic_value: float | None, price: float | None) -> float | None:
     """ ``(intrinsic_value - price) / intrinsic_value``.
 
     Positive means the asset trades below its estimated intrinsic value (a
@@ -210,6 +228,7 @@ def margin_of_safety(intrinsic_value: float, price: float) -> float | None:
     """
     if not _is_finite_number(intrinsic_value, price) or intrinsic_value == 0:
         return None
+    assert intrinsic_value is not None and price is not None
     return (float(intrinsic_value) - float(price)) / float(intrinsic_value)
 
 
