@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from typing import Annotated
 
@@ -14,6 +15,8 @@ from .stockstats_utils import (
 )
 from .symbol_utils import NoMarketDataError, normalize_symbol
 from .utils import overview_would_leak_future
+
+logger = logging.getLogger(__name__)
 
 
 def get_YFin_data_online(
@@ -192,17 +195,16 @@ def get_stock_stats_indicators_window(
 
     except NoMarketDataError:
         raise  # Unknown/delisted symbol — let the router emit the sentinel
-    except Exception as e:
-        print(f"Error getting bulk stockstats data: {e}")
-        # Fallback to original implementation if bulk method fails
-        ind_string = ""
-        curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
-        while curr_date_dt >= before:
-            indicator_value = get_stockstats_indicator(
-                symbol, indicator, curr_date_dt.strftime("%Y-%m-%d")
-            )
-            ind_string += f"{curr_date_dt.strftime('%Y-%m-%d')}: {indicator_value}\n"
-            curr_date_dt = curr_date_dt - relativedelta(days=1)
+    except Exception:
+        # Do NOT fall back to the per-day N+1 loop: that silently recomputes
+        # one row at a time (re-loading OHLCV each call) and masks the real
+        # failure behind a partial result. Let the router emit its sentinel so
+        # the agent reports "unavailable" rather than a truncated series.
+        logger.exception(
+            "bulk stockstats calc failed for %s/%s — surfacing to router",
+            symbol, indicator,
+        )
+        raise
 
     result_str = (
         f"## {indicator} values from {before.strftime('%Y-%m-%d')} to {end_date}:\n\n"
@@ -267,11 +269,15 @@ def get_stockstats_indicator(
         )
     except NoMarketDataError:
         raise  # Unknown/delisted symbol — let the router emit the sentinel
-    except Exception as e:
-        print(
-            f"Error getting stockstats indicator data for indicator {indicator} on {curr_date}: {e}"
+    except Exception:
+        # Surfacing the error (rather than returning "") keeps the data
+        # contract honest: the router turns this into an explicit sentinel
+        # instead of the agent treating an empty string as a valid value.
+        logger.exception(
+            "stockstats indicator %s failed for %s @ %s",
+            indicator, symbol, curr_date,
         )
-        return ""
+        raise
 
     return str(indicator_value)
 
@@ -353,8 +359,13 @@ def get_fundamentals(
 
     except NoMarketDataError:
         raise
-    except Exception as e:
-        return f"Error retrieving fundamentals for {ticker}: {str(e)}"
+    except Exception:
+        # Raise instead of returning an "Error retrieving…" string: the router
+        # (route_to_vendor) logs the failure and either falls through to the
+        # next vendor or emits its sentinel. Returning prose here made the
+        # agent treat the error message as if it were fundamentals data.
+        logger.exception("fundamentals retrieval failed for %s", ticker)
+        raise
 
 
 def get_balance_sheet(
@@ -388,8 +399,9 @@ def get_balance_sheet(
 
     except NoMarketDataError:
         raise
-    except Exception as e:
-        return f"Error retrieving balance sheet for {ticker}: {str(e)}"
+    except Exception:
+        logger.exception("balance sheet retrieval failed for %s", ticker)
+        raise
 
 
 def get_cashflow(
@@ -423,8 +435,9 @@ def get_cashflow(
 
     except NoMarketDataError:
         raise
-    except Exception as e:
-        return f"Error retrieving cash flow for {ticker}: {str(e)}"
+    except Exception:
+        logger.exception("cash flow retrieval failed for %s", ticker)
+        raise
 
 
 def get_income_statement(
@@ -458,8 +471,9 @@ def get_income_statement(
 
     except NoMarketDataError:
         raise
-    except Exception as e:
-        return f"Error retrieving income statement for {ticker}: {str(e)}"
+    except Exception:
+        logger.exception("income statement retrieval failed for %s", ticker)
+        raise
 
 
 def get_insider_transactions(
@@ -485,5 +499,6 @@ def get_insider_transactions(
 
         return header + csv_string
 
-    except Exception as e:
-        return f"Error retrieving insider transactions for {ticker}: {str(e)}"
+    except Exception:
+        logger.exception("insider transactions retrieval failed for %s", ticker)
+        raise
