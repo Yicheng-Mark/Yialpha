@@ -34,14 +34,13 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from yiagents.agents.utils.agent_states import AgentState
 from yiagents.agents.utils.agent_utils import (
     create_msg_delete,
-    get_instrument_context_from_state,
+    get_clear_placeholder_from_state,
 )
 
 from .analyst_execution import AnalystExecutionPlan, AnalystNodeSpec
@@ -232,18 +231,11 @@ def create_analyst_fanout_node(
 
         # specs[i>0] see exactly the placeholder that create_msg_delete would
         # emit after the previous analyst's clear_node. Built with the SAME
-        # helper (get_instrument_context_from_state) + trade_date fallback so
-        # the string is byte-identical. Same placeholder for every i>0 because
-        # serial produces the same one each time.
-        instrument_context = get_instrument_context_from_state(parent_state)
-        trade_date = parent_state.get("trade_date", "the requested date")
-        placeholder = HumanMessage(
-            content=(
-                f"Proceed with your assigned analysis for this workflow. "
-                f"{instrument_context} The analysis date is {trade_date}."
-            )
-        )
-        clone["messages"] = [placeholder]
+        # shared helper (get_clear_placeholder_from_state) so the string is
+        # byte-identical to the serial path — the parallel iron law depends on
+        # there being a SINGLE placeholder builder. Same placeholder for every
+        # i>0 because serial produces the same one each time.
+        clone["messages"] = [get_clear_placeholder_from_state(parent_state)]
         return clone
 
     def fanout_node(state: dict[str, Any]) -> dict[str, Any]:

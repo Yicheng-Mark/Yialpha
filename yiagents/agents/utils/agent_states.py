@@ -1,3 +1,43 @@
+"""TypedDict state contracts for the YiAgents LangGraph pipeline.
+
+Reducer semantics — IMPORTANT
+-----------------------------
+Every field below uses LangGraph's default **last-write-wins** merge: the
+``Annotated[T, "..."]`` second argument is a human docstring, NOT a reducer
+function. This is safe because the graph is *effectively serial per field* —
+each field is written by exactly one node per run, so there is never a
+conflicting concurrent write to reconcile.
+
+The one exception is ``messages``, which inherits ``MessagesState``'s additive
+reducer (append + ``RemoveMessage`` support) so the tool-loop clear-node can
+both add and remove entries.
+
+The two debate sub-states (``investment_debate_state``, ``risk_debate_state``)
+are *replaced wholesale* by each speaker's return dict. Correctness therefore
+depends on every speaker carrying forward all prior fields. Two helpers make
+this carry-forward centralized and drift-proof:
+
+* :func:`~yiagents.agents.utils.agent_utils.build_investment_debate_update`
+  — bull/bear researchers.
+* :func:`~yiagents.agents.utils.agent_utils.build_risk_debate_update`
+  — aggressive/conservative/neutral debators.
+
+These helpers are the compensating layer for the absence of field-level
+reducers: they guarantee the full dict is rebuilt consistently on every turn,
+so a speaker that forgets a field is a compile-time-style test failure
+(``test_investment_debate_state.py`` / ``test_risk_debate_state.py``), not a
+silent state drop.
+
+Field ownership map (writer → field):
+  START (propagation.create_initial_state) → all fields seeded
+  Analysts    → market_report, sentiment_report, news_report, fundamentals_report
+  Researchers → investment_debate_state (via build_investment_debate_update)
+  Research Mgr→ investment_plan
+  Trader      → trader_investment_plan, messages (AIMessage)
+  Risk debators→ risk_debate_state (via build_risk_debate_update)
+  Portfolio Mgr→ final_trade_decision, pm_rating, risk_debate_state.judge_decision
+"""
+
 from typing import Annotated, Any
 
 from langgraph.graph import MessagesState
@@ -50,8 +90,6 @@ class AgentState(MessagesState):
     instrument_context: Annotated[str, "Deterministic ticker identity resolved at run start"]
     trade_date: Annotated[str, "What date we are trading at"]
 
-    sender: Annotated[str, "Agent that sent this message"]
-
     # research step
     market_report: Annotated[str, "Report from the Market Analyst"]
     sentiment_report: Annotated[str, "Report from the Sentiment Analyst"]
@@ -73,5 +111,12 @@ class AgentState(MessagesState):
         RiskDebateState, "Current state of the debate on evaluating risk"
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
+    pm_rating: Annotated[
+        str,
+        "The PM's structured rating (Buy/Overweight/Hold/Underweight/Sell) extracted"
+        " directly from the PortfolioDecision, bypassing markdown parsing so the risk"
+        " overlay never depends on text ordering. Empty string when the PM fell back to"
+        " free-text (the overlay then falls back to parse_rating).",
+    ]
     past_context: Annotated[str, "Memory log context injected at run start (same-ticker decisions + cross-ticker lessons)"]
     portfolio_state: Annotated[Any, "Optional live portfolio snapshot (Phase 1) for the Portfolio Manager"]

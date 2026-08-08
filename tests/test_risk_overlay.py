@@ -164,3 +164,52 @@ def test_overlay_risk_off_does_not_mark():
     state = {"final_trade_decision": original}
     out = g._apply_risk_overlay("AAPL", "2024-01-15", state, None)
     assert out["final_trade_decision"] == original
+
+
+@pytest.mark.unit
+def test_overlay_prefers_structured_pm_rating(monkeypatch):
+    """pm_rating (structured) is preferred over parse_rating(markdown).
+
+    When the PM node extracted the rating directly from its PortfolioDecision,
+    the overlay must use it — never re-parsing the markdown. This decouples
+    rating extraction from text ordering so a prompt change that moves the
+    rating off the first line cannot corrupt the overlay.
+    """
+    g = _make_graph(risk_enabled=True)
+    captured: dict = {}
+    original_decide = g.risk_manager.decide
+
+    def spy_decide(ticker, rating, *a, **kw):
+        captured["rating"] = rating
+        return original_decide(ticker, rating, *a, **kw)
+
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (190.0, 3.0))
+    monkeypatch.setattr(g.risk_manager, "decide", spy_decide)
+    # Markdown says "Sell" but pm_rating says "Buy" — the structured value wins.
+    state = {
+        "final_trade_decision": "**Rating**: Sell\n\nConfusing markdown.",
+        "pm_rating": "Buy",
+    }
+    out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
+    assert captured["rating"] == "Buy"
+    assert "Quantitative Risk Overlay" in out["final_trade_decision"]
+
+
+@pytest.mark.unit
+def test_overlay_falls_back_to_parse_rating_when_pm_rating_empty(monkeypatch):
+    """Empty pm_rating -> overlay falls back to parse_rating on the markdown."""
+    g = _make_graph(risk_enabled=True)
+    captured: dict = {}
+    original_decide = g.risk_manager.decide
+
+    def spy_decide(ticker, rating, *a, **kw):
+        captured["rating"] = rating
+        return original_decide(ticker, rating, *a, **kw)
+
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (190.0, 3.0))
+    monkeypatch.setattr(g.risk_manager, "decide", spy_decide)
+    # pm_rating absent (free-text fallback / old checkpoint) -> parse markdown.
+    state = {"final_trade_decision": "**Rating**: Hold\n\nThesis."}
+    out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
+    assert captured["rating"] == "Hold"
+    assert "Quantitative Risk Overlay" in out["final_trade_decision"]

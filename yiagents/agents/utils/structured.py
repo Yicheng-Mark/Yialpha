@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, TypeVar, overload
 
 from pydantic import BaseModel
 
@@ -55,19 +55,53 @@ def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Any | None:
         return None
 
 
+@overload
 def invoke_structured_or_freetext(
     structured_llm: Any | None,
     plain_llm: Any,
     prompt: Any,
     render: Callable[[T], str],
     agent_name: str,
-) -> str:
+    *,
+    extract: None = None,
+) -> str: ...
+
+
+@overload
+def invoke_structured_or_freetext(
+    structured_llm: Any | None,
+    plain_llm: Any,
+    prompt: Any,
+    render: Callable[[T], str],
+    agent_name: str,
+    *,
+    extract: Callable[[T], Any],
+) -> tuple[str, Any]: ...
+
+
+def invoke_structured_or_freetext(
+    structured_llm: Any | None,
+    plain_llm: Any,
+    prompt: Any,
+    render: Callable[[T], str],
+    agent_name: str,
+    *,
+    extract: Callable[[T], Any] | None = None,
+) -> str | tuple[str, Any]:
     """Run the structured call and render to markdown; fall back to free-text on any failure.
 
     ``prompt`` is whatever the underlying LLM accepts (a string for chat
     invocations, a list of message dicts for chat models that take that
     shape). The same value is forwarded to the free-text path so the
     fallback sees the same input the structured call did.
+
+    When ``extract`` is provided, the structured-success path additionally
+    applies it to the parsed result and returns ``(rendered_markdown,
+    extracted_value)`` instead of just the markdown string. The free-text
+    fallback returns ``(markdown, None)`` — no structured object exists to
+    extract from. Callers that don't pass ``extract`` get the original
+    ``str``-only return (Trader, Research Manager), so this is fully
+    backward-compatible.
     """
     if structured_llm is not None:
         try:
@@ -77,7 +111,10 @@ def invoke_structured_or_freetext(
                 # the tool, leaving the parser with nothing to return. Treat it
                 # as a structured miss and fall back, with a clear reason.
                 raise ValueError("structured output returned no parsed result")
-            return render(result)
+            md = render(result)
+            if extract is not None:
+                return md, extract(result)
+            return md
         except Exception as exc:
             logger.warning(
                 "%s: structured-output invocation failed (%s); retrying once as free text",
@@ -85,4 +122,6 @@ def invoke_structured_or_freetext(
             )
 
     response = plain_llm.invoke(prompt)
+    if extract is not None:
+        return response.content, None
     return response.content

@@ -426,9 +426,14 @@ class YiAgentsGraph:
 
         The LLM keeps the rating and the thesis; this layer overrides size,
         stop and exposure with math and records it as a clearly-marked section
-        appended after the existing markdown. ``parse_rating`` reads the PM's
-        leading ``**Rating**:`` line first, so the appended section never
-        confuses downstream rating extraction.
+        appended after the existing markdown.
+
+        Rating is read from ``final_state["pm_rating"]`` (the structured
+        ``PortfolioDecision.rating`` extracted directly by the PM node) so it
+        never depends on the markdown's text ordering. When ``pm_rating`` is
+        empty (PM fell back to free text, or a checkpoint-resumed run seeded
+        it to ""), it falls back to ``parse_rating`` on the markdown — the
+        legacy path, kept for backward compatibility.
         """
         if self.risk_manager is None:
             if self._risk_overlay_degraded:
@@ -441,7 +446,12 @@ class YiAgentsGraph:
         from yiagents.risk.manager import PortfolioState
 
         decision_md = final_state.get("final_trade_decision", "")
-        rating = self.signal_processor.process_signal(decision_md)
+        # Prefer the structured rating extracted directly from the PM's
+        # PortfolioDecision; fall back to markdown parsing only when it is
+        # absent (free-text fallback or checkpoint resume).
+        rating = final_state.get("pm_rating", "") or self.signal_processor.process_signal(
+            decision_md
+        )
 
         # Coerce the injected snapshot into a PortfolioState the manager reads.
         state = portfolio_state
