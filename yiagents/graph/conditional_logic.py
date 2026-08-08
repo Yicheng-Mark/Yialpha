@@ -50,15 +50,23 @@ class ConditionalLogic:
         return "Msg Clear Fundamentals"
 
     def should_continue_debate(self, state: AgentState) -> str:
-        """Determine if debate should continue."""
+        """Determine if debate should continue.
 
-        if (
-            state["investment_debate_state"]["count"] >= 2 * self.max_debate_rounds
-        ):  # 3 rounds of back-and-forth between 2 agents
+        Speaker alternation is driven by ``count`` parity, NOT by inspecting
+        ``current_response.startswith("Bull")``. The two are equivalent under
+        the normal flow (Bull speaks first at count=0, Bear at count=1, …) but
+        parity is robust to LLM output that fails to carry the ``"Bull
+        Analyst:"`` / ``"Bear Analyst:"`` prefix, which the text-match route
+        relied on. This mirrors the risk debate's explicit ``latest_speaker``
+        approach.
+        """
+
+        count = state["investment_debate_state"]["count"]
+        if count >= 2 * self.max_debate_rounds:
+            # Each round is one Bull + one Bear turn, so 2*max rounds total.
             return "Research Manager"
-        if state["investment_debate_state"]["current_response"].startswith("Bull"):
-            return "Bear Researcher"
-        return "Bull Researcher"
+        # Even count -> Bull speaks next; odd -> Bear.
+        return "Bear Researcher" if count % 2 == 1 else "Bull Researcher"
 
     def should_continue_risk_analysis(self, state: AgentState) -> str:
         """Determine if risk analysis should continue."""
