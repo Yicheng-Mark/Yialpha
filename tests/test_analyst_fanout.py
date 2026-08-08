@@ -25,13 +25,13 @@ import unittest
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from yiagents.agents.utils.agent_utils import get_clear_placeholder_from_state
 from yiagents.graph.analyst_execution import build_analyst_execution_plan
 from yiagents.graph.analyst_fanout import (
     build_analyst_subgraph,
     create_analyst_fanout_node,
 )
 from yiagents.graph.conditional_logic import ConditionalLogic
-
 
 # ---------------------------------------------------------------------------
 # State + stub helpers
@@ -64,19 +64,13 @@ def _make_minimal_state(ticker: str = "AAPL", trade_date: str = "2026-07-01"):
 
 
 def _expected_placeholder(state: dict) -> str:
-    """Reproduce the placeholder text emitted by ``create_msg_delete``.
+    """The placeholder text the shared builder emits for this state.
 
-    ``create_msg_delete`` and the fan-out's ``_clone_for_spec`` build the
-    placeholder from the SAME helpers (``get_instrument_context_from_state`` +
-    ``trade_date``), so this text is byte-identical in both places for a given
-    state.
+    Both ``create_msg_delete`` (serial) and ``_clone_for_spec`` (parallel) now
+    delegate to ``get_clear_placeholder_from_state``, so this helper calls the
+    SAME builder — there is no longer a third copy of the text to drift.
     """
-    instrument_context = state["instrument_context"]
-    trade_date = state["trade_date"]
-    return (
-        f"Proceed with your assigned analysis for this workflow. "
-        f"{instrument_context} The analysis date is {trade_date}."
-    )
+    return get_clear_placeholder_from_state(state).content
 
 
 def _make_scripted_agent_factory(
@@ -453,6 +447,31 @@ class WallTimeTrackerTests(unittest.TestCase):
 
         self.assertEqual(started, ["market", "social"])
         self.assertEqual(completed, ["market", "social"])
+
+
+class TestSerialParallelPlaceholderEquivalence(unittest.TestCase):
+    """The parallel iron law depends on serial-vs-parallel producing the SAME
+    placeholder. Both paths now delegate to ``get_clear_placeholder_from_state``;
+    this test asserts that directly so a future refactor that re-introduces a
+    duplicate string is caught immediately."""
+
+    def test_clear_node_and_fanout_share_one_builder(self):
+        from yiagents.agents.utils.agent_utils import (
+            create_msg_delete,
+            get_clear_placeholder_from_state,
+        )
+
+        state = _make_minimal_state(ticker="TSLA", trade_date="2026-03-15")
+        # The serial clear-node, run on a messages list, must reduce it to the
+        # single placeholder the shared builder produces for the same state.
+        clear_node = create_msg_delete()
+        result = clear_node({**state, "messages": [HumanMessage(content="anything")]})
+        # result["messages"] = [RemoveMessage(...), ..., placeholder]; the
+        # placeholder is the LAST message (RemoveMessage entries come first).
+        placeholder_from_clear = result["messages"][-1]
+        placeholder_from_helper = get_clear_placeholder_from_state(state)
+        self.assertEqual(placeholder_from_clear.content, placeholder_from_helper.content)
+        self.assertIsInstance(placeholder_from_clear, HumanMessage)
 
 
 if __name__ == "__main__":

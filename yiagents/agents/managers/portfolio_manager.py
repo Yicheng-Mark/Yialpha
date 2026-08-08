@@ -126,12 +126,17 @@ def create_portfolio_manager(llm):
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}""" + NO_EXTERNAL_TOOLS
 
-        final_trade_decision = invoke_structured_or_freetext(
+        final_trade_decision, pm_rating = invoke_structured_or_freetext(
             structured_llm,
             llm,
             prompt,
             render_pm_decision,
             "Portfolio Manager",
+            # Extract the structured rating directly so the risk overlay can read
+            # it from state without re-parsing the rendered markdown. On a
+            # free-text fallback pm_rating is None -> overlay falls back to
+            # parse_rating (see trading_graph._apply_risk_overlay).
+            extract=lambda decision: decision.rating.value,
         )
 
         new_risk_debate_state = {
@@ -150,6 +155,7 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
         return {
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
+            "pm_rating": pm_rating or "",
         }
 
     return portfolio_manager_node

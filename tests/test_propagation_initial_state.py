@@ -35,7 +35,7 @@ class TestCreateInitialStateCompleteness:
             "investment_plan",
             "trader_investment_plan",
             "final_trade_decision",
-            "sender",
+            "pm_rating",
         ):
             assert key in self.state, f"missing key: {key}"
             assert self.state[key] == ""

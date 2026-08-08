@@ -1,4 +1,21 @@
 # yiagents/graph/propagation.py
+"""Initial-state construction and graph-invocation arg assembly.
+
+The class name ``Propagator`` is historical: this module does NOT perform
+mid-graph state propagation. Field merging between nodes is handled by
+LangGraph's ``Annotated`` reducers on ``AgentState`` (last-write-wins for
+scalar fields; additive for ``messages``) — see
+``yiagents/agents/utils/agent_states.py`` for the full ownership map. The two
+debate sub-states are rebuilt wholesale by each speaker via
+``build_investment_debate_update`` / ``build_risk_debate_update``, which are
+the compensating layer for the absence of field-level reducers.
+
+What this module actually owns:
+  * :meth:`Propagator.create_initial_state` — seeds every key downstream nodes
+    read via direct indexing (checkpoint-resume robustness).
+  * :meth:`Propagator.get_graph_args` — assembles the ``stream_mode`` +
+    ``recursion_limit`` config passed to ``graph.invoke``.
+"""
 
 from typing import Any
 
@@ -9,7 +26,7 @@ from yiagents.agents.utils.agent_states import (
 
 
 class Propagator:
-    """Handles state initialization and propagation through the graph."""
+    """Handles state initialization and graph-invocation arg assembly."""
 
     def __init__(self, max_recur_limit=100):
         """Initialize with configuration parameters."""
@@ -80,10 +97,12 @@ class Propagator:
             # ``investment_plan`` — the resumed state would lack the key and the
             # Trader node would raise ``KeyError``, masking the original crash.
             # Initialising them to "" makes the resume path degrade gracefully.
-            "sender": "",
             "investment_plan": "",
             "trader_investment_plan": "",
             "final_trade_decision": "",
+            # pm_rating is "" when the PM hasn't run or fell back to free text;
+            # the risk overlay then falls back to parse_rating on the markdown.
+            "pm_rating": "",
         }
 
     def get_graph_args(self, callbacks: list | None = None) -> dict[str, Any]:
