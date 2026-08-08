@@ -230,7 +230,7 @@ def _concept_records(facts: dict[str, Any], candidates: list[str]) -> list[dict[
     return []
 
 
-def _period_public(rec: dict[str, Any], curr_date: str) -> bool:
+def _period_public(rec: dict[str, Any], curr_date: str | None) -> bool:
     """Ground-truth PIT gate: ``filed <= curr_date`` when filed is present, else
     fall back to the project's 45-day ``is_filing_public`` heuristic."""
     if not curr_date:

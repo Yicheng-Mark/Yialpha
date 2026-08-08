@@ -14,7 +14,7 @@ _PASSTHROUGH_KWARGS = (
 class NormalizedAzureChatOpenAI(AzureChatOpenAI):
     """AzureChatOpenAI with normalized content output."""
 
-    def invoke(self, input, config=None, **kwargs):
+    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
         return normalize_content(super().invoke(input, config, **kwargs))
 
 
@@ -35,7 +35,7 @@ class AzureOpenAIClient(BaseLLMClient):
         """Return configured AzureChatOpenAI instance."""
         self.warn_if_unknown_model()
 
-        llm_kwargs = {
+        llm_kwargs: dict[str, Any] = {
             "model": self.model,
             "azure_deployment": os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", self.model),
         }

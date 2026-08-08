@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -121,10 +122,11 @@ def _deserialize(data: dict[str, Any]) -> list[Generation]:
         gen_info = d.get("generation_info")
         if d.get("is_chat"):
             msg_dict = d.get("message") or {}
-            cls = _MESSAGE_TYPES.get(msg_dict.get("type")) if isinstance(msg_dict, dict) else None
+            msg_type: str | None = msg_dict.get("type") if isinstance(msg_dict, dict) else None
+            cls = _MESSAGE_TYPES.get(msg_type) if msg_type else None
             if cls is None:
-                raise ValueError(f"unknown message type: {msg_dict.get('type')!r}")
-            msg = cls.model_validate(msg_dict)
+                raise ValueError(f"unknown message type: {msg_type!r}")
+            msg = cls.model_validate(msg_dict)  # type: ignore[attr-defined]
             gens.append(ChatGeneration(message=msg, generation_info=gen_info))
         else:
             gens.append(Generation(text=d.get("text", ""), generation_info=gen_info))
@@ -148,7 +150,7 @@ class DiskLLMCache(BaseCache):
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
 
-    def lookup(self, prompt: str, llm_string: str):
+    def lookup(self, prompt: str, llm_string: str) -> list[Generation] | None:
         if not self.enabled:
             return None
         path = self.cache_dir / f"{_key(prompt, llm_string)}.json"
@@ -166,7 +168,7 @@ class DiskLLMCache(BaseCache):
                 path.unlink(missing_ok=True)
             return None
 
-    def update(self, prompt: str, llm_string: str, return_val) -> None:
+    def update(self, prompt: str, llm_string: str, return_val: Sequence[Generation]) -> None:
         if not self.enabled:
             return
         path = self.cache_dir / f"{_key(prompt, llm_string)}.json"

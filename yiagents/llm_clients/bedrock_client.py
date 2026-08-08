@@ -6,10 +6,10 @@ from .validators import validate_model
 
 # Bedrock has no global default region; us-west-2 hosts the broadest model set.
 _DEFAULT_REGION = "us-west-2"
-_BEDROCK_CLASS = None
+_BEDROCK_CLASS: type | None = None
 
 
-def _bedrock_class():
+def _bedrock_class() -> type:
     """Lazily import langchain-aws (the optional ``[bedrock]`` extra) and return a
     ChatBedrockConverse subclass with normalized content output.
 
@@ -31,7 +31,7 @@ def _bedrock_class():
     class NormalizedChatBedrockConverse(ChatBedrockConverse):
         """ChatBedrockConverse with normalized (string) content output."""
 
-        def invoke(self, input, config=None, **kwargs):
+        def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
             return normalize_content(super().invoke(input, config, **kwargs))
 
     _BEDROCK_CLASS = NormalizedChatBedrockConverse
@@ -58,7 +58,7 @@ class BedrockClient(BaseLLMClient):
             or os.environ.get("AWS_DEFAULT_REGION")
             or _DEFAULT_REGION
         )
-        llm_kwargs = {"model": self.model, "region_name": region}
+        llm_kwargs: dict[str, Any] = {"model": self.model, "region_name": region}
         for key in ("temperature", "max_tokens", "max_retries", "callbacks"):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]

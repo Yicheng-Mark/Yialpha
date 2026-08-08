@@ -305,7 +305,7 @@ def get_margin_trading(
         return out.getvalue().rstrip("\n")
 
     # rows are most-recent-first from the API; PIT + look-back filter.
-    kept = [r for r in rows if _in_window(r["date"], lower_d, upper_d, upper)]
+    kept = [r for r in rows if _in_window(r["date"], lower_d, upper_d, bool(upper))]
     if not kept:
         out.write(f"\nNo margin-trading rows for {ticker} fall within the last "
                   f"{look_back_days} days as of {curr_date or 'now'}.")

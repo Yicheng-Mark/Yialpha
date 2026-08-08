@@ -56,7 +56,20 @@ def _seven_days_back(trade_date: str) -> str:
     return (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
 
 
-def _fetch_sentiment_sources(ticker: str, start_date: str, end_date: str):
+def _get_news_impl(ticker: str, start_date: str, end_date: str) -> str:
+    """Call the underlying function behind the ``get_news`` LangChain tool.
+
+    ``get_news`` is a ``@tool``-decorated ``BaseTool``; its raw callable lives
+    under ``.func``. mypy cannot see ``.func`` on the ``BaseTool`` type, so
+    this helper centralises the access with a safe ``getattr`` fallback.
+    """
+    fn = getattr(get_news, "func", None)
+    if fn is not None:
+        return fn(ticker, start_date, end_date)
+    return get_news(ticker, start_date, end_date)  # type: ignore[operator]
+
+
+def _fetch_sentiment_sources(ticker: str, start_date: str, end_date: str) -> tuple[str, str, str]:
     """Fetch the three sentiment sources, returning (news, stocktwits, reddit).
 
     Sequential by default; fanned out on a thread pool when
@@ -69,12 +82,12 @@ def _fetch_sentiment_sources(ticker: str, start_date: str, end_date: str):
         # Lambdas preserve each call's exact form so the result is byte-
         # identical to the sequential path; only fetch order differs.
         with ThreadPoolExecutor(max_workers=3) as pool:
-            fut_news = pool.submit(lambda: get_news.func(ticker, start_date, end_date))
+            fut_news = pool.submit(lambda: _get_news_impl(ticker, start_date, end_date))
             fut_stocktwits = pool.submit(lambda: fetch_stocktwits_messages(ticker, limit=30))
             fut_reddit = pool.submit(lambda: fetch_reddit_posts(ticker))
             return fut_news.result(), fut_stocktwits.result(), fut_reddit.result()
     return (
-        get_news.func(ticker, start_date, end_date),
+        _get_news_impl(ticker, start_date, end_date),
         fetch_stocktwits_messages(ticker, limit=30),
         fetch_reddit_posts(ticker),
     )

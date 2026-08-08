@@ -3,6 +3,7 @@
 import re
 from contextlib import nullcontext
 from pathlib import Path
+from typing import Any
 
 from yiagents.agents.utils.rating import parse_rating
 from yiagents.batch.locks import FileLock
@@ -17,9 +18,9 @@ class TradingMemoryLog:
     _DECISION_RE = re.compile(r"DECISION:\n(.*?)(?=\nREFLECTION:|\Z)", re.DOTALL)
     _REFLECTION_RE = re.compile(r"REFLECTION:\n(.*?)$", re.DOTALL)
 
-    def __init__(self, config: dict = None):
+    def __init__(self, config: dict[str, Any] | None = None):
         cfg = config or {}
-        self._log_path = None
+        self._log_path: Path | None = None
         path = cfg.get("memory_log_path")
         if path:
             self._log_path = Path(path).expanduser()
@@ -33,7 +34,7 @@ class TradingMemoryLog:
         # never a torn one. nullcontext when there's no file or locking is off
         # keeps single-ticker runs uncontended.
         if self._log_path and cfg.get("batch_memory_lock", True):
-            self._lock = FileLock(self._log_path)
+            self._lock: FileLock | nullcontext[None] = FileLock(self._log_path)
         else:
             self._lock = nullcontext()
 
@@ -88,7 +89,8 @@ class TradingMemoryLog:
         if not entries:
             return ""
 
-        same, cross = [], []
+        same: list[dict[str, Any]] = []
+        cross: list[dict[str, Any]] = []
         for e in reversed(entries):
             if len(same) >= n_same and len(cross) >= n_cross:
                 break

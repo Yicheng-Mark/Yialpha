@@ -286,7 +286,7 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     return data
 
 
-def filter_financials_by_date(data: pd.DataFrame, curr_date: str) -> pd.DataFrame:
+def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.DataFrame:
     """Drop financial-statement columns that were not yet public on ``curr_date``.
 
     yfinance financial statements use fiscal period end dates as columns. A

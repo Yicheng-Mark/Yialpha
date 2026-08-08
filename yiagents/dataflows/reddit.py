@@ -97,7 +97,7 @@ def _iso_to_timestamp(iso_str: str | None) -> float | None:
         return None
 
 
-def _strip_html(content: str) -> str:
+def _strip_html(content: str | None) -> str:
     """Reduce the HTML body Reddit embeds in an Atom entry to plain text."""
     if not content:
         return ""
