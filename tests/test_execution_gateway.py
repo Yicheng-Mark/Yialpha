@@ -9,7 +9,6 @@ the no-blind-resubmit safety invariant.
 
 from __future__ import annotations
 
-import os
 import sys
 from unittest.mock import MagicMock
 
@@ -646,3 +645,67 @@ class TestMalformedMainnetEnvFailsClosed:
         # Constructor mainnet=True survives the malformed env (fail-closed to
         # the explicit constructor value, not to False).
         assert gw._mainnet is True
+
+
+class TestProgrammingBugReRaises:
+    """A programming bug in the submit path must NOT be masked as a REJECTED
+    order. Without this guard, an ``AttributeError`` (typo on a client
+    attribute) or a ``TypeError`` (wrong arg) would be funnelled into
+    ``_handle_submit_error`` and silently turned into REJECTED — hiding a code
+    defect behind an order outcome. These exceptions re-raise so the bug is
+    visible. Binance business/transport errors (BadRequestError, rate limit,
+    etc.) are unaffected and still reach _handle_submit_error.
+    """
+
+    @pytest.mark.parametrize("bug", [
+        AttributeError("typo on client attr"),
+        TypeError("wrong number of args"),
+        NameError("foo is not defined"),
+        KeyError("missing 'symbol' key"),
+    ])
+    def test_programming_bug_raises_not_rejected(self, bug):
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.side_effect = bug
+        # The bug must propagate, not be swallowed into an OrderData.
+        with pytest.raises(type(bug)):
+            gw.send_order(_req())
+
+    def test_business_error_still_rejected_not_raised(self):
+        # A genuine Binance bad-request (e.g. -2010) must keep returning
+        # REJECTED — the programming-bug guard must not over-reach into
+        # legitimate SDK exceptions, which subclass Exception (not the
+        # builtins the guard targets).
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.side_effect = BadRequestError("bad params")
+        order = gw.send_order(_req())
+        gw._client.rest_api.query_order.assert_not_called()
+        assert order.status is Status.REJECTED
+
+
+class TestCloseReleasesSdkSession:
+    """``close()`` must release the SDK's connection pool, not just drop the
+    reference. Before this fix, close() set ``_client = None`` and relied on GC
+    to close the underlying requests session.
+    """
+
+    def test_close_calls_client_close_when_present(self):
+        gw = _perp_gw_with_client()
+        facade = gw._client  # capture before close() nils it
+        gw.close()
+        facade.close.assert_called_once()  # SDK facade teardown invoked
+        assert gw._client is None
+
+    def test_close_idempotent_when_never_connected(self):
+        gw = BinanceGateway()  # never connected -> _client is None
+        # Must not raise.
+        gw.close()
+        assert gw._connected is False
+
+    def test_close_falls_through_to_session_close(self):
+        # If the SDK facade has no close() but exposes .session.close(), use it.
+        gw = BinanceGateway()
+        facade = MagicMock()
+        del facade.close  # remove the close attribute so hasattr is False
+        gw._client = facade
+        gw.close()
+        facade.session.close.assert_called_once()
