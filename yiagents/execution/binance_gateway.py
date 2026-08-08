@@ -54,13 +54,16 @@ order-count budget throttling; ED25519 key auth.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import secrets
 import time
 from datetime import datetime, timezone
+from typing import Any
 from urllib.parse import urlparse
 
+from ..dataflows.errors import VendorNotConfiguredError
 from .browser_broker import _coerce_bool_env
 from .domain import (
     AccountData,
@@ -75,7 +78,6 @@ from .domain import (
     Status,
 )
 from .gateway import BaseGateway
-from ..dataflows.errors import VendorNotConfiguredError
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +105,15 @@ _BINANCE_STATUS_MAP = {
     "REJECTED": Status.REJECTED,
     "EXPIRED": Status.REJECTED,
 }
+
+# Exceptions that can ONLY come from a bug in our own submit path (wrong
+# attribute, bad argument, unbound name, missing key) — never from a Binance
+# transport/business response. These re-raise out of send_order rather than
+# being funnelled into _handle_submit_error (which would mask the defect as a
+# REJECTED order). Importantly this excludes the SDK's own typed exceptions
+# (they subclass Exception, not these builtins), so genuine Binance errors —
+# rate limit, ban, bad request, server error — still reach _handle_submit_error.
+_PROGRAMMING_BUG_ERRORS = (AttributeError, TypeError, NameError, KeyError)
 
 
 class ExecutionEnableSwitch:
@@ -145,7 +156,7 @@ class ExecutionEnableSwitch:
 # ---------------------------------------------------------------------------
 
 
-def _as_dict(data):
+def _as_dict(data: object) -> dict | list | None:
     """Normalise an SDK response object to a plain (camelCase-keyed) dict.
 
     The SDK's generated pydantic models expose ``to_dict()`` which emits the
@@ -185,7 +196,7 @@ def _to_float(value, default: float = 0.0) -> float:
         return default
 
 
-def _resp_data(resp):
+def _resp_data(resp: object) -> object:
     """Pull the parsed payload from an SDK response object (``.data()`` is a method)."""
     if resp is None:
         return None
@@ -290,7 +301,7 @@ class BinanceGateway(BaseGateway):
             "MAINNET" if self._mainnet else "testnet",
         )
 
-    def _build_client(self, api_key: str, api_secret: str):
+    def _build_client(self, api_key: str, api_secret: str) -> Any:
         """Lazily import the SDK and construct the per-product facade.
 
         Imported here (not at module top) so the module is importable without
@@ -364,10 +375,29 @@ class BinanceGateway(BaseGateway):
 
     def close(self) -> None:
         """Release the SDK session. Safe to call when never connected."""
+        client = self._client
+        if client is not None:
+            # The SDK facades hold a requests session (connection pool); close
+            # it explicitly rather than relying on GC, but guard against SDK
+            # versions that don't expose close()/session so close() stays safe.
+            close_fn = getattr(client, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:  # noqa: BLE001 - teardown must never raise
+                    logger.debug("SDK client.close() raised; ignoring.", exc_info=True)
+            else:
+                session = getattr(client, "session", None)
+                session_close = getattr(session, "close", None)
+                if callable(session_close):
+                    try:
+                        session_close()
+                    except Exception:  # noqa: BLE001
+                        logger.debug("SDK session.close() raised; ignoring.", exc_info=True)
         self._client = None
         self._connected = False
 
-    def _require_client(self):
+    def _require_client(self) -> Any:
         """Return the client or raise — used by explicit query methods."""
         if self._client is None:
             raise VendorNotConfiguredError(
@@ -401,18 +431,30 @@ class BinanceGateway(BaseGateway):
             return self._rejected(req, reason=str(exc))
 
         client_order_id = req.reference or self._gen_client_order_id()
-        kwargs = dict(
-            symbol=req.symbol,
-            side=side,
-            type=sdk_type,
-            new_client_order_id=client_order_id,
-            new_order_resp_type="RESULT",
-        )
+        kwargs = {
+            "symbol": req.symbol,
+            "side": side,
+            "type": sdk_type,
+            "new_client_order_id": client_order_id,
+            "new_order_resp_type": "RESULT",
+        }
         kwargs.update(extra)
 
         try:
             resp = client.rest_api.new_order(**kwargs)
         except Exception as exc:  # noqa: BLE001 - all submit errors funnel here
+            # A *programming* bug (AttributeError/TypeError/NameError/KeyError)
+            # in the submit path is never a Binance transport/business outcome —
+            # funnelling it into _handle_submit_error would mask the defect as a
+            # REJECTED order. Re-raise so the bug surfaces instead of being
+            # silently swallowed by the fail-closed order path.
+            if isinstance(exc, _PROGRAMMING_BUG_ERRORS):
+                logger.error(
+                    "send_order(%s): re-raising %s — looks like a code bug, "
+                    "not a Binance outcome.",
+                    req.symbol, type(exc).__name__, exc_info=True,
+                )
+                raise
             return self._handle_submit_error(req, client_order_id, exc)
 
         data = _as_dict(_resp_data(resp)) or {}
@@ -573,10 +615,8 @@ class BinanceGateway(BaseGateway):
             order.price = fill_price
         update_time = data.get("updateTime")
         if update_time:
-            try:
+            with contextlib.suppress(TypeError, ValueError, OSError):
                 order.datetime = datetime.fromtimestamp(int(update_time) / 1000, tz=timezone.utc)
-            except (TypeError, ValueError, OSError):
-                pass
         return order
 
     def _rejected(self, req: OrderRequest, *, orderid: str = "", reason: str = "") -> OrderData:
@@ -675,7 +715,7 @@ class BinanceGateway(BaseGateway):
         return out
 
 
-def _as_order_id(orderid: str):
+def _as_order_id(orderid: str) -> int | str:
     """Coerce a broker order id to int when possible (SDK futures expects int)."""
     try:
         return int(orderid)
