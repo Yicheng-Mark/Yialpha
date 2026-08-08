@@ -11,17 +11,16 @@ from unittest import mock
 
 import pytest
 
-import yiagents.dataflows.config as config_module
 import yiagents.default_config as default_config
 from yiagents.dataflows import interface
-from yiagents.dataflows.config import set_config
+from yiagents.dataflows.config import reset_config, set_config
 from yiagents.dataflows.symbol_utils import NoMarketDataError
 
 
 def _reset_config():
     # Hard reset: set_config() merges, so empty DEFAULT dicts (e.g. tool_vendors)
-    # don't clear keys leaked by other tests. Replace the global outright.
-    config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+    # don't clear keys leaked by other tests. Reset the context outright.
+    reset_config()
 
 
 def _no_data(symbol, *a, **k):

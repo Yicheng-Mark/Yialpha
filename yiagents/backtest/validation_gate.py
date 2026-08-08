@@ -117,8 +117,8 @@ def evaluate_gate(
     base_m = baseline.metrics.__dict__ if baseline.metrics else {}
     imp_means = {}
     for k in _METRIC_KEYS:
-        vals = [r.metrics.__dict__.get(k) for r in improved if r.metrics]
-        vals = [v for v in vals if isinstance(v, (int, float))]
+        raw = [r.metrics.__dict__.get(k) for r in improved if r.metrics]
+        vals: list[float] = [float(v) for v in raw if isinstance(v, (int, float))]
         if vals and isinstance(base_m.get(k), (int, float)):
             imp_means[k] = _mean(vals) - float(base_m[k])
     # max_drawdown: less-negative is better; keep raw delta but callers read sign.

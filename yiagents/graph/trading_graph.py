@@ -3,9 +3,9 @@
 import json
 import logging
 import os
+from contextlib import AbstractContextManager
 from datetime import datetime, timedelta
 from pathlib import Path
-from contextlib import AbstractContextManager
 from typing import Any
 
 import yfinance as yf
@@ -29,8 +29,8 @@ from yiagents.agents.utils.agent_utils import (
     get_binance_taker_buy_sell,
     get_cashflow,
     get_form4_insider_trading,
-    get_fundamentals,
     get_ftd_data,
+    get_fundamentals,
     get_global_news,
     get_income_statement,
     get_indicators,
@@ -59,6 +59,31 @@ from .setup import GraphSetup
 from .signal_processing import SignalProcessor
 
 logger = logging.getLogger(__name__)
+
+#: A pending memory-log entry older than this (in days) that still cannot be
+#: resolved is logged at WARNING so it does not silently accumulate forever.
+STALE_PENDING_DAYS = 7
+
+
+def _warn_if_stale_pending(ticker: str, trade_date: str, now: datetime) -> None:
+    """Log a WARNING when a pending entry is old enough to be concerning.
+
+    Pending entries that can never resolve (delisted ticker, permanent data
+    gap) previously accumulated indefinitely with no signal. This makes the
+    silent-stuck state observable without changing the log format.
+    """
+    try:
+        entry_date = datetime.strptime(trade_date, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return
+    age_days = (now - entry_date).days
+    if age_days > STALE_PENDING_DAYS:
+        logger.warning(
+            "Pending memory-log entry for %s @ %s is %d days old and still "
+            "unresolved (price data unavailable). It may be stuck due to "
+            "delisting or a permanent data gap.",
+            ticker, trade_date, age_days,
+        )
 
 
 class YiAgentsGraph:
@@ -91,8 +116,8 @@ class YiAgentsGraph:
         self.perf_tracker = None
         if self.config.get("node_perf_telemetry"):
             from yiagents.graph.perf_telemetry import (
-                NodePerfTracker,
                 NodePerfTokenCallback,
+                NodePerfTracker,
             )
             self.perf_tracker = NodePerfTracker()
             # The token callback rides the LLM callbacks channel so on_llm_end
@@ -555,18 +580,26 @@ class YiAgentsGraph:
 
         Trade-off: only same-ticker entries are resolved per run.  Entries for
         other tickers accumulate until that ticker is run again.
+
+        Stale-pending observability: an entry whose trade_date is older than
+        ``STALE_PENDING_DAYS`` (7) that still cannot be resolved is logged at
+        WARNING so indefinitely-stuck pending entries are not silent.
         """
         pending = [e for e in self.memory_log.get_pending_entries() if e["ticker"] == ticker]
         if not pending:
             return
 
         benchmark = self._resolve_benchmark(ticker)
+        today = datetime.now()
         updates = []
         for entry in pending:
             raw, alpha, days = self._fetch_returns(
                 ticker, entry["date"], benchmark=benchmark,
             )
             if raw is None:
+                # Price not available yet — but if this entry is old, flag it so
+                # it does not silently accumulate forever (delisted / bad data).
+                _warn_if_stale_pending(ticker, entry["date"], today)
                 continue  # price not available yet — try again next run
             reflection = self.reflector.reflect_on_final_decision(
                 final_decision=entry.get("decision", ""),

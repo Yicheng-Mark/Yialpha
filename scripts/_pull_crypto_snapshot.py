@@ -7,7 +7,6 @@ decision-grade summary per coin. Analysis-only, read-only, no key.
 from __future__ import annotations
 
 import io
-import sys
 import traceback
 from datetime import datetime, timedelta, timezone
 
@@ -16,13 +15,15 @@ import pandas as pd
 _TODAY = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 _START = (datetime.now(timezone.utc) - timedelta(days=130)).strftime("%Y-%m-%d")
 
-from yiagents.dataflows.binance import (
-    get_binance_klines,
-    get_binance_funding_rate,
-    get_binance_open_interest,
-    get_binance_long_short_ratio,
-    get_binance_taker_buy_sell,
+# noqa: E402 — module-level constant assignments (_TODAY/_START) precede this
+# import; reordering would break the timestamp-instantiation pattern.
+from yiagents.dataflows.binance import (  # noqa: E402
     get_binance_basis,
+    get_binance_funding_rate,
+    get_binance_klines,
+    get_binance_long_short_ratio,
+    get_binance_open_interest,
+    get_binance_taker_buy_sell,
 )
 
 SYMBOLS = ["ETHUSDT", "SOLUSDT", "XRPUSDT", "HYPEUSDT"]

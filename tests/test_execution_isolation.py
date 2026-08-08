@@ -73,14 +73,13 @@ class TestBrowserBrokerSurfaceUnchanged:
     def test_public_symbols_still_importable(self):
         # The exact set tests/test_browser_broker.py relies on. This round
         # must not remove or rename any of them.
+        # OrderResult is the order-result dataclass the broker returns; keep it
+        # importable too (used by the future Track B adapter).
         from yiagents.execution.browser_broker import (  # noqa: F401
             BrowserBroker,
             KillSwitch,
             OrderAction,
+            OrderResult,  # noqa: F401
             OrderStatus,
             _coerce_bool_env,
         )
-
-        # OrderResult is the order-result dataclass the broker returns; keep it
-        # importable too (used by the future Track B adapter).
-        from yiagents.execution.browser_broker import OrderResult  # noqa: F401

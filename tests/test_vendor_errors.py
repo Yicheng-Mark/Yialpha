@@ -15,7 +15,7 @@ from yiagents.dataflows.alpha_vantage_common import (
     AlphaVantageNotConfiguredError,
     AlphaVantageRateLimitError,
 )
-from yiagents.dataflows.config import set_config
+from yiagents.dataflows.config import reset_config, set_config
 from yiagents.dataflows.errors import (
     NoMarketDataError,
     VendorError,
@@ -52,10 +52,10 @@ class HierarchyTests(unittest.TestCase):
 @pytest.mark.unit
 class RouterHandlesBaseTypesTests(unittest.TestCase):
     def setUp(self):
-        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+        reset_config()
 
     def tearDown(self):
-        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+        reset_config()
 
     def test_rate_limit_subclass_caught_by_base(self):
         # A vendor-named rate-limit error skips to the next vendor in the chain.

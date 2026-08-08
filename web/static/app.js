@@ -107,10 +107,22 @@
 
   // ----------------------------- router -----------------------------------
 
+  // Highlight the nav link matching the current top-level route.
+  function syncNav(parts) {
+    const top = parts.length ? parts[0] : "";
+    document.querySelectorAll(".nav a").forEach((a) => {
+      const href = (a.getAttribute("href") || "").replace(/^#\//, "");
+      const active = (top === "" && href === "") || (top !== "" && href === top);
+      a.classList.toggle("active", active);
+    });
+  }
+
   function route() {
     stopPoll();
+    if (window.YiCharts) YiCharts.disposeAll(); // clear charts from previous view
     const raw = location.hash.replace(/^#/, "");
     const parts = raw.split("/").filter(Boolean); // ['t','AAPL','2026-07-03']
+    syncNav(parts);
     view().innerHTML = `<p class="muted">${t("common_loading")}</p>`;
 
     if (parts.length === 0 || parts[0] === "") return renderHome();
@@ -147,22 +159,52 @@
     const list = data.tickers || [];
     if (!list.length) {
       view().innerHTML = `
-        <h1 class="page-title">${t("home_title")}</h1>
-        <p class="muted">${t("home_empty")}</p>`;
+        <div class="empty-state">
+          <div class="empty-icon">📊</div>
+          <p class="empty-title">${t("home_empty_title")}</p>
+          <p class="empty-desc">${t("home_empty")}</p>
+          <a class="btn btn-primary" href="#/new">${t("home_empty_cta")}</a>
+        </div>`;
       return;
     }
     view().innerHTML = `
       <div class="section-head"><h1 class="page-title">${t("home_title")}</h1></div>
       <p class="page-sub">${t("home_sub")}</p>
-      ${ratingDistHTML(list)}
+      ${statRowHTML(list)}
+      <div class="dashboard-row">
+        <div class="chart-panel">
+          <div class="chart-head"><div class="subhead" style="margin:0">${t("chart_dist_title")}</div><span class="total">${list.length} ${t("dist_tickers")}</span></div>
+          <div id="chart-dist" class="chart-area chart-area-md"></div>
+        </div>
+      </div>
       <div class="grid">
         ${list.map((x) => `
-          <a class="card" href="#/t/${encodeURIComponent(x.ticker)}">
+          <a class="card ticker-card" href="#/t/${encodeURIComponent(x.ticker)}">
+            <div class="card-accent ${cssRatingClass(x.latest_rating)}"></div>
             ${x.latest_rating ? ratingBadge(x.latest_rating) : ""}
             <div class="ticker">${esc(x.ticker)}</div>
             <div class="meta">${t("home_latest")} ${esc(x.latest_date)} · ${x.run_count} ${t("home_runs")}</div>
           </a>`).join("")}
       </div>`;
+
+    // draw the donut chart after DOM is ready
+    var distEl = document.getElementById("chart-dist");
+    if (distEl) YiCharts.drawRatingDist(distEl, list);
+  }
+
+  // Home: top-level stat overview cards (tickers, buy share, latest run date).
+  function statRowHTML(tickers) {
+    const total = tickers.length;
+    const buys = tickers.filter((x) => x.latest_rating === "Buy" || x.latest_rating === "Overweight").length;
+    const buyPct = total ? Math.round((buys / total) * 100) : 0;
+    const latest = tickers.reduce((m, x) => (x.latest_date && x.latest_date > m ? x.latest_date : m), "");
+    const card = (icon, k, v, cls) =>
+      `<div class="stat-card"><div class="stat-icon">${icon}</div><div class="stat-k">${esc(k)}</div><div class="stat-v${cls ? " " + cls : ""}">${esc(v)}</div></div>`;
+    return `<div class="stat-row">
+      ${card("📁", t("home_stat_tickers"), total, "")}
+      ${card("📈", t("home_stat_buy"), buyPct + "%", "accent")}
+      ${card("🕐", t("home_stat_latest"), latest || "—", "")}
+    </div>`;
   }
 
   // ----------------------------- detail -----------------------------------
@@ -194,6 +236,11 @@
         </div>
         <span class="date-tag">${drs.length ? (t("home_latest") + " " + drs[drs.length - 1].date) : ""}</span>
       </div>
+      ${(drs.some((dr) => dr.rating)) ? `
+      <div class="chart-panel">
+        <div class="chart-head"><div class="subhead" style="margin:0">${t("chart_trend_title")}</div><span class="total">${drs.length} ${t("home_runs")}</span></div>
+        <div id="chart-trend" class="chart-area chart-area-trend"></div>
+      </div>` : ""}
       <div class="cols">
         <div class="side">
           <h3>${t("detail_dates")}</h3>
@@ -203,6 +250,14 @@
         </div>
         <div class="card muted">${drs.length ? t("detail_pick_date") : t("detail_no_dates")}</div>
       </div>`;
+
+    // initialise the rating trend chart after DOM is ready
+    var trendEl = document.getElementById("chart-trend");
+    if (trendEl) {
+      YiCharts.drawRatingTrend(trendEl, drs, function (date) {
+        location.hash = "#/t/" + encodeURIComponent(ticker) + "/" + date;
+      });
+    }
   }
 
   // ----------------------------- report -----------------------------------
@@ -212,27 +267,10 @@
     return `<span class="rating-badge rating-${esc(r)}${cls ? " " + cls : ""}">${esc(rating || "Hold")}</span>`;
   }
 
-  // Home: 5-tier distribution summary bar (stacked segments, 2px surface gaps).
-  function ratingDistHTML(tickers) {
-    const order = ["Buy", "Overweight", "Hold", "Underweight", "Sell"];
+  // Map rating to CSS class for card accent bars (matches --r-* tokens).
+  function cssRatingClass(rating) {
     const key = { Buy: "buy", Overweight: "over", Hold: "hold", Underweight: "under", Sell: "sell" };
-    const counts = {}; order.forEach((r) => (counts[r] = 0));
-    let total = 0;
-    tickers.forEach((x) => { if (x.latest_rating && counts[x.latest_rating] != null) { counts[x.latest_rating]++; total++; } });
-    if (!total) return "";
-    const present = order.filter((r) => counts[r] > 0);
-    const segs = present.map((r) => {
-      const pct = (counts[r] / total) * 100;
-      const label = pct >= 11 ? `<span class="seg-label">${counts[r]}</span>` : "";
-      return `<div class="dist-seg" style="flex:${counts[r]};background:var(--r-${key[r]})" data-tip="${esc(r)} · ${counts[r]} (${pct.toFixed(0)}%)">${label}</div>`;
-    }).join("");
-    const legend = present.map((r) =>
-      `<span class="li"><span class="sw" style="background:var(--r-${key[r]})"></span>${esc(r)} <span class="dim">${counts[r]}</span></span>`).join("");
-    return `<div class="dist-wrap">
-      <div class="dist-title"><h2>${t("dist_title")}</h2><span class="total">${total} ${t("dist_tickers")}</span></div>
-      <div class="dist-bar">${segs}</div>
-      <div class="dist-legend">${legend}</div>
-    </div>`;
+    return key[rating] || "neutral";
   }
 
   // Report: KPI tiles for the quantitative risk overlay.
@@ -255,32 +293,18 @@
     </div>`;
   }
 
-  function perfChart(nodePerf) {
+  // Report: node-perf chart container (ECharts draws into it after render).
+  function perfChartContainer(nodePerf) {
     if (!nodePerf || !nodePerf.nodes) return "";
-    const entries = Object.entries(nodePerf.nodes)
-      .map(([name, v]) => ({ name, wall: v.wall_seconds || 0,
-        tok: (v.tokens_in || 0) + (v.tokens_out || 0) + (v.tokens_reasoning || 0) }))
-      .filter((e) => e.wall > 0)
-      .sort((a, b) => b.wall - a.wall);
-    if (!entries.length) return "";
-    const max = entries[0].wall;
-    const total = entries.reduce((s, e) => s + e.wall, 0);
-    const rows = entries.map((e) => `
-      <div class="perf-row" data-tip="${esc(e.name)}" data-tip-sub="${e.wall.toFixed(1)}s · ${e.tok.toLocaleString()} tok · ${(e.wall / total * 100).toFixed(0)}%">
-        <div class="perf-name">${esc(e.name)}</div>
-        <div class="perf-track"><div class="perf-bar" style="width:${(e.wall / max * 100).toFixed(1)}%"></div></div>
-        <div class="perf-val">${e.wall.toFixed(1)}s</div>
-        <div class="perf-tok">${e.tok.toLocaleString()} tok</div>
-      </div>`).join("");
-    return `<div class="perf-wrap">
-      <div class="perf-head"><div class="subhead" style="margin:0">${t("report_perf")}</div><span class="total">${t("report_perf_total")} ${total.toFixed(0)}s</span></div>
-      ${rows}
+    const total = (nodePerf.totals && nodePerf.totals.wall_seconds) || 0;
+    return `<div class="chart-panel" style="margin:0 0 16px">
+      <div class="chart-head"><div class="subhead" style="margin:0">${t("chart_perf_title")}</div><span class="total">${t("report_perf_total")} ${total.toFixed(0)}s</span></div>
+      <div id="chart-perf" class="chart-area chart-area-perf"></div>
     </div>`;
   }
 
-  // Bull ↔ Bear balance from character volume + segment counts, plus a
-  // keyword wording-lean of the Research Manager verdict (labeled as such).
-  function debateHTML(deb) {
+  // Bull ↔ Bear debate gauge + verdict — ECharts gauge container.
+  function debateChartContainer(deb) {
     const bull = deb.bull_history || "", bear = deb.bear_history || "";
     const bc = bull.length, rc = bear.length, sum = bc + rc || 1;
     const bullPct = Math.round((bc / sum) * 100);
@@ -288,16 +312,8 @@
     const bearSeg = countMatches(bear, /Bear\s+Analyst/gi);
     const tilt = verdictTilt(deb.judge_decision || "");
     const rounds = (bullSeg || bearSeg) ? `${t("debate_rounds")}: Bull ${bullSeg} · Bear ${bearSeg}` : "";
-    return `<div class="debate">
-      <div class="balance">
-        <span class="bal-side bull">Bull ${bullPct}%</span>
-        <div class="bal-track">
-          <div class="bal-fill bull" style="width:${bullPct}%"></div>
-          <div class="bal-fill bear" style="width:${100 - bullPct}%"></div>
-          <div class="bal-mid"></div>
-        </div>
-        <span class="bal-side bear">${100 - bullPct}% Bear</span>
-      </div>
+    return `<div class="debate-viz">
+      <div id="chart-debate" class="chart-area chart-area-gauge"></div>
       <div class="bal-meta">
         <span>Bull ${fmtK(bc)} ${t("debate_chars")}</span>
         ${rounds ? `<span>${rounds}</span>` : ""}
@@ -310,27 +326,16 @@
     </div>`;
   }
 
-  // Risk three-way overview: per-debater char volume + wording lean, verdict below.
-  function riskTrioHTML(risk) {
-    const cols = [
-      { cls: "aggressive", role: t("sub_aggressive"), text: risk.aggressive_history || "" },
-      { cls: "neutral-c", role: t("sub_neutral"), text: risk.neutral_history || "" },
-      { cls: "conservative", role: t("sub_conservative"), text: risk.conservative_history || "" },
-    ];
+  // Risk three-way radar — ECharts radar container + verdict.
+  function riskChartContainer(risk) {
     const tilt = verdictTilt(risk.judge_decision || "");
-    const colsHTML = cols.map((c) => {
-      const ct = verdictTilt(c.text);
-      return `<div class="trio-col ${c.cls}">
-        <div class="role">${esc(c.role)}</div>
-        <div class="name">${fmtK(c.text.length)} ${t("debate_chars")}</div>
-        <span class="verdict-tag ${ct}" style="font-size:11px;padding:2px 9px">${t(VERDICT_KEY[ct])}</span>
-      </div>`;
-    }).join("");
-    return `<div class="trio" style="margin-bottom:8px">${colsHTML}</div>
-      <div class="verdict-row" style="border-top:1px solid var(--grid);padding-top:12px;margin-top:14px">
+    return `<div class="risk-viz">
+      <div id="chart-risk" class="chart-area chart-area-radar"></div>
+      <div class="verdict-row" style="border-top:1px solid var(--grid);padding-top:12px;margin-top:0">
         <span class="verdict-tag ${tilt}">${t("debate_verdict")}: ${t(VERDICT_KEY[tilt])}</span>
         <span class="verdict-note">${t("debate_verdict_note")}</span>
-      </div>`;
+      </div>
+    </div>`;
   }
 
   async function renderReport(ticker, date) {
@@ -364,7 +369,7 @@
       <div class="subhead">${t("report_overlay")}</div>
       ${overlayKPI(run.overlay)}
 
-      ${perfChart(run.node_perf)}
+      ${perfChartContainer(run.node_perf)}
 
       <details class="section" open><summary><span class="caret"></span><span class="num">1</span>${t("sec_analysts")}</summary>
         <div class="section-body">
@@ -376,7 +381,7 @@
 
       <details class="section"><summary><span class="caret"></span><span class="num">2</span>${t("sec_research")}</summary>
         <div class="section-body">
-          ${debateHTML(deb)}
+          ${debateChartContainer(deb)}
           <div class="subhead">${t("sub_bull")}</div><div class="md">${md(deb.bull_history)}</div>
           <div class="subhead">${t("sub_bear")}</div><div class="md">${md(deb.bear_history)}</div>
           <div class="subhead">${t("sub_manager")}</div><div class="md">${md(deb.judge_decision)}</div>
@@ -389,7 +394,7 @@
 
       <details class="section"><summary><span class="caret"></span><span class="num">4</span>${t("sec_risk")}</summary>
         <div class="section-body">
-          ${riskTrioHTML(risk)}
+          ${riskChartContainer(risk)}
           <div class="subhead">${t("sub_aggressive")}</div><div class="md">${md(risk.aggressive_history)}</div>
           <div class="subhead">${t("sub_conservative")}</div><div class="md">${md(risk.conservative_history)}</div>
           <div class="subhead">${t("sub_neutral")}</div><div class="md">${md(risk.neutral_history)}</div>
@@ -400,6 +405,14 @@
       <details class="section" open><summary><span class="caret"></span><span class="num">5</span>${t("sec_pm")}</summary>
         <div class="section-body"><div class="md">${md(s.final_trade_decision)}</div></div>
       </details>`;
+
+    // initialise ECharts instances after DOM is ready
+    var perfEl = document.getElementById("chart-perf");
+    if (perfEl && run.node_perf) YiCharts.drawNodePerf(perfEl, run.node_perf);
+    var debEl = document.getElementById("chart-debate");
+    if (debEl) YiCharts.drawDebateBalance(debEl, deb);
+    var riskEl = document.getElementById("chart-risk");
+    if (riskEl) YiCharts.drawRiskRadar(riskEl, risk);
   }
 
   // ----------------------------- new analysis -----------------------------
@@ -550,6 +563,36 @@
       <p style="margin-top:14px"><button class="btn" id="health-redo">${t("health_refresh")}</button></p>`;
     document.getElementById("health-redo").addEventListener("click", renderHealth);
   }
+
+  // ----------------------------- theme ------------------------------------
+
+  const THEME_KEY = "yiagents_theme";
+  const themeBtn = () => document.getElementById("theme-toggle");
+
+  function currentTheme() {
+    return document.documentElement.getAttribute("data-theme") || "dark";
+  }
+
+  function setTheme(t) {
+    document.documentElement.setAttribute("data-theme", t);
+    localStorage.setItem(THEME_KEY, t);
+    const btn = themeBtn();
+    if (btn) btn.textContent = t === "dark" ? "🌙" : "☀️";
+    // Redraw all ECharts so they pick up the new theme's CSS colors.
+    // CSS vars update synchronously on setAttribute, but redraw must wait
+    // a frame for the browser to recompute computed styles.
+    requestAnimationFrame(() => { if (window.YiCharts) YiCharts.redrawAll(); });
+  }
+
+  // Scripts load at </body>, so #theme-toggle already exists — bind directly
+  // rather than waiting for DOMContentLoaded (which may have already fired).
+  function initTheme() {
+    const btn = themeBtn();
+    if (!btn) return;
+    btn.textContent = currentTheme() === "dark" ? "🌙" : "☀️";
+    btn.addEventListener("click", () => setTheme(currentTheme() === "dark" ? "light" : "dark"));
+  }
+  initTheme();
 
   // ----------------------------- boot -------------------------------------
 

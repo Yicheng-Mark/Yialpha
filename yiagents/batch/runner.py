@@ -123,7 +123,7 @@ class BatchRunner:
 
         # Per-thread ticker context for log attribution.
         self._worker_ctx = threading.local()
-        self._log_filter = _TickerLogFilter(self._worker_ctx)
+        self._log_filter: _TickerLogFilter | None = _TickerLogFilter(self._worker_ctx)
         logging.getLogger().addFilter(self._log_filter)
 
         # Build the K-graph pool up front. set_config() is idempotent for
@@ -165,9 +165,8 @@ class BatchRunner:
     def __enter__(self) -> BatchRunner:
         return self
 
-    def __exit__(self, *exc) -> bool:
+    def __exit__(self, *exc: object) -> None:
         self.close()
-        return False
 
     # -- internals ----------------------------------------------------------
 

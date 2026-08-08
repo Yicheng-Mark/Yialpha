@@ -733,14 +733,19 @@ class TestPortfolioManagerInjection:
     def test_pm_falls_back_to_freetext_when_structured_unavailable(self):
         """If a provider does not support with_structured_output, the agent
         falls back to a plain invoke and returns whatever prose the model
-        produced, so the pipeline never blocks."""
+        produced, so the pipeline never blocks. The fallback is now flagged in
+        the decision text (silent-degradation observability)."""
         plain_response = "**Rating**: Sell\n\nExit ahead of guidance."
         llm = MagicMock()
         llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
         llm.invoke.return_value = MagicMock(content=plain_response)
         pm_node = create_portfolio_manager(llm)
         result = pm_node(_make_pm_state())
-        assert result["final_trade_decision"] == plain_response
+        # The prose is preserved, but a structured-fallback audit marker is
+        # appended so the degradation is visible to downstream readers.
+        decision = result["final_trade_decision"]
+        assert decision.startswith(plain_response)
+        assert "Structured-output fallback" in decision
         # No structured object on the free-text path -> pm_rating is empty so
         # the risk overlay falls back to parse_rating on the markdown.
         assert result["pm_rating"] == ""

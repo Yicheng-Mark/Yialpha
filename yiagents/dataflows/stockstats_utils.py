@@ -80,7 +80,7 @@ def yf_retry(func, max_retries=3, base_delay=2.0, symbol=None, canonical=None):
     for attempt in range(max_retries + 1):
         try:
             return func()
-        except YFRateLimitError:
+        except YFRateLimitError as err:
             if attempt < max_retries:
                 delay = base_delay * (2 ** attempt)
                 logger.warning(f"Yahoo Finance rate limited, retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})")
@@ -89,7 +89,7 @@ def yf_retry(func, max_retries=3, base_delay=2.0, symbol=None, canonical=None):
             raise NoMarketDataError(
                 symbol or "?", canonical or symbol or "?",
                 "Yahoo Finance rate-limited after retries",
-            )
+            ) from err
         except _YF_NETWORK_ERRORS as exc:
             raise NoMarketDataError(
                 symbol or "?", canonical or symbol or "?",
@@ -304,7 +304,7 @@ def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.D
         return data
     parsed = pd.to_datetime(data.columns, errors="coerce")
     keep = []
-    for col, col_ts in zip(data.columns, parsed):
+    for col, col_ts in zip(data.columns, parsed, strict=True):
         if pd.isna(col_ts):
             keep.append(True)  # non-date metadata column
         else:

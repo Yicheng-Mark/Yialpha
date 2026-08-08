@@ -68,7 +68,7 @@ class TestKlinesPagination(unittest.TestCase):
         self.assertEqual(len(set(dates)), len(dates))
         self.assertEqual(dates[0], "2020-01-01")
         d_objs = [datetime.strptime(d, "%Y-%m-%d") for d in dates]
-        for prev, cur in zip(d_objs, d_objs[1:]):
+        for prev, cur in zip(d_objs, d_objs[1:], strict=False):
             self.assertEqual((cur - prev).days, 1)
 
     def test_short_range_single_page_unchanged(self):
@@ -123,9 +123,9 @@ class TestFundingPagination(unittest.TestCase):
 class TestNoDataStillRaises(unittest.TestCase):
     def test_empty_klines_raises_no_market_data(self):
         from yiagents.dataflows.errors import NoMarketDataError
-        with mock.patch.object(binance, "_http_get", _fake_klines_server([])):
-            with self.assertRaises(NoMarketDataError):
-                binance.get_binance_klines("BTCUSDT", "2020-01-01", "2020-01-31")
+        with mock.patch.object(binance, "_http_get", _fake_klines_server([])), \
+                self.assertRaises(NoMarketDataError):
+            binance.get_binance_klines("BTCUSDT", "2020-01-01", "2020-01-31")
 
 
 if __name__ == "__main__":

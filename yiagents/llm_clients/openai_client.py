@@ -1,3 +1,4 @@
+import contextlib
 import os
 import re
 from dataclasses import dataclass
@@ -340,10 +341,8 @@ class OpenAIClient(BaseLLMClient):
         if "timeout" not in llm_kwargs:
             _timeout_env = os.environ.get("YIAGENTS_LLM_TIMEOUT_S")
             if _timeout_env:
-                try:
+                with contextlib.suppress(ValueError):
                     llm_kwargs["timeout"] = float(_timeout_env)
-                except ValueError:
-                    pass
 
         # The subclass (provider quirks) comes from the registry spec.
         return chat_cls(**llm_kwargs)

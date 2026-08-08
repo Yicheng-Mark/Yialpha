@@ -382,7 +382,7 @@ def risk_overlay_determinism(runs: list[dict]) -> bool:
     for r in runs:
         rating = r.get("rating", "?")
         by_rating.setdefault(rating, []).append(r)
-    for rating, group in by_rating.items():
+    for _rating, group in by_rating.items():
         overlays = [g.get("risk_overlay") for g in group]
         # Skip groups where every overlay is missing (risk disabled).
         if all(o is None for o in overlays):

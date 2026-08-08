@@ -28,12 +28,12 @@ from datetime import datetime, timedelta
 from langchain_core.messages import AIMessage
 
 from yiagents.agents.schemas import SentimentReport, render_sentiment_report
-from yiagents.agents.utils.prompt_builder import build_collaborator_prompt
 from yiagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
     get_news,
 )
+from yiagents.agents.utils.prompt_builder import build_collaborator_prompt
 from yiagents.agents.utils.structured import (
     NO_EXTERNAL_TOOLS,
     bind_structured,

@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from datetime import datetime as Datetime
 from enum import Enum
 
-
 # ---------------------------------------------------------------------------
 # Enums (constant.py, pruned + de-i18n'd)
 # ---------------------------------------------------------------------------

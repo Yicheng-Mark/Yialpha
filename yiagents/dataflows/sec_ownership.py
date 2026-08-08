@@ -47,19 +47,19 @@ import io
 import json
 import logging
 import os
-import zipfile
 import xml.etree.ElementTree as ET
+import zipfile
 from datetime import date, timedelta
 
 from .config import get_config
 from .errors import NoMarketDataError
+
 # Reuse sec_edgar's transport verbatim (CIK resolution, GET, cache, throttle).
 from .sec_edgar import (
     _cache_dir,
     _cached_or_fetch,
     _cik_for_ticker,
     _fetch_company_facts,
-    _sec_get,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,10 +173,7 @@ def get_form4_insider_trading(
 
     # Live mode: no as-of upper bound; anchor the look-back window at today.
     upper = (curr_date or "")[:10]
-    if upper:
-        upper_d = date.fromisoformat(upper)
-    else:
-        upper_d = date.today()
+    upper_d = date.fromisoformat(upper) if upper else date.today()
     lower_d = upper_d - timedelta(days=int(look_back_days))
 
     recent = (subs.get("filings") or {}).get("recent") or {}
@@ -269,10 +266,7 @@ def get_form4_insider_trading(
 # FTD (fails-to-deliver)
 # --------------------------------------------------------------------------- #
 def _last_day_of_month(y: int, m: int) -> int:
-    if m == 12:
-        nxt = date(y + 1, 1, 1)
-    else:
-        nxt = date(y, m + 1, 1)
+    nxt = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
     return (nxt - timedelta(days=1)).day
 
 
@@ -475,9 +469,9 @@ def _extract_cusip(facts: dict, curr_date: str | None) -> str:
     absent — the single-source CUSIP contract (no FTD/13D fallback by design)."""
     try:
         records = facts["dei"]["EntityCusip"]["units"]["NONE"]
-    except (KeyError, TypeError):
+    except (KeyError, TypeError) as err:
         raise NoMarketDataError(
-            "cusip", detail="dei:EntityCusip not reported in companyfacts")
+            "cusip", detail="dei:EntityCusip not reported in companyfacts") from err
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else None
 
@@ -613,8 +607,10 @@ def _parse_13f_tsv(zip_bytes: bytes) -> tuple[list[dict], list[dict]]:
             "13f", detail="13F ZIP missing cover/holding TSV members")
 
     ch, cl = _tsv_header_lines(cover_raw)
-    cai = _idx(ch, "accession"); cci = _idx(ch, "filer_cik", "cik")
-    cdi = _idx(ch, "filing_date"); cmi = _idx(ch, "filing_manager", "manager")
+    cai = _idx(ch, "accession")
+    cci = _idx(ch, "filer_cik", "cik")
+    cdi = _idx(ch, "filing_date")
+    cmi = _idx(ch, "filing_manager", "manager")
     cover = []
     for ln in cl:
         p = ln.split("\t")
@@ -622,8 +618,10 @@ def _parse_13f_tsv(zip_bytes: bytes) -> tuple[list[dict], list[dict]]:
                       "filing_date": _cell(p, cdi), "manager": _cell(p, cmi)})
 
     hh, hl = _tsv_header_lines(holding_raw)
-    hai = _idx(hh, "accession"); hcu = _idx(hh, "cusip")
-    hni = _idx(hh, "name_of_issuer", "issuer"); hvi = _idx(hh, "value")
+    hai = _idx(hh, "accession")
+    hcu = _idx(hh, "cusip")
+    hni = _idx(hh, "name_of_issuer", "issuer")
+    hvi = _idx(hh, "value")
     hsh = hst = hpc = None
     for i, name in enumerate(hh):
         n = name.lower()

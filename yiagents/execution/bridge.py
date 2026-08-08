@@ -21,6 +21,8 @@ bare ``OrderRequest`` structs for future automated submission. The two coexist.
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from yiagents.agents.schemas import (
@@ -37,6 +39,34 @@ if TYPE_CHECKING:
     # but keeping the reference under TYPE_CHECKING means this module never
     # pulls the risk layer at runtime — bridge stays pure-struct + pure-function.
     from yiagents.risk.manager import RiskDecision
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RiskAudit:
+    """Audit trail for :func:`pre_trade_risk_check`.
+
+    Makes the previously-silent Gate 3 pass-through observable. Downstream
+    callers (gateway, submission layer) can inspect ``risk_checked`` to decide
+    whether to log a WARNING or refuse the order — aligned with the fail-closed
+    philosophy of the execution edge (``browser_broker.py`` kill switch).
+
+    Attributes:
+        risk_checked: ``True`` when a real ``RiskDecision`` was applied (gates
+            1/2 ran). ``False`` on Gate 3 pass-through — the risk overlay was
+            ``None`` (disabled / degraded / not yet computed) and orders were
+            released with no sizing guard.
+        gate: Human-readable label of the gate that decided the outcome
+            (``"pass_through"``, ``"breaker_block"``, ``"weight_cap"``,
+            ``"checked"``).
+        n_in / n_out: Order count before and after the check.
+    """
+
+    risk_checked: bool
+    gate: str
+    n_in: int
+    n_out: int
 
 _BULLISH_RATINGS = (PortfolioRating.BUY, PortfolioRating.OVERWEIGHT)
 _BEARISH_RATINGS = (PortfolioRating.SELL, PortfolioRating.UNDERWEIGHT)
@@ -157,6 +187,13 @@ def pre_trade_risk_check(
        responsibility for sizing. This preserves today's "risk overlay is
        advisory text only" behaviour when execution is not wired.
 
+    .. note::
+
+        The Gate 3 pass-through is now **logged at WARNING** so it is no longer
+        silent — the biggest fail-open risk in the system is at least observable.
+        Callers that need the full audit trail (gate label, risk_checked flag)
+        should use :func:`pre_trade_risk_check_with_audit` instead.
+
     Args:
         order_requests: The output of :func:`decision_to_order_requests`.
         risk_decision: The :class:`~yiagents.risk.manager.RiskDecision` from the
@@ -170,20 +207,62 @@ def pre_trade_risk_check(
         A (possibly empty, possibly clipped) list of ``OrderRequest`` safe to
         submit to ``gateway.send_order``.
     """
+    orders, audit = pre_trade_risk_check_with_audit(
+        order_requests, risk_decision, equity=equity, max_weight=max_weight
+    )
+    return orders
+
+
+def pre_trade_risk_check_with_audit(
+    order_requests: list[OrderRequest],
+    risk_decision: RiskDecision | None,
+    *,
+    equity: float = 0.0,
+    max_weight: float = 0.20,
+) -> tuple[list[OrderRequest], RiskAudit]:
+    """Same gates as :func:`pre_trade_risk_check`, but returns an audit trail.
+
+    The :class:`RiskAudit` makes the Gate 3 pass-through observable: downstream
+    callers can check ``audit.risk_checked`` and refuse / flag orders that were
+    released without a quantitative sizing guard. This is the recommended entry
+    point for any wired execution path.
+
+    Returns:
+        A ``(orders, audit)`` tuple where ``orders`` is the (possibly empty,
+        possibly clipped) list and ``audit`` records which gate fired.
+    """
+    n_in = len(order_requests)
+
     # Gate 3: no risk decision -> caller owns sizing; pass through unchanged.
+    # This is the biggest fail-open path in the system. We keep the behaviour
+    # (orders are released) but make it OBSERVABLE via a WARNING + the audit
+    # trail, so downstream callers can refuse un-checked orders if they choose.
     if risk_decision is None:
-        return list(order_requests)
+        if n_in > 0:
+            logger.warning(
+                "pre_trade_risk_check: Gate 3 PASS-THROUGH — %d order(s) released "
+                "with NO risk overlay (risk_decision is None: overlay disabled, "
+                "degraded, or not yet computed). No sizing guard was applied.",
+                n_in,
+            )
+        return list(order_requests), RiskAudit(
+            risk_checked=False, gate="pass_through", n_in=n_in, n_out=n_in
+        )
 
     # Gate 1: breaker hard-stop or explicit block drops every order.
     if (
         risk_decision.action == "blocked"
         or getattr(risk_decision.breaker, "regime", "") == "hard_stop"
     ):
-        return []
+        return [], RiskAudit(
+            risk_checked=True, gate="breaker_block", n_in=n_in, n_out=0
+        )
 
     # Gate 2: clip each order's value to max_weight * equity.
     if equity <= 0 or max_weight <= 0:
-        return list(order_requests)
+        return list(order_requests), RiskAudit(
+            risk_checked=True, gate="checked_no_cap", n_in=n_in, n_out=n_in
+        )
     value_cap = equity * max_weight
 
     clipped: list[OrderRequest] = []
@@ -207,4 +286,6 @@ def pre_trade_risk_check(
                     reference=req.reference,
                 )
         clipped.append(req)
-    return clipped
+    return clipped, RiskAudit(
+        risk_checked=True, gate="weight_cap", n_in=n_in, n_out=len(clipped)
+    )

@@ -23,8 +23,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
 from yiagents.agents.analysts.fundamentals_analyst import create_fundamentals_analyst
-from yiagents.dataflows import akshare_vendor as akv
-from yiagents.dataflows import baostock_vendor as bsv
+from yiagents.dataflows import akshare_vendor as akv, baostock_vendor as bsv
 from yiagents.dataflows.errors import NoMarketDataError, VendorRateLimitError
 
 
@@ -322,9 +321,9 @@ class FundamentalsAShareWiringTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # AKShare news vendor (Phase 2)
 # --------------------------------------------------------------------------- #
-import pandas as pd  # noqa: E402
-
 from types import SimpleNamespace  # noqa: E402
+
+import pandas as pd  # noqa: E402
 
 
 def _news_df():
@@ -689,8 +688,8 @@ class NewsAShareWiringTests(unittest.TestCase):
     """a_share_native news — default-off byte-equivalence + on-appends-news-tool."""
 
     def _tool_names(self, config_overrides=None, ticker="600519.SS"):
-        from yiagents.dataflows import config as cfgmod
         from yiagents.agents.analysts.news_analyst import create_news_analyst
+        from yiagents.dataflows import config as cfgmod
         orig = cfgmod.get_config()
         try:
             if config_overrides:

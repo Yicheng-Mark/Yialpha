@@ -1,10 +1,20 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="zh" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>YiAgents</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <!-- Apply persisted theme before first paint to avoid a dark→light flash. -->
+  <script>
+    (function () {
+      var t = localStorage.getItem("yiagents_theme");
+      if (t !== "light" && t !== "dark") {
+        t = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+      }
+      document.documentElement.setAttribute("data-theme", t);
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/styles.css?v=4" />
 </head>
 <body>
   <header class="topbar">
@@ -17,6 +27,7 @@
       </nav>
     </div>
     <div class="topbar-right">
+      <button id="theme-toggle" class="btn btn-icon" title="主题"></button>
       <button id="lang-toggle" class="btn btn-ghost" data-i18n="lang_btn">🌐 EN</button>
     </div>
   </header>
@@ -31,7 +42,10 @@
 
   <!-- Offline markdown renderer (marked v15, MIT). No CDN at runtime. -->
   <script src="/static/vendor/marked.min.js"></script>
-  <script src="/static/i18n.js"></script>
-  <script src="/static/app.js"></script>
+  <!-- ECharts 5.5 (Apache-2.0), vendored locally — offline, no CDN. -->
+  <script src="/static/vendor/echarts.min.js"></script>
+  <script src="/static/i18n.js?v=4"></script>
+  <script src="/static/charts.js?v=4"></script>
+  <script src="/static/app.js?v=4"></script>
 </body>
 </html>

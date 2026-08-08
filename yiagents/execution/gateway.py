@@ -126,16 +126,16 @@ class BaseGateway(ABC):
     # signatures so that a later ``StreamingGateway`` (mixing in an
     # EventEngine) can override them without altering this synchronous base.
 
-    def on_order(self, order: OrderData) -> None:
+    def on_order(self, order: OrderData) -> None:  # noqa: B027
         pass
 
-    def on_trade(self, trade: TradeData) -> None:
+    def on_trade(self, trade: TradeData) -> None:  # noqa: B027
         pass
 
-    def on_position(self, position: PositionData) -> None:
+    def on_position(self, position: PositionData) -> None:  # noqa: B027
         pass
 
-    def on_account(self, account: AccountData) -> None:
+    def on_account(self, account: AccountData) -> None:  # noqa: B027
         pass
 
     def get_default_setting(self) -> dict:

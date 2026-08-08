@@ -39,11 +39,11 @@ class TestEnums:
 
     def test_active_statuses_membership(self):
         # The three "can still change" statuses; finals are absent.
-        assert ACTIVE_STATUSES == {
+        assert {
             Status.SUBMITTING,
             Status.NOTTRADED,
             Status.PARTTRADED,
-        }
+        } == ACTIVE_STATUSES
         assert Status.ALLTRADED not in ACTIVE_STATUSES
         assert Status.CANCELLED not in ACTIVE_STATUSES
         assert Status.REJECTED not in ACTIVE_STATUSES
@@ -65,12 +65,12 @@ class TestEnums:
 @pytest.mark.unit
 class TestOrderData:
     def _order(self, **kw):
-        base = dict(
-            gateway_name="binance",
-            symbol="BTCUSDT",
-            exchange=Exchange.BINANCE,
-            orderid="o1",
-        )
+        base = {
+            "gateway_name": "binance",
+            "symbol": "BTCUSDT",
+            "exchange": Exchange.BINANCE,
+            "orderid": "o1",
+        }
         base.update(kw)
         return OrderData(**base)
 

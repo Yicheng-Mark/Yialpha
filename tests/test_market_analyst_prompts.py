@@ -10,6 +10,7 @@ from yiagents.agents.analysts.market_analyst import (
     _legacy_system_message,
     _system_message,
 )
+from yiagents.dataflows.config import get_config
 
 
 @pytest.mark.unit
@@ -46,10 +47,11 @@ def test_system_message_defaults_to_legacy():
 
 @pytest.mark.unit
 def test_system_message_switches_to_fincot_when_enabled(monkeypatch):
-    import yiagents.dataflows.config as cfg_mod
-    enabled = dict(cfg_mod._config)
+    from yiagents.dataflows.config import set_config
+
+    enabled = get_config()
     enabled["fin_cot_prompts"] = True
-    monkeypatch.setattr(cfg_mod, "_config", enabled)
+    set_config(enabled)
     msg = _system_message()
     assert "## Task" in msg
     assert "trading assistant" not in msg

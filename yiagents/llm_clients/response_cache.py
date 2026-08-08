@@ -83,7 +83,7 @@ def _key(prompt: str, llm_string: str) -> str:
     this pair uniquely identifies one logical LLM call — structured-output
     calls hash apart from plain ``invoke`` calls automatically.
     """
-    return hashlib.sha1(f"{llm_string}\x00{prompt}".encode("utf-8")).hexdigest()
+    return hashlib.sha1(f"{llm_string}\x00{prompt}".encode()).hexdigest()
 
 
 def _serialize(return_val: Any) -> dict[str, Any]:

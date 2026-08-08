@@ -227,3 +227,9 @@ analysis_output/
 .claude/
 # ZCode agent workspace state (personal, machine-specific — not for the repo)
 .zcode/
+
+# Mimosa security-scan artifacts (tool-generated scratch, not source)
+.mimosa/
+
+# pytest cache (stale lastfailed can reference renamed/deleted tests)
+.pytest_cache/

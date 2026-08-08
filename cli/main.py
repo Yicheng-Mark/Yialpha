@@ -14,21 +14,24 @@ for _stream in (sys.stdout, sys.stderr):
     with contextlib.suppress(AttributeError, ValueError):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
-import typer
-from rich import box
-from rich.align import Align
-from rich.console import Console, Group
-from rich.layout import Layout
-from rich.live import Live
-from rich.markdown import Markdown
-from rich.panel import Panel
-from rich.rule import Rule
-from rich.spinner import Spinner
-from rich.table import Table
-from rich.text import Text
+# noqa: E402 — all imports sit after the UTF-8 reconfigure guard above, which must
+# run first so ✅/❌/中文 render on a GBK Windows console.  The guard is a platform
+# shim, not a code-ordering bug; reordering would re-introduce UnicodeEncodeError.
+import typer  # noqa: E402
+from rich import box  # noqa: E402
+from rich.align import Align  # noqa: E402
+from rich.console import Console, Group  # noqa: E402
+from rich.layout import Layout  # noqa: E402
+from rich.live import Live  # noqa: E402
+from rich.markdown import Markdown  # noqa: E402
+from rich.panel import Panel  # noqa: E402
+from rich.rule import Rule  # noqa: E402
+from rich.spinner import Spinner  # noqa: E402
+from rich.table import Table  # noqa: E402
+from rich.text import Text  # noqa: E402
 
-from cli.stats_handler import StatsCallbackHandler
-from cli.utils import (
+from cli.stats_handler import StatsCallbackHandler  # noqa: E402
+from cli.utils import (  # noqa: E402
     ask_anthropic_effort,
     ask_gemini_thinking_config,
     ask_glm_region,
@@ -48,15 +51,15 @@ from cli.utils import (
     select_research_depth,
     select_shallow_thinking_agent,
 )
-from yiagents.default_config import DEFAULT_CONFIG
-from yiagents.graph.analyst_execution import (
+from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
+from yiagents.graph.analyst_execution import (  # noqa: E402
     AnalystWallTimeTracker,
     build_analyst_execution_plan,
     get_initial_analyst_node,
     sync_analyst_tracker_from_chunk,
 )
-from yiagents.graph.trading_graph import YiAgentsGraph
-from yiagents.reporting import write_report_tree
+from yiagents.graph.trading_graph import YiAgentsGraph  # noqa: E402
+from yiagents.reporting import write_report_tree  # noqa: E402
 
 console = Console()
 

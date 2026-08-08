@@ -28,15 +28,17 @@ for _stream in (sys.stdout, sys.stderr):
     with __import__("contextlib").suppress(AttributeError, ValueError):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
-import argparse
-import contextlib
-import os
-import subprocess
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-from pathlib import Path
+# noqa: E402 — imports follow the UTF-8 reconfigure guard above; reordering would
+# re-introduce UnicodeEncodeError when printing ❌/✅/中文 on a GBK Windows console.
+import argparse  # noqa: E402
+import contextlib  # noqa: E402
+import os  # noqa: E402
+import subprocess  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: E402
+from datetime import datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 # Allow running as `python scripts/run_robust.py` without an editable install.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -222,11 +224,9 @@ def _register_proc(proc: subprocess.Popen) -> None:
 
 
 def _unregister_proc(proc: subprocess.Popen) -> None:
-    with _active_lock:
-        try:
-            _active_procs.remove(proc)
-        except ValueError:
-            pass  # already removed (Ctrl+C handler killed and cleared it)
+    # already removed (Ctrl+C handler killed and cleared it) is harmless.
+    with _active_lock, contextlib.suppress(ValueError):
+        _active_procs.remove(proc)
 
 
 def _kill_all_active() -> None:
@@ -338,12 +338,12 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                 # kwarg is platform-only — Popen rejects start_new_session on
                 # Windows and creationflags is a no-op 0 on POSIX — so the
                 # Windows argv/flags stay byte-identical to the old behavior.
-                popen_kwargs = dict(
-                    cwd=str(_PROJECT_ROOT),
-                    env=child_env,
-                    stdout=logf,
-                    stderr=subprocess.STDOUT,
-                )
+                popen_kwargs = {
+                    "cwd": str(_PROJECT_ROOT),
+                    "env": child_env,
+                    "stdout": logf,
+                    "stderr": subprocess.STDOUT,
+                }
                 if IS_WINDOWS:
                     popen_kwargs["creationflags"] = _CREATE_FLAGS
                 else:

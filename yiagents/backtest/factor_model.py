@@ -210,7 +210,7 @@ def load_factor_returns(
 # Pure OLS attribution.
 # ---------------------------------------------------------------------------
 def factor_attribution(
-    strategy_returns: "pd.Series",
+    strategy_returns: pd.Series,
     factor_returns: pd.DataFrame,
     periods_per_year: int = 252,
     model: str = "FF3",
@@ -246,7 +246,7 @@ def factor_attribution(
     coeffs, _residuals, _rank, _sv = np.linalg.lstsq(design, excess, rcond=None)
 
     alpha_per = float(coeffs[0])
-    betas = {c: float(b) for c, b in zip(factor_cols, coeffs[1:])}
+    betas = {c: float(b) for c, b in zip(factor_cols, coeffs[1:], strict=True)}
 
     predicted = design @ coeffs
     ss_res = float(np.sum((excess - predicted) ** 2))
