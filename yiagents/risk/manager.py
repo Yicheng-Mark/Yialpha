@@ -203,6 +203,15 @@ class RiskManager:
         is_new = existing_value <= 0.0
 
         # 5. Combine: Kelly x breaker x CVaR, then clip to exposure cap.
+        #
+        # NOTE: breaker and CVaR are applied MULTIPLICATIVELY and both read
+        # equity-derived history, so they compound in a stress regime. In a
+        # deepening drawdown the breaker already cuts to 0.5 (no_new) or 0.0
+        # (hard_stop), AND CVaR can independently cut another 50% on a tail
+        # breach — so realized position size can be 0.25x of an already-trimmed
+        # Kelly. This is intentional (belt-and-suspenders de-risking), not a
+        # bug, but easy to misread: a tiny position in a stress regime is the
+        # two gates agreeing the risk is high, not a sizing error.
         target_weight = kelly_raw * breaker_state.position_multiplier * cvar_mult
         target_weight = max(0.0, min(target_weight, self.breaker.max_single_position))
 

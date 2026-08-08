@@ -103,7 +103,15 @@ def _sec_get(url: str) -> bytes:
 
 def _cached_or_fetch(path: str, url: str, ttl_days: float) -> bytes:
     """Serve from a fresh on-disk cache, else fetch + cache. Falls back to a stale
-    cache on network failure (a slightly-old filing beats no data)."""
+    cache on network failure (a slightly-old filing beats no data).
+
+    .. warning:: Stale-on-failure is a deliberate fail-open trade-off. For
+        read-only market data this is reasonable, but a backtest may see a
+        slightly-old filing rather than no data when the network is down.
+        The staleness is bounded by the cache's mtime (visible on disk) but is
+        NOT logged at WARNING level on the stale-serve path — callers that need
+        strict freshness should check the cache file's mtime themselves.
+    """
     if os.path.exists(path):
         if (time.time() - os.path.getmtime(path)) < ttl_days * 86_400.0:
             try:

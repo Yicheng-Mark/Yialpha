@@ -119,6 +119,11 @@ class DrawdownBreaker:
         return self._state(drawdown, regime)
 
     def _state(self, drawdown: float, regime: str) -> BreakerState:
+        # Regime -> position multiplier. ``caution`` keeps full size (1.0) — the
+        # *signal* is the regime change, not a size cut. ``no_new`` halves,
+        # ``hard_stop`` flattens. This multiplier compounds multiplicatively
+        # with the CVaR multiplier in RiskManager.decide (see manager.py step 5),
+        # so a stress regime can yield 0.25x of an already-trimmed Kelly.
         multiplier = {
             "normal": 1.0,
             "caution": 1.0,
