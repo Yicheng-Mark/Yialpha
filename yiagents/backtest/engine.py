@@ -127,6 +127,7 @@ class BacktestResult:
     config_summary: dict[str, Any] = field(default_factory=dict)
     cached_hits: int = 0
     cached_misses: int = 0
+    degraded_decision_count: int = 0
 
     def equity_series(self) -> pd.Series:
         return pd.Series(self.equity, index=self.equity_dates, dtype=float)
@@ -300,6 +301,7 @@ def run_backtest(
     cached_hits = 0
     cached_misses = 0
     total_traded_notional = 0.0
+    degraded_decision_count = 0
 
     for trade_date, price in prices.items():
         if trade_date < sorted_dates[0]:
@@ -317,13 +319,15 @@ def run_backtest(
 
         # Rebalance on a decision date.
         if trade_date in decision_set:
-            rating, decision_md, was_cached = _resolve_decision(
+            rating, decision_md, was_cached, was_degraded = _resolve_decision(
                 graph, ticker, trade_date, asset_type, cache, run_tag,
             )
             if was_cached:
                 cached_hits += 1
             else:
                 cached_misses += 1
+            if was_degraded:
+                degraded_decision_count += 1
 
             target_weight = weight_fn(rating, trade_date, ctx)
 
@@ -430,6 +434,7 @@ def run_backtest(
         },
         cached_hits=cached_hits,
         cached_misses=cached_misses,
+        degraded_decision_count=degraded_decision_count,
     )
 
 
@@ -608,20 +613,32 @@ def _resolve_decision(
     asset_type: str,
     cache: DecisionCache | None,
     run_tag: str,
-) -> tuple[str, str, bool]:
-    """Return ``(rating, final_decision_markdown, was_cached)``.
+) -> tuple[str, str, bool, bool]:
+    """Return ``(rating, final_decision_markdown, was_cached, was_degraded)``.
 
     Uses the cache when available; otherwise calls the graph. The graph returns
     ``(final_state, rating)``; the markdown decision lives in
     ``final_state['final_trade_decision']``.
+
+    ``was_degraded`` is True when the decision is a fallback rather than a
+    genuine agent output — ``propagate`` raised (rating forced to Hold) or the
+    rating was not a parseable string. This lets the backtest engine count
+    degraded decisions separately so they are not silently confused with real
+    "Hold" calls. (``parse_rating`` fallback also emits its own warning via
+    ``warn_on_default=True``.)
     """
     if cache is not None:
         cached = cache.get(ticker, trade_date, run_tag)
         if cached is not None:
-            return cached.rating, cached.final_decision, True
+            return cached.rating, cached.final_decision, True, False
 
-    final_state, rating = _call_graph(graph, ticker, trade_date, asset_type)
-    rating = parse_rating(rating) if isinstance(rating, str) else "Hold"
+    final_state, rating, propagate_failed = _call_graph(graph, ticker, trade_date, asset_type)
+    was_degraded = propagate_failed or not isinstance(rating, str)
+    if propagate_failed or not isinstance(rating, str):
+        rating = "Hold"
+    else:
+        rating = parse_rating(rating, warn_on_default=True)
+
     decision_md = ""
     if isinstance(final_state, Mapping):
         decision_md = str(final_state.get("final_trade_decision", ""))  # type: ignore[union-attr]
@@ -630,16 +647,24 @@ def _resolve_decision(
 
     if cache is not None:
         cache.remember(ticker, trade_date, rating, decision_md, run_tag)
-    return rating, decision_md, False
+    return rating, decision_md, False, was_degraded
 
 
-def _call_graph(graph: _GraphLike, ticker: str, trade_date: str, asset_type: str):
-    """Invoke propagate defensively; a failing node should not abort the backtest."""
+def _call_graph(
+    graph: _GraphLike, ticker: str, trade_date: str, asset_type: str,
+) -> tuple[Any, Any, bool]:
+    """Invoke propagate defensively; a failing node should not abort the backtest.
+
+    Returns ``(final_state, rating, propagate_failed)``. ``propagate_failed`` is
+    True when an exception was caught and the rating was forced to ``"Hold"``,
+    so callers can distinguish a degraded fallback from a genuine Hold.
+    """
     try:
-        return graph.propagate(ticker, trade_date, asset_type=asset_type)
+        final_state, rating = graph.propagate(ticker, trade_date, asset_type=asset_type)
+        return final_state, rating, False
     except Exception as exc:  # noqa: BLE001 -- one bad date must not kill the run
         logger.warning("propagate failed for %s on %s: %s (treating as Hold)", ticker, trade_date, exc)
-        return {"final_trade_decision": f"[propagate error: {exc}]"}, "Hold"
+        return {"final_trade_decision": f"[propagate error: {exc}]"}, "Hold", True
 
 
 def _excerpt(text: str, limit: int = 200) -> str:

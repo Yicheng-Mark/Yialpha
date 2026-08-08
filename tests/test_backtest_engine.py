@@ -200,6 +200,27 @@ def test_engine_propagate_error_treated_as_hold():
 
 
 @pytest.mark.unit
+def test_engine_degraded_decisions_counted():
+    """propagate failures are counted as degraded, not confused with real Holds."""
+    dates = _decision_dates(4)
+
+    class BrokenGraph:
+        def propagate(self, *a, **k):
+            raise RuntimeError("boom")
+        def _resolve_benchmark(self, t):
+            return "SPY"
+
+    result = run_backtest(BrokenGraph(), "AAPL", dates, holding_days=5,
+                          price_provider=_rising_prices)
+    assert result.degraded_decision_count == len(dates)
+    # A healthy graph produces zero degraded decisions.
+    good_graph = FakeGraph(dict.fromkeys(dates, "Buy"))
+    good_result = run_backtest(good_graph, "AAPL", dates, holding_days=5,
+                               price_provider=_rising_prices)
+    assert good_result.degraded_decision_count == 0
+
+
+@pytest.mark.unit
 def test_trade_row_fields_populated():
     dates = _decision_dates(4)
     graph = FakeGraph(dict.fromkeys(dates, "Buy"))
