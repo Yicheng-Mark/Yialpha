@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -301,7 +302,19 @@ class BinanceGateway(BaseGateway):
         except ValueError:
             timeout_ms = _DEFAULT_TIMEOUT_MS
         proxy = self._proxy_dict()
-        mainnet = self._mainnet or _coerce_bool_env(os.environ.get(_ENV_MAINNET)) is True
+        # Fail-closed: a malformed ``YIAGENTS_EXECUTION_MAINNET`` must not raise
+        # (``_coerce_bool_env`` throws on unrecognised values); it falls back to
+        # the constructor-supplied ``self._mainnet`` (False by default -> testnet).
+        try:
+            mainnet = self._mainnet or _coerce_bool_env(os.environ.get(_ENV_MAINNET)) is True
+        except ValueError:
+            logger.warning(
+                "YIAGENTS_EXECUTION_MAINNET=%r is not a recognised boolean; "
+                "falling back to constructor mainnet=%r (fail-closed).",
+                os.environ.get(_ENV_MAINNET),
+                self._mainnet,
+            )
+            mainnet = self._mainnet
 
         if self._product == "spot":
             from binance_common.configuration import ConfigurationRestAPI  # type: ignore
@@ -407,7 +420,14 @@ class BinanceGateway(BaseGateway):
 
     @staticmethod
     def _gen_client_order_id() -> str:
-        return f"yiagents-{int(time.time() * 1000)}-{os.getpid()}"
+        # ``int(time.time() * 1000)`` + ``pid`` alone collide if two calls land
+        # in the same millisecond within one process (Binance then rejects the
+        # second with -2010 Duplicate order sent). A short random suffix breaks
+        # the tie. The total length must stay within Binance's 36-char
+        # ``new_client_order_id`` cap: ``yiagents-`` (9) + 13-digit ms + ``-`` +
+        # pid + ``-`` + 6-hex <= 9+13+1+5+1+6 = 35 (pid up to 5 digits on
+        # Windows; 3 random bytes = ~16M space, ample for intra-ms uniqueness).
+        return f"yiagents-{int(time.time() * 1000)}-{os.getpid()}-{secrets.token_hex(3)}"
 
     def _map_order(self, req: OrderRequest) -> tuple[str, str, dict]:
         """Translate an :class:`OrderRequest` to SDK ``new_order`` arguments.
@@ -467,8 +487,22 @@ class BinanceGateway(BaseGateway):
             )
             return self._rejected(req, reason=f"IP ban 418: {body}")
 
-        transient = name in {"TooManyRequestsError", "ServerError", "NetworkError"} or (
-            isinstance(status_code, int) and status_code >= 500
+        # Transient = the order may have reached the book despite the error.
+        # 429 (rate limit) is the single most common transient on Binance; we
+        # match it via status code AND via the exception class name, because the
+        # SDK's exception taxonomy has shifted across versions (RateLimitError,
+        # TooManyRequestsError, BinanceAPIException …). Substring matching on
+        # the lowered name keeps us resilient to those renames without having
+        # to import SDK exception types (the SDK is lazily imported).
+        name_lower = name.lower()
+        transient = (
+            name in {"TooManyRequestsError", "ServerError", "NetworkError"}
+            or any(tok in name_lower for tok in ("rate", "limit", "timeout", "network"))
+            or (
+                isinstance(status_code, int)
+                and (status_code >= 500 or status_code == 429)
+            )
+            or str(status_code) == "429"
         )
         if transient:
             recovered = self._safe_query_by_client_id(req, client_order_id)
@@ -510,7 +544,13 @@ class BinanceGateway(BaseGateway):
                 )
             data = _as_dict(_resp_data(resp)) or {}
             orderid = data.get("orderId")
-            if orderid is None and not data:
+            # A real order always carries ``orderId``. An error payload
+            # (e.g. ``{"code": -2013, "msg": "Order does not exist."}``) is
+            # non-empty but has no ``orderId`` — returning None lets the caller
+            # treat the submit as ambiguous (-> REJECTED) instead of falling
+            # through to ``_order_from_response`` which would default the
+            # unknown status to ``SUBMITTING`` (a live, optimistic state).
+            if orderid is None:
                 return None
             return self._order_from_response(req, data, client_order_id)
         except Exception:  # noqa: BLE001 - recovery must never raise

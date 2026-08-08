@@ -72,6 +72,18 @@ class Propagator:
             "fundamentals_report": "",
             "sentiment_report": "",
             "news_report": "",
+            # Downstream nodes read these via direct ``state[key]`` indexing
+            # (trader, portfolio_manager, risk debators). In the normal flow each
+            # is written by its upstream node before it is read, so the absence
+            # of a default is harmless. But under checkpoint resume — if a run
+            # crashes before, say, the Research Manager writes
+            # ``investment_plan`` — the resumed state would lack the key and the
+            # Trader node would raise ``KeyError``, masking the original crash.
+            # Initialising them to "" makes the resume path degrade gracefully.
+            "sender": "",
+            "investment_plan": "",
+            "trader_investment_plan": "",
+            "final_trade_decision": "",
         }
 
     def get_graph_args(self, callbacks: list | None = None) -> dict[str, Any]:

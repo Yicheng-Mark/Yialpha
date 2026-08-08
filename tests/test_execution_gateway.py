@@ -500,3 +500,149 @@ class TestLazyImport:
         assert "binance_sdk_spot" not in sys.modules
         assert "binance_sdk_derivatives_trading_usds_futures" not in sys.modules
         assert "binance_common" not in sys.modules
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the 2026-08-08 hardening pass.
+#
+# Each test pins a fix whose pre-fix behaviour was wrong (the assertion would
+# fail against the old code). They live here so the fail-closed contract stays
+# auditable in one place.
+# ---------------------------------------------------------------------------
+
+
+class TestRateLimit429Detection:
+    """A 429 with an SDK exception class name we do not hardcode must still be
+    treated as transient (-> query recovery), not as a deterministic REJECT.
+
+    Pre-fix, only ``status_code >= 500`` and an exact class-name set were
+    recognised, so a 429 raised as e.g. ``BinanceAPIException`` bypassed the
+    query path and was logged as REJECTED — risking a lost fill.
+    """
+
+    def test_429_with_unrecognized_class_name_recovers_via_query(self):
+        # An exception type whose name is NOT in the hardcoded set and whose
+        # status_code is 429 (not >= 500).
+        class BinanceAPIException(Exception):
+            def __init__(self, msg="rate limited", status_code=429, error_message=""):
+                super().__init__(msg)
+                self.status_code = status_code
+                self.error_message = error_message
+
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.side_effect = BinanceAPIException()
+        gw._client.rest_api.query_order.return_value = _FakeResp(
+            {"status": "NEW", "orderId": 888, "executedQty": "0", "updateTime": 1700000000000}
+        )
+        order = gw.send_order(_req(reference="coid-429"))
+        assert gw._client.rest_api.new_order.call_count == 1
+        gw._client.rest_api.query_order.assert_called_once_with(
+            symbol="BTCUSDT", orig_client_order_id="coid-429"
+        )
+        assert order.status is Status.NOTTRADED  # recovered, not rejected
+
+    def test_429_with_unrecognized_class_name_unconfirmed_rejected(self):
+        class BinanceAPIException(Exception):
+            def __init__(self, msg="rate limited", status_code=429, error_message=""):
+                super().__init__(msg)
+                self.status_code = status_code
+                self.error_message = error_message
+
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.side_effect = BinanceAPIException()
+        gw._client.rest_api.query_order.return_value = _FakeResp(
+            {"code": -2013, "msg": "Order does not exist."}
+        )
+        order = gw.send_order(_req(reference="coid-429b"))
+        assert order.status is Status.REJECTED  # not resubmitted
+        assert gw._client.rest_api.new_order.call_count == 1
+
+    def test_rate_limit_named_exception_detected_via_substring(self):
+        # A rate-limit exception whose class name contains "rate"/"limit"
+        # but is NOT exactly "TooManyRequestsError" and carries no status_code.
+        class RateLimitError(Exception):
+            def __init__(self, msg="rl"):
+                super().__init__(msg)
+                self.status_code = ""
+                self.error_message = ""
+
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.side_effect = RateLimitError()
+        gw._client.rest_api.query_order.side_effect = Exception("not found")
+        order = gw.send_order(_req(reference="coid-rl"))
+        # Must have queried (transient path), not treated as a hard reject.
+        gw._client.rest_api.query_order.assert_called_once()
+        assert order.status is Status.REJECTED  # unconfirmed -> no resubmit
+
+
+class TestSafeQueryErrorPayload:
+    """An error payload (non-empty, no ``orderId``) must return None, not fall
+    through to ``_order_from_response`` which defaults unknown status to
+    SUBMITTING.
+
+    Pre-fix, the guard was ``orderid is None and not data``, so a body like
+    ``{"code": -2013, "msg": "Order does not exist."}`` (non-empty but no
+    orderId) slipped through and was reported as SUBMITTING — a live state.
+    """
+
+    def test_error_payload_returns_none(self):
+        gw = _perp_gw_with_client()
+        # Drive through _safe_query_by_client_id via a transient submit error.
+        gw._client.rest_api.new_order.side_effect = NetworkError("net", status_code=500)
+        gw._client.rest_api.query_order.return_value = _FakeResp(
+            {"code": -2013, "msg": "Order does not exist."}
+        )
+        order = gw.send_order(_req(reference="coid-err"))
+        # Query returned an error payload -> treated as "not found" -> REJECTED.
+        assert order.status is Status.REJECTED
+
+    def test_empty_payload_returns_none(self):
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.side_effect = NetworkError("net", status_code=500)
+        gw._client.rest_api.query_order.return_value = _FakeResp({})
+        order = gw.send_order(_req(reference="coid-empty"))
+        assert order.status is Status.REJECTED
+
+
+class TestGenClientOrderIdUniqueness:
+    """``_gen_client_order_id`` must not collide within a single process/millisecond."""
+
+    def test_unique_under_burst(self):
+        ids = {BinanceGateway._gen_client_order_id() for _ in range(1000)}
+        assert len(ids) == 1000  # no collisions
+
+    def test_within_binance_length_limit(self):
+        # Binance new_client_order_id cap is 36 characters.
+        for _ in range(100):
+            assert len(BinanceGateway._gen_client_order_id()) <= 36
+
+    def test_starts_with_namespace(self):
+        assert BinanceGateway._gen_client_order_id().startswith("yiagents-")
+
+
+class TestMalformedMainnetEnvFailsClosed:
+    """A malformed ``YIAGENTS_EXECUTION_MAINNET`` must not raise from ``connect``."""
+
+    def test_garbage_mainnet_env_does_not_raise(self, monkeypatch):
+        monkeypatch.setenv(_ENV_ENABLED, "true")
+        monkeypatch.setenv(_ENV_KEY, "k")
+        monkeypatch.setenv(_ENV_SECRET, "s")
+        monkeypatch.setenv("YIAGENTS_EXECUTION_MAINNET", "garbage")
+        gw = BinanceGateway()
+        gw._build_client = MagicMock(return_value="FAKE_CLIENT")  # avoid SDK import
+        # Pre-fix this raised ValueError from _coerce_bool_env.
+        gw.connect()
+        # Constructor default (False -> testnet) preserved.
+        assert gw._mainnet is False
+
+    def test_garbage_mainnet_env_with_constructor_true_keeps_it(self, monkeypatch):
+        monkeypatch.setenv(_ENV_ENABLED, "true")
+        monkeypatch.setenv(_ENV_KEY, "k")
+        monkeypatch.setenv(_ENV_SECRET, "s")
+        monkeypatch.setenv("YIAGENTS_EXECUTION_MAINNET", "not-a-bool")
+        gw = BinanceGateway(setting={"mainnet": True})
+        gw._build_client = MagicMock(return_value="FAKE_CLIENT")
+        gw.connect()
+        # Constructor mainnet=True survives the malformed env (fail-closed to
+        # the explicit constructor value, not to False).
+        assert gw._mainnet is True
