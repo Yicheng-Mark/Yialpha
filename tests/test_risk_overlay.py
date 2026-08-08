@@ -25,6 +25,7 @@ def _make_graph(risk_enabled: bool) -> YiAgentsGraph:
         "max_drawdown_hard_stop": 0.15,
         "atr_stop_mult": 2.0,
     }
+    g._risk_overlay_degraded = False
     g.risk_manager = g._build_risk_manager()
     g.signal_processor = SignalProcessor(None)
     return g
@@ -109,3 +110,57 @@ def test_overlay_drawdown_regime_recorded(monkeypatch):
     # Regime line always present; with a fresh peak == 80k the drawdown is 0,
     # so this asserts the section renders without error and includes the field.
     assert "Drawdown Regime" in md
+
+
+@pytest.mark.unit
+def test_overlay_build_failure_marks_decision():
+    """When RiskManager build fails, the decision gets a visible DISABLED warning."""
+    g = _make_graph(risk_enabled=True)
+    # Simulate build failure: risk_manager is None but the degraded flag is set.
+    g.risk_manager = None
+    g._risk_overlay_degraded = True
+
+    original = "**Rating**: Buy\n\nStrong thesis."
+    state = {"final_trade_decision": original}
+    out = g._apply_risk_overlay("AAPL", "2024-01-15", state, None)
+    md = out["final_trade_decision"]
+    # The warning is visible in the decision text.
+    assert "⚠️ Quantitative Risk Overlay DISABLED" in md
+    assert "no Kelly sizing" in md
+    # The original decision is still there, and the rating still parses.
+    assert "Strong thesis." in md
+    assert parse_rating(md) == "Buy"
+
+
+@pytest.mark.unit
+def test_overlay_decide_failure_marks_decision(monkeypatch):
+    """When decide() throws, the decision gets a visible DISABLED warning."""
+    g = _make_graph(risk_enabled=True)
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (190.0, 3.0))
+    # Force decide() to raise.
+    original_decide = g.risk_manager.decide
+    g.risk_manager.decide = lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("simulated Kelly failure")
+    )
+
+    state = {"final_trade_decision": "**Rating**: Buy\n\nThesis."}
+    out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
+    md = out["final_trade_decision"]
+    assert "⚠️ Quantitative Risk Overlay DISABLED" in md
+    assert "overlay computation failed" in md
+    # Rating still intact.
+    assert parse_rating(md) == "Buy"
+    # Restore so other tests using the same graph instance aren't affected.
+    g.risk_manager.decide = original_decide
+
+
+@pytest.mark.unit
+def test_overlay_risk_off_does_not_mark():
+    """When risk_enabled=False (user choice, not failure), no warning appears."""
+    g = _make_graph(risk_enabled=False)
+    assert g.risk_manager is None
+    assert g._risk_overlay_degraded is False
+    original = "**Rating**: Buy\n\nThesis."
+    state = {"final_trade_decision": original}
+    out = g._apply_risk_overlay("AAPL", "2024-01-15", state, None)
+    assert out["final_trade_decision"] == original

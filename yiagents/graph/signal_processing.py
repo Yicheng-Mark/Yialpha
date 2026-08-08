@@ -28,4 +28,4 @@ class SignalProcessor:
 
     def process_signal(self, full_signal: str) -> str:
         """Return one of Buy / Overweight / Hold / Underweight / Sell."""
-        return parse_rating(full_signal)
+        return parse_rating(full_signal, warn_on_default=True)

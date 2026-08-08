@@ -60,6 +60,25 @@ class TestParseRating:
         for r in RATINGS_5_TIER:
             assert parse_rating(f"Rating: {r}") == r
 
+    def test_warn_on_default_emits_warning(self, caplog):
+        """When warn_on_default=True, a fallback to default logs a warning."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="yiagents.agents.utils.rating"):
+            result = parse_rating("No rating here at all.", warn_on_default=True)
+        assert result == "Hold"
+        assert len(caplog.records) == 1
+        assert "defaulting to 'Hold'" in caplog.records[0].message
+        assert "degraded decision" in caplog.records[0].message
+
+    def test_warn_on_default_false_is_silent(self, caplog):
+        """Without warn_on_default, no warning is emitted (backwards compat)."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="yiagents.agents.utils.rating"):
+            parse_rating("No rating here at all.")
+        assert len(caplog.records) == 0
+
 
 # ---------------------------------------------------------------------------
 # SignalProcessor: thin adapter over the heuristic

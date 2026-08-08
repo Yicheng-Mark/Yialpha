@@ -81,6 +81,11 @@ def render_backtest_report(result: BacktestResult) -> str:
                  f"Initial capital: {result.initial_capital:,.0f}  |  "
                  f"Transaction cost: {result.config_summary.get('cost_bps', 0.0)} bps")
     lines.append(f"- Cache: {result.cached_hits} hits / {result.cached_misses} misses")
+    if result.degraded_decision_count:
+        lines.append(
+            f"- ⚠️ Degraded decisions: {result.degraded_decision_count} "
+            f"(propagate failed or rating unparseable — forced to Hold)"
+        )
     lines.append("")
     lines.append("## Equity curve")
     lines.append("")

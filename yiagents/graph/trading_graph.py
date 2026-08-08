@@ -179,6 +179,7 @@ class YiAgentsGraph:
         # Phase 1: optional quantitative risk overlay. Built only when the user
         # opts in via risk_enabled; otherwise every node behaves as before and
         # the Phase-0 baseline stays reproducible.
+        self._risk_overlay_degraded = False
         self.risk_manager = self._build_risk_manager()
 
         # State tracking
@@ -370,7 +371,9 @@ class YiAgentsGraph:
         """Construct the Phase-1 RiskManager when ``risk_enabled`` is set.
 
         Returns ``None`` when risk control is off so the rest of the graph can
-        branch cheaply on a single truthy check.
+        branch cheaply on a single truthy check. On build failure, sets
+        ``self._risk_overlay_degraded`` so :meth:`_apply_risk_overlay` can mark
+        the decision document visibly instead of silently dropping the overlay.
         """
         if not self.config.get("risk_enabled"):
             return None
@@ -380,6 +383,7 @@ class YiAgentsGraph:
         except Exception as exc:  # noqa: BLE001 -- never block a run on risk setup
             logger.warning("risk_enabled is set but RiskManager build failed (%s); "
                            "running without the risk overlay", exc)
+            self._risk_overlay_degraded = True
             return None
 
     def _latest_close_and_atr(self, ticker, trade_date):
@@ -401,6 +405,22 @@ class YiAgentsGraph:
                          ticker, trade_date, exc)
             return None, None
 
+    @staticmethod
+    def _risk_disabled_warning(reason: str) -> str:
+        """A visible markdown warning appended when the risk overlay is skipped.
+
+        Placed at the *end* of the decision text so ``parse_rating`` still reads
+        the PM's leading ``**Rating**:`` line first. This makes a silent fail-open
+        visible to anyone reading the decision report.
+        """
+        return (
+            "\n\n---\n\n## ⚠️ Quantitative Risk Overlay DISABLED\n\n"
+            f"The risk overlay layer failed to run for this decision ({reason}). "
+            "The rating and thesis above are unchanged, but **no Kelly sizing, "
+            "ATR stop-loss, drawdown breaker, or CVaR protection was applied**. "
+            "Treat the position sizing in the decision above with caution.\n"
+        )
+
     def _apply_risk_overlay(self, company_name, trade_date, final_state, portfolio_state):
         """Append the deterministic risk overlay to the PM's final decision.
 
@@ -411,6 +431,11 @@ class YiAgentsGraph:
         confuses downstream rating extraction.
         """
         if self.risk_manager is None:
+            if self._risk_overlay_degraded:
+                final_state["final_trade_decision"] = (
+                    final_state.get("final_trade_decision", "")
+                    + self._risk_disabled_warning("RiskManager build failed")
+                )
             return final_state
 
         from yiagents.risk.manager import PortfolioState
@@ -439,6 +464,10 @@ class YiAgentsGraph:
             )
         except Exception as exc:  # noqa: BLE001 -- overlay must never break a run
             logger.warning("risk overlay failed for %s on %s: %s", company_name, trade_date, exc)
+            final_state["final_trade_decision"] = (
+                final_state.get("final_trade_decision", "")
+                + self._risk_disabled_warning(f"overlay computation failed: {exc}")
+            )
             return final_state
 
         overlay = (
