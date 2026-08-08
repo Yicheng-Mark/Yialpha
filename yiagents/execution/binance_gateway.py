@@ -428,6 +428,16 @@ class BinanceGateway(BaseGateway):
         Fail-closed: not connected / unsupported type -> ``REJECTED``. On an
         ambiguous submit error (the order may have reached the book) we
         **query** rather than re-submit, to avoid duplicate fills.
+
+        .. warning::
+
+            This gateway performs **no quantitative risk check** — it trusts
+            the ``OrderRequest`` it receives. The caller MUST pass every order
+            through :func:`yiagents.execution.bridge.pre_trade_risk_check`
+            before calling ``send_order``. That function enforces the drawdown
+            hard-stop, breaker block, and single-position weight cap that the
+            risk overlay computed upstream. Bypassing it is the #1 money-losing
+            risk when the execution layer is wired into the graph.
         """
         client = self._client
         if client is None:
