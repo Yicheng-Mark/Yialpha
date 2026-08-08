@@ -22,6 +22,7 @@ then take the Pearson correlation of the ranks).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TypeAlias
 
 import numpy as np
 import pandas as pd
@@ -42,7 +43,7 @@ except Exception:  # pragma: no cover - exercised only by environment
 _MIN_PAIRS = 5
 
 # Type alias for the array-likes we accept as 1-D factor / return inputs.
-ArrayLike = Sequence[float] | np.ndarray | pd.Series
+ArrayLike: TypeAlias = "Sequence[float] | np.ndarray | pd.Series"
 
 
 def _as_clean_series(x: ArrayLike) -> pd.Series:

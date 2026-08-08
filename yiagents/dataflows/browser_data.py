@@ -150,9 +150,8 @@ class BrowserDataFetcher:
     def __enter__(self) -> BrowserDataFetcher:
         return self
 
-    def __exit__(self, *exc: object) -> bool:
-        self.close()
-        return False  # never swallow exceptions
+    def __exit__(self, *exc: object) -> None:
+        self.close()  # never swallows exceptions
 
     def close(self) -> None:
         """Tear down the browser session. Idempotent and never raises.

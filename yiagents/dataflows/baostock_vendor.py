@@ -181,7 +181,7 @@ def _query_daily(bs, code: str) -> list[dict]:
             f"{getattr(rs, 'error_msg', '?')}")
     rows: list[dict] = []
     while (rs.error_code == "0") and rs.next():
-        rows.append(dict(zip(rs.fields, rs.get_row_data())))
+        rows.append(dict(zip(rs.fields, rs.get_row_data(), strict=False)))
     return rows
 
 
@@ -260,9 +260,7 @@ def _in_window(d_str: str, lower_d: date, upper_d: date, upper_set: bool) -> boo
         return False
     if upper_set and d > upper_d:
         return False
-    if d < lower_d:
-        return False
-    return True
+    return not d < lower_d
 
 
 # --------------------------------------------------------------------------- #

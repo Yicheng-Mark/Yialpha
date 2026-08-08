@@ -17,6 +17,7 @@ from yiagents.agents.utils.agent_utils import (
 )
 from yiagents.agents.utils.structured import (
     NO_EXTERNAL_TOOLS,
+    STRUCTURED_FALLBACK,
     bind_structured,
     invoke_structured_or_freetext,
 )
@@ -134,10 +135,26 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
             "Portfolio Manager",
             # Extract the structured rating directly so the risk overlay can read
             # it from state without re-parsing the rendered markdown. On a
-            # free-text fallback pm_rating is None -> overlay falls back to
-            # parse_rating (see trading_graph._apply_risk_overlay).
+            # free-text fallback pm_rating is STRUCTURED_FALLBACK -> the rating
+            # is unknown and the overlay must fall back to parse_rating (see
+            # trading_graph._apply_risk_overlay).
             extract=lambda decision: decision.rating.value,
         )
+
+        # Detect the structured-output degradation path. When the PM fell back to
+        # free text, pm_rating is STRUCTURED_FALLBACK (falsy, identity-distinct
+        # from None). We flag this in the decision text so it is never silent:
+        # a weak model that degrades to regex-parsed ratings is now observable.
+        structured_degraded = pm_rating is STRUCTURED_FALLBACK
+        if structured_degraded:
+            final_trade_decision = (
+                final_trade_decision
+                + "\n\n---\n\n"
+                + "> ⚠️ **Structured-output fallback**: the PM's typed "
+                "``PortfolioDecision`` could not be parsed; the rating above "
+                "was extracted from free text via regex. Treat the rating with "
+                "caution."
+            )
 
         new_risk_debate_state = {
             "judge_decision": final_trade_decision,
@@ -155,7 +172,7 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
         return {
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
-            "pm_rating": pm_rating or "",
+            "pm_rating": pm_rating if pm_rating and not structured_degraded else "",
         }
 
     return portfolio_manager_node

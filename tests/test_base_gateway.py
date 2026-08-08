@@ -8,8 +8,6 @@ must not require an EventEngine), and the reserved ``proxies`` setting. All
 
 from __future__ import annotations
 
-from datetime import datetime
-
 import pytest
 
 from yiagents.execution.domain import (
@@ -21,7 +19,6 @@ from yiagents.execution.domain import (
     OrderRequest,
     OrderType,
     PositionData,
-    Status,
 )
 from yiagents.execution.gateway import BaseGateway
 
@@ -66,12 +63,12 @@ class _MinimalGateway(BaseGateway):
 class TestAbcContract:
     def test_cannot_instantiate_base(self):
         with pytest.raises(TypeError):
-            BaseGateway("x")  # noqa: abstract methods present
+            BaseGateway("x")  # noqa: F811 -- abstract methods present
 
     @pytest.mark.parametrize("missing", sorted(_full_kwargs()))
     def test_missing_one_abstract_still_abstract(self, missing):
         # Drop exactly one method -> the subclass is still abstract.
-        attrs = {k: v for k, v in vars(_MinimalGateway).items()}
+        attrs = dict(vars(_MinimalGateway))
         attrs.pop(missing, None)
 
         cls = type("Partial", (BaseGateway,), attrs)

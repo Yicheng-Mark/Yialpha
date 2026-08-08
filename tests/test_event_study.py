@@ -79,7 +79,7 @@ def _build_drift_series(n_days: int = 700, base_seed: int = 123):
     event_positions = [200, 290, 380, 470, 560]
     deltas = 0.005 + rng.normal(0.0, 0.0015, size=len(event_positions))
     window_len = 11  # event_window (0, +10) inclusive
-    for pos, d in zip(event_positions, deltas):
+    for pos, d in zip(event_positions, deltas, strict=True):
         ret_idx = pos - 1
         asset_ret[ret_idx:ret_idx + window_len] += d
 

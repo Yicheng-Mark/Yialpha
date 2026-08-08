@@ -16,7 +16,7 @@ import yiagents.dataflows.config as config_module
 import yiagents.dataflows.y_finance as y_finance
 import yiagents.default_config as default_config
 from yiagents.dataflows import interface
-from yiagents.dataflows.config import set_config
+from yiagents.dataflows.config import reset_config, set_config
 from yiagents.dataflows.stockstats_utils import _assert_ohlcv_not_stale
 from yiagents.dataflows.symbol_utils import NoMarketDataError
 
@@ -84,10 +84,10 @@ class StaleGuardPropagationTests(unittest.TestCase):
 @pytest.mark.unit
 class StaleGuardRoutingTests(unittest.TestCase):
     def setUp(self):
-        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+        reset_config()
 
     def tearDown(self):
-        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+        reset_config()
 
     def test_router_sentinel_surfaces_stale_reason(self):
         set_config({"data_vendors": {"core_stock_apis": "yfinance"}})

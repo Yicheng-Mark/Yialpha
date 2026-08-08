@@ -15,7 +15,6 @@ import pytest
 from yiagents.dataflows import sec_edgar
 from yiagents.dataflows.errors import NoMarketDataError, VendorRateLimitError
 
-
 # --------------------------------------------------------------------------- #
 # Synthetic SEC payloads
 # --------------------------------------------------------------------------- #
@@ -77,7 +76,7 @@ def test_balance_sheet_pit_drops_not_yet_filed_period(monkeypatch, tmp_path):
     assert "2024-06-29" in out
     assert "2023-12-30" in out
     # Total Assets row carries the Q3 value, integer-formatted.
-    assets_line = next(l for l in out.splitlines() if l.startswith("Total Assets,"))
+    assets_line = next(line for line in out.splitlines() if line.startswith("Total Assets,"))
     assert "35300000000" in assets_line  # Q3 value
 
 

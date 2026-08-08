@@ -62,7 +62,6 @@ import os
 import threading
 from datetime import date, timedelta
 
-from .config import get_config
 from .errors import NoMarketDataError, VendorRateLimitError
 
 logger = logging.getLogger(__name__)
@@ -161,9 +160,7 @@ def _in_window(d_str: str, upper_d: date, upper_set: bool) -> bool:
         d = date.fromisoformat(d_str[:10])
     except ValueError:
         return True
-    if upper_set and d > upper_d:
-        return False
-    return True
+    return not (upper_set and d > upper_d)
 
 
 def _market_for(ticker: str) -> str:
@@ -259,7 +256,6 @@ def get_a_share_news_native(
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
     upper_set = bool(upper)
-    lower_d = upper_d - timedelta(days=int(look_back_days))
 
     try:
         with _direct_connect():
@@ -270,8 +266,8 @@ def get_a_share_news_native(
         # skip to the next vendor; everything else -> no-data sentinel.
         low = msg.lower()
         if any(k in low for k in ("429", "rate", "频繁", "拒绝")):
-            raise VendorRateLimitError(f"AKShare stock_news_em throttled: {msg}")
-        raise NoMarketDataError(ticker, detail=f"AKShare news fetch failed: {msg}")
+            raise VendorRateLimitError(f"AKShare stock_news_em throttled: {msg}") from exc
+        raise NoMarketDataError(ticker, detail=f"AKShare news fetch failed: {msg}") from exc
 
     out = io.StringIO()
     out.write(f"# A-share News (AKShare / Eastmoney) for {ticker} "

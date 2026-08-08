@@ -6,19 +6,19 @@ from yiagents.agents.utils.agent_utils import (
     get_balance_sheet,
     get_cashflow,
     get_form4_insider_trading,
-    get_fundamentals,
     get_ftd_data,
+    get_fundamentals,
     get_income_statement,
     get_institutional_holdings,
     get_instrument_context_from_state,
     get_language_instruction,
     get_margin_trading,
 )
+from yiagents.agents.utils.pot_tool import make_pot_compute_tool
 from yiagents.agents.utils.prompt_builder import build_collaborator_prompt
 from yiagents.agents.utils.valuation_tools import get_valuation_metrics
 from yiagents.dataflows.config import get_config
 from yiagents.dataflows.symbol_utils import is_a_stock
-
 
 # Appended to the fundamentals system prompt only when YIAGENTS_SEC_OWNERSHIP is
 # on. When off, the analyst's prompt (and tool list) are byte-for-byte unchanged.
@@ -93,6 +93,12 @@ def create_fundamentals_analyst(llm):
         # Python instead of confabulating it.
         if get_config().get("valuation_tools"):
             tools.append(get_valuation_metrics)
+            # Ad-hoc PoT computation tool (same gate as valuation_tools). When
+            # on, the analyst can delegate arbitrary numerical reasoning (ratio
+            # percentile, implied growth, conversion) to Python code generated
+            # by the LLM and run in the restricted sandbox — instead of doing
+            # the arithmetic in its head. When off, byte-for-byte unchanged.
+            tools.append(make_pot_compute_tool(llm))
         # SEC ownership & short-interest (Track B2, env: YIAGENTS_SEC_OWNERSHIP,
         # off by default). Same byte-equivalence contract as valuation_tools:
         # when off, the tool list -- and therefore the tool names injected into

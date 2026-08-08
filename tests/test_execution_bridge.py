@@ -144,11 +144,11 @@ class TestGuards:
 @pytest.mark.unit
 class TestPurity:
     def test_same_inputs_same_output(self):
-        kwargs = dict(
-            symbol="AAPL",
-            exchange=Exchange.SMART,
-            volume=7,
-        )
+        kwargs = {
+            "symbol": "AAPL",
+            "exchange": Exchange.SMART,
+            "volume": 7,
+        }
         a = decision_to_order_requests(_decision(PortfolioRating.BUY), None, **kwargs)
         b = decision_to_order_requests(_decision(PortfolioRating.BUY), None, **kwargs)
         assert len(a) == len(b) == 1

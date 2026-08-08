@@ -38,6 +38,39 @@ NO_EXTERNAL_TOOLS = (
 )
 
 
+class _StructuredFallbackSentinel:
+    """Marker returned on the free-text-fallback path of ``extract``.
+
+    This lets downstream code distinguish **three** states for an extracted
+    structured field (e.g. the PM's ``rating``):
+
+    * A real value (e.g. ``"Buy"``) — structured call succeeded.
+    * ``None`` — the structured call succeeded but the field was genuinely
+      absent (rare; e.g. the schema allows optional fields).
+    * :data:`STRUCTURED_FALLBACK` — the structured call **failed** and the
+      agent fell back to free-text generation. The markdown is the LLM's raw
+      prose and the extracted field does not exist. This is the silent-
+      degradation path that previously returned a bare ``None``, making it
+      indistinguishable from a legitimate absence.
+
+    The sentinel is falsy so ``pm_rating or ""`` and similar truthiness guards
+    keep working unchanged, but ``is STRUCTURED_FALLBACK`` lets the risk overlay
+    and any audit layer flag the degraded path explicitly.
+    """
+
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "STRUCTURED_FALLBACK"
+
+
+#: Singleton instance. Use identity comparison (``is STRUCTURED_FALLBACK``).
+STRUCTURED_FALLBACK: Any = _StructuredFallbackSentinel()
+
+
 def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Any | None:
     """Return ``llm.with_structured_output(schema)`` or ``None`` if unsupported.
 
@@ -98,9 +131,10 @@ def invoke_structured_or_freetext(
     When ``extract`` is provided, the structured-success path additionally
     applies it to the parsed result and returns ``(rendered_markdown,
     extracted_value)`` instead of just the markdown string. The free-text
-    fallback returns ``(markdown, None)`` — no structured object exists to
-    extract from. Callers that don't pass ``extract`` get the original
-    ``str``-only return (Trader, Research Manager), so this is fully
+    fallback returns ``(markdown, STRUCTURED_FALLBACK)`` — a falsy sentinel
+    that is distinguishable from a genuine ``None`` via identity comparison
+    (``is STRUCTURED_FALLBACK``). Callers that don't pass ``extract`` get the
+    original ``str``-only return (Trader, Research Manager), so this is fully
     backward-compatible.
     """
     if structured_llm is not None:
@@ -123,5 +157,5 @@ def invoke_structured_or_freetext(
 
     response = plain_llm.invoke(prompt)
     if extract is not None:
-        return response.content, None
+        return response.content, STRUCTURED_FALLBACK
     return response.content

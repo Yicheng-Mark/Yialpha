@@ -416,20 +416,20 @@ class PoTExecutor:
         self._run_with_thread_timeout(func)
 
     def _run_with_signal_timeout(self, func: Any) -> None:
-        previous_handler = signal.getsignal(signal.SIGALRM)
+        previous_handler = signal.getsignal(signal.SIGALRM)  # type: ignore[attr-defined]
 
         def _handler(signum: int, frame: Any) -> None:  # noqa: ARG001
             raise _TimeoutError()
 
         try:
-            signal.signal(signal.SIGALRM, _handler)
-            signal.setitimer(signal.ITIMER_REAL, float(self.timeout_seconds))
+            signal.signal(signal.SIGALRM, _handler)  # type: ignore[attr-defined]
+            signal.setitimer(signal.ITIMER_REAL, float(self.timeout_seconds))  # type: ignore[attr-defined]
             try:
                 func()
             finally:
-                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.setitimer(signal.ITIMER_REAL, 0)  # type: ignore[attr-defined]
         finally:
-            signal.signal(signal.SIGALRM, previous_handler)
+            signal.signal(signal.SIGALRM, previous_handler)  # type: ignore[attr-defined]
 
     def _run_with_thread_timeout(self, func: Any) -> None:
         timed_out = {"flag": False}

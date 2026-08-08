@@ -141,9 +141,9 @@ def _query(pro, api_name: str, **fields):
         msg = str(exc)
         low = msg.lower()
         if any(k in low for k in ("每分钟", "次数", "限频", "429", "rate", "权限", "permission")):
-            raise VendorRateLimitError(f"Tushare {api_name} throttled/forbidden: {msg}")
+            raise VendorRateLimitError(f"Tushare {api_name} throttled/forbidden: {msg}") from exc
         raise NoMarketDataError(fields.get("ts_code", api_name),
-                                detail=f"Tushare {api_name} failed: {msg}")
+                                detail=f"Tushare {api_name} failed: {msg}") from exc
 
 
 # --------------------------------------------------------------------------- #

@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
 rank_signals.py — YiAgents 多标的信心排名。
 
@@ -20,23 +19,26 @@ rank_signals.py — YiAgents 多标的信心排名。
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
-import os
 import re
 import sys
 from pathlib import Path
 
 # Windows 控制台是 GBK(cp936)，打印中文/符号会 UnicodeEncodeError —— 强制 UTF-8
-try:
+with contextlib.suppress(Exception):
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-except Exception:
-    pass
 
 # 复用 trade_ticket.py 的全部解析（scripts/ 不是包，sys.path 注入）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from trade_ticket import (  # noqa: E402
-    _results_dir, parse_pm_decision, parse_trader, parse_market,
-    decide_direction, detect_asset_type, resolve_levels,
+    _results_dir,
+    decide_direction,
+    detect_asset_type,
+    parse_market,
+    parse_pm_decision,
+    parse_trader,
+    resolve_levels,
 )
 
 # ---------------------------------------------------------------------------
@@ -124,10 +126,11 @@ def resolve_target(parsed_pm, entry, direction) -> float | None:
     （会出现 59× 止损距离这类垃圾值），故弃用；无 PM 目标价 → 返回 None，信心分重归一化。
     """
     pt = parsed_pm.get("price_target")
-    if pt and entry:
-        # 目标价必须在方向上有利（多头 pt>entry，空头 pt<entry），否则不可用
-        if (direction == "long" and pt > entry) or (direction == "short" and pt < entry):
-            return pt
+    # 目标价必须在方向上有利（多头 pt>entry，空头 pt<entry），否则不可用
+    if pt and entry and (
+        (direction == "long" and pt > entry) or (direction == "short" and pt < entry)
+    ):
+        return pt
     return None
 
 
@@ -247,7 +250,7 @@ def render_rank(rows: list[dict], tickers: list[str], top: int, capital=None) ->
     lines = []
     lines.append(f"# 多标的信心排名 · {len(ok)} 个 ticker"
                  + (f"（展示每类前 {top}）" if top else ""))
-    lines.append(f"> 综合信心分 = 评级 55% + 情绪 25% + 盈亏比 20%（缺失分量重归一化）。"
+    lines.append("> 综合信心分 = 评级 55% + 情绪 25% + 盈亏比 20%（缺失分量重归一化）。"
                  "信心分是**代理分，非校准概率**。评级中/英文均识别。"
                  "⚠️ = 回撤熔断（框架已拒部署，不进 #1 推荐）。")
     lines.append("")

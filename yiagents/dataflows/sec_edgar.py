@@ -105,21 +105,40 @@ def _cached_or_fetch(path: str, url: str, ttl_days: float) -> bytes:
     """Serve from a fresh on-disk cache, else fetch + cache. Falls back to a stale
     cache on network failure (a slightly-old filing beats no data).
 
-    .. warning:: Stale-on-failure is a deliberate fail-open trade-off. For
+    .. note:: Stale-on-failure is a deliberate fail-open trade-off. For
         read-only market data this is reasonable, but a backtest may see a
         slightly-old filing rather than no data when the network is down.
-        The staleness is bounded by the cache's mtime (visible on disk) but is
-        NOT logged at WARNING level on the stale-serve path — callers that need
-        strict freshness should check the cache file's mtime themselves.
+        The staleness is bounded by the cache's mtime (visible on disk). When
+        a stale cache IS served after a fetch failure, it is now logged at
+        WARNING level with the cache age — consistent with baostock and
+        eastmoney, so all three read-only vendors are equally observable.
     """
-    if os.path.exists(path):
-        if (time.time() - os.path.getmtime(path)) < ttl_days * 86_400.0:
+    if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < ttl_days * 86_400.0:
+        try:
+            with open(path, "rb") as fh:
+                return fh.read()
+        except OSError:
+            pass
+    try:
+        raw = _sec_get(url)
+    except (NoMarketDataError, VendorRateLimitError) as exc:
+        # Network failure — fall back to the stale cache if it exists, mirroring
+        # baostock_vendor / eastmoney. Unlike those two, this path previously
+        # had NO warning; now it logs at WARNING with the cache age so the
+        # silent-degradation is observable.
+        if os.path.exists(path):
+            age_days = (time.time() - os.path.getmtime(path)) / 86_400.0
+            logger.warning(
+                "sec_edgar: serving STALE cache for %s (age %.1f days) after "
+                "fetch failure: %s",
+                path, age_days, exc,
+            )
             try:
                 with open(path, "rb") as fh:
                     return fh.read()
             except OSError:
-                pass
-    raw = _sec_get(url)
+                pass  # cache unreadable — fall through to re-raise
+        raise
     try:
         with open(path, "wb") as fh:
             fh.write(raw)
@@ -303,7 +322,7 @@ def _render_statement(
 
     out = io.StringIO()
     out.write(f"# {title} for {ticker} ({freq})\n")
-    out.write(f"# Source: SEC EDGAR XBRL (companyfacts"
+    out.write("# Source: SEC EDGAR XBRL (companyfacts"
               + (f", latest filing {latest_filed}" if latest_filed else "") + ")\n\n")
     out.write("," + ",".join(columns) + "\n")
     for display, unit_kind, recs in per_item:

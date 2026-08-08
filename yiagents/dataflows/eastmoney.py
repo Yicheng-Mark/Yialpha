@@ -372,6 +372,4 @@ def _in_window(d_str: str, lower_d: date, upper_d: date, upper_set: bool) -> boo
         return False
     if upper_set and d > upper_d:
         return False
-    if d < lower_d:
-        return False
-    return True
+    return not d < lower_d

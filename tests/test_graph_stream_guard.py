@@ -8,8 +8,6 @@ non-telemetry ``invoke`` path are byte-identical to before.
 """
 import unittest
 
-import pytest
-
 from yiagents.graph.trading_graph import YiAgentsGraph
 
 

@@ -52,19 +52,19 @@ def _form4_xml(owner: str, title: str, code: str, shares: str, price: str,
         "</postTransactionAmounts>"
         "</nonDerivativeTransaction></nonDerivativeTable>"
         "</ownershipDocument>"
-    ).encode("utf-8")
+    ).encode()
 
 
 # Three Form 4 filings: 2024-04-01 (BUY), 2024-06-10 (SELL), 2024-07-01 (SELL,
 # not-yet-public at the PIT cutoff used below).
 SUBMISSIONS_JSON = (
-    '{"cik":320193,"name":"Apple Inc.","filings":{"recent":{'
-    '"form":["4","4","4"],'
-    '"accessionNumber":["000032019324000003","000032019324000002","000032019324000001"],'
-    '"filingDate":["2024-07-01","2024-06-10","2024-04-01"],'
-    '"primaryDocument":["f3.xml","f2.xml","f1.xml"]'
-    "}}}"
-).encode("utf-8")
+    b'{"cik":320193,"name":"Apple Inc.","filings":{"recent":{'
+    b'"form":["4","4","4"],'
+    b'"accessionNumber":["000032019324000003","000032019324000002","000032019324000001"],'
+    b'"filingDate":["2024-07-01","2024-06-10","2024-04-01"],'
+    b'"primaryDocument":["f3.xml","f2.xml","f1.xml"]'
+    b"}}}"
+)
 
 XML_BY_DOC = {
     "f1.xml": _form4_xml("KATHERINE ADAMS", "GC", "P", "10000", "170.00",
@@ -78,17 +78,17 @@ XML_BY_DOC = {
 # FTD file content (pipe-delimited, with a parenthesized fails column to prove
 # header-driven parsing tolerates the SEC's label variants).
 FTD_PIPE = (
-    "Date|CUSIP|Issuer Name|Symbol|Total Fails (To Deliver)|Price\n"
-    "20240610|037833100|APPLE INC|AAPL|1234567|195.20\n"
-    "20240612|037833100|APPLE INC|AAPL|2345678|196.10\n"
-    "20240611|594918104|MICROSOFT CORP|MSFT|999999|420.00\n"
-).encode("utf-8")
+    b"Date|CUSIP|Issuer Name|Symbol|Total Fails (To Deliver)|Price\n"
+    b"20240610|037833100|APPLE INC|AAPL|1234567|195.20\n"
+    b"20240612|037833100|APPLE INC|AAPL|2345678|196.10\n"
+    b"20240611|594918104|MICROSOFT CORP|MSFT|999999|420.00\n"
+)
 
 # Same data, tab-delimited — proves the delimiter auto-detection.
 FTD_TAB = (
-    "Date\tCUSIP\tIssuer Name\tSymbol\tTotal Fails\tPrice\n"
-    "20240610\t037833100\tAPPLE INC\tAAPL\t1234567\t195.20\n"
-).encode("utf-8")
+    b"Date\tCUSIP\tIssuer Name\tSymbol\tTotal Fails\tPrice\n"
+    b"20240610\t037833100\tAPPLE INC\tAAPL\t1234567\t195.20\n"
+)
 
 
 def _patch_form4(monkeypatch, tmp_path):

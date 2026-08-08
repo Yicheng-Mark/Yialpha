@@ -13,7 +13,7 @@ import requests
 import yiagents.dataflows.config as config_module
 import yiagents.default_config as default_config
 from yiagents.dataflows import interface, polymarket
-from yiagents.dataflows.config import set_config
+from yiagents.dataflows.config import reset_config, set_config
 
 
 def _market(question, prob, *, volume, end_date, closed=False, wk=None):
@@ -105,10 +105,10 @@ class PolymarketResilienceTests(unittest.TestCase):
 @pytest.mark.unit
 class PolymarketRoutingTests(unittest.TestCase):
     def setUp(self):
-        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+        reset_config()
 
     def tearDown(self):
-        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+        reset_config()
 
     def test_category_routes_to_polymarket(self):
         self.assertEqual(

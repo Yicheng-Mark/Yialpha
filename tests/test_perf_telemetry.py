@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import threading
 import time
 
@@ -290,7 +289,7 @@ def test_dump_perf_report_writes_valid_json_matching_serialize(tmp_path):
     dump_perf_report(tracker, out_file)
 
     assert out_file.exists()
-    with open(out_file, "r", encoding="utf-8") as fh:
+    with open(out_file, encoding="utf-8") as fh:
         on_disk = json.load(fh)
     assert on_disk == tracker.serialize()
     # Spot-check structure & totals.
@@ -307,7 +306,7 @@ def test_dump_perf_report_accepts_string_path(tmp_path):
     out_file = str(tmp_path / "out.json")
     dump_perf_report(tracker, out_file)
     assert os.path.exists(out_file)
-    with open(out_file, "r", encoding="utf-8") as fh:
+    with open(out_file, encoding="utf-8") as fh:
         assert json.load(fh) == tracker.serialize()
 
 
@@ -323,7 +322,7 @@ def test_dump_perf_report_atomic_no_tmp_leftover(tmp_path):
     assert out_file.exists()
     assert not (tmp_path / "node_perf_2026-07-06.json.tmp").exists()
     # And the file is valid JSON (not half-written).
-    with open(out_file, "r", encoding="utf-8") as fh:
+    with open(out_file, encoding="utf-8") as fh:
         assert "nodes" in json.load(fh)
 
 

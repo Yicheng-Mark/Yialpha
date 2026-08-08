@@ -11,8 +11,7 @@ import time
 
 import pytest
 
-from yiagents.dataflows import binance
-from yiagents.dataflows import binance_rate_limiter as rl
+from yiagents.dataflows import binance, binance_rate_limiter as rl
 from yiagents.dataflows.config import set_config
 from yiagents.dataflows.errors import VendorRateLimitError
 

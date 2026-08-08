@@ -31,8 +31,6 @@ from __future__ import annotations
 import logging
 import math
 
-import pandas as pd
-
 from .config import get_config
 from .stockstats_utils import load_ohlcv
 

@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
 trade_ticket.py — YiAgents 分析完成后的「交执行单」生成器。
 
@@ -24,6 +23,7 @@ agent / 图 / 数据流，零影响（符合「增强层零影响」铁律）。
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -31,10 +31,8 @@ import sys
 from pathlib import Path
 
 # Windows 控制台是 GBK(cp936)，打印中文/符号会 UnicodeEncodeError —— 强制 UTF-8
-try:
+with contextlib.suppress(Exception):
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-except Exception:
-    pass
 
 # ---------------------------------------------------------------------------
 # 资产类型 / 方向 / 评级 常量
@@ -307,14 +305,8 @@ def compute_leverage(stop_dist, atr_pct, asset_type, strength, profile):
     """
     hard = HARD_CEILING.get(asset_type, 5.0)
 
-    if stop_dist and stop_dist > 0:
-        l_liq = 1.0 / (LIQ_SAFETY * stop_dist)
-    else:
-        l_liq = hard
-    if atr_pct and atr_pct > 0:
-        l_vol = VOL_K.get(asset_type, 0.20) / atr_pct
-    else:
-        l_vol = hard
+    l_liq = 1.0 / (LIQ_SAFETY * stop_dist) if stop_dist and stop_dist > 0 else hard
+    l_vol = VOL_K.get(asset_type, 0.20) / atr_pct if atr_pct and atr_pct > 0 else hard
     l_conv = CONV_CAP.get(abs(strength), {}).get(profile, 5.0) if strength else 0.0
 
     L = max(1.0, min(l_liq, l_vol, l_conv, hard))
@@ -458,10 +450,7 @@ def build_ticket(report_dir: Path, capital: float, profile: str) -> dict:
 def _money(x, unit=""):
     if x is None:
         return "—"
-    if abs(x) >= 1000:
-        s = f"{x:,.2f}"
-    else:
-        s = f"{x:,.4f}".rstrip("0").rstrip(".")
+    s = f"{x:,.2f}" if abs(x) >= 1000 else f"{x:,.4f}".rstrip("0").rstrip(".")
     return f"{unit}{s}"
 
 
@@ -487,12 +476,12 @@ def render_ticket(t: dict) -> str:
     # ---- 不进场情形 ----
     if t["status"] in ("no_trade_hold", "no_trade_breaker", "missing_levels"):
         if t["status"] == "no_trade_breaker":
-            lines.append(f"## ⛔ 不建议进场 —— 风控熔断器触发")
+            lines.append("## ⛔ 不建议进场 —— 风控熔断器触发")
             lines.append(f"回撤体制 = **{t['drawdown_regime']}**（no_new/hard_stop）。"
                          "框架的 Kelly×Breaker×CVaR 层已主动拒绝部署新资金。"
                          "此时硬上杠杆等于在回撤中接刀，应空仓等体制回到 normal/caution。")
         elif t["status"] == "no_trade_hold":
-            lines.append(f"## ⚪ 本笔观望，不建议进场")
+            lines.append("## ⚪ 本笔观望，不建议进场")
             lines.append(f"{t['direction_reason']}。")
             lines.append("Hold 评级意味着多空力量均衡，强行套杠杆没有统计优势。"
                          "若你非要进场，至少等评级转为 Overweight/Underweight，"
@@ -605,7 +594,7 @@ def _execution_plan(t):
             f"分批止盈：到 TP1 {_money(tps[0])} 平 1/3 锁利并把止损上移到成本；"
             f"到 TP2 {_money(tps[1])} 再平 1/3；余仓用 "
             + ("价格回到成本下方" if d == "long" else "价格回到成本上方")
-            + f" 的移动止损（或跌破/突破 10 周线）离场。"
+            + " 的移动止损（或跌破/突破 10 周线）离场。"
         )
     if t["asset_type"].startswith("crypto"):
         parts.append("永续合约：留意资金费率（多头为正时持续扣费），隔夜成本会侵蚀收益；"

@@ -29,6 +29,11 @@
       home_title: "历史分析报告",
       home_sub: "点击 ticker 查看历次分析；左侧为分析日期，右侧可下载原始报告。",
       home_empty: "还没有任何报告。去「提交新分析」跑一次？",
+      home_empty_title: "暂无报告",
+      home_empty_cta: "提交第一次分析 →",
+      home_stat_tickers: "标的总数",
+      home_stat_buy: "Buy/Overweight 占比",
+      home_stat_latest: "最近分析日期",
       home_latest: "最近",
       home_runs: "次分析",
 
@@ -109,6 +114,17 @@
       health_sub: "复刻 preflight 五项（依赖 / key / 代理 / yfinance / DeepSeek）。含网络探测，稍等数秒。",
       health_refresh: "重新检测",
       health_checking: "检测中…",
+
+      // charts
+      chart_axis_volume: "发言量",
+      chart_axis_bull: "看多密度",
+      chart_axis_bear: "看空密度",
+      chart_axis_caution: "谨慎度",
+      chart_trend_title: "评级趋势",
+      chart_dist_title: "评级分布",
+      chart_perf_title: "节点性能",
+      chart_debate_title: "多空力量",
+      chart_risk_title: "三方风险立场",
     },
 
     en: {
@@ -127,6 +143,11 @@
       home_title: "Past Analyses",
       home_sub: "Click a ticker to browse its runs; dates on the left, downloadable raw reports on the right.",
       home_empty: "No reports yet. Run one under “New Analysis”.",
+      home_empty_title: "No reports yet",
+      home_empty_cta: "Run your first analysis →",
+      home_stat_tickers: "Tickers",
+      home_stat_buy: "Buy/Overweight share",
+      home_stat_latest: "Latest run",
       home_latest: "latest",
       home_runs: "runs",
 
@@ -202,6 +223,17 @@
       health_sub: "Replicates the 5 preflight checks (deps / key / proxy / yfinance / DeepSeek). Network probes take a few seconds.",
       health_refresh: "Re-run checks",
       health_checking: "Checking…",
+
+      // charts
+      chart_axis_volume: "Volume",
+      chart_axis_bull: "Bullish",
+      chart_axis_bear: "Bearish",
+      chart_axis_caution: "Caution",
+      chart_trend_title: "Rating Trend",
+      chart_dist_title: "Rating Distribution",
+      chart_perf_title: "Node Performance",
+      chart_debate_title: "Bull vs Bear",
+      chart_risk_title: "Risk Stance",
     },
   };
 

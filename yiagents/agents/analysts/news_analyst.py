@@ -11,7 +11,6 @@ from yiagents.agents.utils.prompt_builder import build_collaborator_prompt
 from yiagents.dataflows.config import get_config
 from yiagents.dataflows.symbol_utils import is_a_stock
 
-
 # Appended to the news system prompt only when YIAGENTS_A_SHARE_NATIVE is on AND
 # the ticker is a China A-share (.SS/.SH/.SZ). When off (or non-A-share), the
 # analyst's prompt (and tool list) are byte-for-byte unchanged. Same double-gate
