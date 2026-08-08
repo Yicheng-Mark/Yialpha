@@ -190,6 +190,13 @@ def _cached_daily(code: str) -> list[dict]:
 
     Falls back to a stale cache on a fetch failure (a slightly-old daily
     series beats no data), matching eastmoney's stale-on-failure contract.
+
+    .. warning:: Stale-on-failure is a deliberate fail-open trade-off. For
+        read-only market data this is reasonable, but a backtest may see a
+        slightly-old daily series rather than no data when the BaoStock socket
+        is unreachable. The stale-serve IS logged at WARNING level (below) so
+        the staleness is observable; callers needing strict freshness can
+        suppress it by ensuring the socket is reachable before backtest.
     """
     cache_path = os.path.join(_cache_dir(), f"daily_{code.replace('.', '_')}.json")
     stale = _read_cache(cache_path)
