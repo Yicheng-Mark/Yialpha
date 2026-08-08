@@ -88,3 +88,53 @@ class TestRiskDebateRouting:
         assert cl.should_continue_risk_analysis(_risk_state(1, "Aggressive")) == "Conservative Analyst"
         assert cl.should_continue_risk_analysis(_risk_state(2, "Conservative")) == "Neutral Analyst"
         assert cl.should_continue_risk_analysis(_risk_state(3, "Neutral")) == "Aggressive Analyst"
+
+
+class _Msg:
+    """Minimal stand-in for a LangChain message: just needs ``tool_calls``."""
+
+    def __init__(self, tool_calls=None):
+        self.tool_calls = tool_calls
+
+
+class TestAnalystToolRouting:
+    """The four ``should_continue_*`` analysts route to the tool node when the
+    last message carries pending tool calls, otherwise to the clear node.
+    Previously each method indexed ``messages[-1]`` with no empty-list guard —
+    an abnormal empty ``messages`` state crashed the graph with IndexError.
+    """
+
+    @pytest.mark.parametrize("method,tool_node,clear_node", [
+        ("should_continue_market", "tools_market", "Msg Clear Market"),
+        ("should_continue_social", "tools_social", "Msg Clear Sentiment"),
+        ("should_continue_news", "tools_news", "Msg Clear News"),
+        ("should_continue_fundamentals", "tools_fundamentals", "Msg Clear Fundamentals"),
+    ])
+    def test_routes_to_tool_node_on_tool_calls(self, method, tool_node, clear_node):
+        cl = ConditionalLogic()
+        state = {"messages": [_Msg(tool_calls=[{"name": "get_price"}])]}
+        assert getattr(cl, method)(state) == tool_node
+
+    @pytest.mark.parametrize("method,clear_node", [
+        ("should_continue_market", "Msg Clear Market"),
+        ("should_continue_social", "Msg Clear Sentiment"),
+        ("should_continue_news", "Msg Clear News"),
+        ("should_continue_fundamentals", "Msg Clear Fundamentals"),
+    ])
+    def test_routes_to_clear_node_when_no_tool_calls(self, method, clear_node):
+        cl = ConditionalLogic()
+        state = {"messages": [_Msg(tool_calls=[])]}
+        assert getattr(cl, method)(state) == clear_node
+
+    @pytest.mark.parametrize("method,clear_node", [
+        ("should_continue_market", "Msg Clear Market"),
+        ("should_continue_social", "Msg Clear Sentiment"),
+        ("should_continue_news", "Msg Clear News"),
+        ("should_continue_fundamentals", "Msg Clear Fundamentals"),
+    ])
+    def test_empty_messages_does_not_crash(self, method, clear_node):
+        """The guard: an empty messages list must fall through to the clear
+        node, not raise IndexError. Pre-fix this crashed the graph."""
+        cl = ConditionalLogic()
+        state = {"messages": []}
+        assert getattr(cl, method)(state) == clear_node

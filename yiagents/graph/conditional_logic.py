@@ -6,20 +6,35 @@ from yiagents.agents.utils.agent_states import AgentState
 class ConditionalLogic:
     """Handles conditional logic for determining graph flow."""
 
-    def __init__(self, max_debate_rounds=1, max_risk_discuss_rounds=1):
+    def __init__(self, max_debate_rounds: int = 1, max_risk_discuss_rounds: int = 1):
         """Initialize with configuration parameters."""
         self.max_debate_rounds = max_debate_rounds
         self.max_risk_discuss_rounds = max_risk_discuss_rounds
 
-    def should_continue_market(self, state: AgentState):
-        """Determine if market analysis should continue."""
-        messages = state["messages"]
-        last_message = messages[-1]
-        if last_message.tool_calls:
-            return "tools_market"
-        return "Msg Clear Market"
+    @staticmethod
+    def _route_on_tool_calls(
+        state: AgentState, tool_node: str, clear_node: str
+    ) -> str:
+        """Shared router for the four analyst ``should_continue_*`` methods.
 
-    def should_continue_social(self, state: AgentState):
+        If the last message carries pending tool calls, route to the tool node;
+        otherwise route to the message-clear node. Guards against an empty
+        ``messages`` list (e.g. an abnormal state) by falling through to the
+        clear node instead of raising ``IndexError`` and crashing the graph.
+        """
+        messages = state["messages"]
+        if not messages:
+            return clear_node
+        last_message = messages[-1]
+        if getattr(last_message, "tool_calls", None):
+            return tool_node
+        return clear_node
+
+    def should_continue_market(self, state: AgentState) -> str:
+        """Determine if market analysis should continue."""
+        return self._route_on_tool_calls(state, "tools_market", "Msg Clear Market")
+
+    def should_continue_social(self, state: AgentState) -> str:
         """Determine if sentiment-analyst tool round should continue.
 
         Method name keeps the legacy ``social`` suffix to match the
@@ -27,27 +42,15 @@ class ConditionalLogic:
         back-compat); the returned ``clear_node`` label uses the v0.2.5
         rename so it matches the node registered by the execution plan.
         """
-        messages = state["messages"]
-        last_message = messages[-1]
-        if last_message.tool_calls:
-            return "tools_social"
-        return "Msg Clear Sentiment"
+        return self._route_on_tool_calls(state, "tools_social", "Msg Clear Sentiment")
 
-    def should_continue_news(self, state: AgentState):
+    def should_continue_news(self, state: AgentState) -> str:
         """Determine if news analysis should continue."""
-        messages = state["messages"]
-        last_message = messages[-1]
-        if last_message.tool_calls:
-            return "tools_news"
-        return "Msg Clear News"
+        return self._route_on_tool_calls(state, "tools_news", "Msg Clear News")
 
-    def should_continue_fundamentals(self, state: AgentState):
+    def should_continue_fundamentals(self, state: AgentState) -> str:
         """Determine if fundamentals analysis should continue."""
-        messages = state["messages"]
-        last_message = messages[-1]
-        if last_message.tool_calls:
-            return "tools_fundamentals"
-        return "Msg Clear Fundamentals"
+        return self._route_on_tool_calls(state, "tools_fundamentals", "Msg Clear Fundamentals")
 
     def should_continue_debate(self, state: AgentState) -> str:
         """Determine if debate should continue.
