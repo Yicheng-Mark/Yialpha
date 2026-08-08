@@ -5,11 +5,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
-def pytest_configure(config):
-    for marker in ("unit", "integration", "smoke"):
-        config.addinivalue_line("markers", f"{marker}: {marker}-level tests")
-
+# Test markers (unit / integration / smoke) are declared in pyproject.toml's
+# [tool.pytest.ini_options] alongside --strict-markers, so they don't need to
+# be re-registered here.
 
 _API_KEY_ENV_VARS = (
     "OPENAI_API_KEY",
