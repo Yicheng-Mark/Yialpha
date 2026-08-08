@@ -181,9 +181,22 @@ def _as_dict(data: object) -> dict | list | None:
         except Exception:  # noqa: BLE001
             pass
     try:
-        return dict(data)
+        return dict(data)  # type: ignore[call-overload]  # best-effort coercion
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _as_dict_obj(data: object) -> dict:
+    """Like :func:`_as_dict` but guaranteed to return a ``dict``.
+
+    Use this when iterating a list already produced by ``_as_dict`` (each
+    element is a single object, never a nested list) so the caller can call
+    ``.get()`` without a ``dict | list | None`` union narrowing issue.
+    """
+    result = _as_dict(data)
+    if isinstance(result, dict):
+        return result
+    return {}
 
 
 def _to_float(value, default: float = 0.0) -> float:
@@ -654,7 +667,7 @@ class BinanceGateway(BaseGateway):
             resp = client.rest_api.futures_account_balance_v2()
             items = _as_dict(_resp_data(resp)) or []
             for item in items:
-                d = _as_dict(item)
+                d = _as_dict_obj(item)
                 if str(d.get("asset", "")).upper() == "USDT":
                     balance = _to_float(d.get("balance") or d.get("walletBalance"))
                     available = _to_float(d.get("availableBalance") or d.get("maxWithdrawAmount"))
@@ -667,9 +680,9 @@ class BinanceGateway(BaseGateway):
             return AccountData(gateway_name=self.gateway_name, accountid="USDT")
         # spot
         resp = client.rest_api.get_account()
-        data = _as_dict(_resp_data(resp)) or {}
+        data = _as_dict_obj(_resp_data(resp))
         for b in data.get("balances") or []:
-            d = _as_dict(b)
+            d = _as_dict_obj(b)
             if str(d.get("asset", "")).upper() == "USDT":
                 free = _to_float(d.get("free"))
                 locked = _to_float(d.get("locked"))
@@ -690,7 +703,7 @@ class BinanceGateway(BaseGateway):
         items = _as_dict(_resp_data(resp)) or []
         out: list[PositionData] = []
         for item in items:
-            d = _as_dict(item)
+            d = _as_dict_obj(item)
             amount = _to_float(d.get("positionAmt"))
             if abs(amount) < 1e-12:
                 continue  # skip flat rows
