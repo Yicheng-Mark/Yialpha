@@ -3,7 +3,7 @@
 ``test_structured_agents.py`` already covers the structured-output happy path,
 the free-text fallback, and ``render_trader_proposal``. These tests focus on
 the *node* contract that was previously unasserted: the returned dict's shape
-(``sender``/``trader_investment_plan`` keys), multi-action round-trips (HOLD /
+(``trader_investment_plan``/``messages`` keys), multi-action round-trips (HOLD /
 SELL, not just BUY), and robustness against the empty-string state fields a
 checkpoint-resumed run can feed in (see propagation.create_initial_state).
 """
@@ -40,26 +40,18 @@ def _state(company="NVDA", plan="**Recommendation**: Buy\n..."):
 
 
 class TestTraderNodeShape:
-    """The node returns a dict with exactly the three keys downstream nodes
-    read via state[key] indexing (sender / trader_investment_plan / messages)."""
+    """The node returns a dict with exactly the keys downstream nodes read via
+    state[key] indexing (trader_investment_plan / messages)."""
 
     @pytest.mark.parametrize("action", list(TraderAction))
     def test_every_action_round_trips(self, action):
         proposal = TraderProposal(action=action, reasoning="r")
         trader = create_trader(_structured_llm(proposal))
         result = trader(_state())
-        assert result["sender"] == "Trader"
         assert isinstance(result["trader_investment_plan"], str)
         # render_trader_proposal upper-cases the action value in the final line.
         assert f"FINAL TRANSACTION PROPOSAL: **{action.value.upper()}**" in result["trader_investment_plan"]
         assert len(result["messages"]) == 1
-
-    def test_sender_is_trader_regardless_of_binding_name(self):
-        # create_trader binds name="Trader"; the node must echo it, not a stale
-        # default. This pins the contract the risk-debate / PM nodes rely on.
-        proposal = TraderProposal(action=TraderAction.HOLD, reasoning="wait")
-        trader = create_trader(_structured_llm(proposal))
-        assert trader(_state())["sender"] == "Trader"
 
 
 class TestTraderEmptyStateRobustness:
@@ -78,7 +70,7 @@ class TestTraderEmptyStateRobustness:
         proposal = TraderProposal(action=TraderAction.BUY, reasoning="x")
         trader = create_trader(_structured_llm(proposal))
         result = trader({"company_of_interest": "AAPL", "investment_plan": "buy"})
-        assert result["sender"] == "Trader"
+        assert result["trader_investment_plan"]
 
 
 class TestTraderPromptConstruction:
