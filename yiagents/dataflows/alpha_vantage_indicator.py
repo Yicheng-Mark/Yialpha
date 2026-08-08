@@ -1,4 +1,8 @@
+import logging
+
 from .alpha_vantage_common import AlphaVantageNotConfiguredError, _make_api_request
+
+logger = logging.getLogger(__name__)
 
 
 def get_indicator(
@@ -210,6 +214,12 @@ def get_indicator(
         # fall back / emit the no-data sentinel instead of returning this as a
         # successful-looking error string.
         raise
-    except Exception as e:
-        print(f"Error getting Alpha Vantage indicator data for {indicator}: {e}")
-        return f"Error retrieving {indicator} data: {str(e)}"
+    except Exception:
+        # Raise instead of returning an "Error retrieving …" string: returning
+        # prose made the agent treat the failure message as indicator data.
+        # The router (route_to_vendor) logs the failure and either falls through
+        # to the next vendor or emits its sentinel.
+        logger.exception(
+            "Alpha Vantage indicator %s failed for %s", indicator, symbol,
+        )
+        raise
