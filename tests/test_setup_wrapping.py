@@ -19,12 +19,15 @@ from yiagents.graph.setup import GraphSetup
 
 
 def _make_setup(perf_tracker=None) -> GraphSetup:
-    # Stub LLMs are fine: setup_graph only captures them in closures; it never
-    # invokes them at compile time (bind_tools runs at node-invoke time).
+    # Stub LLMs are fine: setup_graph never *invokes* an LLM at compile time
+    # (bind_tools runs at node-invoke time). It does, however, *dereference*
+    # each LLM eagerly (e.g. create_bull_researcher(self.debate_llm)), so all
+    # three LLM attributes must exist — hence three stubs, not two.
     class _StubLLM:
         pass
 
     return GraphSetup(
+        _StubLLM(),
         _StubLLM(),
         _StubLLM(),
         {k: ToolNode([]) for k in ("market", "social", "news", "fundamentals")},

@@ -11,6 +11,13 @@ _ENV_OVERRIDES = {
     "YIAGENTS_LLM_PROVIDER":         "llm_provider",
     "YIAGENTS_DEEP_THINK_LLM":       "deep_think_llm",
     "YIAGENTS_QUICK_THINK_LLM":      "quick_think_llm",
+    # Mid-tier model for the debate layer (bull/bear researchers + 3 risk
+    # debators). These nodes do free-text adversarial argumentation across
+    # multiple rounds — a task where the quick-tier model is weakest. When
+    # unset (None), the debate layer falls back to deep_think_llm, i.e. the
+    # same model as the Research/Portfolio Managers. Set explicitly (e.g.
+    # deepseek-v4-flash) to A/B test a cheaper debate tier.
+    "YIAGENTS_DEBATE_LLM":           "debate_llm",
     "YIAGENTS_LLM_BACKEND_URL":      "backend_url",
     "YIAGENTS_OUTPUT_LANGUAGE":      "output_language",
     "YIAGENTS_MAX_DEBATE_ROUNDS":    "max_debate_rounds",
@@ -220,6 +227,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.5",
     "quick_think_llm": "gpt-5.4-mini",
+    # Debate-tier model: bull/bear researchers + risk debators. None = fall
+    # back to deep_think_llm (the debate layer runs on the same model as the
+    # final-decision nodes). Override via YIAGENTS_DEBATE_LLM to A/B test a
+    # cheaper model for the adversarial-argumentation layer.
+    "debate_llm": None,
     # When None, each provider's client falls back to its own default endpoint
     # (api.openai.com for OpenAI, generativelanguage.googleapis.com for Gemini, ...).
     # The CLI overrides this per provider when the user picks one. Keeping a

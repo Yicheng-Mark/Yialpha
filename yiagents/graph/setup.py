@@ -33,6 +33,7 @@ class GraphSetup:
         self,
         quick_thinking_llm: Any,
         deep_thinking_llm: Any,
+        debate_llm: Any,
         tool_nodes: dict[str, ToolNode],
         conditional_logic: ConditionalLogic,
         *,
@@ -41,6 +42,12 @@ class GraphSetup:
         analyst_parallel_max_threads: int = 16,
     ):
         """Initialize with required components.
+
+        ``debate_llm`` powers the bull/bear researchers and the three risk
+        debators — nodes that do multi-round free-text adversarial
+        argumentation. The caller (``YiAgentsGraph``) resolves the
+        ``debate_llm or deep_think_llm`` fallback, so this is always a real LLM
+        instance.
 
         The three keyword-only opts are all OFF/disjoint by default so the
         compiled graph is byte-identical to the historical serial one:
@@ -55,6 +62,7 @@ class GraphSetup:
         """
         self.quick_thinking_llm = quick_thinking_llm
         self.deep_thinking_llm = deep_thinking_llm
+        self.debate_llm = debate_llm
         self.tool_nodes = tool_nodes
         self.conditional_logic = conditional_logic
         self.perf_tracker = perf_tracker
@@ -120,16 +128,22 @@ class GraphSetup:
                 max_threads=self.analyst_parallel_max_threads,
             )
 
-        # Create researcher and manager nodes
-        bull_researcher_node = create_bull_researcher(self.quick_thinking_llm)
-        bear_researcher_node = create_bear_researcher(self.quick_thinking_llm)
+        # Create researcher and manager nodes. Bull/bear researchers do
+        # free-text adversarial argumentation across multiple rounds — a task
+        # where the quick-tier model is weakest — so they run on the debate-
+        # tier model (falls back to deep_think_llm when debate_llm is unset).
+        bull_researcher_node = create_bull_researcher(self.debate_llm)
+        bear_researcher_node = create_bear_researcher(self.debate_llm)
         research_manager_node = create_research_manager(self.deep_thinking_llm)
         trader_node = create_trader(self.quick_thinking_llm)
 
-        # Create risk analysis nodes
-        aggressive_analyst = create_aggressive_debator(self.quick_thinking_llm)
-        neutral_analyst = create_neutral_debator(self.quick_thinking_llm)
-        conservative_analyst = create_conservative_debator(self.quick_thinking_llm)
+        # Create risk analysis nodes. The three risk debators likewise run on
+        # the debate-tier model: multi-round, multi-opponent free-text rebuttal
+        # directly feeds the Portfolio Manager, so model quality here has high
+        # leverage on the final decision.
+        aggressive_analyst = create_aggressive_debator(self.debate_llm)
+        neutral_analyst = create_neutral_debator(self.debate_llm)
+        conservative_analyst = create_conservative_debator(self.debate_llm)
         portfolio_manager_node = create_portfolio_manager(self.deep_thinking_llm)
 
         # Create workflow
