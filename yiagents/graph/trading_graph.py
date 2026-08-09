@@ -170,9 +170,21 @@ class YiAgentsGraph:
             base_url=self.config.get("backend_url"),
             **llm_kwargs,
         )
+        # Debate-tier client: bull/bear researchers + risk debators. Falls back
+        # to deep_think_llm when debate_llm is unset (None), so the adversarial-
+        # argumentation layer runs on the same model as the final-decision nodes
+        # unless the user overrides YIAGENTS_DEBATE_LLM for A/B testing.
+        debate_model = self.config["debate_llm"] or self.config["deep_think_llm"]
+        debate_client = create_llm_client(
+            provider=self.config["llm_provider"],
+            model=debate_model,
+            base_url=self.config.get("backend_url"),
+            **llm_kwargs,
+        )
 
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
+        self.debate_llm = debate_client.get_llm()
 
         self.memory_log = TradingMemoryLog(self.config)
 
@@ -187,6 +199,7 @@ class YiAgentsGraph:
         self.graph_setup = GraphSetup(
             self.quick_thinking_llm,
             self.deep_thinking_llm,
+            self.debate_llm,
             self.tool_nodes,
             self.conditional_logic,
             perf_tracker=self.perf_tracker,
