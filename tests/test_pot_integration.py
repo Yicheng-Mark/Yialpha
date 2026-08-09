@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import pytest
 
+import yiagents.agents.utils.pot_executor as pot_executor_module
 from yiagents.agents.utils.pot_integration import (
     PotAnalyzer,
     extract_code_block,
 )
+
+
+@pytest.fixture(autouse=True)
+def _explicitly_enable_pot(monkeypatch):
+    monkeypatch.setenv("YIAGENTS_POT_ENABLED", "true")
+    monkeypatch.setenv("YIAGENTS_ANALYSIS_ONLY", "false")
+    monkeypatch.setattr(pot_executor_module.platform, "system", lambda: "Linux")
 
 
 class FakeLLM:

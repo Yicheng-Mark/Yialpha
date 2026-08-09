@@ -7,11 +7,11 @@ between the analysis graph (which emits a ``PortfolioDecision`` +
 until a concrete gateway lands, nothing calls it, so importing this module
 changes no agent input and no graph topology (byte-equivalent).
 
-Direction resolution mirrors ``scripts/trade_ticket.py:decide_direction``
-exactly — the PM 5-tier rating wins; only when the rating is missing does the
-Trader's 3-tier action get consulted. A ``Hold`` rating (or a hold/absent
-signal) yields an empty list: the bridge never fabricates a trade the agents
-did not call for.
+Direction resolution keeps the PM-rating priority used by
+``scripts/trade_ticket.py:decide_direction``, but the executable bridge adds a
+fail-closed short-sale policy: a bearish signal defaults to no order, an
+explicit close may reduce a long, and opening a new short requires a separate
+flag plus ``Offset.OPEN``. A ``Hold`` rating yields an empty list.
 
 This does **not** replace ``scripts/trade_ticket.py``. That script renders a
 rich, human-readable ticket (leverage / take-profit / stop-loss / margin /
@@ -22,8 +22,10 @@ bare ``OrderRequest`` structs for future automated submission. The two coexist.
 from __future__ import annotations
 
 import logging
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from yiagents.agents.schemas import (
     PortfolioDecision,
@@ -47,19 +49,18 @@ logger = logging.getLogger(__name__)
 class RiskAudit:
     """Audit trail for :func:`pre_trade_risk_check`.
 
-    Makes the previously-silent Gate 3 pass-through observable. Downstream
-    callers (gateway, submission layer) can inspect ``risk_checked`` to decide
-    whether to log a WARNING or refuse the order — aligned with the fail-closed
-    philosophy of the execution edge (``browser_broker.py`` kill switch).
+    Records which fail-closed gate accepted, clipped, or rejected orders.
+    Missing quantitative context never releases opening exposure; an explicit
+    close can remain available as a risk-reducing emergency action.
 
     Attributes:
-        risk_checked: ``True`` when a real ``RiskDecision`` was applied (gates
-            1/2 ran). ``False`` on Gate 3 pass-through — the risk overlay was
-            ``None`` (disabled / degraded / not yet computed) and orders were
-            released with no sizing guard.
+        risk_checked: ``True`` when a real ``RiskDecision`` was applied.
+            ``False`` when it was missing; in that case only explicit close
+            offsets can survive.
         gate: Human-readable label of the gate that decided the outcome
-            (``"pass_through"``, ``"breaker_block"``, ``"weight_cap"``,
-            ``"checked"``).
+            (for example ``"missing_risk_decision"``,
+            ``"breaker_close_only"``, ``"invalid_risk_context"``, or
+            ``"weight_cap"``).
         n_in / n_out: Order count before and after the check.
     """
 
@@ -70,20 +71,28 @@ class RiskAudit:
 
 _BULLISH_RATINGS = (PortfolioRating.BUY, PortfolioRating.OVERWEIGHT)
 _BEARISH_RATINGS = (PortfolioRating.SELL, PortfolioRating.UNDERWEIGHT)
+_CLOSE_OFFSETS = frozenset(
+    {Offset.CLOSE, Offset.CLOSETODAY, Offset.CLOSEYESTERDAY}
+)
 
 
 def _resolve_direction(
     decision: PortfolioDecision | None,
     trader_proposal: TraderProposal | None,
+    *,
+    offset: Offset = Offset.NONE,
+    allow_short_open: bool = False,
 ) -> Direction | None:
     """Map (decision.rating, trader_proposal.action) to a Direction or None.
 
-    Faithful to ``scripts/trade_ticket.py`` ``decide_direction``:
+    Uses the manual ticket's rating priority with stricter execution semantics:
 
     * rating Buy / Overweight      -> LONG
-    * rating Sell / Underweight    -> SHORT
+    * rating Sell / Underweight    -> SHORT only for an explicit close, or for
+      ``Offset.OPEN`` plus ``allow_short_open=True``
     * rating Hold                  -> None  (no fallback to action)
-    * rating missing               -> Trader action Buy -> LONG, Sell -> SHORT
+    * rating missing               -> Trader Buy -> LONG; Trader Sell follows
+      the same close/explicit-short policy
     * nothing committed            -> None
     """
     rating = getattr(decision, "rating", None)
@@ -91,7 +100,11 @@ def _resolve_direction(
         if rating in _BULLISH_RATINGS:
             return Direction.LONG
         if rating in _BEARISH_RATINGS:
-            return Direction.SHORT
+            if offset in _CLOSE_OFFSETS:
+                return Direction.SHORT
+            if offset == Offset.OPEN and allow_short_open is True:
+                return Direction.SHORT
+            return None
         if rating == PortfolioRating.HOLD:
             return None
     # Rating missing entirely — fall back to the Trader's action.
@@ -99,7 +112,11 @@ def _resolve_direction(
     if action == TraderAction.BUY:
         return Direction.LONG
     if action == TraderAction.SELL:
-        return Direction.SHORT
+        if offset in _CLOSE_OFFSETS:
+            return Direction.SHORT
+        if offset == Offset.OPEN and allow_short_open is True:
+            return Direction.SHORT
+        return None
     return None
 
 
@@ -114,6 +131,7 @@ def decision_to_order_requests(
     price: float = 0.0,
     offset: Offset = Offset.NONE,
     reference: str = "",
+    allow_short_open: bool = False,
 ) -> list[OrderRequest]:
     """Turn a PM decision + Trader proposal into a list of ``OrderRequest``.
 
@@ -132,6 +150,9 @@ def decision_to_order_requests(
         price: Limit price (only meaningful with ``OrderType.LIMIT``).
         offset: Futures open/close flag (``Offset.NONE`` for spot / equity).
         reference: Free-text tag propagated onto the resulting ``OrderData``.
+        allow_short_open: Defaults to ``False``. A bearish signal may open a
+            new short only when this is the literal ``True`` *and* ``offset``
+            is explicitly ``Offset.OPEN``. An explicit close remains allowed.
 
     Returns:
         A list of zero or one ``OrderRequest`` objects.
@@ -139,7 +160,12 @@ def decision_to_order_requests(
     if volume <= 0:
         return []
 
-    direction = _resolve_direction(decision, trader_proposal)
+    direction = _resolve_direction(
+        decision,
+        trader_proposal,
+        offset=offset,
+        allow_short_open=allow_short_open,
+    )
     if direction is None:
         return []
 
@@ -163,43 +189,33 @@ def pre_trade_risk_check(
     *,
     equity: float = 0.0,
     max_weight: float = 0.20,
+    reference_price: float | None = None,
+    reference_prices: Mapping[str, float] | None = None,
 ) -> list[OrderRequest]:
     """Gate ``decision_to_order_requests`` output through the risk overlay.
 
-    **This is the mandatory pre-``send_order`` guard.** The gateway performs no
-    quantitative risk check of its own — it trusts the ``OrderRequest`` it
-    receives — so the caller MUST pass every order list through this function
-    before submitting. Skipping it is the #1 way to lose money when the
-    execution layer is wired into the graph.
+    **This is the mandatory pre-``send_order`` guard.** ``BinanceGateway`` also
+    invokes it at the final network edge so a caller cannot accidentally bypass
+    quantitative risk checks; other gateways should do the same.
 
-    The function is pure (no side effects, no network). It applies three gates:
+    The function is pure (no side effects, no network). It applies these gates:
 
-    1. **Drawdown hard-stop / breaker block**: if ``risk_decision.action ==
-       "blocked"`` or ``risk_decision.breaker.regime == "hard_stop"``, every
-       order is dropped (returns ``[]``). The breaker has already zeroed the
-       target weight upstream; this is the enforcement at the order edge.
+    1. **Drawdown hard-stop / breaker block**: new exposure is dropped while
+       explicit close offsets remain available for risk reduction.
     2. **Weight cap**: each order's value (``volume * price`` for limit,
        ``volume`` treated as a share/contract count requiring a price for market
        orders) is clipped so it never exceeds ``max_weight * equity``. Orders
        that would be clipped to zero volume are dropped.
-    3. **Pass-through**: with no ``risk_decision`` (risk overlay disabled or
-       not yet computed), orders pass through unchanged — the caller takes
-       responsibility for sizing. This preserves today's "risk overlay is
-       advisory text only" behaviour when execution is not wired.
-
-    .. note::
-
-        The Gate 3 pass-through is now **logged at WARNING** so it is no longer
-        silent — the biggest fail-open risk in the system is at least observable.
-        Callers that need the full audit trail (gate label, risk_checked flag)
-        should use :func:`pre_trade_risk_check_with_audit` instead.
+    3. **Required context**: no ``risk_decision`` or no valid equity/reference
+       price rejects opening orders. Market orders use ``reference_price`` or
+       the per-symbol ``reference_prices`` mapping for value sizing.
 
     Args:
         order_requests: The output of :func:`decision_to_order_requests`.
         risk_decision: The :class:`~yiagents.risk.manager.RiskDecision` from the
-            risk overlay, or ``None`` if the overlay did not run (pass-through).
+            risk overlay, or ``None`` if the overlay did not run (opens reject).
         equity: Current account equity, used to translate ``max_weight`` into
-            an absolute value cap. ``0`` disables the weight cap (gate 2).
+            an absolute value cap. A non-positive/missing value rejects opens.
         max_weight: Maximum fraction of equity a single order may represent.
             Default 0.20 matches ``DrawdownBreaker.max_single_position``.
 
@@ -208,7 +224,12 @@ def pre_trade_risk_check(
         submit to ``gateway.send_order``.
     """
     orders, audit = pre_trade_risk_check_with_audit(
-        order_requests, risk_decision, equity=equity, max_weight=max_weight
+        order_requests,
+        risk_decision,
+        equity=equity,
+        max_weight=max_weight,
+        reference_price=reference_price,
+        reference_prices=reference_prices,
     )
     return orders
 
@@ -219,73 +240,150 @@ def pre_trade_risk_check_with_audit(
     *,
     equity: float = 0.0,
     max_weight: float = 0.20,
+    reference_price: float | None = None,
+    reference_prices: Mapping[str, float] | None = None,
 ) -> tuple[list[OrderRequest], RiskAudit]:
     """Same gates as :func:`pre_trade_risk_check`, but returns an audit trail.
 
-    The :class:`RiskAudit` makes the Gate 3 pass-through observable: downstream
-    callers can check ``audit.risk_checked`` and refuse / flag orders that were
-    released without a quantitative sizing guard. This is the recommended entry
-    point for any wired execution path.
+    The :class:`RiskAudit` makes the exact rejection/close-only/cap gate
+    observable. This is the recommended entry point for any submission path.
 
     Returns:
         A ``(orders, audit)`` tuple where ``orders`` is the (possibly empty,
         possibly clipped) list and ``audit`` records which gate fired.
     """
     n_in = len(order_requests)
-
-    # Gate 3: no risk decision -> caller owns sizing; pass through unchanged.
-    # This is the biggest fail-open path in the system. We keep the behaviour
-    # (orders are released) but make it OBSERVABLE via a WARNING + the audit
-    # trail, so downstream callers can refuse un-checked orders if they choose.
-    if risk_decision is None:
-        if n_in > 0:
-            logger.warning(
-                "pre_trade_risk_check: Gate 3 PASS-THROUGH — %d order(s) released "
-                "with NO risk overlay (risk_decision is None: overlay disabled, "
-                "degraded, or not yet computed). No sizing guard was applied.",
-                n_in,
-            )
-        return list(order_requests), RiskAudit(
-            risk_checked=False, gate="pass_through", n_in=n_in, n_out=n_in
-        )
-
-    # Gate 1: breaker hard-stop or explicit block drops every order.
-    if (
-        risk_decision.action == "blocked"
-        or getattr(risk_decision.breaker, "regime", "") == "hard_stop"
-    ):
+    if n_in == 0:
         return [], RiskAudit(
-            risk_checked=True, gate="breaker_block", n_in=n_in, n_out=0
+            risk_checked=risk_decision is not None,
+            gate="empty",
+            n_in=0,
+            n_out=0,
         )
 
-    # Gate 2: clip each order's value to max_weight * equity.
-    if equity <= 0 or max_weight <= 0:
-        return list(order_requests), RiskAudit(
-            risk_checked=True, gate="checked_no_cap", n_in=n_in, n_out=n_in
-        )
-    value_cap = equity * max_weight
+    def _is_close(req: OrderRequest) -> bool:
+        return req.offset in _CLOSE_OFFSETS
 
-    clipped: list[OrderRequest] = []
+    def _positive_finite(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0.0 and math.isfinite(number) else None
+
+    def _valid_close(req: OrderRequest) -> bool:
+        # A close is risk-reducing only when it has a concrete positive size.
+        # BinanceGateway additionally maps it to reduce_only=true.
+        return _positive_finite(req.volume) is not None
+
+    close_orders = [
+        req for req in order_requests if _is_close(req) and _valid_close(req)
+    ]
+
+    # Missing risk context is never permission to open/increase exposure.  A
+    # structurally explicit close remains available as an emergency risk exit.
+    if risk_decision is None:
+        logger.warning(
+            "pre_trade_risk_check: rejected %d unchecked opening order(s); "
+            "only explicit CLOSE orders may pass without risk_decision.",
+            n_in - len(close_orders),
+        )
+        return close_orders, RiskAudit(
+            risk_checked=False,
+            gate="missing_risk_decision",
+            n_in=n_in,
+            n_out=len(close_orders),
+        )
+
+    breaker = getattr(risk_decision, "breaker", None)
+    action = getattr(risk_decision, "action", None)
+    breaker_blocks = (
+        action not in {"enter", "add"}
+        or breaker is None
+        or getattr(breaker, "regime", "") == "hard_stop"
+        or getattr(breaker, "can_open_new", False) is not True
+        or getattr(risk_decision, "exposure_ok", False) is not True
+    )
+    if breaker_blocks:
+        # A hard stop must flatten risk, not delete the reduce-only orders that
+        # perform the flattening. New/open exposure is removed.
+        return close_orders, RiskAudit(
+            risk_checked=True,
+            gate="breaker_close_only",
+            n_in=n_in,
+            n_out=len(close_orders),
+        )
+
+    equity_value = _positive_finite(equity)
+    weight_value = _positive_finite(max_weight)
+    if equity_value is None or weight_value is None or weight_value > 1.0:
+        logger.warning(
+            "pre_trade_risk_check: missing/invalid equity or max_weight; "
+            "rejecting all opening orders (CLOSE remains available)."
+        )
+        return close_orders, RiskAudit(
+            risk_checked=True,
+            gate="invalid_risk_context",
+            n_in=n_in,
+            n_out=len(close_orders),
+        )
+
+    value_cap = equity_value * weight_value
+
+    def _valuation_price(req: OrderRequest) -> float | None:
+        order_price = _positive_finite(req.price)
+        if req.type != OrderType.MARKET:
+            return order_price
+        if order_price is not None:
+            return order_price
+        if reference_prices is not None:
+            try:
+                mapped_value = reference_prices.get(req.symbol)
+            except (AttributeError, TypeError):
+                mapped_value = None
+            mapped = _positive_finite(mapped_value)
+            if mapped is not None:
+                return mapped
+        return _positive_finite(reference_price)
+
+    checked: list[OrderRequest] = []
     for req in order_requests:
-        # For a market order ``price`` is 0; without a reference price we cannot
-        # compute a value, so the order passes (the exchange will reject an
-        # absurd size). For limit orders we clip the volume directly.
-        if req.price > 0 and req.volume > 0:
-            max_volume = value_cap / req.price
-            if req.volume > max_volume:
-                if max_volume <= 0:
-                    continue  # clipped away entirely
-                req = OrderRequest(
-                    symbol=req.symbol,
-                    exchange=req.exchange,
-                    direction=req.direction,
-                    type=req.type,
-                    volume=max_volume,
-                    price=req.price,
-                    offset=req.offset,
-                    reference=req.reference,
-                )
-        clipped.append(req)
-    return clipped, RiskAudit(
-        risk_checked=True, gate="weight_cap", n_in=n_in, n_out=len(clipped)
+        if _is_close(req):
+            if _valid_close(req):
+                checked.append(req)
+            continue
+
+        volume = _positive_finite(req.volume)
+        valuation_price = _valuation_price(req)
+        if volume is None or valuation_price is None:
+            logger.warning(
+                "pre_trade_risk_check: rejecting %s %s; positive volume and "
+                "limit/reference price are required for sizing.",
+                req.symbol,
+                req.type.value,
+            )
+            continue
+
+        max_volume = value_cap / valuation_price
+        if not (max_volume > 0.0 and math.isfinite(max_volume)):
+            continue
+        safe_volume = min(volume, max_volume)
+        if safe_volume != volume:
+            req = OrderRequest(
+                symbol=req.symbol,
+                exchange=req.exchange,
+                direction=req.direction,
+                type=req.type,
+                volume=safe_volume,
+                price=req.price,
+                offset=req.offset,
+                reference=req.reference,
+            )
+        checked.append(req)
+
+    return checked, RiskAudit(
+        risk_checked=True,
+        gate="weight_cap",
+        n_in=n_in,
+        n_out=len(checked),
     )

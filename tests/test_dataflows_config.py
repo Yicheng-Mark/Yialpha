@@ -2,11 +2,12 @@
 
 import copy
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 import yiagents.default_config as default_config
-from yiagents.dataflows.config import get_config, set_config
+from yiagents.dataflows.config import get_config, set_config, submit_with_context
 
 
 @pytest.mark.unit
@@ -59,3 +60,11 @@ class DataflowsConfigIsolationTests(unittest.TestCase):
         fresh = get_config()
         self.assertEqual(fresh["tool_vendors"]["get_stock_data"], "alpha_vantage")
         self.assertEqual(fresh["tool_vendors"]["get_news"], "alpha_vantage")
+
+    def test_submit_with_context_propagates_config_to_worker_thread(self):
+        set_config({"context_probe": 987654})
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            value = submit_with_context(executor, get_config).result()["context_probe"]
+
+        self.assertEqual(value, 987654)

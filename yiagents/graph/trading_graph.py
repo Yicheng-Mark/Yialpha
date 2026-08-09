@@ -46,7 +46,7 @@ from yiagents.agents.utils.agent_utils import (
 )
 from yiagents.agents.utils.memory import TradingMemoryLog
 from yiagents.dataflows.config import set_config
-from yiagents.dataflows.utils import safe_ticker_component
+from yiagents.dataflows.utils import safe_ticker_component, set_analysis_date
 from yiagents.default_config import DEFAULT_CONFIG
 from yiagents.llm_clients import create_llm_client
 from yiagents.reporting import write_report_tree
@@ -63,6 +63,14 @@ logger = logging.getLogger(__name__)
 #: A pending memory-log entry older than this (in days) that still cannot be
 #: resolved is logged at WARNING so it does not silently accumulate forever.
 STALE_PENDING_DAYS = 7
+
+
+def _entry_precedes_cutoff(entry: dict[str, Any], cutoff: datetime) -> bool:
+    """Fail-closed date gate for pending reflection outcomes."""
+    try:
+        return datetime.strptime(str(entry["date"])[:10], "%Y-%m-%d") < cutoff
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _warn_if_stale_pending(ticker: str, trade_date: str, now: datetime) -> None:
@@ -542,6 +550,7 @@ class YiAgentsGraph:
     def _fetch_returns(
         self, ticker: str, trade_date: str, holding_days: int = 5,
         benchmark: str = "SPY",
+        as_of_date: str | None = None,
     ) -> tuple[float | None, float | None, int | None]:
         """Fetch raw and alpha return for ticker over holding_days from trade_date.
 
@@ -555,6 +564,14 @@ class YiAgentsGraph:
         try:
             start = datetime.strptime(trade_date, "%Y-%m-%d")
             end = start + timedelta(days=holding_days + 7)  # buffer for weekends/holidays
+            cutoff = None
+            if as_of_date is not None:
+                cutoff = datetime.strptime(str(as_of_date)[:10], "%Y-%m-%d")
+                if cutoff <= start:
+                    return None, None, None
+                # yfinance's end is exclusive.  Never request observations
+                # beyond the simulated date, even when today's vendor has them.
+                end = min(end, cutoff + timedelta(days=1))
             end_str = end.strftime("%Y-%m-%d")
 
             # Normalize so the realized-return lookup hits the same instrument
@@ -563,10 +580,33 @@ class YiAgentsGraph:
             stock = yf.Ticker(normalize_symbol(ticker)).history(start=trade_date, end=end_str)
             bench = yf.Ticker(benchmark).history(start=trade_date, end=end_str)
 
+            if cutoff is not None:
+                # Belt-and-suspenders PIT guard: vendors and test doubles can
+                # ignore the requested end boundary, so trim dated frames again
+                # on the client before calculating any outcome.
+                def _through_cutoff(frame):
+                    try:
+                        return frame[frame.index.date <= cutoff.date()]
+                    except (AttributeError, TypeError):
+                        return frame
+
+                stock = _through_cutoff(stock)
+                bench = _through_cutoff(bench)
+
             if len(stock) < 2 or len(bench) < 2:
                 return None, None, None
 
-            actual_days = min(holding_days, len(stock) - 1, len(bench) - 1)
+            if cutoff is not None:
+                # A reflection labelled as a five-session outcome must not be
+                # produced from a partial horizon merely because the historical
+                # run date falls two sessions after the decision.
+                if len(stock) <= holding_days or len(bench) <= holding_days:
+                    return None, None, None
+                actual_days = holding_days
+            else:
+                # Backwards-compatible library behaviour for callers that do
+                # not request an as-of boundary.
+                actual_days = min(holding_days, len(stock) - 1, len(bench) - 1)
             raw = float(
                 (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
                 / stock["Close"].iloc[0]
@@ -584,7 +624,11 @@ class YiAgentsGraph:
             )
             return None, None, None
 
-    def _resolve_pending_entries(self, ticker: str) -> None:
+    def _resolve_pending_entries(
+        self,
+        ticker: str,
+        as_of_date: str | None = None,
+    ) -> None:
         """Resolve pending log entries for ticker at the start of a new run.
 
         Fetches returns for each same-ticker pending entry, generates reflections,
@@ -598,21 +642,39 @@ class YiAgentsGraph:
         ``STALE_PENDING_DAYS`` (7) that still cannot be resolved is logged at
         WARNING so indefinitely-stuck pending entries are not silent.
         """
-        pending = [e for e in self.memory_log.get_pending_entries() if e["ticker"] == ticker]
+        try:
+            cutoff = (
+                datetime.strptime(str(as_of_date)[:10], "%Y-%m-%d")
+                if as_of_date is not None
+                else datetime.now()
+            )
+        except (TypeError, ValueError):
+            logger.warning("Invalid memory as-of date %r; skipping reflection", as_of_date)
+            return
+
+        cutoff_str = cutoff.strftime("%Y-%m-%d")
+        pending = [
+            entry
+            for entry in self.memory_log.get_pending_entries()
+            if entry["ticker"] == ticker
+            and _entry_precedes_cutoff(entry, cutoff)
+        ]
         if not pending:
             return
 
         benchmark = self._resolve_benchmark(ticker)
-        today = datetime.now()
         updates = []
         for entry in pending:
             raw, alpha, days = self._fetch_returns(
-                ticker, entry["date"], benchmark=benchmark,
+                ticker,
+                entry["date"],
+                benchmark=benchmark,
+                as_of_date=cutoff_str,
             )
             if raw is None:
                 # Price not available yet — but if this entry is old, flag it so
                 # it does not silently accumulate forever (delisted / bad data).
-                _warn_if_stale_pending(ticker, entry["date"], today)
+                _warn_if_stale_pending(ticker, entry["date"], cutoff)
                 continue  # price not available yet — try again next run
             reflection = self.reflector.reflect_on_final_decision(
                 final_decision=entry.get("decision", ""),
@@ -627,12 +689,15 @@ class YiAgentsGraph:
                 "alpha_return": alpha,
                 "holding_days": days,
                 "reflection": reflection,
+                "available_date": cutoff_str,
             })
 
         if updates:
             self.memory_log.batch_update_with_outcomes(updates)
 
-    def resolve_instrument_context(self, ticker: str, asset_type: str = "stock") -> str:
+    def resolve_instrument_context(
+        self, ticker: str, asset_type: str = "stock", trade_date: str | None = None,
+    ) -> str:
         """Resolve ticker identity once and return the full instrument context.
 
         Deterministic yfinance lookup (cached, fail-open) injected into a
@@ -640,8 +705,13 @@ class YiAgentsGraph:
         hallucinating one from the price chart (#814). Both the propagate()
         path and the CLI call this so the resolved identity reaches the whole
         graph regardless of entry point.
+
+        ``trade_date`` enforces the point-in-time guard in
+        :func:`resolve_instrument_identity`: on a historical date the live
+        ``.info`` snapshot (company name / sector / exchange) is refused and
+        the context degrades to ticker-only, the same as a yfinance failure.
         """
-        identity = resolve_instrument_identity(ticker)
+        identity = resolve_instrument_identity(ticker, trade_date)
         return build_instrument_context(ticker, asset_type, identity)
 
     def _run_signature(self, asset_type: str) -> str:
@@ -655,6 +725,9 @@ class YiAgentsGraph:
         signature even though the upstream contract doesn't carry it).
         """
         return "|".join([
+            # Invalidate checkpoints produced before live-only data sources
+            # were removed from historical tool bindings.
+            "pit=v2",
             "analysts=" + ",".join(self.selected_analysts),
             f"debate={self.config['max_debate_rounds']}",
             f"risk={self.config['max_risk_discuss_rounds']}",
@@ -681,7 +754,7 @@ class YiAgentsGraph:
         self.ticker = company_name
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
-        self._resolve_pending_entries(company_name)
+        self._resolve_pending_entries(company_name, as_of_date=str(trade_date))
 
         # Recompile with a checkpointer if the user opted in.
         if self.config.get("checkpoint_enabled"):
@@ -786,10 +859,23 @@ class YiAgentsGraph:
         if self.perf_tracker is not None:
             self.perf_tracker.reset()
 
+        # Pin the analysis date for the PIT clamp in the data vendor layer
+        # (get_stock_data / get_binance_klines clamp their fetch window to it so
+        # a backtest never sees rows after the analysis date). The batch runner
+        # copies the context into each worker via submit_with_context, so this
+        # crosses the ThreadPoolExecutor boundary correctly. Live runs (no
+        # explicit date) leave it unset = no-op pass-through.
+        set_analysis_date(str(trade_date)) if str(trade_date) else set_analysis_date(None)
+
         # Initialize state — inject memory log context for PM and the
         # deterministically resolved instrument identity for all agents.
-        past_context = self.memory_log.get_past_context(company_name)
-        instrument_context = self.resolve_instrument_context(company_name, asset_type)
+        past_context = self.memory_log.get_past_context(
+            company_name,
+            as_of_date=str(trade_date),
+        )
+        instrument_context = self.resolve_instrument_context(
+            company_name, asset_type, trade_date=str(trade_date),
+        )
         init_agent_state = self.propagator.create_initial_state(
             company_name,
             trade_date,

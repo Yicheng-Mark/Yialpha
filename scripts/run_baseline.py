@@ -36,6 +36,7 @@ import argparse
 import contextlib
 import queue
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -49,14 +50,18 @@ if _PROJECT_ROOT not in sys.path:
 # Windows 控制台默认 GBK(cp936)，打印 ✅/❌ 等 Unicode 会触发 UnicodeEncodeError；
 # 强制标准输出/错误流用 utf-8（Python 3.7+），让所有模式的中文与符号都能正常显示。
 for _stream in (sys.stdout, sys.stderr):
-    with contextlib.suppress(AttributeError, ValueError):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if callable(_reconfigure):
+        with contextlib.suppress(ValueError):
+            _reconfigure(encoding="utf-8", errors="replace")
 
 import pandas as pd  # noqa: E402
 
+from yiagents.backtest.cache import DecisionCache  # noqa: E402
 from yiagents.backtest.engine import run_backtest  # noqa: E402
 from yiagents.backtest.report import write_report  # noqa: E402
 from yiagents.backtest.validation_gate import evaluate_gate  # noqa: E402
+from yiagents.dataflows.config import submit_with_context  # noqa: E402
 from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
 from yiagents.graph.trading_graph import YiAgentsGraph  # noqa: E402
 from yiagents.monitoring.dashboard import write_dashboard  # noqa: E402
@@ -80,9 +85,13 @@ def _build_graph(
     node_perf_telemetry: bool = False,
 ) -> YiAgentsGraph:
     config = DEFAULT_CONFIG.copy()
+    # Validation runs must not depend on persistent lessons written by an
+    # earlier ticker/run ordering. Point-in-time filtering prevents lookahead,
+    # but a shared memory log would still make repeated A/B samples stateful.
+    config["memory_enabled"] = False
     # Let each mode control the quantitative overlay explicitly instead of
     # inheriting the DEFAULT_CONFIG flip (baseline forces it off, full on);
-    # None inherits the default (currently on -- the production path).
+    # None inherits the default (currently on -- the full analysis path).
     if risk_enabled is not None:
         config["risk_enabled"] = risk_enabled
     # T0: opt-in node-level perf telemetry (off by default = byte-identical).
@@ -138,7 +147,7 @@ def _map_tickers(tickers, task, workers: int = 1, risk_enabled: bool | None = No
             pool.put(graph)
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        future_to_ticker = {ex.submit(run, t): t for t in tickers}
+        future_to_ticker = {submit_with_context(ex, run, t): t for t in tickers}
         for fut in as_completed(future_to_ticker):
             t = future_to_ticker[fut]
             try:
@@ -340,7 +349,6 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
     # 启用风控配置
     risk_cfg = DEFAULT_CONFIG.copy()
     risk_cfg["risk_enabled"] = True
-    rm = RiskManager.from_config(risk_cfg)
     dates = _rebalance_dates(start, end, step, n_dates)
     print(f"  再平衡日期 {dates}")
 
@@ -357,30 +365,44 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
 
     def per_ticker(t, ta):
         print(f"\n  [{t}] 开始", flush=True)
-        base = run_backtest(ta, t, dates, holding_days=holding_days,
-                            cost_bps=cost_bps, run_tag=f"ab_base_{t}",
-                            n_trials=n_trials, factor_model="3")
-        mb = base.metrics
-        print(f"    [{t}] 基线:    总收益 {mb.total_return:.2%} | Sharpe {mb.sharpe:.2f} | "
-              f"MDD {mb.max_drawdown:.2%}")
-
+        baselines = []
         improved = []
-        wfn = build_backtest_weight_fn(rm, t)
         for r in range(runs):
-            res = run_backtest(ta, t, dates, holding_days=holding_days,
-                               cost_bps=cost_bps, weight_fn=wfn,
-                               run_tag=f"ab_risk_{t}_r{r}",
-                               n_trials=n_trials, factor_model="3")
+            # Materialize one LLM decision tape, then replay that exact tape in
+            # the risk-sized leg. A fresh manager/adapter per pair prevents the
+            # drawdown breaker, Kelly ledger and closure state leaking across
+            # runs or tickers.
+            pair_tag = f"ab_pair_{t}_r{r}"
+            base = run_backtest(
+                ta, t, dates, holding_days=holding_days,
+                cost_bps=cost_bps, run_tag=pair_tag, cache=decision_cache,
+                n_trials=n_trials, factor_model="3",
+            )
+            rm = RiskManager.from_config(risk_cfg)
+            wfn = build_backtest_weight_fn(rm, t)
+            res = run_backtest(
+                ta, t, dates, holding_days=holding_days,
+                cost_bps=cost_bps, weight_fn=wfn,
+                run_tag=pair_tag, cache=decision_cache,
+                n_trials=n_trials, factor_model="3",
+            )
+            mb = base.metrics
             mi = res.metrics
+            print(f"    [{t}] 配对 run{r} 基线: 总收益 {mb.total_return:.2%} | "
+                  f"Sharpe {mb.sharpe:.2f} | MDD {mb.max_drawdown:.2%}")
             print(f"    [{t}] 风控 run{r}: 总收益 {mi.total_return:.2%} | Sharpe {mi.sharpe:.2f} | "
                   f"MDD {mi.max_drawdown:.2%} | DSR {mi.deflated_sharpe:.2f}")
+            baselines.append(base)
             improved.append(res)
-        return (t, base, improved)
+        return (t, baselines, improved)
 
-    # Graph-layer overlay ON, consistent with the risk_cfg/weight_fn already
-    # True above. Both A/B legs share this graph; sizing still differs only via
-    # weight_fn, so the gate stays a clean controlled comparison.
-    gate_inputs = _map_tickers(tickers, per_ticker, workers, risk_enabled=True)
+    # Keep graph-level risk off for both legs; otherwise the baseline is already
+    # risk-adjusted and the improved leg applies a second overlay. The cache is
+    # temporary to this invocation: it pairs A/B decisions without silently
+    # reusing an older experiment's LLM outputs.
+    with tempfile.TemporaryDirectory(prefix="yiagents_ab_decisions_") as cache_dir:
+        decision_cache = DecisionCache(cache_dir, enabled=True)
+        gate_inputs = _map_tickers(tickers, per_ticker, workers, risk_enabled=False)
 
     # 每只票独立判定闸门（串行，确定性顺序）。_map_tickers 对失败的 ticker
     # 返回 None 占位 —— 跳过它（无 base/improved 可判定），并计入整体失败。
@@ -390,20 +412,21 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
         if gi is None:
             all_pass = False
             continue
-        t, base, improved = gi
-        verdict = evaluate_gate(base, improved)
+        t, baselines, improved = gi
+        verdict = evaluate_gate(baselines, improved)
         md = verdict.render()
         print(f"\n  [{t}] 闸门判定: {'✅ PASS' if verdict.passes else '❌ FAIL'} "
               f"| DSR {verdict.mean_dsr:.2f} | 跑赢B&H {verdict.beats_buyhold}")
         print(f"    建议: {verdict.recommendation[:160]}...")
+        Path(out).mkdir(parents=True, exist_ok=True)
         (Path(out) / f"gate_{t}.md").write_text(md, encoding="utf-8")
-        all_render += [base] + improved
+        all_render += baselines + improved
         if not verdict.passes:
             all_pass = False
 
     if all_render:
         write_report(all_render, results_dir=out)
-    write_dashboard([gi[1] for gi in gate_inputs if gi is not None],
+    write_dashboard([gi[1][0] for gi in gate_inputs if gi is not None and gi[1]],
                     results_dir=out, kill_switch=False)
     print(f"\n📊 报告/仪表盘/闸门判定 都写到: {out}")
     # CLAUDE.md: 「闸门 PASS 才做券商适配」—— return the aggregated verdict so

@@ -98,6 +98,14 @@ def test_overview_does_not_leak_today_or_live():
 
 
 @pytest.mark.unit
+def test_overview_rejects_future_label_for_todays_snapshot():
+    from datetime import date, timedelta
+
+    future = (date.today() + timedelta(days=1)).isoformat()
+    assert overview_would_leak_future(future) is True
+
+
+@pytest.mark.unit
 def test_overview_conservative_on_unparseable():
     assert overview_would_leak_future("not-a-date") is False
 

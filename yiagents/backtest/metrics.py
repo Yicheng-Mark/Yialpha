@@ -30,14 +30,15 @@ units:
 
     sr_per       = mean(returns) / std(returns)
     sr0_per      = z / sqrt(n)            # hurdle in per-obs units (0 if N==1)
-    denom        = sqrt(1 - sk*sr_per + (ku*sr_per**2)/4)
+    denom        = sqrt(1 - sk*sr_per + ((ku+2)*sr_per**2)/4)
     stat         = (sr_per - sr0_per) * sqrt(n - 1) / denom
     DSR          = norm.cdf(stat)         # in [0, 1]
 
 where ``z`` is the expected maximum of ``N = n_trials`` standard normals
 (built from the inverse normal CDF), ``sk`` is sample skew and ``ku`` is
-sample excess kurtosis of the periodic returns. DSR > 0.5 means the
-strategy clears the multiple-testing hurdle.
+sample *excess* kurtosis of the periodic returns.  The original variance term
+uses ``(non_excess_kurtosis - 1)``; with an excess-kurtosis input that is
+``ku + 2``. DSR > 0.5 means the strategy clears the multiple-testing hurdle.
 """
 
 from __future__ import annotations
@@ -268,7 +269,9 @@ def _deflated_sharpe_ratio(
     z = _expected_max_z(n_trials)
     sr0_per = z / math.sqrt(n)  # hurdle Sharpe in per-observation units
 
-    denom_sq = 1.0 - sk * sr_per + (ku * sr_per ** 2) / 4.0
+    # Bailey/Lopez de Prado use (kurtosis - 1).  ``ku`` here is Fisher's
+    # *excess* kurtosis (normal == 0), therefore kurtosis - 1 == ku + 2.
+    denom_sq = 1.0 - sk * sr_per + ((ku + 2.0) * sr_per ** 2) / 4.0
     if denom_sq <= 0.0:
         return 0.0
     denom = math.sqrt(denom_sq)

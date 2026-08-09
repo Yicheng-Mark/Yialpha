@@ -28,6 +28,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Version 2 invalidates decisions produced before the historical-source and
+# next-bar point-in-time fixes. Replaying those files would silently reintroduce
+# present-day social/positioning data into an otherwise corrected backtest.
+DECISION_CACHE_SCHEMA_VERSION = 2
+
 
 @dataclass(frozen=True)
 class CachedDecision:
@@ -41,6 +46,7 @@ class CachedDecision:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": DECISION_CACHE_SCHEMA_VERSION,
             "ticker": self.ticker,
             "date": self.date,
             "run_tag": self.run_tag,
@@ -50,6 +56,11 @@ class CachedDecision:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CachedDecision:
+        if d.get("schema_version") != DECISION_CACHE_SCHEMA_VERSION:
+            raise ValueError(
+                "backtest decision cache schema is stale or missing; "
+                "a point-in-time-safe decision must be recomputed"
+            )
         return cls(
             ticker=d["ticker"],
             date=d["date"],

@@ -23,6 +23,7 @@ _ENV_OVERRIDES = {
     "YIAGENTS_MAX_DEBATE_ROUNDS":    "max_debate_rounds",
     "YIAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "YIAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
+    "YIAGENTS_MEMORY_ENABLED":       "memory_enabled",
     "YIAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "YIAGENTS_TEMPERATURE":          "temperature",
     # Provider-specific reasoning/thinking knobs (None = each provider's own
@@ -49,6 +50,12 @@ _ENV_OVERRIDES = {
     # execution layer reads the same env var directly so a halt takes effect
     # without restarting the agent process.
     "YIAGENTS_KILL_SWITCH":             "kill_switch",
+    # Safety boundary for analysis-only installations. Live execution requires
+    # analysis_only=False plus both execution enable switches at the network
+    # edge; PoT host-side code execution is independently opt-in.
+    "YIAGENTS_ANALYSIS_ONLY":            "analysis_only",
+    "YIAGENTS_LIVE_EXECUTION_ENABLED":   "live_execution_enabled",
+    "YIAGENTS_POT_ENABLED":              "pot_enabled",
     # Multi-ticker batch concurrency (Phase A/B). Off by default so every path
     # stays strictly serial (one ticker at a time) and reproducible. See
     # yiagents/batch/runner.py — each ticker runs through propagate() unchanged;
@@ -219,6 +226,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "results_dir": os.getenv("YIAGENTS_RESULTS_DIR", os.path.join(_YIAGENTS_HOME, "logs")),
     "data_cache_dir": os.getenv("YIAGENTS_CACHE_DIR", os.path.join(_YIAGENTS_HOME, "cache")),
     "memory_log_path": os.getenv("YIAGENTS_MEMORY_LOG_PATH", os.path.join(_YIAGENTS_HOME, "memory", "trading_memory.md")),
+    # Reflections contain realised returns and therefore require strict
+    # point-in-time bookkeeping. Keep persistence opt-in for an analysis-only
+    # installation; when enabled, historical runs additionally filter every
+    # lesson by its recorded outcome-availability date.
+    "memory_enabled": False,
     # Optional cap on the number of resolved memory log entries. When set,
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.
@@ -263,18 +275,26 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "max_risk_discuss_rounds": 2,
     "max_recur_limit": 100,
     # --- Quantitative risk-control layer (Phase 1) -------------------------
-    # On by default: the recommended production form. The risk manager overrides
+    # On by default for analysis reports. The risk manager overrides analytical
     # position size / stop-loss / exposure deterministically (LLM keeps
     # direction; math owns size and risk). scripts/run_baseline.py sets this
     # explicitly per mode (baseline=False, full=True) so the A/B gate stays
     # clean regardless of this default; smoke inherits the default to exercise
-    # the production path.
+    # the full analysis path.
     "risk_enabled": True,
     "kelly_fraction": 0.25,            # quarter-Kelly by default
     "max_single_position": 0.20,       # one ticker <= 20% of equity
     "max_single_sector": 0.30,         # one sector <= 30% of equity
     "max_drawdown_hard_stop": 0.15,    # flatten + cool off beyond this drawdown
     "atr_stop_mult": 2.0,              # stop = last_close - mult*ATR (long)
+    # Analysis is the product's default boundary. These config values document
+    # the mode for callers/UI; execution gateways additionally read the same
+    # environment flags at each submission so a stop takes effect immediately.
+    "analysis_only": True,
+    "live_execution_enabled": False,
+    # The in-process PoT namespace is not an OS sandbox. Keep LLM-generated
+    # Python disabled unless the operator makes a separate explicit opt-in.
+    "pot_enabled": False,
     # Phase 2b: FinCoT de-persona structured prompts for analysts.
     "fin_cot_prompts": False,
     # Deterministic valuation tool (env: YIAGENTS_VALUATION_TOOLS). Off by

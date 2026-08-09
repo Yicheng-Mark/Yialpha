@@ -1,9 +1,9 @@
 """Unit tests for the decision -> OrderRequest bridge (yiagents.execution.bridge).
 
 Covers the direction truth table (rating priority, Trader-action fallback,
-Hold -> no order), the volume guard, and function purity. The direction logic
-mirrors ``scripts/trade_ticket.py:decide_direction`` exactly; these tests pin
-that contract so the two never drift. All ``@pytest.mark.unit``.
+Hold -> no order), the volume guard, and function purity. Unlike the manual
+trade-ticket renderer, this execution bridge fails closed on bearish signals:
+selling to close is explicit, and opening a short needs a double opt-in.
 """
 
 from __future__ import annotations
@@ -52,15 +52,15 @@ class TestDirectionTruthTable:
             # Rating wins.
             (PortfolioRating.BUY, None, Direction.LONG),
             (PortfolioRating.OVERWEIGHT, None, Direction.LONG),
-            (PortfolioRating.SELL, None, Direction.SHORT),
-            (PortfolioRating.UNDERWEIGHT, None, Direction.SHORT),
+            (PortfolioRating.SELL, None, None),
+            (PortfolioRating.UNDERWEIGHT, None, None),
             (PortfolioRating.HOLD, None, None),
             # Hold rating does NOT fall back to the Trader action.
             (PortfolioRating.HOLD, TraderAction.BUY, None),
             (PortfolioRating.HOLD, TraderAction.SELL, None),
             # Rating missing entirely -> Trader action decides.
             (None, TraderAction.BUY, Direction.LONG),
-            (None, TraderAction.SELL, Direction.SHORT),
+            (None, TraderAction.SELL, None),
             (None, TraderAction.HOLD, None),
             # Nothing committed.
             (None, None, None),
@@ -109,12 +109,48 @@ class TestOrderShape:
             price=78.5,
             offset=Offset.OPEN,
             reference="hedge",
+            allow_short_open=True,
         )
         r = reqs[0]
         assert r.type is OrderType.LIMIT and r.price == 78.5
         assert r.offset is Offset.OPEN
         assert r.reference == "hedge"
         assert r.direction is Direction.SHORT
+
+    def test_bearish_signal_can_explicitly_close_long(self):
+        reqs = decision_to_order_requests(
+            _decision(PortfolioRating.SELL),
+            None,
+            symbol="BTCUSDT",
+            exchange=Exchange.BINANCE,
+            volume=0.5,
+            offset=Offset.CLOSE,
+        )
+        assert len(reqs) == 1
+        assert reqs[0].direction is Direction.SHORT
+        assert reqs[0].offset is Offset.CLOSE
+
+    def test_offset_open_alone_does_not_authorize_short(self):
+        reqs = decision_to_order_requests(
+            _decision(PortfolioRating.SELL),
+            None,
+            symbol="BTCUSDT",
+            exchange=Exchange.BINANCE,
+            volume=0.5,
+            offset=Offset.OPEN,
+        )
+        assert reqs == []
+
+    def test_allow_short_alone_does_not_authorize_implicit_offset(self):
+        reqs = decision_to_order_requests(
+            _decision(PortfolioRating.SELL),
+            None,
+            symbol="BTCUSDT",
+            exchange=Exchange.BINANCE,
+            volume=0.5,
+            allow_short_open=True,
+        )
+        assert reqs == []
 
 
 @pytest.mark.unit

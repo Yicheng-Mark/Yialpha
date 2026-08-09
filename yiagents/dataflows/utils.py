@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from contextvars import ContextVar
 from datetime import date, datetime, timedelta
 from typing import Annotated
 
@@ -69,13 +70,15 @@ def is_filing_public(
     return period_end + timedelta(days=lag_days) <= as_of
 
 
-def overview_would_leak_future(curr_date: str | None) -> bool:
-    """True iff ``curr_date`` is an explicit past date, for which a vendor's
-    current-point overview snapshot would leak future information.
+def is_historical_date(curr_date: str | None) -> bool:
+    """Return whether an explicit analysis date is not the live/current date.
 
-    Such snapshots (yfinance ``.info`` / Alpha Vantage ``OVERVIEW``) carry no
-    date dimension, so they are only valid when ``curr_date`` is empty (live,
-    no as-of constraint) or today/future.
+    This is the shared gate for sources that only expose a current snapshot and
+    have no trustworthy historical/as-of parameter (social feeds, prediction
+    markets, rolling 24-hour tickers, and selected positioning endpoints).
+    A future label must not receive today's snapshot either, so every valid
+    explicit date other than today takes the causal/date-bounded branch. Empty
+    or malformed values are left to the caller's normal validation path.
     """
     if not curr_date:
         return False
@@ -83,7 +86,93 @@ def overview_would_leak_future(curr_date: str | None) -> bool:
         as_of = datetime.strptime(str(curr_date)[:10], "%Y-%m-%d").date()
     except (ValueError, TypeError):
         return False
-    return as_of < date.today()
+    return as_of != date.today()
+
+
+def overview_would_leak_future(curr_date: str | None) -> bool:
+    """True iff ``curr_date`` is an explicit past date, for which a vendor's
+    current-point overview snapshot would be misdated or leak information.
+
+    Such snapshots (yfinance ``.info`` / Alpha Vantage ``OVERVIEW``) carry no
+    date dimension, so they are only valid when ``curr_date`` is empty (live,
+    no as-of constraint) or exactly today.
+    """
+    return is_historical_date(curr_date)
+
+
+# ---------------------------------------------------------------------------
+# Analysis-date PIT cutoff for the tool execution layer.
+#
+# The stock/crypto OHLCV tools (get_stock_data, get_binance_klines, ...) are
+# called by the LLM with (symbol, start_date, end_date) and carry NO analysis
+# date parameter — the LLM picks end_date from its prompt context. The real
+# clock may be ahead of the analysis date (a backtest for 2020 run today), so a
+# vendor that honors whatever window the LLM supplies would return rows after
+# the analysis date, leaking the future into the backtest.
+#
+# We pin the analysis date in a ContextVar at the start of each graph run
+# (:meth:`YiAgentsGraph._run_graph`). The vendor layer reads it via
+# :func:`get_analysis_date` and clamps its fetch window with
+# :func:`clamp_end_date`. This is transparent to the tool signatures (no LLM-
+# facing parameter changes) and crosses the ThreadPoolExecutor boundary the
+# same way the config ContextVar does (the batch runner copies the context into
+# each worker via ``submit_with_context``). Live mode (no analysis date pinned)
+# is a no-op pass-through, so today's live runs are byte-identical.
+# ---------------------------------------------------------------------------
+_analysis_date_var: ContextVar[str | None] = ContextVar("yiagents_analysis_date", default=None)
+
+
+def set_analysis_date(curr_date: str | None) -> None:
+    """Pin the analysis date for the current graph run / batch worker thread.
+
+    ``None`` (or an empty string) clears it — live mode, no as-of constraint.
+    The value is expected in ``YYYY-MM-DD`` form; non-conforming values are
+    stored as-is but :func:`clamp_end_date` treats unparseable analysis dates
+    as live (no clamp), failing open only for the live path.
+    """
+    _analysis_date_var.set(curr_date or None)
+
+
+def get_analysis_date() -> str | None:
+    """The analysis date pinned for this run/thread, or ``None`` for live mode."""
+    return _analysis_date_var.get()
+
+
+def clamp_end_date(end_date: str | None, curr_date: str | None = None) -> str | None:
+    """Return ``end_date`` capped to the analysis date ``curr_date``.
+
+    The third PIT guard (after :func:`is_filing_public` and
+    :func:`overview_would_leak_future`): a vendor fetch window must not extend
+    past the analysis date. When ``curr_date`` is empty/``None`` (live mode)
+    or either date is unparseable, the value is returned unchanged — fail open
+    *only* for live, where there is no as-of constraint to violate. On a
+    parseable historical analysis date, an ``end_date`` strictly after it is
+    clamped down to it so the vendor never returns rows the backtest could not
+    have seen.
+    """
+    if not curr_date or not end_date:
+        return end_date
+    try:
+        as_of = datetime.strptime(str(curr_date)[:10], "%Y-%m-%d")
+        requested = datetime.strptime(str(end_date)[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return end_date
+    if requested <= as_of:
+        return end_date
+    logger.debug(
+        "PIT clamp: end_date %s past analysis date %s; clamped", end_date, curr_date,
+    )
+    return as_of.strftime("%Y-%m-%d")
+
+
+def current_pit_end(end_date: str | None) -> str | None:
+    """Convenience: clamp ``end_date`` to the run's pinned analysis date.
+
+    Vendors that fetch by date window call this instead of plumbing a
+    ``curr_date`` argument through every layer. Returns ``end_date`` unchanged
+    in live mode (no analysis date pinned).
+    """
+    return clamp_end_date(end_date, get_analysis_date())
 
 
 # Tickers can contain letters, digits, dot, dash, underscore, caret
@@ -132,23 +221,26 @@ def get_current_date():
     return date.today().strftime("%Y-%m-%d")
 
 
-def proxy_map() -> dict[str, str | None]:
+def proxy_map() -> dict[str, str]:
     """requests-style proxy dict for US/quote data sources, read at call time.
 
     ``http`` <- ``HTTP_PROXY`` else ``ALL_PROXY``; ``https`` <- ``HTTPS_PROXY``
     else ``ALL_PROXY``. The ``ALL_PROXY`` fallback matters: a user who sets
     only ``ALL_PROXY`` (a single config knob) must get proxied traffic on
     *every* US source, not just the ones that happened to read it -- otherwise
-    one vendor hangs or leaks the real IP while another is proxied. Missing
-    values fall back to ``None`` (requests' default behaviour).
+    one vendor hangs or leaks the real IP while another is proxied. Entries
+    whose resolved value is ``None`` (no relevant env var set) are omitted so
+    the dict matches ``requests``' ``proxies: Mapping[str, str]`` contract;
+    an empty dict means "no proxy", identical to requests' default behaviour.
 
     Domestic sources that must bypass the proxy (e.g. Eastmoney) do NOT use
     this -- they disable env merging via ``Session(trust_env=False)`` instead.
     """
-    return {
+    raw = {
         "http": os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY"),
         "https": os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY"),
     }
+    return {k: v for k, v in raw.items() if v is not None}
 
 
 def decorate_all_methods(decorator):

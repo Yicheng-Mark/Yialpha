@@ -14,7 +14,7 @@ from .stockstats_utils import (
     yf_retry,
 )
 from .symbol_utils import NoMarketDataError, normalize_symbol
-from .utils import overview_would_leak_future
+from .utils import current_pit_end, overview_would_leak_future
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,11 @@ def get_YFin_data_online(
 ):
 
     datetime.strptime(start_date, "%Y-%m-%d")
+    # PIT guard: a backtest must never see rows after the analysis date. The
+    # stock-data tool carries no analysis-date argument (the LLM picks end_date
+    # from its prompt context), so clamp here against the run's pinned analysis
+    # date. Live mode (no analysis date pinned) is a no-op pass-through.
+    end_date = current_pit_end(end_date) or end_date
     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
     # Resolve broker/forex symbols to Yahoo's convention (XAUUSD+ -> GC=F).

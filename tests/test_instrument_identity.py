@@ -166,5 +166,64 @@ class ContextAnchoredPlaceholderTests(unittest.TestCase):
         self.assertIn("EC", placeholder.content)
 
 
+@pytest.mark.unit
+class ResolveInstrumentIdentityPITTests(unittest.TestCase):
+    """Point-in-time guard: a historical date must not receive today's identity.
+
+    ``.info`` is a current-point snapshot (company name, sector, industry,
+    exchange are today's values). On a backtest decision date surfacing them
+    leaks the future identity, so the guard refuses and returns ``{}`` — the
+    same degradation as a yfinance failure, degrading to ticker-only context.
+    """
+
+    def setUp(self):
+        resolve_instrument_identity.cache_clear()
+
+    def test_historical_date_returns_empty_without_touching_yfinance(self):
+        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+            identity = resolve_instrument_identity("AAPL", curr_date="2020-01-02")
+        mock.assert_not_called()  # must not even hit the network
+        self.assertEqual(identity, {})
+
+    def test_future_label_date_also_refused(self):
+        # A future date is not "live/today" either — it must not get today's
+        # snapshot dressed up as that future date.
+        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+            identity = resolve_instrument_identity("AAPL", curr_date="2099-12-31")
+        mock.assert_not_called()
+        self.assertEqual(identity, {})
+
+    def test_live_mode_still_resolves(self):
+        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+            mock.return_value.info = {"longName": "Apple Inc.", "sector": "Technology"}
+            identity = resolve_instrument_identity("AAPL", curr_date=None)
+        mock.assert_called_once()
+        self.assertEqual(identity["company_name"], "Apple Inc.")
+
+    def test_none_curr_date_is_live(self):
+        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+            mock.return_value.info = {"longName": "Apple Inc."}
+            identity = resolve_instrument_identity("AAPL")
+        self.assertEqual(identity["company_name"], "Apple Inc.")
+
+    def test_cache_keyed_on_curr_date(self):
+        # Same ticker, different curr_date → different cache slots. The live
+        # call resolves; the historical call is refused — both independent.
+        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+            mock.return_value.info = {"longName": "Apple Inc."}
+            live = resolve_instrument_identity("AAPL", curr_date=None)
+            historical = resolve_instrument_identity("AAPL", curr_date="2020-01-02")
+        self.assertEqual(live["company_name"], "Apple Inc.")
+        self.assertEqual(historical, {})
+
+    def test_context_degrades_to_ticker_only_on_historical(self):
+        from yiagents.agents.utils.agent_utils import build_instrument_context
+
+        # resolve returns {} on historical → context has no identity line.
+        context = build_instrument_context("AAPL", "stock", {})
+        self.assertIn("AAPL", context)
+        self.assertNotIn("Resolved identity", context)
+
+
 if __name__ == "__main__":
     unittest.main()

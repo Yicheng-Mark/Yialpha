@@ -23,13 +23,27 @@ final, overlay-adjusted decision.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
 from yiagents.agents.utils.rating import parse_rating
 from yiagents.dataflows.utils import safe_ticker_component
 
-LOGS_ROOT = Path.home() / ".yiagents" / "logs"
+
+def _resolve_logs_root() -> Path:
+    """Resolve the logs root from ``YIAGENTS_RESULTS_DIR`` (same source as the
+    CLI/batch write side) so the web read side stays aligned with a custom
+    results dir. Falls back to ``~/.yiagents/logs`` when the env is unset,
+    matching :mod:`yiagents.default_config`.
+    """
+    env = os.getenv("YIAGENTS_RESULTS_DIR")
+    if env:
+        return Path(env)
+    return Path.home() / ".yiagents" / "logs"
+
+
+LOGS_ROOT = _resolve_logs_root()
 REPORTS_ROOT = LOGS_ROOT / "reports"
 
 # Subdirs under LOGS_ROOT that are not per-ticker result dirs.

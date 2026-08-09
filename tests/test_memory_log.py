@@ -266,6 +266,45 @@ class TestTradingMemoryLogCore:
         assert "Recent cross-ticker lessons" in ctx
         assert "Past analyses of NVDA" not in ctx
 
+    def test_historical_context_excludes_legacy_undated_outcome(self, tmp_path):
+        log = make_log(tmp_path)
+        _seed_completed(
+            tmp_path,
+            "NVDA",
+            "2020-01-02",
+            "Buy NVDA.",
+            "Reflection generated at an unknown later date.",
+        )
+
+        assert log.get_past_context("NVDA", as_of_date="2020-02-01") == ""
+
+    def test_historical_context_uses_outcome_availability_date(self, tmp_path):
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", "2020-01-02", DECISION_BUY)
+        log.update_with_outcome(
+            "NVDA",
+            "2020-01-02",
+            0.05,
+            0.02,
+            5,
+            "Causal lesson.",
+            available_date="2020-01-10",
+        )
+
+        assert log.get_past_context("NVDA", as_of_date="2020-01-09") == ""
+        assert "Causal lesson." in log.get_past_context(
+            "NVDA", as_of_date="2020-01-10"
+        )
+
+    def test_memory_can_be_explicitly_disabled(self, tmp_path):
+        path = tmp_path / "disabled.md"
+        log = TradingMemoryLog(
+            {"memory_log_path": str(path), "memory_enabled": False}
+        )
+        log.store_decision("NVDA", "2020-01-02", DECISION_BUY)
+
+        assert not path.exists()
+
     def test_n_same_limit_respected(self, tmp_path):
         """Only the n_same most recent same-ticker entries are included."""
         log = make_log(tmp_path)
@@ -536,6 +575,37 @@ class TestDeferredReflection:
         assert raw is not None and alpha is not None and days is not None
         assert days == 2
 
+    def test_fetch_returns_respects_as_of_even_if_vendor_ignores_end(self):
+        index = pd.to_datetime(
+            ["2020-01-02", "2020-01-03", "2020-01-04", "2020-01-05", "2020-01-06"]
+        )
+        stock = pd.DataFrame({"Close": [100, 101, 102, 103, 999]}, index=index)
+        bench = pd.DataFrame({"Close": [100, 100, 100, 100, 999]}, index=index)
+        requested_ends = []
+
+        with patch("yfinance.Ticker") as mock_ticker_cls:
+            def _make_ticker(symbol):
+                ticker = MagicMock()
+                ticker.history.side_effect = lambda **kwargs: (
+                    requested_ends.append(kwargs["end"])
+                    or (bench if symbol == "SPY" else stock)
+                )
+                return ticker
+
+            mock_ticker_cls.side_effect = _make_ticker
+            raw, alpha, days = YiAgentsGraph._fetch_returns(
+                None,
+                "NVDA",
+                "2020-01-02",
+                holding_days=2,
+                as_of_date="2020-01-05",
+            )
+
+        assert requested_ends == ["2020-01-06", "2020-01-06"]
+        assert raw == pytest.approx(0.02)
+        assert alpha == pytest.approx(0.02)
+        assert days == 2
+
     # YiAgentsGraph._resolve_benchmark — picks index for alpha calc
 
     def test_resolve_benchmark_explicit_override(self):
@@ -664,6 +734,34 @@ class TestDeferredReflection:
         assert entries[0]["reflection"] == "Momentum confirmed."
         assert "+5.0%" in entries[0]["raw"]
         assert "+2.0%" in entries[0]["alpha"]
+
+    def test_resolve_is_bounded_by_historical_run_date(self, tmp_path):
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", "2020-01-02", DECISION_BUY)
+        log.store_decision("NVDA", "2020-02-02", DECISION_BUY)
+        mock_graph = MagicMock(spec=YiAgentsGraph)
+        mock_graph.memory_log = log
+        mock_reflector = MagicMock()
+        mock_reflector.reflect_on_final_decision.return_value = "Causal lesson."
+        mock_graph.reflector = mock_reflector
+        mock_graph._resolve_benchmark.return_value = "SPY"
+        mock_graph._fetch_returns.return_value = (0.05, 0.02, 5)
+
+        YiAgentsGraph._resolve_pending_entries(
+            mock_graph,
+            "NVDA",
+            as_of_date="2020-01-15",
+        )
+
+        mock_graph._fetch_returns.assert_called_once_with(
+            "NVDA",
+            "2020-01-02",
+            benchmark="SPY",
+            as_of_date="2020-01-15",
+        )
+        entries = log.load_entries()
+        assert entries[0]["available_date"] == "2020-01-15"
+        assert entries[1]["pending"] is True
 
 
 # ---------------------------------------------------------------------------

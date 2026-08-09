@@ -84,8 +84,30 @@ class TaskRegistry:
     def get(self, task_id: str) -> TaskState | None:
         return self.tasks.get(task_id)
 
+    def release(self, task_id: str) -> None:
+        """Release the single running slot, but only for its owning task."""
+        if self._running_id == task_id:
+            self._running_id = None
+
+    def reset(self) -> None:
+        """Clear all task state, releasing any stale busy slot.
+
+        Called at server startup (lifespan) to recover from a crash/restart
+        that left a task stuck in the ``running`` state. Fail-closed: we never
+        reattach to or trust an orphaned ``run_robust`` subprocess from the
+        previous process — its PID is lost and the slot is freed so the UI is
+        usable again. The orphan writes its result to disk and exits naturally.
+        """
+        self.tasks.clear()
+        self._running_id = None
+
 
 registry = TaskRegistry()
+
+# asyncio keeps only weak references to scheduled tasks. Retain watcher tasks
+# until completion so registry cleanup cannot disappear during garbage
+# collection and leave the UI permanently busy.
+_WATCH_TASKS: set[asyncio.Task[None]] = set()
 
 
 def _build_cmd(ticker: str, date: str, asset_type: str) -> list[str]:
@@ -130,47 +152,71 @@ async def spawn(ticker: str, date: str, asset_type: str, language: str = "en") -
     # Env (not argv) so run_robust's cmd stays byte-identical to a plain CLI run.
     env["YIAGENTS_OUTPUT_LANGUAGE"] = _LANG_MAP.get(language, "English")
     cmd = _build_cmd(ticker, date, asset_type)
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=str(_PROJECT_ROOT),
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(_PROJECT_ROOT),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    except BaseException as exc:
+        # The slot is reserved before the first await so two requests cannot
+        # race into one process. A launch failure must therefore roll that
+        # reservation back explicitly.
+        state.status = "error"
+        state.error = f"failed to start analysis: {exc!r}"
+        state.finished_at = time.time()
+        registry.release(task_id)
+        raise
     state.pid = proc.pid
     # Fire-and-forget watcher; the registry is its only state.
-    asyncio.create_task(_watch(proc, state))
+    watcher = asyncio.create_task(_watch(proc, state))
+    _WATCH_TASKS.add(watcher)
+    watcher.add_done_callback(_WATCH_TASKS.discard)
     return task_id
 
 
 async def _watch(proc: asyncio.subprocess.Process, state: TaskState) -> None:
     """Read stdout lines for attempt banners, then record the final exit code."""
     assert proc.stdout is not None
+    rc: int | None = None
     try:
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
-            text = line.decode("utf-8", "replace").rstrip()
-            m = _ATTEMPT_RE.search(text)
-            if m:
-                state.attempt = int(m.group(1))
-                state.max_attempts = int(m.group(2))
-            if len(state.log_tail) >= _LOG_TAIL_MAX:
-                state.log_tail.pop(0)
-            state.log_tail.append(text)
-    except Exception as e:  # noqa: BLE001 -- never let the watcher raise
-        state.error = f"watch error: {e!r}"
+        try:
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", "replace").rstrip()
+                m = _ATTEMPT_RE.search(text)
+                if m:
+                    state.attempt = int(m.group(1))
+                    state.max_attempts = int(m.group(2))
+                if len(state.log_tail) >= _LOG_TAIL_MAX:
+                    state.log_tail.pop(0)
+                state.log_tail.append(text)
+        except Exception as exc:  # noqa: BLE001 -- still wait for child exit
+            state.error = f"watch output error: {exc!r}"
 
-    rc = await proc.wait()
-    state.finished_at = time.time()
-    if rc == 0:
-        state.status = "done"
-        # Point at the newest complete report dir for this ticker (download).
-        reports = store.list_reports(state.ticker)
-        if reports:
-            state.report_dir = reports[0]["dir"]
-    else:
-        state.status = "error"
-        state.error = state.error or f"run_robust exited {rc}"
-    registry._running_id = None
+        try:
+            rc = await proc.wait()
+        except Exception as exc:  # noqa: BLE001 -- cleanup must always run
+            state.status = "error"
+            state.error = f"watch wait error: {exc!r}"
+    finally:
+        state.finished_at = time.time()
+        try:
+            if rc == 0:
+                state.status = "done"
+                # Point at the newest complete report dir for this ticker (download).
+                reports = store.list_reports(state.ticker)
+                if reports:
+                    state.report_dir = reports[0]["dir"]
+            elif state.status != "error":
+                state.status = "error"
+                state.error = state.error or f"run_robust exited {rc}"
+        except Exception as exc:  # noqa: BLE001 -- registry release is mandatory
+            state.status = "error"
+            state.error = f"post-run report lookup failed: {exc!r}"
+        finally:
+            registry.release(state.task_id)

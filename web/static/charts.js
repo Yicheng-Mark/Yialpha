@@ -22,6 +22,11 @@
 
   function countMatches(text, re) { return ((text || "").match(re) || []).length; }
   function fmtK(n) { n = n || 0; return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n); }
+  function escapeHTML(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
 
   // ---- read CSS custom properties into a theme snapshot ----
   function cssVar(name) {
@@ -230,7 +235,7 @@
       tooltip: Object.assign(triggerItem(tooltipStyle(th)), {
         formatter: function (p) {
           var d = entries[p.dataIndex];
-          return "<b>" + d.name + "</b><br/>" +
+          return "<b>" + escapeHTML(d.name) + "</b><br/>" +
             "Wall: " + d.wall.toFixed(1) + "s<br/>" +
             "Tokens: " + d.tok.toLocaleString() + "<br/>" +
             "<span style=\"color:" + th.ink3 + ";font-size:11px\">  in " + d.tokIn.toLocaleString() + " · out " + d.tokOut.toLocaleString() + " · reason " + d.tokReason.toLocaleString() + "</span>";

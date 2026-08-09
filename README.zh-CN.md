@@ -27,9 +27,9 @@
 
 ## 这是什么
 
-YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易公司的运作：基本面 / 情绪 / 新闻 / 技术分析师产出观点，多空研究员结构化辩论，交易员给出提案，风控团队与组合经理做最终裁决。在此之上，框架叠加一层**确定性量化风控**（Kelly 仓位 / ATR 止损 / 熔断 / CVaR）和一套**四档验证 + 回测闸门**流程，把"研究玩具"往"可上线工程"推。
+YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的分析过程：基本面 / 情绪 / 新闻 / 技术分析师产出观点，多空研究员结构化辩论，交易员给出提案，风控团队与组合经理做最终裁决。在此之上，框架叠加一层**确定性量化风控**（Kelly 仓位 / ATR 止损 / 熔断 / CVaR）和一套**四档验证 + 回测闸门**流程，用于提高分析严谨性。
 
-> ⚠️ **仅用于研究。** 交易表现受模型、温度、数据质量、调仓周期等诸多非确定性因素影响，**不构成任何金融、投资或交易建议**。
+> ⚠️ **仅做分析。** 默认配置不能下单，也不能执行 LLM 生成的 Python。请保持 `YIAGENTS_ANALYSIS_ONLY=true`；报告与回测只是研究证据，不能直接用于资金决策，且**不构成任何金融、投资或交易建议**。
 
 ---
 
@@ -52,11 +52,11 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易公司的�
 | 分析师 | 维度 | 数据来源 |
 | ------ | ------ | ------ |
 | Market Analyst | 技术面：从指标库（MACD / RSI / 布林带 / ATR / VWMA / SMA / EMA 等）按市况选最多 8 个互补指标 | yfinance / Alpha Vantage |
-| Sentiment Analyst | 社交情绪 | Reddit、StockTwits |
+| Sentiment Analyst | 社交情绪 | Reddit、StockTwits（仅当前日期分析） |
 | News Analyst | 个股新闻 + 宏观/全球新闻（美联储、地缘、央行政策等） | yfinance / Alpha Vantage News |
 | Fundamentals Analyst | 财务基本面 | yfinance / Alpha Vantage |
 
-宏观数据走 FRED（美联储），事件概率走 Polymarket（预测市场），另类数据可走浏览器采集。
+宏观数据走 FRED（美联储），事件概率走 Polymarket（预测市场），另类数据可走浏览器采集。没有可靠 as-of 参数的数据源会在历史分析中被省略，不再用“今天的数据”冒充历史数据。
 
 ### 加密货币分析模式
 
@@ -65,8 +65,8 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易公司的�
 | 模式 | `--asset-type` | 数据源 | 绑定工具 | 备注 |
 | ------ | ------ | ------ | ------ | ------ |
 | Yahoo 现货（默认） | `crypto` | Yahoo Finance（`BTC-USD`） | indicators + verified_snapshot | 默认加密路径；无 funding / OI / 杠杆 |
-| Binance 现货 | `crypto_spot` | Binance 现货（`api.binance.com`，可切镜像） | spot_klines / ticker24 / **spot_perp_basis** + indicators + verified_snapshot | 全新跨 venue 基差 = 永续收盘 − 现货收盘（新 alpha 维度） |
-| Binance 永续 | `crypto_perp` | Binance USDT-M 永续（`fapi.binance.com`） | 6 个原生工具：klines / funding / open_interest / long_short_ratio / taker_buy_sell / basis | 无 RSI/MACD（直读 klines）；隐藏 Yahoo 工具避免符号解析到错误现货对 |
+| Binance 现货 | `crypto_spot` | Binance 现货（`api.binance.com`，可切镜像） | 历史：spot_klines + 有日期的指标/快照；当前日期另含 ticker24 / **spot_perp_basis** | 历史分析不会注入滚动 24h 与当前跨市场基差 |
+| Binance 永续 | `crypto_perp` | Binance USDT-M 永续（`fapi.binance.com`） | 历史：klines + funding；当前日期另含 OI / 多空比 / 主动买卖 / basis | 仅分析；现有现货多头回测引擎会明确拒绝该模式 |
 
 加密模式下 Fundamentals Analyst 会自动剔除（永续 / 现货对无基本面）。所有 Binance 请求为手写 `requests`（**非官方 SDK**），复用已验证的 SOCKS5 代理，按产品线独立限流，并保留反应式 429/418 兜底。
 
@@ -96,7 +96,7 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易公司的�
         │
    量化风控叠加（risk_enabled）→ 仓位 / 止损 / 敞口再校准
         │
-   决策 + 记忆闭环（写入 ~/.yiagents/memory/）
+   可选因果记忆闭环（默认关闭，按 as-of 日期过滤）
 ```
 
 - **评级**：Research Manager / Portfolio Manager 用**五档**（Buy / Overweight / Hold / Underweight / Sell）；Trader 用三档（Buy / Hold / Sell）。
@@ -164,7 +164,7 @@ YIAGENTS_OUTPUT_LANGUAGE=Chinese             # 分析师报告与最终决策输
 
 ## CLI 用法
 
-安装后得到 `yiagents` 命令；也可 `python -m cli.main` 从源码运行。
+安装后得到 `yiagents` 命令；也可 `python -m yiagents.cli.main` 从源码运行。CLI 已放入唯一的 `yiagents` 命名空间，避免被环境中的通用顶层 `cli` 包覆盖。
 
 ### 单只分析：`yiagents analyze`
 
@@ -247,7 +247,7 @@ print(decision)
 
 ```python
 config = DEFAULT_CONFIG.copy()
-config["risk_enabled"] = True          # 默认开启（生产形态）
+config["risk_enabled"] = True          # 默认开启（分析报告的确定性风控层）
 config["kelly_fraction"] = 0.25        # 四分之一 Kelly
 config["max_single_position"] = 0.20   # 单票 ≤ 20% 净值
 config["max_single_sector"] = 0.30     # 单行业 ≤ 30%
@@ -274,7 +274,7 @@ LLM 定方向，数学定仓位与风险（[yiagents/risk/](yiagents/risk/)）�
 | CVaR | [cvar.py](yiagents/risk/cvar.py) | 条件风险价值，尾部风险约束 |
 | 总线 | [manager.py](yiagents/risk/manager.py) | 汇聚以上，覆盖单票 / 行业 / 敞口上限 |
 
-`risk_enabled` 默认**开启**（推荐的生产形态）：风控经理确定性地改写仓位 / 止损 / 敞口，LLM 只保留方向。`scripts/run_baseline.py` 按模式显式设置（`--baseline` 关，建立 Phase-0 基线；`--full` 开，做 A/B）。
+`risk_enabled` 默认**开启**：风控经理确定性地改写分析报告中的仓位 / 止损 / 敞口，LLM 只保留方向。`scripts/run_baseline.py` 按模式显式设置（`--baseline` 关，建立 Phase-0 基线；`--full` 开，做配对 A/B）。
 
 ---
 
@@ -304,7 +304,10 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 
 - **Deflated Sharpe Ratio（DSR）** —— 对多次抽样做多重检验校正，惩罚过拟合（[metrics.py](yiagents/backtest/metrics.py)）
 - **是否跑赢买入持有**、PASS / FAIL 结论、改进建议
+- baseline / improved 复用同一份 LLM 决策带；每个 ticker/run 使用全新的有状态 RiskManager
 - 报告、仪表盘、闸门判定写入 `--out`（默认 `backtest_output/`）
+
+日线信号统一在**下一根可用 K 线**成交，不再使用刚被模型读过的当日收盘价；`Hold` 不调仓也不收费，胜率按实际持仓盈亏计算。`crypto_perp` 在实现资金费、做空、杠杆、保证金与爆仓前会被回测入口明确拒绝。
 
 ```text
 [AAPL] 闸门判定: ✅ PASS | DSR 1.42 | 跑赢B&H True
@@ -335,11 +338,11 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 
 ## 持久化与恢复
 
-**决策日志（默认开启）：** 每次完成的运行把决策追加到 `~/.yiagents/memory/trading_memory.md`。下次同 ticker 运行时，自动拉取实现收益（含相对基准的 alpha）、生成反思，并把最近同 ticker 决策与跨 ticker 教训注入组合经理提示，形成"吃一堑长一智"闭环。路径用 `YIAGENTS_MEMORY_LOG_PATH` 覆盖。
+**决策日志（显式开启）：** 持久化默认关闭（`YIAGENTS_MEMORY_ENABLED=false`）。开启后，决策写入 `~/.yiagents/memory/trading_memory.md`；历史运行只能看到在其 as-of 日期前已经产生、且收益结果已经可知的记录。没有“结果可用日期”的旧反思不会注入历史提示。路径用 `YIAGENTS_MEMORY_LOG_PATH` 覆盖。
 
 **检查点恢复（opt-in）：** 用 `--checkpoint` 开启，LangGraph 在每个节点后存档，崩溃 / 中断可从最后一个成功步骤续跑，成功完成后自动清理。按 ticker 的 SQLite 库位于 `~/.yiagents/cache/checkpoints/<TICKER>.db`（`YIAGENTS_CACHE_DIR` 覆盖）。
 
-**全局熔断：** `YIAGENTS_KILL_SWITCH=true` 时，浏览器券商执行层拒绝提交任何新订单（[browser_broker.py](yiagents/execution/browser_broker.py)）。
+**分析边界：** `YIAGENTS_ANALYSIS_ONLY=true` 为默认值，会阻断全部实盘入口。只有关闭分析模式并同时显式开启新旧两个执行开关后，执行路径才可能工作；网关每次提交前都会重新检查这些开关与 `YIAGENTS_KILL_SWITCH`。PoT 主机代码执行同样默认关闭；在具备真正进程隔离前，Windows 上始终拒绝执行。
 
 ---
 
@@ -369,9 +372,10 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 │   ├── execution/            # browser_broker（浏览器券商 + kill switch）
 │   ├── monitoring/           # dashboard（HTML 仪表盘）
 │   ├── llm_clients/          # 多 LLM 提供商适配 + 限流器 + 共享 httpx
+│   ├── cli/                  # 交互式 CLI（analyze / batch）
 │   ├── default_config.py     # 配置 + env 映射
 │   └── reporting.py
-├── cli/                      # 交互式 CLI（analyze / batch）
+├── cli/                      # 源码兼容包装；正式入口是 yiagents.cli
 ├── web/                      # FastAPI Web UI（原地运行，不打包）
 ├── scripts/                  # run_baseline / run_robust / run_batch / run_analyst_parallel_ab / …
 ├── tests/                    # 测试套件——数据/风控/回测/闸门/多提供商/i18n/并发
@@ -385,7 +389,7 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 YiAgents 是 LLM 驱动的，**同一 ticker + 日期的两次运行可能不同** —— 这是语言模型研究的固有特性，不是缺陷。来源：
 
 - **模型采样非确定性**：即使固定温度，提供商也不保证逐字节一致；推理模型内部推理本身就在采样，波动更大。
-- **实时数据在变**：新闻 / StockTwits / Reddit 随时间返回不同内容，即便固定历史交易日，社情舆情仍反映"当下"。
+- **当前日期数据在变**：新闻 / StockTwits / Reddit 会随时间变化。历史运行会省略仅支持当前快照的社交、预测市场、滚动行情与持仓流数据；有日期的数据仍可能因供应商修订或覆盖范围改变而变化。
 
 降低波动的手段：调低 `temperature`（`YIAGENTS_TEMPERATURE`），或显式选非推理模型。已确定性化的部分：分析公司身份在 agent 运行前由 ticker 解析锁定；市场分析师的精确价格 / 指标取自已校验的数据快照。
 

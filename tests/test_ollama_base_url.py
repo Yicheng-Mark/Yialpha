@@ -18,10 +18,9 @@ def _resync_reloaded_modules():
     doesn't leak across test modules.
     """
     yield
-    import cli.main
-    import cli.utils
-    importlib.reload(cli.utils)
-    importlib.reload(cli.main)
+    from yiagents.cli import main as _main, utils as _utils
+    importlib.reload(_utils)
+    importlib.reload(_main)
 
 
 # ---- openai_client side: registry-driven base_url resolution --------------
@@ -93,7 +92,7 @@ def test_explicit_base_url_overrides_env(monkeypatch):
 def test_cli_dropdown_uses_env(monkeypatch):
     """The Ollama entry in the CLI dropdown must reflect OLLAMA_BASE_URL."""
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://cli-remote:11434/v1")
-    import cli.utils as cli_utils
+    import yiagents.cli.utils as cli_utils
     importlib.reload(cli_utils)
     # Reach inside the function via the same env-read it does at call time
     ollama_url = (
@@ -105,7 +104,7 @@ def test_cli_dropdown_uses_env(monkeypatch):
 
 def test_cli_dropdown_default_when_unset(monkeypatch):
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
-    import cli.utils as cli_utils
+    import yiagents.cli.utils as cli_utils
     importlib.reload(cli_utils)
     ollama_url = (
         __import__("os").environ.get("OLLAMA_BASE_URL")
@@ -119,7 +118,7 @@ def test_cli_dropdown_default_when_unset(monkeypatch):
 
 def test_confirm_endpoint_shows_default(monkeypatch, capsys):
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
-    import cli.utils as cli_utils
+    import yiagents.cli.utils as cli_utils
     importlib.reload(cli_utils)
     cli_utils.confirm_ollama_endpoint("http://localhost:11434/v1")
     out = capsys.readouterr().out
@@ -130,7 +129,7 @@ def test_confirm_endpoint_shows_default(monkeypatch, capsys):
 
 def test_confirm_endpoint_marks_env_origin(monkeypatch, capsys):
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://remote-host:11434/v1")
-    import cli.utils as cli_utils
+    import yiagents.cli.utils as cli_utils
     importlib.reload(cli_utils)
     cli_utils.confirm_ollama_endpoint("http://remote-host:11434/v1")
     out = capsys.readouterr().out
@@ -141,7 +140,7 @@ def test_confirm_endpoint_marks_env_origin(monkeypatch, capsys):
 def test_confirm_endpoint_warns_on_missing_scheme(monkeypatch, capsys):
     """If user sets OLLAMA_BASE_URL=0.0.0.128, advise on the expected shape."""
     monkeypatch.setenv("OLLAMA_BASE_URL", "0.0.0.128")
-    import cli.utils as cli_utils
+    import yiagents.cli.utils as cli_utils
     importlib.reload(cli_utils)
     cli_utils.confirm_ollama_endpoint("0.0.0.128")
     out = capsys.readouterr().out
@@ -152,7 +151,7 @@ def test_confirm_endpoint_warns_on_missing_scheme(monkeypatch, capsys):
 def test_confirm_endpoint_warns_on_non_default_port_remote(monkeypatch, capsys):
     """A remote host with no :11434 gets a soft hint about port mismatch."""
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://remote-host/v1")
-    import cli.utils as cli_utils
+    import yiagents.cli.utils as cli_utils
     importlib.reload(cli_utils)
     cli_utils.confirm_ollama_endpoint("http://remote-host/v1")
     out = capsys.readouterr().out
@@ -162,7 +161,7 @@ def test_confirm_endpoint_warns_on_non_default_port_remote(monkeypatch, capsys):
 def test_confirm_endpoint_quiet_on_local_no_port(monkeypatch, capsys):
     """Local host without port shouldn't trigger the remote-port hint."""
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost/v1")
-    import cli.utils as cli_utils
+    import yiagents.cli.utils as cli_utils
     importlib.reload(cli_utils)
     cli_utils.confirm_ollama_endpoint("http://localhost/v1")
     out = capsys.readouterr().out

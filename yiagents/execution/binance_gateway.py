@@ -17,8 +17,9 @@ hand-written read-only REST path — different concern).
 
 Design invariants (every path preserves these):
 
-* **Default-off == byte-equivalent.** ``YIAGENTS_EXECUTION_ENABLED`` defaults
-  unset/off. When off, ``connect`` builds no client and ``send_order``
+* **Analysis-only by default.** Live use requires ``YIAGENTS_ANALYSIS_ONLY``
+  to be false and both execution-enable flags to be true. When unarmed,
+  ``connect`` builds no client and ``send_order``
   returns ``REJECTED`` without touching the SDK. The module imports no SDK
   symbol at top level (lazy import inside ``connect``), so merely importing
   this module changes nothing — no SDK install required, no graph topology
@@ -58,13 +59,15 @@ import contextlib
 import logging
 import os
 import secrets
+import threading
 import time
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
 from ..dataflows.errors import VendorNotConfiguredError
-from .browser_broker import _coerce_bool_env
+from .browser_broker import KillSwitch, LiveExecutionSwitch, _coerce_bool_env
 from .domain import (
     AccountData,
     CancelRequest,
@@ -117,38 +120,24 @@ _PROGRAMMING_BUG_ERRORS = (AttributeError, TypeError, NameError, KeyError)
 
 
 class ExecutionEnableSwitch:
-    """Reads ``YIAGENTS_EXECUTION_ENABLED`` straight from the environment.
+    """Backward-compatible Binance facade over the global execution policy.
 
-    Mirrors ``browser_broker.KillSwitch`` but with the **opposite** fail-safe
-    polarity: a *kill* switch fail-closed means malformed -> HALTED, whereas an
-    *enable* switch fail-closed means malformed -> DISABLED. The default
-    (unset / empty) is OFF — the execution track is opt-in.
+    The legacy ``YIAGENTS_EXECUTION_ENABLED`` name remains required, but cannot
+    enable trading by itself: :class:`LiveExecutionSwitch` also requires the
+    analysis-only boundary to be explicitly disabled and the new live switch
+    to be explicitly enabled. Values are read at connection and order time.
     """
 
     _ENV_VAR = _ENV_ENABLED
 
     @staticmethod
     def is_enabled() -> bool:
-        raw = os.environ.get(_ENV_ENABLED)
-        try:
-            return _coerce_bool_env(raw)
-        except ValueError:
-            # Malformed must NOT silently enable real trading.
-            return False
+        """Return the global three-switch live-execution policy."""
+        return LiveExecutionSwitch.is_enabled()
 
     @staticmethod
     def reason() -> str:
-        raw = os.environ.get(_ENV_ENABLED)
-        if raw is None or raw.strip() == "":
-            return f"{_ENV_ENABLED} is unset (execution disabled)."
-        try:
-            on = _coerce_bool_env(raw)
-        except ValueError:
-            return (
-                f"{_ENV_ENABLED}={raw!r} is not a recognized boolean; "
-                "treated as disabled (fail-closed)."
-            )
-        return f"{_ENV_ENABLED}={raw!r} -> execution {'ENABLED' if on else 'disabled'}."
+        return LiveExecutionSwitch.reason()
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +234,12 @@ class BinanceGateway(BaseGateway):
         "mainnet": False,  # default testnet; mainnet requires explicit opt-in
     }
 
+    # Strict in-process uniqueness under bursts/clock rollback; the random
+    # process nonce separates independently-running gateway processes.
+    _client_id_lock = threading.Lock()
+    _client_id_last_ns = 0
+    _client_id_nonce = secrets.token_hex(4)
+
     def __init__(self, gateway_name: str = default_name, *, setting: dict | None = None) -> None:
         super().__init__(gateway_name, setting=setting)
         self._product: str = str(self.setting.get("product", "perp")).lower()
@@ -294,8 +289,7 @@ class BinanceGateway(BaseGateway):
                 _ENV_ENABLED,
                 ExecutionEnableSwitch.reason(),
             )
-            self._client = None
-            self._connected = False
+            self.close()
             return
 
         api_key = os.environ.get(_ENV_KEY)
@@ -422,23 +416,49 @@ class BinanceGateway(BaseGateway):
     # Order placement
     # ------------------------------------------------------------------
 
-    def send_order(self, req: OrderRequest) -> OrderData:
+    def send_order(
+        self,
+        req: OrderRequest,
+        *,
+        risk_decision: Any | None = None,
+        equity: float = 0.0,
+        max_weight: float = 0.20,
+        reference_price: float | None = None,
+        reference_prices: Mapping[str, float] | None = None,
+    ) -> OrderData:
         """Submit ``req`` and return the resulting ``OrderData`` synchronously.
 
-        Fail-closed: not connected / unsupported type -> ``REJECTED``. On an
-        ambiguous submit error (the order may have reached the book) we
-        **query** rather than re-submit, to avoid duplicate fills.
+        Fail-closed: the live policy and kill switch are read again on every
+        call; missing risk/equity/reference-price context, not connected, or an
+        unsupported type all produce ``REJECTED``. On an ambiguous submit error
+        (the order may have reached the book) we **query** rather than re-submit.
 
         .. warning::
 
-            This gateway performs **no quantitative risk check** — it trusts
-            the ``OrderRequest`` it receives. The caller MUST pass every order
-            through :func:`yiagents.execution.bridge.pre_trade_risk_check`
-            before calling ``send_order``. That function enforces the drawdown
-            hard-stop, breaker block, and single-position weight cap that the
-            risk overlay computed upstream. Bypassing it is the #1 money-losing
-            risk when the execution layer is wired into the graph.
+            The risk guard is enforced here at the final submission edge, so
+            callers cannot accidentally bypass it. ``Offset.CLOSE`` requests
+            remain eligible during a hard stop because futures sends them as
+            ``reduce_only=true``.
         """
+        if not ExecutionEnableSwitch.is_enabled():
+            reason = ExecutionEnableSwitch.reason()
+            logger.warning(
+                "BinanceGateway.send_order(%s): execution policy disabled -> "
+                "REJECTED (dynamic fail-closed). %s",
+                req.symbol,
+                reason,
+            )
+            return self._rejected(req, reason=reason)
+
+        if KillSwitch.is_halted():
+            reason = KillSwitch.reason()
+            logger.warning(
+                "BinanceGateway.send_order(%s): kill switch engaged -> REJECTED. %s",
+                req.symbol,
+                reason,
+            )
+            return self._rejected(req, reason=reason)
+
         client = self._client
         if client is None:
             logger.warning(
@@ -446,6 +466,27 @@ class BinanceGateway(BaseGateway):
                 req.symbol,
             )
             return self._rejected(req, reason="gateway not connected")
+
+        # Keep the final quantitative guard at the network edge. The import is
+        # lazy so importing this SDK adapter remains side-effect-free.
+        from .bridge import pre_trade_risk_check_with_audit
+
+        checked, audit = pre_trade_risk_check_with_audit(
+            [req],
+            risk_decision,
+            equity=equity,
+            max_weight=max_weight,
+            reference_price=reference_price,
+            reference_prices=reference_prices,
+        )
+        if not checked:
+            logger.warning(
+                "BinanceGateway.send_order(%s): pre-trade risk gate %s -> REJECTED.",
+                req.symbol,
+                audit.gate,
+            )
+            return self._rejected(req, reason=f"pre-trade risk gate: {audit.gate}")
+        req = checked[0]
 
         try:
             side, sdk_type, extra = self._map_order(req)
@@ -462,6 +503,20 @@ class BinanceGateway(BaseGateway):
             "new_order_resp_type": "RESULT",
         }
         kwargs.update(extra)
+
+        # Final guard: re-check the kill switch at the network edge. The entry
+        # check (line ~453) reads it once; an operator may have engaged it
+        # during the quantitative-risk gate above. Honor it so the order is
+        # NOT transmitted. Mirrors the browser broker's submit-edge guard.
+        if KillSwitch.is_halted():
+            reason = KillSwitch.reason()
+            logger.warning(
+                "BinanceGateway.send_order(%s): kill switch engaged at network "
+                "edge -> REJECTED. %s",
+                req.symbol,
+                reason,
+            )
+            return self._rejected(req, reason=f"kill switch at submit edge: {reason}")
 
         try:
             resp = client.rest_api.new_order(**kwargs)
@@ -483,16 +538,15 @@ class BinanceGateway(BaseGateway):
         data = _as_dict(_resp_data(resp)) or {}
         return self._order_from_response(req, data, client_order_id)
 
-    @staticmethod
-    def _gen_client_order_id() -> str:
-        # ``int(time.time() * 1000)`` + ``pid`` alone collide if two calls land
-        # in the same millisecond within one process (Binance then rejects the
-        # second with -2010 Duplicate order sent). A short random suffix breaks
-        # the tie. The total length must stay within Binance's 36-char
-        # ``new_client_order_id`` cap: ``yiagents-`` (9) + 13-digit ms + ``-`` +
-        # pid + ``-`` + 6-hex <= 9+13+1+5+1+6 = 35 (pid up to 5 digits on
-        # Windows; 3 random bytes = ~16M space, ample for intra-ms uniqueness).
-        return f"yiagents-{int(time.time() * 1000)}-{os.getpid()}-{secrets.token_hex(3)}"
+    @classmethod
+    def _gen_client_order_id(cls) -> str:
+        # Strictly monotonic within this process, including concurrent calls and
+        # wall-clock rollback. Prefix + hex tick + separator + 8-char nonce is
+        # currently 34 characters, below Binance's 36-character cap.
+        with cls._client_id_lock:
+            tick = max(time.time_ns(), cls._client_id_last_ns + 1)
+            cls._client_id_last_ns = tick
+        return f"yiagents-{tick:x}-{cls._client_id_nonce}"
 
     def _map_order(self, req: OrderRequest) -> tuple[str, str, dict]:
         """Translate an :class:`OrderRequest` to SDK ``new_order`` arguments.
@@ -512,7 +566,17 @@ class BinanceGateway(BaseGateway):
         if self._product == "perp":
             # One-way (hedge-off) mode. Closing a position uses reduce_only.
             extra["position_side"] = "BOTH"
-            extra["reduce_only"] = "true" if req.offset == Offset.CLOSE else "false"
+            close_offsets = {
+                Offset.CLOSE,
+                Offset.CLOSETODAY,
+                Offset.CLOSEYESTERDAY,
+            }
+            extra["reduce_only"] = "true" if req.offset in close_offsets else "false"
+        elif self._product == "spot" and req.offset != Offset.NONE:
+            # Spot has no exchange-level reduce-only flag. Accepting a futures
+            # CLOSE marker here would silently turn a risk exit into an ordinary
+            # BUY/SELL, so reject rather than pretending the semantic survived.
+            raise ValueError("spot orders do not support futures offset/close semantics")
 
         if req.type == OrderType.MARKET:
             sdk_type = "MARKET"

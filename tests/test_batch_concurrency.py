@@ -8,12 +8,14 @@ serial (K=1) fallback. No network/LLM — graph construction is stubbed.
 
 import threading
 import time
+from multiprocessing import get_context
 
 import pytest
 
 from yiagents.agents.utils.memory import TradingMemoryLog
 from yiagents.batch.locks import FileLock
-from yiagents.batch.runner import BatchRunner
+from yiagents.batch.runner import BatchRunner, serialized_run
+from yiagents.dataflows.config import get_config
 
 DECISION = "Rating: Buy\nEnter at $190, 6% portfolio cap."
 
@@ -51,8 +53,43 @@ class _FailGraph(_FakeGraph):
         return super().propagate(ticker, trade_date, asset_type=asset_type)
 
 
+class _ConfigGraph(_FakeGraph):
+    """Expose the dataflow config observed inside a pool worker."""
+
+    def propagate(self, ticker, trade_date, asset_type="stock"):
+        state, signal = super().propagate(ticker, trade_date, asset_type=asset_type)
+        state["context_probe"] = get_config()["context_probe"]
+        return state, signal
+
+
+class _OverlapGraph(_FakeGraph):
+    """Track whether duplicate logical runs overlap across worker graphs."""
+
+    current = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def propagate(self, ticker, trade_date, asset_type="stock"):
+        with self.guard:
+            type(self).current += 1
+            type(self).peak = max(type(self).peak, type(self).current)
+        try:
+            time.sleep(0.03)
+            return super().propagate(ticker, trade_date, asset_type=asset_type)
+        finally:
+            with self.guard:
+                type(self).current -= 1
+
+
 def _fake_factory(config):
     return _FakeGraph(config)
+
+
+def _hold_logical_run(config, entered, release, asset_type="stock"):
+    """Child-process target used to verify the logical-run file lock."""
+    with serialized_run(config, "AAPL", "2026-01-10", asset_type):
+        entered.set()
+        release.wait(10)
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +121,48 @@ def test_filelock_serializes_same_path(tmp_path):
     for t in threads:
         t.join()
     assert peak["v"] == 1, f"same-path locks overlapped: peak concurrency {peak['v']}"
+
+
+def test_logical_run_lock_serializes_separate_processes(tmp_path):
+    pytest.importorskip("filelock")
+    config = {
+        "data_cache_dir": str(tmp_path / "cache"),
+        "results_dir": str(tmp_path / "results"),
+    }
+    ctx = get_context("spawn")
+    first_entered, first_release = ctx.Event(), ctx.Event()
+    second_entered, second_release = ctx.Event(), ctx.Event()
+    first = ctx.Process(
+        target=_hold_logical_run,
+        args=(config, first_entered, first_release),
+    )
+    second = ctx.Process(
+        target=_hold_logical_run,
+        # Backing report/checkpoint names do not contain asset_type, so unlike
+        # modes for one ticker/date must also be excluded.
+        args=(config, second_entered, second_release, "crypto_perp"),
+    )
+
+    first.start()
+    try:
+        assert first_entered.wait(10)
+        second.start()
+        assert not second_entered.wait(0.3)
+        first_release.set()
+        assert second_entered.wait(10)
+    finally:
+        first_release.set()
+        second_release.set()
+        for process in (first, second):
+            if process.pid is None:
+                continue
+            process.join(10)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+
+    assert first.exitcode == 0
+    assert second.exitcode == 0
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +245,39 @@ def test_batchrunner_on_respects_workers():
         assert br._pool.qsize() == 4
 
 
+def test_explicit_workers_overrides_off_switch():
+    """An explicit --workers>1 must force concurrency ON even when the env
+    master switch (YIAGENTS_BATCH_CONCURRENCY=false) left batch_concurrency off.
+
+    This is the run_batch.py / CLI override contract: an explicit value is
+    authoritative, so the default-off switch cannot silently force a requested
+    pool back to one worker (see _apply_batch_worker_override).
+    """
+    config = {"batch_concurrency": False, "batch_workers": 3}
+    # Explicit workers=5 flips the master switch ON (same as run_batch.py does).
+    config["batch_concurrency"] = 5 > 1
+    with BatchRunner(config, workers=5, graph_factory=_fake_factory, progress=False) as br:
+        assert br.workers == 5
+
+
+def test_explicit_workers_one_forces_serial_even_if_switch_on():
+    """An explicit --workers 1 forces serial even when the switch is ON."""
+    config = {"batch_concurrency": True, "batch_workers": 4}
+    config["batch_concurrency"] = 1 > 1  # explicit 1 → off
+    with BatchRunner(config, workers=1, graph_factory=_fake_factory, progress=False) as br:
+        assert br.workers == 1
+
+
+def test_omitted_workers_respects_env_switch():
+    """No explicit --workers → the env/config master switch is authoritative."""
+    config_off = {"batch_concurrency": False, "batch_workers": 4}
+    with BatchRunner(config_off, workers=None, graph_factory=_fake_factory, progress=False) as br:
+        assert br.workers == 1
+    config_on = {"batch_concurrency": True, "batch_workers": 4}
+    with BatchRunner(config_on, workers=None, graph_factory=_fake_factory, progress=False) as br:
+        assert br.workers == 4
+
+
 def test_batchrunner_dedup():
     config = {"batch_concurrency": False, "batch_dedup_tickers": True}
     with BatchRunner(config, graph_factory=_fake_factory, progress=False) as br:
@@ -210,3 +322,45 @@ def test_batchrunner_concurrent_graceful_degradation():
     assert by_ticker["BAD"]["error"] is not None
     assert by_ticker["AAPL"]["error"] is None
     assert by_ticker["NVDA"]["error"] is None
+
+
+def test_batchrunner_workers_inherit_dataflow_config_context():
+    config = {
+        "batch_concurrency": True,
+        "batch_workers": 2,
+        "context_probe": 987654,
+    }
+    with BatchRunner(config, graph_factory=_ConfigGraph, progress=False) as br:
+        results = br.run(["AAPL", "NVDA"], "2026-01-10")
+
+    assert [r["state"]["context_probe"] for r in results] == [987654, 987654]
+
+
+def test_batchrunner_fail_fast_returns_one_result_per_input():
+    config = {
+        "batch_concurrency": True,
+        "batch_workers": 2,
+        "batch_fail_fast": True,
+    }
+    with BatchRunner(config, graph_factory=_FailGraph, progress=False) as br:
+        results = br.run(["BAD", "AAPL", "NVDA", "MSFT"], "2026-01-10")
+
+    assert [r["ticker"] for r in results] == ["BAD", "AAPL", "NVDA", "MSFT"]
+    assert len(results) == 4
+    assert all("elapsed" in r and "error" in r for r in results)
+    assert results[0]["error"] is not None
+
+
+def test_duplicate_ticker_date_runs_are_serialized_when_dedup_is_disabled():
+    _OverlapGraph.current = 0
+    _OverlapGraph.peak = 0
+    config = {
+        "batch_concurrency": True,
+        "batch_workers": 2,
+        "batch_dedup_tickers": False,
+    }
+    with BatchRunner(config, graph_factory=_OverlapGraph, progress=False) as br:
+        results = br.run(["AAPL", "aapl"], "2026-01-10")
+
+    assert len(results) == 2
+    assert _OverlapGraph.peak == 1

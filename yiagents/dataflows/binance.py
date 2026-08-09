@@ -38,7 +38,7 @@ from .binance_rate_limiter import get_binance_weight_limiter
 from .config import get_config
 from .errors import NoMarketDataError, VendorRateLimitError
 from .symbol_utils import normalize_symbol_for_venue
-from .utils import proxy_map
+from .utils import current_pit_end, proxy_map
 
 logger = logging.getLogger(__name__)
 
@@ -387,6 +387,10 @@ def get_binance_klines(
         .timestamp()
         * 1000
     )
+    # PIT guard: clamp the fetch window to the analysis date so a backtest
+    # never sees klines after it. Live mode (no analysis date pinned) is a
+    # no-op pass-through.
+    end_date = current_pit_end(end_date) or end_date
     end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     # End-of-day so the requested end_date row is included.
     end_ms = int((end_dt.timestamp() + 86399) * 1000)
@@ -465,6 +469,8 @@ def get_binance_funding_rate(
         .timestamp()
         * 1000
     )
+    # PIT guard: clamp to the analysis date (see get_binance_klines).
+    end_date = current_pit_end(end_date) or end_date
     end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_ms = int((end_dt.timestamp() + 86399) * 1000)
 
@@ -841,6 +847,8 @@ def get_binance_spot_klines(
         .timestamp()
         * 1000
     )
+    # PIT guard: clamp the fetch window to the analysis date (see perp variant).
+    end_date = current_pit_end(end_date) or end_date
     end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_ms = int((end_dt.timestamp() + 86399) * 1000)  # end-of-day inclusive
 

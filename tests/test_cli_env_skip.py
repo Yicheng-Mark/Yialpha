@@ -15,17 +15,17 @@ import pytest
 @pytest.mark.unit
 class TestProviderDefaultUrl(unittest.TestCase):
     def test_known_providers_resolve(self):
-        from cli.utils import provider_default_url
+        from yiagents.cli.utils import provider_default_url
         self.assertEqual(provider_default_url("openai"), "https://api.openai.com/v1")
         self.assertEqual(provider_default_url("DeepSeek"), "https://api.deepseek.com")
         self.assertIsNone(provider_default_url("google"))  # uses SDK default
 
     def test_unknown_provider_returns_none(self):
-        from cli.utils import provider_default_url
+        from yiagents.cli.utils import provider_default_url
         self.assertIsNone(provider_default_url("not-a-provider"))
 
     def test_ollama_honors_base_url_env(self):
-        from cli.utils import provider_default_url
+        from yiagents.cli.utils import provider_default_url
         with mock.patch.dict(os.environ, {"OLLAMA_BASE_URL": "http://host:1234/v1"}):
             self.assertEqual(provider_default_url("ollama"), "http://host:1234/v1")
 
@@ -33,7 +33,7 @@ class TestProviderDefaultUrl(unittest.TestCase):
 @pytest.mark.unit
 class TestCliSkipsPromptsFromEnv(unittest.TestCase):
     def test_env_config_skips_llm_prompts(self):
-        import cli.main as m
+        import yiagents.cli.main as m
 
         env = {
             "YIAGENTS_LLM_PROVIDER": "openai",
@@ -83,7 +83,7 @@ class TestCliSkipsPromptsFromEnv(unittest.TestCase):
 @pytest.mark.unit
 class TestResearchDepthSkippedFromEnv(unittest.TestCase):
     def test_both_round_envs_skip_depth_prompt(self):
-        import cli.main as m
+        import yiagents.cli.main as m
 
         env = {
             "YIAGENTS_MAX_DEBATE_ROUNDS": "2",
@@ -114,7 +114,7 @@ class TestResearchDepthSkippedFromEnv(unittest.TestCase):
 @pytest.mark.unit
 class TestReasoningEffortSkippedFromEnv(unittest.TestCase):
     def test_effort_env_skips_step8_prompt(self):
-        import cli.main as m
+        import yiagents.cli.main as m
 
         env = {"YIAGENTS_OPENAI_REASONING_EFFORT": "high"}
         fake_cfg = dict(m.DEFAULT_CONFIG)

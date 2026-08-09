@@ -35,7 +35,7 @@ python web/app.py                # serves http://127.0.0.1:8000
 ## Architecture
 
 ```
-browser SPA (static/index.html + app.js + i18n.js + styles.css + vendor/marked.min.js)
+browser SPA (static/index.html + app.js + i18n.js + styles.css + vendored marked/DOMPurify)
         │  fetch JSON, poll every 4 s
         ▼
 FastAPI (app.py) ── mount /static and /reports
@@ -79,5 +79,7 @@ scripts/run_robust.py --tickers <T> --date <D> [--asset-type <X>] --workers 1
   `run_robust`'s watchdog's contract, and a second outer watchdog would race it.
 - **`scripts/` is not a package** (no `__init__.py`), so the overlay regex and
   the preflight checks are replicated here rather than imported.
-- **Marked is vendored** at `static/vendor/marked.min.js` (v15, MIT) — no CDN at
-  runtime. To upgrade: drop a newer `marked.min.js` there.
+- **Marked and DOMPurify are vendored** under `static/vendor/` — no CDN at
+  runtime. Model/news Markdown is parsed and then sanitized with an explicit
+  HTML/attribute/URL allowlist before it reaches `innerHTML`; if either library
+  is unavailable, the renderer falls back to escaped plain text.

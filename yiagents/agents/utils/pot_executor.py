@@ -24,10 +24,12 @@ SECURITY MODEL — read this before relying on this module:
        any code runs. This is defense-in-depth; the restricted builtins are the
        real barrier.
     4. Code size (line count) is capped to bound runtime.
-    5. A best-effort timeout is applied. On POSIX this uses ``SIGALRM``; on
-       Windows (where ``setitimer`` is unavailable) it falls back to a
-       thread-based watchdog that sets a flag. The timeout is best-effort and
-       must never crash the host process.
+    5. A best-effort timeout is applied. On POSIX main threads this uses
+       ``SIGALRM``. Windows host execution is refused entirely until PoT runs
+       in a terminable, process-isolated sandbox.
+
+    6. Execution is disabled by default and unconditionally blocked whenever
+       the project is in its default ``analysis_only`` mode.
 
 If you need to run genuinely untrusted code, do not use this module — reach for
 a container/seccomp-based sandbox instead.
@@ -42,6 +44,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import platform
 import signal
 import sys
@@ -53,7 +56,95 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-__all__ = ["PoTResult", "PoTExecutor"]
+__all__ = ["PoTEnableSwitch", "PoTResult", "PoTExecutor"]
+
+
+class PoTEnableSwitch:
+    """Runtime opt-in for host-side execution of LLM-generated Python.
+
+    The restricted namespace is a convenience guard, not an OS security
+    boundary: numpy/pandas are powerful host objects.  PoT therefore defaults
+    off and is checked immediately before every execution. It can never run
+    while ``analysis_only`` is active. Windows host execution is also refused:
+    its timeout cannot terminate a Python worker safely without process-level
+    isolation. Missing, malformed, or non-boolean values fail closed.
+    """
+
+    _ENV_VAR = "YIAGENTS_POT_ENABLED"
+    _ANALYSIS_ONLY_ENV = "YIAGENTS_ANALYSIS_ONLY"
+    _TRUTHY = frozenset({"true", "1", "yes", "on"})
+    _FALSY = frozenset({"false", "0", "no", "off"})
+
+    @classmethod
+    def _config_flag(cls, name: str, default: bool) -> bool:
+        try:
+            from yiagents.dataflows.config import get_config
+
+            value = get_config().get(name, default)
+            return value if isinstance(value, bool) else default
+        except Exception:  # noqa: BLE001 - uncertainty must fail closed
+            return default
+
+    @classmethod
+    def _env_or_config_flag(
+        cls,
+        env_name: str,
+        config_name: str,
+        *,
+        default: bool,
+    ) -> bool:
+        raw = os.environ.get(env_name)
+        if raw is None or raw.strip() == "":
+            return cls._config_flag(config_name, default)
+        value = raw.strip().lower()
+        if value in cls._TRUTHY:
+            return True
+        if value in cls._FALSY:
+            return False
+        return default
+
+    @classmethod
+    def is_enabled(cls) -> bool:
+        analysis_only = cls._env_or_config_flag(
+            cls._ANALYSIS_ONLY_ENV,
+            "analysis_only",
+            default=True,
+        )
+        if analysis_only:
+            return False
+        if platform.system() == "Windows":
+            return False
+        return cls._env_or_config_flag(
+            cls._ENV_VAR,
+            "pot_enabled",
+            default=False,
+        )
+
+    @classmethod
+    def reason(cls) -> str:
+        analysis_only = cls._env_or_config_flag(
+            cls._ANALYSIS_ONLY_ENV,
+            "analysis_only",
+            default=True,
+        )
+        if analysis_only:
+            return "analysis_only is active; host-side LLM code execution is blocked."
+        if platform.system() == "Windows":
+            return (
+                "PoT host execution is blocked on Windows until it uses a "
+                "terminable, process-isolated sandbox."
+            )
+        raw = os.environ.get(cls._ENV_VAR)
+        if raw is None or raw.strip() == "":
+            if cls._config_flag("pot_enabled", False):
+                return "pot_enabled=True in runtime config."
+            return (
+                f"{cls._ENV_VAR} is unset and pot_enabled is not explicitly true; "
+                "LLM-generated code execution is disabled."
+            )
+        if raw.strip().lower() not in cls._TRUTHY | cls._FALSY:
+            return f"{cls._ENV_VAR}={raw!r} is invalid; execution is disabled."
+        return f"{cls._ENV_VAR}={raw!r}."
 
 
 def _make_guarded_import() -> Any:
@@ -242,9 +333,9 @@ class PoTExecutor:
     """Run LLM-generated Python in a restricted namespace and return the result.
 
     Parameters:
-        timeout_seconds: Best-effort wall-clock cap on execution. On POSIX a
-            hard ``SIGALRM`` is used; on Windows a thread-based watchdog sets
-            a flag. The timeout never raises in the host process.
+        timeout_seconds: Best-effort wall-clock cap on supported hosts. On a
+            POSIX main thread a hard ``SIGALRM`` is used. Windows calls are
+            rejected by :class:`PoTEnableSwitch` before execution.
         max_lines: Maximum number of lines of source code accepted. Longer
             inputs are rejected before execution.
     """
@@ -267,6 +358,17 @@ class PoTExecutor:
         extraction convention (the LLM must assign its answer to ``result``
         or to ``result_var``).
         """
+        # 0. Runtime opt-in. This is deliberately checked per call so PoT can
+        # be disabled after an executor/analyzer has already been constructed.
+        if not PoTEnableSwitch.is_enabled():
+            return PoTResult(
+                ok=False,
+                result=None,
+                stdout="",
+                error=f"PoTExecutor disabled (fail-closed). {PoTEnableSwitch.reason()}",
+                code_ran=False,
+            )
+
         # 1. Validate input.
         if not isinstance(code, str) or not code.strip():
             return PoTResult(
@@ -391,12 +493,10 @@ class PoTExecutor:
     def _run_with_timeout(self, func: Any) -> None:
         """Run ``func`` with a best-effort timeout, platform-aware.
 
-        POSIX: ``signal.SIGALRM`` delivers a hard interrupt.
-        Windows: ``signal.SIGALRM`` is unavailable, so a daemon watchdog
-        thread sets an event flag instead. The watchdog cannot forcibly kill
-        the worker thread (CPython offers no API for that), so the Windows
-        timeout is advisory — but it never crashes the host, which is the
-        hard requirement.
+        POSIX main thread: ``signal.SIGALRM`` delivers a hard interrupt.
+        Other supported contexts use a bounded daemon-thread fallback. Windows
+        never reaches this method through :meth:`run_sandboxed`; the runtime
+        policy rejects host execution before any worker is started.
         """
         if self.timeout_seconds is None or self.timeout_seconds <= 0:
             func()
@@ -432,14 +532,6 @@ class PoTExecutor:
             signal.signal(signal.SIGALRM, previous_handler)  # type: ignore[attr-defined]
 
     def _run_with_thread_timeout(self, func: Any) -> None:
-        timed_out = {"flag": False}
-
-        def _watchdog() -> None:
-            if event.wait(timeout=self.timeout_seconds):
-                return  # worker finished, no action
-            timed_out["flag"] = True
-
-        event = threading.Event()
         worker_exc: list[BaseException] = []
 
         def _worker() -> None:
@@ -447,21 +539,20 @@ class PoTExecutor:
                 func()
             except BaseException as exc:  # noqa: BLE001
                 worker_exc.append(exc)
-            finally:
-                event.set()
 
         thread = threading.Thread(target=_worker, daemon=True)
-        watcher = threading.Thread(target=_watchdog, daemon=True)
         thread.start()
-        watcher.start()
-        thread.join()
+        # Never join without a deadline: on Windows the worker cannot be
+        # forcibly interrupted, so an unbounded join defeated the watchdog and
+        # hung the caller forever. The daemon may finish later, but this call
+        # returns promptly and reports a timeout.
+        thread.join(timeout=float(self.timeout_seconds))
+
+        if thread.is_alive():
+            raise _TimeoutError()
 
         if worker_exc:
             raise worker_exc[0]
-        if timed_out["flag"] and thread.is_alive():
-            # Cannot forcibly kill the worker on CPython; leave it as a
-            # daemon so it never blocks process exit.
-            raise _TimeoutError()
 
 
 def _scan_for_dangerous_tokens(code: str) -> str | None:

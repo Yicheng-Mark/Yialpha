@@ -68,9 +68,9 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
         sections.append(f"## III. Trading Team Plan\n\n### Trader\n{final_state['trader_investment_plan']}")
 
     # 4. Risk Management
-    if final_state.get("risk_debate_state"):
+    risk = final_state.get("risk_debate_state") or {}
+    if risk:
         risk_dir = save_path / "4_risk"
-        risk = final_state["risk_debate_state"]
         risk_parts = []
         if risk.get("aggressive_history"):
             risk_dir.mkdir(exist_ok=True)
@@ -88,12 +88,20 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
             content = "\n\n".join(f"### {name}\n{text}" for name, text in risk_parts)
             sections.append(f"## IV. Risk Management Team Decision\n\n{content}")
 
-        # 5. Portfolio Manager
-        if risk.get("judge_decision"):
-            portfolio_dir = save_path / "5_portfolio"
-            portfolio_dir.mkdir(exist_ok=True)
-            (portfolio_dir / "decision.md").write_text(risk["judge_decision"], encoding="utf-8")
-            sections.append(f"## V. Portfolio Manager Decision\n\n### Portfolio Manager\n{risk['judge_decision']}")
+    # 5. Final decision. ``final_trade_decision`` is authoritative because the
+    # deterministic risk overlay appends its sizing/stop/exposure override there
+    # after the Portfolio Manager's prose. Falling back to judge_decision keeps
+    # older states readable, but a report must never prefer that pre-overlay
+    # text when the final version exists.
+    final_decision = final_state.get("final_trade_decision") or risk.get("judge_decision")
+    if final_decision:
+        portfolio_dir = save_path / "5_portfolio"
+        portfolio_dir.mkdir(exist_ok=True)
+        (portfolio_dir / "decision.md").write_text(final_decision, encoding="utf-8")
+        sections.append(
+            "## V. Final Risk-Adjusted Decision\n\n"
+            f"### Final Decision\n{final_decision}"
+        )
 
     # Write consolidated report
     header = f"# Trading Analysis Report: {ticker}\n\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"

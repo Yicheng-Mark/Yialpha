@@ -9,16 +9,16 @@ LLM cost.
 """
 
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest import mock
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
-from cli.models import AnalystType, AssetType
-from cli.utils import filter_analysts_for_asset_type
 from yiagents.agents.analysts.market_analyst import create_market_analyst
 from yiagents.agents.utils.agent_utils import build_instrument_context
+from yiagents.cli.models import AnalystType, AssetType
+from yiagents.cli.utils import filter_analysts_for_asset_type
 from yiagents.dataflows import binance as binance_vendor
 from yiagents.dataflows.errors import NoMarketDataError
 from yiagents.dataflows.symbol_utils import (
@@ -146,7 +146,7 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
     stock/crypto still bind the baseline 3; perp still binds 6."""
 
     @staticmethod
-    def _state(asset_type):
+    def _state(asset_type, trade_date=None):
         ticker = {
             "crypto_perp": "BTCUSDT",
             "crypto_spot": "BTCUSDT",
@@ -154,17 +154,17 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
             "stock": "AAPL",
         }[asset_type]
         return {
-            "trade_date": "2026-07-01",
+            "trade_date": trade_date or date.today().isoformat(),
             "company_of_interest": ticker,
             "asset_type": asset_type,
             "instrument_context": "CTX",
             "messages": [HumanMessage(content="analyze")],
         }
 
-    def _tool_names(self, asset_type):
+    def _tool_names(self, asset_type, trade_date=None):
         llm = RecordingLLM()
         node = create_market_analyst(llm)
-        node(self._state(asset_type))
+        node(self._state(asset_type, trade_date))
         return [t.name for t in llm.bound_tools]
 
     def test_stock_binds_three_baseline_tools(self):
@@ -196,6 +196,16 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
         # Spot must NOT bind the perp-native tools.
         self.assertNotIn("get_binance_klines", names)
         self.assertNotIn("get_binance_funding_rate", names)
+
+    def test_historical_spot_omits_rolling_current_snapshots(self):
+        self.assertEqual(
+            sorted(self._tool_names("crypto_spot", "2020-01-02")),
+            [
+                "get_binance_spot_klines",
+                "get_indicators",
+                "get_verified_market_snapshot",
+            ],
+        )
 
 
 def _kline(day_iso: str, close: float) -> list:

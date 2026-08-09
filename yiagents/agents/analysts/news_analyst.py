@@ -10,6 +10,7 @@ from yiagents.agents.utils.agent_utils import (
 from yiagents.agents.utils.prompt_builder import build_collaborator_prompt
 from yiagents.dataflows.config import get_config
 from yiagents.dataflows.symbol_utils import is_a_stock
+from yiagents.dataflows.utils import is_historical_date
 
 # Appended to the news system prompt only when YIAGENTS_A_SHARE_NATIVE is on AND
 # the ticker is a China A-share (.SS/.SH/.SZ). When off (or non-A-share), the
@@ -33,12 +34,15 @@ def create_news_analyst(llm):
         instrument_context = get_instrument_context_from_state(state)
         ticker = str(state["company_of_interest"])
 
-        tools = [
-            get_news,
-            get_global_news,
-            get_macro_indicators,
-            get_prediction_markets,
-        ]
+        tools = [get_news, get_global_news, get_macro_indicators]
+        prediction_markets_instruction = ""
+        if not is_historical_date(current_date):
+            tools.append(get_prediction_markets)
+            prediction_markets_instruction = (
+                " Use get_prediction_markets(topic, limit) for live "
+                "market-implied probabilities of forward-looking events "
+                "(e.g. Fed decisions, geopolitics, or sector events)."
+            )
         # Native A-share news (env: YIAGENTS_A_SHARE_NATIVE, off by default).
         # Double-gated byte-equivalence contract: flag AND is_a_stock(ticker).
         # When either fails the tool list / prompt are byte-for-byte identical to
@@ -48,7 +52,9 @@ def create_news_analyst(llm):
             tools.append(get_a_share_news_native)
 
         system_message = (
-            f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(query, start_date, end_date) for {asset_label}-specific or targeted news searches, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve'), and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events). Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
+            f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the state of the world as of {current_date} that is relevant for trading and macroeconomics. Use the available tools: get_news(query, start_date, end_date) for {asset_label}-specific or targeted news searches, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, and get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve')."
+            + prediction_markets_instruction
+            + " Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + " Grounding rules (anti-hallucination): (1) Every news item or macro claim must cite its source and date (e.g. 'per FRED, core_pce was X% on YYYY-MM-DD' or 'headline from get_news, YYYY-MM-DD'). (2) If two sources conflict, flag the discrepancy rather than inventing a reconciled narrative. (3) If a tool returns no results for the query/period, write 'no coverage found' for that angle instead of speculating or filling gaps from prior knowledge."
             + get_language_instruction()

@@ -17,10 +17,18 @@ from yiagents.execution import browser_broker as bb
 from yiagents.execution.browser_broker import (
     BrowserBroker,
     KillSwitch,
+    LiveExecutionSwitch,
     OrderAction,
     OrderStatus,
     _coerce_bool_env,
 )
+
+
+@pytest.fixture(autouse=True)
+def _arm_live_policy_for_existing_gate_tests(monkeypatch):
+    monkeypatch.setenv("YIAGENTS_ANALYSIS_ONLY", "false")
+    monkeypatch.setenv("YIAGENTS_LIVE_EXECUTION_ENABLED", "true")
+    monkeypatch.setenv("YIAGENTS_EXECUTION_ENABLED", "true")
 
 # ---------------------------------------------------------------------------
 # Enum round-tripping
@@ -102,6 +110,27 @@ class TestKillSwitch:
         assert "halted" in KillSwitch.reason().lower()
 
 
+@pytest.mark.unit
+class TestLiveExecutionSwitch:
+    def test_all_three_explicit_values_arm(self):
+        assert LiveExecutionSwitch.is_enabled() is True
+
+    def test_analysis_only_default_fails_closed(self, monkeypatch):
+        monkeypatch.delenv("YIAGENTS_ANALYSIS_ONLY", raising=False)
+        assert LiveExecutionSwitch.is_enabled() is False
+
+    def test_malformed_analysis_only_fails_closed(self, monkeypatch):
+        monkeypatch.setenv("YIAGENTS_ANALYSIS_ONLY", "maybe")
+        assert LiveExecutionSwitch.is_enabled() is False
+
+    def test_each_enable_switch_is_required(self, monkeypatch):
+        monkeypatch.delenv("YIAGENTS_LIVE_EXECUTION_ENABLED", raising=False)
+        assert LiveExecutionSwitch.is_enabled() is False
+        monkeypatch.setenv("YIAGENTS_LIVE_EXECUTION_ENABLED", "true")
+        monkeypatch.delenv("YIAGENTS_EXECUTION_ENABLED", raising=False)
+        assert LiveExecutionSwitch.is_enabled() is False
+
+
 # ---------------------------------------------------------------------------
 # place_order gate logic (no browser, no network)
 # ---------------------------------------------------------------------------
@@ -164,6 +193,13 @@ class TestPlaceOrderGates:
         assert result.status is OrderStatus.BLOCKED_PLAYWRIGHT
         assert result.submitted is False
         assert "playwright" in result.message.lower()
+
+    def test_live_order_blocked_by_analysis_only_before_browser(self, monkeypatch):
+        monkeypatch.setenv("YIAGENTS_ANALYSIS_ONLY", "true")
+        broker = BrowserBroker(order_page_url="https://broker.example/order")
+        result = broker.place_order("AAPL", "buy", size=10.0, dry_run=False)
+        assert result.status is OrderStatus.BLOCKED_EXECUTION_POLICY
+        assert result.submitted is False
 
     def test_dry_run_false_no_url_blocks(self, monkeypatch):
         monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
@@ -411,3 +447,102 @@ class TestSubmittedInvariant:
             result = broker.place_order(**kwargs)
             assert result.status is expected_status, kwargs
             assert result.submitted is False, kwargs
+
+
+# ---------------------------------------------------------------------------
+# Submit-edge kill-switch re-check (P0-B): an operator engaging the kill
+# switch DURING the form-fill window must stop the order before the click.
+# ---------------------------------------------------------------------------
+
+
+class _TrackingBroker(BrowserBroker):
+    """Broker subclass that records whether the final click fired.
+
+    ``_fill_order_form`` is a no-op (succeeds), and ``_click_submit`` records
+    that it was called. This lets a test assert the submit-edge guard stopped
+    the order *after* the form fill but *before* the click.
+    """
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.submit_clicked = False
+
+    def _fill_order_form(self, page, ticker, action, size):
+        pass  # succeed; the hook flips the switch mid-fill if needed
+
+    def _click_submit(self, page):
+        self.submit_clicked = True
+
+
+@pytest.mark.unit
+class TestSubmitEdgeKillSwitch:
+    def test_kill_switch_flipped_after_fill_blocks_before_click(self, monkeypatch):
+        # Kill switch OFF at entry (passes Gate 1), then engaged DURING the
+        # form fill. The submit-edge guard must catch it.
+        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+
+        broker = _TrackingBroker(order_page_url="https://b.example/o")
+
+        # Flip the kill switch ON inside _fill_order_form, simulating an
+        # operator hitting stop mid-fill.
+        original_fill = broker._fill_order_form
+
+        def flip_mid_fill(page, ticker, action, size):
+            monkeypatch.setenv("YIAGENTS_KILL_SWITCH", "true")
+            original_fill(page, ticker, action, size)
+
+        broker._fill_order_form = flip_mid_fill
+
+        from unittest import mock
+
+        with mock.patch.object(
+            bb.BrowserBroker, "_get_playwright", lambda self: lambda: _FakePW()
+        ):
+            result = broker.place_order("AAPL", "buy", size=10.0, dry_run=False)
+
+        assert result.status is OrderStatus.BLOCKED_KILL_SWITCH
+        assert result.submitted is False
+        assert broker.submit_clicked is False  # the click never fired
+
+    def test_policy_flipped_after_fill_blocks_before_click(self, monkeypatch):
+        # Live policy ON at entry (passes Gate 3), then flipped to analysis-only
+        # DURING the form fill. The submit-edge guard must catch it.
+        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+
+        broker = _TrackingBroker(order_page_url="https://b.example/o")
+
+        original_fill = broker._fill_order_form
+
+        def flip_mid_fill(page, ticker, action, size):
+            monkeypatch.setenv("YIAGENTS_ANALYSIS_ONLY", "true")
+            original_fill(page, ticker, action, size)
+
+        broker._fill_order_form = flip_mid_fill
+
+        from unittest import mock
+
+        with mock.patch.object(
+            bb.BrowserBroker, "_get_playwright", lambda self: lambda: _FakePW()
+        ):
+            result = broker.place_order("AAPL", "buy", size=10.0, dry_run=False)
+
+        assert result.status is OrderStatus.BLOCKED_EXECUTION_POLICY
+        assert result.submitted is False
+        assert broker.submit_clicked is False
+
+    def test_no_flip_submits_normally(self, monkeypatch):
+        # Control: kill switch stays OFF through the whole flow → submits.
+        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+
+        broker = _TrackingBroker(order_page_url="https://b.example/o")
+
+        from unittest import mock
+
+        with mock.patch.object(
+            bb.BrowserBroker, "_get_playwright", lambda self: lambda: _FakePW()
+        ):
+            result = broker.place_order("AAPL", "buy", size=10.0, dry_run=False)
+
+        assert result.status is OrderStatus.SUBMITTED
+        assert result.submitted is True
+        assert broker.submit_clicked is True

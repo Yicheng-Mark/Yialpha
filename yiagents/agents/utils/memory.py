@@ -2,6 +2,7 @@
 
 import re
 from contextlib import nullcontext
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,11 @@ class TradingMemoryLog:
     def __init__(self, config: dict[str, Any] | None = None):
         cfg = config or {}
         self._log_path: Path | None = None
-        path = cfg.get("memory_log_path")
+        # Persistent reflection is deliberately opt-in in the application
+        # default.  Explicit, minimal configs used by library callers remain
+        # backwards compatible: providing a path without ``memory_enabled``
+        # still enables the log.
+        path = cfg.get("memory_log_path") if cfg.get("memory_enabled", True) else None
         if path:
             self._log_path = Path(path).expanduser()
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,9 +88,44 @@ class TradingMemoryLog:
         """Return entries with outcome:pending (for Phase B)."""
         return [e for e in self.load_entries() if e.get("pending")]
 
-    def get_past_context(self, ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
-        """Return formatted past context string for agent prompt injection."""
+    def get_past_context(
+        self,
+        ticker: str,
+        n_same: int = 5,
+        n_cross: int = 3,
+        *,
+        as_of_date: str | None = None,
+    ) -> str:
+        """Return causal past context for agent prompt injection.
+
+        When ``as_of_date`` is supplied, an entry is visible only when both its
+        decision date and the date on which its outcome became known precede (or
+        equal, for the outcome) the simulated date.  Legacy resolved entries do
+        not carry an outcome-availability date, so they are excluded from
+        historical runs instead of being trusted and potentially leaking a
+        reflection produced with present-day prices.
+        """
         entries = [e for e in self.load_entries() if not e.get("pending")]
+        if as_of_date is not None:
+            try:
+                cutoff = date.fromisoformat(str(as_of_date)[:10])
+            except (TypeError, ValueError):
+                return ""
+
+            causal_entries = []
+            for entry in entries:
+                try:
+                    decision_date = date.fromisoformat(str(entry["date"])[:10])
+                    available_date = date.fromisoformat(
+                        str(entry["available_date"])[:10]
+                    )
+                except (KeyError, TypeError, ValueError):
+                    # Fail closed: an undated reflection cannot be proven to
+                    # have existed at the requested point in time.
+                    continue
+                if decision_date < cutoff and available_date <= cutoff:
+                    causal_entries.append(entry)
+            entries = causal_entries
         if not entries:
             return ""
 
@@ -121,6 +161,7 @@ class TradingMemoryLog:
         alpha_return: float,
         holding_days: int,
         reflection: str,
+        available_date: str | None = None,
     ) -> None:
         """Replace pending tag and append REFLECTION section using atomic write.
 
@@ -162,6 +203,8 @@ class TradingMemoryLog:
                         f"[{trade_date} | {ticker} | {rating}"
                         f" | {raw_pct} | {alpha_pct} | {holding_days}d]"
                     )
+                    if available_date:
+                        new_tag = new_tag[:-1] + f" | known={available_date}]"
                     rest = "\n".join(lines[1:])
                     new_blocks.append(
                         f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{reflection}"
@@ -217,6 +260,11 @@ class TradingMemoryLog:
                             f"[{trade_date} | {ticker} | {rating}"
                             f" | {raw_pct} | {alpha_pct} | {upd['holding_days']}d]"
                         )
+                        if upd.get("available_date"):
+                            new_tag = (
+                                new_tag[:-1]
+                                + f" | known={upd['available_date']}]"
+                            )
                         rest = "\n".join(lines[1:])
                         new_blocks.append(
                             f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{upd['reflection']}"
@@ -291,6 +339,11 @@ class TradingMemoryLog:
             "raw": fields[3] if fields[3] != "pending" else None,
             "alpha": fields[4] if len(fields) > 4 else None,
             "holding": fields[5] if len(fields) > 5 else None,
+            "available_date": (
+                fields[6].split("=", 1)[1]
+                if len(fields) > 6 and fields[6].startswith("known=")
+                else None
+            ),
         }
         body = "\n".join(lines[1:]).strip()
         decision_match = self._DECISION_RE.search(body)

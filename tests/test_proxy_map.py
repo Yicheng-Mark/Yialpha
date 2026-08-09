@@ -26,8 +26,10 @@ class TestProxyMap(unittest.TestCase):
             else:
                 os.environ[v] = val
 
-    def test_nothing_set_yields_none(self):
-        self.assertEqual(proxy_map(), {"http": None, "https": None})
+    def test_nothing_set_yields_empty(self):
+        # No proxy env vars set -> empty dict (no None values; requests'
+        # proxies contract is Mapping[str, str], and {} means "no proxy").
+        self.assertEqual(proxy_map(), {})
 
     def test_scheme_specific_used(self):
         os.environ["HTTP_PROXY"] = "http://h:8080"

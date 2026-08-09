@@ -114,6 +114,88 @@ def test_engine_hold_keeps_prior_position():
 
 
 @pytest.mark.unit
+def test_hold_is_no_order_and_charges_no_rebalance_cost():
+    """A carried partial position may drift away from its old target; Hold must
+    still leave shares/cash untouched instead of rebalancing back and charging."""
+    dates = _decision_dates(5)
+    graph = FakeGraph({dates[0]: "Buy", **dict.fromkeys(dates[1:], "Hold")})
+    mapping = {
+        "Buy": 0.5, "Overweight": 0.4, "Hold": None,
+        "Underweight": 0.0, "Sell": 0.0,
+    }
+    result = run_backtest(
+        graph, "AAPL", dates, holding_days=5, price_provider=_rising_prices,
+        rating_to_weight=mapping, cost_bps=100.0,
+    )
+    assert result.trades[0].is_rebalance is True
+    assert result.trades[0].transaction_cost > 0.0
+    assert all(t.target_weight is None for t in result.trades[1:])
+    assert all(t.is_rebalance is False for t in result.trades[1:])
+    assert all(t.traded_notional == 0.0 for t in result.trades[1:])
+    assert all(t.transaction_cost == 0.0 for t in result.trades[1:])
+
+
+@pytest.mark.unit
+def test_signal_executes_on_next_bar_not_same_close():
+    dates = ["2024-01-01"]
+    idx = pd.bdate_range("2024-01-01", periods=12)
+    values = [100.0, 200.0] + [200.0] * 10
+
+    def gap_prices(ticker, start, end):
+        return pd.Series(values, index=idx.strftime("%Y-%m-%d"), dtype=float)
+
+    result = run_backtest(
+        FakeGraph({dates[0]: "Buy"}), "AAPL", dates,
+        price_provider=gap_prices, compute_index_alpha=False,
+    )
+    trade = result.trades[0]
+    assert trade.date == "2024-01-01"
+    assert trade.execution_date == "2024-01-02"
+    assert trade.price == 200.0
+    # The strategy cannot capture the already-completed 100 -> 200 gap.
+    assert result.equity[1] == pytest.approx(100_000.0)
+
+
+@pytest.mark.unit
+def test_engine_rejects_same_bar_execution():
+    with pytest.raises(ValueError, match="execution_lag_bars"):
+        run_backtest(
+            FakeGraph({"2024-01-01": "Buy"}), "AAPL", ["2024-01-01"],
+            price_provider=_rising_prices, execution_lag_bars=0,
+        )
+
+
+@pytest.mark.unit
+def test_last_signal_without_a_future_bar_is_not_executed():
+    signal_dates = ["2024-01-01", "2024-01-05"]
+    idx = pd.bdate_range("2024-01-01", "2024-01-05")
+
+    def finite_prices(ticker, start, end):
+        return pd.Series(
+            [100.0, 101.0, 102.0, 103.0, 104.0],
+            index=idx.strftime("%Y-%m-%d"),
+            dtype=float,
+        )
+
+    result = run_backtest(
+        FakeGraph(dict.fromkeys(signal_dates, "Buy")), "AAPL", signal_dates,
+        price_provider=finite_prices, compute_index_alpha=False,
+    )
+    assert [t.date for t in result.trades] == ["2024-01-01"]
+    assert result.trades[0].execution_date == "2024-01-02"
+    assert result.unexecuted_decision_count == 1
+
+
+@pytest.mark.unit
+def test_crypto_perp_fails_closed_in_spot_engine():
+    with pytest.raises(NotImplementedError, match="crypto_perp"):
+        run_backtest(
+            FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],
+            price_provider=_rising_prices, asset_type="crypto_perp",
+        )
+
+
+@pytest.mark.unit
 def test_engine_custom_weight_fn_overrides_mapping():
     dates = _decision_dates(6)
     graph = FakeGraph(dict.fromkeys(dates, "Buy"))
@@ -300,7 +382,9 @@ def test_engine_win_rate_turnover_drawdown_date_populated():
                           price_provider=_rising_prices)
     m = result.metrics
     assert m.win_rate == 1.0
-    assert m.num_trades == len(dates)
+    # Repeated Buy-at-100% decisions do not open eight independent trades; the
+    # actual exposure is one continuous position episode.
+    assert m.num_trades == 1
     assert m.turnover_annual is not None and m.turnover_annual > 0
     assert isinstance(m.max_drawdown_date, str) and len(m.max_drawdown_date) == 10
 
@@ -315,6 +399,17 @@ def test_engine_win_rate_none_when_no_decidable_returns():
                           price_provider=_flat_index)
     # Flat asset -> no positive holding returns -> win_rate 0.0 (decided, none win).
     assert result.metrics.win_rate == 0.0
+
+
+@pytest.mark.unit
+def test_engine_all_cash_has_no_win_rate_even_when_asset_rises():
+    dates = _decision_dates(5)
+    graph = FakeGraph(dict.fromkeys(dates, "Sell"))
+    result = run_backtest(
+        graph, "AAPL", dates, holding_days=5, price_provider=_rising_prices,
+    )
+    assert result.metrics.win_rate is None
+    assert result.metrics.num_trades == 0
 
 
 @pytest.mark.unit

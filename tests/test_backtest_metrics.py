@@ -12,6 +12,7 @@ import pytest
 
 from yiagents.backtest.metrics import (
     BacktestMetrics,
+    _deflated_sharpe_ratio,
     compute_metrics,
     returns_from_equity,
 )
@@ -111,6 +112,23 @@ def test_deflated_sharpe_more_trials_lowers_dsr():
     many = compute_metrics(eq, n_trials=50).deflated_sharpe
     # More trials -> higher hurdle -> lower DSR (or equal, never higher here).
     assert many <= single + 1e-12
+
+
+@pytest.mark.unit
+def test_dsr_converts_excess_kurtosis_to_original_variance_term():
+    returns = np.asarray([0.01, -0.005, 0.02, 0.003, -0.002, 0.012])
+    sr = float(returns.mean() / returns.std(ddof=0))
+    stat = sr * math.sqrt(len(returns) - 1) / math.sqrt(1.0 + 0.5 * sr ** 2)
+    expected = 0.5 * (1.0 + math.erf(stat / math.sqrt(2.0)))
+    got = _deflated_sharpe_ratio(
+        returns,
+        sharpe_annualized=0.0,
+        n_trials=1,
+        periods_per_year=252,
+        skew_override=0.0,
+        kurt_override=0.0,  # Fisher excess kurtosis; normal non-excess is 3
+    )
+    assert got == pytest.approx(expected)
 
 
 @pytest.mark.unit

@@ -7,14 +7,15 @@ run with zero network and zero LLM cost.
 """
 
 import unittest
+from datetime import date
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
-from cli.models import AnalystType, AssetType
-from cli.utils import filter_analysts_for_asset_type
 from yiagents.agents.analysts.market_analyst import create_market_analyst
 from yiagents.agents.utils.agent_utils import build_instrument_context
+from yiagents.cli.models import AnalystType, AssetType
+from yiagents.cli.utils import filter_analysts_for_asset_type
 from yiagents.dataflows.symbol_utils import normalize_symbol, normalize_symbol_for_venue
 
 
@@ -152,19 +153,19 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
     spot tools byte-for-byte."""
 
     @staticmethod
-    def _state(asset_type):
+    def _state(asset_type, trade_date=None):
         return {
-            "trade_date": "2026-07-01",
+            "trade_date": trade_date or date.today().isoformat(),
             "company_of_interest": "BTCUSDT" if asset_type == "crypto_perp" else "AAPL",
             "asset_type": asset_type,
             "instrument_context": "CTX",
             "messages": [HumanMessage(content="analyze")],
         }
 
-    def _tool_names(self, asset_type):
+    def _tool_names(self, asset_type, trade_date=None):
         llm = RecordingLLM()
         node = create_market_analyst(llm)
-        node(self._state(asset_type))
+        node(self._state(asset_type, trade_date))
         return [t.name for t in llm.bound_tools]
 
     def test_stock_binds_three_baseline_tools(self):
@@ -202,6 +203,12 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
                 "get_binance_open_interest",
                 "get_binance_taker_buy_sell",
             ],
+        )
+
+    def test_historical_perp_omits_current_positioning_and_order_flow(self):
+        self.assertEqual(
+            sorted(self._tool_names("crypto_perp", "2020-01-02")),
+            ["get_binance_funding_rate", "get_binance_klines"],
         )
 
 
