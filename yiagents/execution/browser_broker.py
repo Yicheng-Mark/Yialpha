@@ -2,8 +2,9 @@
 
 When a broker has no first-class API, this module drives the broker's Web
 order-entry UI via Playwright with Microsoft Edge. It is intentionally
-**fail-closed and dry-run by default**, and gated behind an environment kill
-switch. The preferred execution path is always a real broker API; this is the
+**fail-closed and dry-run by default**, and gated behind an analysis-only
+boundary, two explicit enable switches, and an environment kill switch. The
+preferred execution path is always a real broker API; this is the
 fallback for the brokers that only expose a Web UI.
 
 Design invariants (every code path must preserve these):
@@ -15,12 +16,12 @@ Design invariants (every code path must preserve these):
 * **Fail-closed.** Any uncertainty — kill switch on, validator unavailable or
   rejecting, page anomaly, dry run, missing Playwright, missing broker URL,
   subclass not configured — yields a non-submitted result. The *only* path to
-  ``submitted=True`` is: ``dry_run`` explicitly ``False`` AND the kill switch
-  is off AND validation passed AND Playwright imported AND an order-page URL is
-  configured AND ``_fill_order_form`` succeeded AND the submit click returned
-  without raising.
-* **Standalone.** The kill switch is read straight from
-  ``YIAGENTS_KILL_SWITCH`` via ``os.environ.get``; this module deliberately
+  ``submitted=True`` is: ``dry_run`` explicitly ``False`` AND all three live
+  policy values are explicitly armed AND the kill switch is off AND validation
+  passed AND Playwright imported AND an order-page URL is configured AND
+  ``_fill_order_form`` succeeded AND the submit click returned without raising.
+* **Standalone.** Safety switches are read straight from ``os.environ`` on
+  every attempt; this module deliberately
   does *not* couple to the project's global config system so it can be reasoned
   about and tested in isolation.
 * **Broker-specific DOM is subclassed.** The base class cannot, by design,
@@ -114,6 +115,60 @@ class KillSwitch:
         return f"{KillSwitch._ENV_VAR}={raw!r} -> trading allowed."
 
 
+class LiveExecutionSwitch:
+    """Global, dynamically-read opt-in policy for any live order path.
+
+    YiAgents is analysis-only by default.  Arming live execution therefore
+    requires three explicit environment settings at the same time:
+
+    * ``YIAGENTS_ANALYSIS_ONLY=false``
+    * ``YIAGENTS_LIVE_EXECUTION_ENABLED=true``
+    * ``YIAGENTS_EXECUTION_ENABLED=true`` (legacy compatibility switch)
+
+    Requiring both enable switches keeps the existing public knob available
+    while preventing a stale legacy environment variable from silently
+    defeating the new analysis-only boundary.  Values are read on every call,
+    so disabling any switch after connecting halts subsequent submissions.
+    Missing or malformed values always fail closed.
+    """
+
+    _ANALYSIS_ONLY_ENV = "YIAGENTS_ANALYSIS_ONLY"
+    _LIVE_ENABLED_ENV = "YIAGENTS_LIVE_EXECUTION_ENABLED"
+    _LEGACY_ENABLED_ENV = "YIAGENTS_EXECUTION_ENABLED"
+
+    @staticmethod
+    def _read(name: str, *, default: bool) -> bool:
+        raw = os.environ.get(name)
+        if raw is None or raw.strip() == "":
+            return default
+        try:
+            return _coerce_bool_env(raw)
+        except ValueError:
+            # For analysis_only, fail-closed means staying in analysis-only
+            # mode.  For an enable flag it means staying disabled.
+            return default
+
+    @classmethod
+    def is_enabled(cls) -> bool:
+        analysis_only = cls._read(cls._ANALYSIS_ONLY_ENV, default=True)
+        live_enabled = cls._read(cls._LIVE_ENABLED_ENV, default=False)
+        legacy_enabled = cls._read(cls._LEGACY_ENABLED_ENV, default=False)
+        return not analysis_only and live_enabled and legacy_enabled
+
+    @classmethod
+    def reason(cls) -> str:
+        if cls._read(cls._ANALYSIS_ONLY_ENV, default=True):
+            return (
+                f"{cls._ANALYSIS_ONLY_ENV} is enabled or invalid/unset; "
+                "the project is analysis-only."
+            )
+        if not cls._read(cls._LIVE_ENABLED_ENV, default=False):
+            return f"{cls._LIVE_ENABLED_ENV} is disabled, invalid, or unset."
+        if not cls._read(cls._LEGACY_ENABLED_ENV, default=False):
+            return f"{cls._LEGACY_ENABLED_ENV} is disabled, invalid, or unset."
+        return "All live-execution opt-in switches are enabled."
+
+
 # ---------------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------------
@@ -135,6 +190,7 @@ class OrderStatus(str, Enum):
 
     DRY_RUN_PREVIEW = "dry_run_preview"  # stopped at preview, never submitted
     SUBMITTED = "submitted"  # actually placed (only when dry_run=False + all gates pass)
+    BLOCKED_EXECUTION_POLICY = "blocked_execution_policy"
     BLOCKED_KILL_SWITCH = "blocked_kill_switch"
     BLOCKED_VALIDATION = "blocked_validation"
     BLOCKED_PLAYWRIGHT = "blocked_playwright"  # playwright missing / page error
@@ -267,17 +323,19 @@ class BrowserBroker:
 
         1. :class:`KillSwitch` halted -> ``BLOCKED_KILL_SWITCH``.
         2. ``dry_run`` resolution: ``dry_run_default`` if ``dry_run is None``.
-        3. Size sanity: ``size`` must be ``> 0``; if ``equity_value`` is given,
+        3. A non-dry-run request requires :class:`LiveExecutionSwitch` to be
+           fully armed. Dry-run analysis/preview remains available.
+        4. Size sanity: ``size`` must be ``> 0``; if ``equity_value`` is given,
            ``size / equity_value`` must be ``<= max_order_pct_of_equity``.
-        4. ``pre_submit_validator(ticker, action, size)`` if provided must
+        5. ``pre_submit_validator(ticker, action, size)`` if provided must
            return ``True`` or ``None`` (ok); ``False`` or raising ->
            ``BLOCKED_VALIDATION``.
-        5. Playwright importable (lazy). If not -> ``BLOCKED_PLAYWRIGHT`` (no
+        6. Playwright importable (lazy). If not -> ``BLOCKED_PLAYWRIGHT`` (no
            live attempt).
-        6. ``order_page_url`` set? If ``None`` -> ``BLOCKED_PLAYWRIGHT``, unless
+        7. ``order_page_url`` set? If ``None`` -> ``BLOCKED_PLAYWRIGHT``, unless
            ``dry_run`` in which case ``DRY_RUN_PREVIEW`` noting no URL is
            configured (still never submit).
-        7. Launch Edge, navigate, fill via :meth:`_fill_order_form`, capture
+        8. Launch Edge, navigate, fill via :meth:`_fill_order_form`, capture
            preview. If ``dry_run`` -> stop, return ``DRY_RUN_PREVIEW``.
            Else -> :meth:`_click_submit` and return ``SUBMITTED``.
 
@@ -312,7 +370,23 @@ class BrowserBroker:
         # Gate 2: resolve dry_run.
         is_dry_run = self.dry_run_default if dry_run is None else bool(dry_run)
 
-        # Gate 3: size / equity sanity.
+        # Gate 3: dry-run previews are analysis output; only a real submit needs
+        # the explicit live-execution policy. Read dynamically so an operator
+        # can stop submissions after a browser session has already opened.
+        if not is_dry_run and not LiveExecutionSwitch.is_enabled():
+            return OrderResult(
+                status=OrderStatus.BLOCKED_EXECUTION_POLICY,
+                ticker=ticker,
+                action=action_enum,
+                size=size,
+                message=(
+                    "Order blocked by analysis-only/live-execution policy. "
+                    f"{LiveExecutionSwitch.reason()}"
+                ),
+                submitted=False,
+            )
+
+        # Gate 4: size / equity sanity.
         try:
             size_f = float(size)
         except (TypeError, ValueError):
@@ -532,6 +606,47 @@ class BrowserBroker:
 
     # -- Live path ------------------------------------------------------------
 
+    def _final_guard(
+        self, ticker: str, action: OrderAction, size: float, preview_url: str | None = None,
+    ) -> OrderResult | None:
+        """Re-check the kill switch and live-execution policy at the submit edge.
+
+        The entry gates in :meth:`place_order` (Gate 1/3) read the switches
+        once, long before the browser is launched. Between then and the final
+        submit click, an operator may engage the kill switch or flip the
+        analysis-only policy. This guard is invoked immediately before
+        :meth:`_click_submit` so a stop invoked during the form-fill window is
+        honored — the order is NOT submitted. Returns an ``OrderResult`` (a
+        block) when the order must stop, or ``None`` when it may proceed.
+        """
+        if KillSwitch.is_halted():
+            return OrderResult(
+                status=OrderStatus.BLOCKED_KILL_SWITCH,
+                ticker=ticker,
+                action=action,
+                size=size,
+                message=(
+                    "Order blocked at submit edge: kill switch engaged after "
+                    f"form fill. {KillSwitch.reason()}"
+                ),
+                submitted=False,
+                preview_url=preview_url,
+            )
+        if not LiveExecutionSwitch.is_enabled():
+            return OrderResult(
+                status=OrderStatus.BLOCKED_EXECUTION_POLICY,
+                ticker=ticker,
+                action=action,
+                size=size,
+                message=(
+                    "Order blocked at submit edge: analysis-only/live-execution "
+                    f"policy flipped after form fill. {LiveExecutionSwitch.reason()}"
+                ),
+                submitted=False,
+                preview_url=preview_url,
+            )
+        return None
+
     def _do_live_order(
         self,
         sync_playwright: Callable[[], Any],
@@ -566,6 +681,15 @@ class BrowserBroker:
                     preview_url = page.url
                 except Exception:  # noqa: BLE001 - non-fatal preview metadata
                     preview_url = self.order_page_url
+
+                # Final guard: re-check kill switch + live-execution policy at
+                # the submit edge. The entry gates (Gate 1/3) read the switches
+                # once before the browser launched; an operator may have engaged
+                # the kill switch DURING the form-fill window. Honor it here so
+                # the order is NOT submitted. Returns a block result or None.
+                block = self._final_guard(ticker, action, size, preview_url)
+                if block is not None:
+                    return block
 
                 # Final submit. Base class raises NotImplementedError here too;
                 # concrete brokers override to click the real confirm button.

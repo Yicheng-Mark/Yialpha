@@ -28,12 +28,25 @@ from yiagents.execution.domain import (
     OrderType,
     Status,
 )
+from yiagents.risk.breaker import BreakerState
+from yiagents.risk.manager import RiskDecision
 
 pytestmark = pytest.mark.unit
 
 _ENV_ENABLED = "YIAGENTS_EXECUTION_ENABLED"
+_ENV_ANALYSIS_ONLY = "YIAGENTS_ANALYSIS_ONLY"
+_ENV_LIVE_ENABLED = "YIAGENTS_LIVE_EXECUTION_ENABLED"
 _ENV_KEY = "BINANCE_API_KEY"
 _ENV_SECRET = "BINANCE_API_SECRET"
+
+
+@pytest.fixture(autouse=True)
+def _arm_test_execution_policy(monkeypatch):
+    """Mapping/status tests use a mock client but still cross real safety gates."""
+    monkeypatch.setenv(_ENV_ANALYSIS_ONLY, "false")
+    monkeypatch.setenv(_ENV_LIVE_ENABLED, "true")
+    monkeypatch.setenv(_ENV_ENABLED, "true")
+    monkeypatch.setenv("YIAGENTS_KILL_SWITCH", "false")
 
 
 # ---------------------------------------------------------------------------
@@ -109,10 +122,41 @@ def _req(
     )
 
 
+def _risk_decision() -> RiskDecision:
+    return RiskDecision(
+        rating="Buy",
+        action="enter",
+        target_weight=0.05,
+        position_value=50_000,
+        stop_loss=None,
+        entry_price=None,
+        kelly_raw=0.05,
+        breaker=BreakerState(
+            can_open_new=True,
+            position_multiplier=1.0,
+            current_drawdown=0.0,
+            regime="normal",
+        ),
+        cvar_multiplier=1.0,
+        exposure_ok=True,
+        exposure_reason="ok",
+        rationale="test",
+    )
+
+
 def _perp_gw_with_client():
     """A perp gateway with a mock SDK client injected (bypasses connect)."""
     gw = BinanceGateway()
     gw._client = MagicMock()
+    raw_send = gw.send_order
+
+    def _checked_send(req, **kwargs):
+        kwargs.setdefault("risk_decision", _risk_decision())
+        kwargs.setdefault("equity", 1_000_000)
+        kwargs.setdefault("reference_price", 60_000)
+        return raw_send(req, **kwargs)
+
+    gw.send_order = _checked_send
     return gw
 
 
@@ -144,6 +188,18 @@ class TestExecutionEnableSwitch:
     def test_reason_mentions_state(self, monkeypatch):
         monkeypatch.delenv(_ENV_ENABLED, raising=False)
         assert "disabled" in ExecutionEnableSwitch.reason().lower()
+
+    def test_analysis_only_is_an_independent_hard_stop(self, monkeypatch):
+        monkeypatch.setenv(_ENV_ANALYSIS_ONLY, "true")
+        assert ExecutionEnableSwitch.is_enabled() is False
+
+    def test_analysis_only_unset_fails_closed(self, monkeypatch):
+        monkeypatch.delenv(_ENV_ANALYSIS_ONLY, raising=False)
+        assert ExecutionEnableSwitch.is_enabled() is False
+
+    def test_new_live_enable_switch_is_required(self, monkeypatch):
+        monkeypatch.delenv(_ENV_LIVE_ENABLED, raising=False)
+        assert ExecutionEnableSwitch.is_enabled() is False
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +332,17 @@ class TestSendOrderMapping:
         assert order.traded == pytest.approx(0.5)
         assert order.price == pytest.approx(61000.0)
 
+    @pytest.mark.parametrize(
+        "offset", [Offset.CLOSE, Offset.CLOSETODAY, Offset.CLOSEYESTERDAY]
+    )
+    def test_all_close_offsets_are_reduce_only(self, offset):
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.return_value = _FakeResp(
+            {"status": "NEW", "orderId": 103, "executedQty": "0"}
+        )
+        gw.send_order(_req(direction=Direction.SHORT, offset=offset))
+        assert gw._client.rest_api.new_order.call_args.kwargs["reduce_only"] == "true"
+
     def test_spot_has_no_position_side(self):
         gw = _perp_gw_with_client()
         gw._product = "spot"
@@ -286,6 +353,13 @@ class TestSendOrderMapping:
         kw = gw._client.rest_api.new_order.call_args.kwargs
         assert "position_side" not in kw
         assert "reduce_only" not in kw
+
+    def test_spot_rejects_futures_close_marker(self):
+        gw = _perp_gw_with_client()
+        gw._product = "spot"
+        order = gw.send_order(_req(offset=Offset.CLOSE))
+        assert order.status is Status.REJECTED
+        gw._client.rest_api.new_order.assert_not_called()
 
     def test_response_data_is_method(self):
         # Ensure we call .data() rather than reading .data as an attribute.
@@ -346,6 +420,67 @@ class TestSendOrderFailClosed:
         gw = _perp_gw_with_client()
         order = gw.send_order(_req(direction=Direction.NET))
         assert order.status is Status.REJECTED
+        gw._client.rest_api.new_order.assert_not_called()
+
+    def test_missing_risk_decision_rejected_at_gateway_edge(self):
+        gw = BinanceGateway()
+        gw._client = MagicMock()
+        order = gw.send_order(
+            _req(),
+            equity=1_000_000,
+            reference_price=60_000,
+        )
+        assert order.status is Status.REJECTED
+        gw._client.rest_api.new_order.assert_not_called()
+
+    def test_disabling_live_switch_after_connect_stops_next_order(self, monkeypatch):
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.return_value = _FakeResp(
+            {"status": "NEW", "orderId": 99, "executedQty": "0"}
+        )
+        assert gw.send_order(_req()).status is Status.NOTTRADED
+
+        monkeypatch.setenv(_ENV_LIVE_ENABLED, "false")
+        assert gw.send_order(_req()).status is Status.REJECTED
+        assert gw._client.rest_api.new_order.call_count == 1
+
+    def test_dynamic_kill_switch_stops_connected_gateway(self, monkeypatch):
+        gw = _perp_gw_with_client()
+        monkeypatch.setenv("YIAGENTS_KILL_SWITCH", "true")
+        assert gw.send_order(_req()).status is Status.REJECTED
+        gw._client.rest_api.new_order.assert_not_called()
+
+    def test_kill_switch_engaged_after_entry_blocked_at_network_edge(self, monkeypatch):
+        """Kill switch OFF at entry, engaged after the risk gate -> rejected
+        at the network edge, never POSTed.
+
+        This pins the P0-B submit-edge re-check: an operator hitting stop
+        between the entry gate and the ``new_order`` POST must be honored.
+        """
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.return_value = _FakeResp(
+            {"status": "NEW", "orderId": 99, "executedQty": "0"}
+        )
+        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+
+        # First call (entry) passes; second call (network edge) halts.
+        # Simulates the switch flipping during the risk gate.
+        from yiagents.execution import binance_gateway as gw_mod
+
+        calls = {"n": 0}
+
+        def fake_halted():
+            calls["n"] += 1
+            return calls["n"] >= 2  # halt on the 2nd check (network edge)
+
+        monkeypatch.setattr(gw_mod.KillSwitch, "is_halted", staticmethod(fake_halted))
+        monkeypatch.setattr(
+            gw_mod.KillSwitch, "reason", staticmethod(lambda: "halted (test)")
+        )
+
+        order = gw.send_order(_req())
+        assert order.status is Status.REJECTED
+        # The POST never fired because the network-edge guard caught it.
         gw._client.rest_api.new_order.assert_not_called()
 
 
@@ -609,6 +744,13 @@ class TestGenClientOrderIdUniqueness:
     def test_unique_under_burst(self):
         ids = {BinanceGateway._gen_client_order_id() for _ in range(1000)}
         assert len(ids) == 1000  # no collisions
+
+    def test_unique_even_when_clock_does_not_advance(self, monkeypatch):
+        monkeypatch.setattr(
+            "yiagents.execution.binance_gateway.time.time_ns", lambda: 1
+        )
+        ids = {BinanceGateway._gen_client_order_id() for _ in range(1000)}
+        assert len(ids) == 1000
 
     def test_within_binance_length_limit(self):
         # Binance new_client_order_id cap is 36 characters.

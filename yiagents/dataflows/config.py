@@ -11,10 +11,9 @@ This module now uses a :class:`~contextvars.ContextVar` instead. The API
 state is now per-context (thread-safe, no lock needed):
 
 * Single-ticker runs: identical behaviour — one context, one config.
-* Batch runs with K identical workers: identical behaviour — all workers
-  inherit the config set during pool construction. ``_assert_uniform`` is no
-  longer structurally necessary (though it remains as a belt-and-suspenders
-  guard until callers are audited).
+* Batch runs with K identical workers: callers use :func:`submit_with_context`
+  to copy the submitting context into each worker. ``ContextVar`` does not do
+  this automatically for thread pools.
 * Batch runs with divergent worker configs: **now possible** — each worker
   can ``set_config`` in its own context without clobbering siblings. This was
   previously impossible (the guard would raise).
@@ -23,9 +22,11 @@ state is now per-context (thread-safe, no lock needed):
 mutate the stored config in place.
 """
 
-from contextvars import ContextVar
+from collections.abc import Callable
+from concurrent.futures import Executor, Future
+from contextvars import ContextVar, copy_context
 from copy import deepcopy
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 import yiagents.default_config as default_config
 
@@ -34,6 +35,9 @@ import yiagents.default_config as default_config
 # async task) gets its own slot, so set_config in one worker never affects
 # another — the fragile process-wide mutation is gone.
 _config_var: ContextVar[dict[str, Any] | None] = ContextVar("_config_var", default=None)
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 
 def initialize_config() -> None:
@@ -49,9 +53,9 @@ def set_config(config: dict[str, Any]) -> None:
     partial update like ``{"data_vendors": {"core_stock_apis": "alpha_vantage"}}``
     keeps the other nested keys from the default; scalar keys are replaced.
 
-    This sets the config in the **current context** (thread/task). In a batch
-    run, each worker thread inherits the config from the context that submitted
-    it, so a worker calling ``set_config`` does not clobber siblings.
+    This sets the config in the **current context** (thread/task). Thread-pool
+    callers must submit work through :func:`submit_with_context`; a worker that
+    subsequently calls ``set_config`` then diverges without clobbering siblings.
     """
     current = _config_var.get()
     if current is None:  # noqa: SIM108 -- ternary would drop the concurrency-safety comment below
@@ -89,6 +93,29 @@ def reset_config() -> None:
     context.
     """
     _config_var.set(deepcopy(default_config.DEFAULT_CONFIG))
+
+
+def submit_with_context(
+    executor: Executor,
+    func: Callable[_P, _R],
+    /,
+    *args: _P.args,
+    **kwargs: _P.kwargs,
+) -> Future[_R]:
+    """Submit ``func`` with a snapshot of the caller's context.
+
+    ``ContextVar`` values flow into asyncio tasks, but Python deliberately does
+    not copy them into :class:`~concurrent.futures.ThreadPoolExecutor` workers.
+    Every submission needs its own context copy (a single ``Context`` cannot be
+    entered concurrently), so keeping this operation next to the config store
+    makes the safe path explicit and reusable.
+    """
+    context = copy_context()
+
+    def invoke() -> _R:
+        return context.run(func, *args, **kwargs)
+
+    return executor.submit(invoke)
 
 
 # Initialize with default config at import time (same as before).

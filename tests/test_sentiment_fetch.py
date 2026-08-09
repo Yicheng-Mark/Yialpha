@@ -8,6 +8,7 @@ so the two paths must produce identical results -- this test pins that.
 import pytest
 
 import yiagents.agents.analysts.sentiment_analyst as sent
+from yiagents.dataflows.config import get_config, set_config
 
 
 class _Stub:
@@ -32,6 +33,7 @@ def _stub_sources(monkeypatch):
 @pytest.mark.unit
 def test_sequential_fetch_returns_all_three(monkeypatch):
     _stub_sources(monkeypatch)
+    monkeypatch.setattr(sent, "is_historical_date", lambda _date: False)
     monkeypatch.setattr(sent, "_SENTIMENT_PARALLEL_FETCH", False)
     out = sent._fetch_sentiment_sources("AAPL", "2026-01-01", "2026-01-08")
     assert out == ("NEWS", "STOCKTWITS", "REDDIT")
@@ -40,12 +42,54 @@ def test_sequential_fetch_returns_all_three(monkeypatch):
 @pytest.mark.unit
 def test_parallel_fetch_byte_equivalent_to_sequential(monkeypatch):
     _stub_sources(monkeypatch)
+    monkeypatch.setattr(sent, "is_historical_date", lambda _date: False)
     monkeypatch.setattr(sent, "_SENTIMENT_PARALLEL_FETCH", False)
     sequential = sent._fetch_sentiment_sources("AAPL", "2026-01-01", "2026-01-08")
     monkeypatch.setattr(sent, "_SENTIMENT_PARALLEL_FETCH", True)
     parallel = sent._fetch_sentiment_sources("AAPL", "2026-01-01", "2026-01-08")
     # Fixed slots: completion order must not change the assembled result.
     assert parallel == sequential == ("NEWS", "STOCKTWITS", "REDDIT")
+
+
+@pytest.mark.unit
+def test_parallel_fetch_workers_inherit_dataflow_config(monkeypatch):
+    seen = []
+
+    def source(name):
+        def fetch(*args, **kwargs):
+            seen.append(get_config()["context_probe"])
+            return name
+
+        return fetch
+
+    set_config({"context_probe": 987654})
+    monkeypatch.setattr(sent, "is_historical_date", lambda _date: False)
+    monkeypatch.setattr(sent, "_SENTIMENT_PARALLEL_FETCH", True)
+    monkeypatch.setattr(sent, "_get_news_impl", source("NEWS"))
+    monkeypatch.setattr(sent, "fetch_stocktwits_messages", source("STOCKTWITS"))
+    monkeypatch.setattr(sent, "fetch_reddit_posts", source("REDDIT"))
+
+    result = sent._fetch_sentiment_sources("AAPL", "2026-01-01", "2026-01-08")
+
+    assert result == ("NEWS", "STOCKTWITS", "REDDIT")
+    assert seen == [987654, 987654, 987654]
+
+
+@pytest.mark.unit
+def test_historical_fetch_omits_current_social_feeds(monkeypatch):
+    _stub_sources(monkeypatch)
+    monkeypatch.setattr(sent, "is_historical_date", lambda _date: True)
+
+    def _must_not_fetch(*_args, **_kwargs):
+        raise AssertionError("current social endpoint called during historical run")
+
+    monkeypatch.setattr(sent, "fetch_stocktwits_messages", _must_not_fetch)
+    monkeypatch.setattr(sent, "fetch_reddit_posts", _must_not_fetch)
+    out = sent._fetch_sentiment_sources("AAPL", "2020-01-01", "2020-01-08")
+
+    assert out[0] == "NEWS"
+    assert "historical analysis" in out[1]
+    assert "historical analysis" in out[2]
 
 
 @pytest.mark.unit

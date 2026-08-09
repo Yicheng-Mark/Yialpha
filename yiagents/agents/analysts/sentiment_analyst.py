@@ -39,8 +39,10 @@ from yiagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
+from yiagents.dataflows.config import submit_with_context
 from yiagents.dataflows.reddit import fetch_reddit_posts
 from yiagents.dataflows.stocktwits import fetch_stocktwits_messages
+from yiagents.dataflows.utils import is_historical_date
 
 # Opt-in (default OFF = byte-equivalent sequential fetch). Fan out the three
 # independent source fetches (Yahoo news / StockTwits / Reddit) on a thread
@@ -50,6 +52,15 @@ from yiagents.dataflows.stocktwits import fetch_stocktwits_messages
 _SENTIMENT_PARALLEL_FETCH = os.environ.get(
     "YIAGENTS_SENTIMENT_PARALLEL_FETCH", ""
 ).lower() in ("1", "true", "yes", "on")
+
+_HISTORICAL_STOCKTWITS_UNAVAILABLE = (
+    "<unavailable: StockTwits exposes a current feed without a trustworthy "
+    "historical as-of boundary; omitted from this historical analysis>"
+)
+_HISTORICAL_REDDIT_UNAVAILABLE = (
+    "<unavailable: Reddit search/RSS exposes current retrieval results without "
+    "a trustworthy historical as-of boundary; omitted from this historical analysis>"
+)
 
 
 def _seven_days_back(trade_date: str) -> str:
@@ -78,13 +89,28 @@ def _fetch_sentiment_sources(ticker: str, start_date: str, end_date: str) -> tup
     Fetchers degrade to a string and do not raise, so the parallel path
     preserves the sequential semantics.
     """
+    if is_historical_date(end_date):
+        # News is queried with explicit date bounds.  The two social endpoints
+        # are latest-feed APIs; filtering their current response after download
+        # cannot reconstruct what was discoverable on a past date, so omit them
+        # instead of contaminating a backtest prompt with today's narratives.
+        return (
+            _get_news_impl(ticker, start_date, end_date),
+            _HISTORICAL_STOCKTWITS_UNAVAILABLE,
+            _HISTORICAL_REDDIT_UNAVAILABLE,
+        )
+
     if _SENTIMENT_PARALLEL_FETCH:
         # Lambdas preserve each call's exact form so the result is byte-
         # identical to the sequential path; only fetch order differs.
         with ThreadPoolExecutor(max_workers=3) as pool:
-            fut_news = pool.submit(lambda: _get_news_impl(ticker, start_date, end_date))
-            fut_stocktwits = pool.submit(lambda: fetch_stocktwits_messages(ticker, limit=30))
-            fut_reddit = pool.submit(lambda: fetch_reddit_posts(ticker))
+            fut_news = submit_with_context(
+                pool, _get_news_impl, ticker, start_date, end_date
+            )
+            fut_stocktwits = submit_with_context(
+                pool, fetch_stocktwits_messages, ticker, limit=30
+            )
+            fut_reddit = submit_with_context(pool, fetch_reddit_posts, ticker)
             return fut_news.result(), fut_stocktwits.result(), fut_reddit.result()
     return (
         _get_news_impl(ticker, start_date, end_date),

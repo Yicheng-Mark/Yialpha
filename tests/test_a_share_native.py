@@ -17,6 +17,7 @@ Pure mock-LLM, zero network, zero LLM cost.
 from __future__ import annotations
 
 import unittest
+from datetime import date
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -687,7 +688,12 @@ def test_router_money_flow_non_a_share_degrades_to_sentinel(monkeypatch):
 class NewsAShareWiringTests(unittest.TestCase):
     """a_share_native news — default-off byte-equivalence + on-appends-news-tool."""
 
-    def _tool_names(self, config_overrides=None, ticker="600519.SS"):
+    def _tool_names(
+        self,
+        config_overrides=None,
+        ticker="600519.SS",
+        trade_date=None,
+    ):
         from yiagents.agents.analysts.news_analyst import create_news_analyst
         from yiagents.dataflows import config as cfgmod
         orig = cfgmod.get_config()
@@ -696,7 +702,9 @@ class NewsAShareWiringTests(unittest.TestCase):
                 cfgmod.set_config({**orig, **config_overrides})
             llm = _RecordingLLM()
             node = create_news_analyst(llm)
-            node(_state(ticker))
+            state = _state(ticker)
+            state["trade_date"] = trade_date or date.today().isoformat()
+            node(state)
             return [t.name for t in llm.bound_tools]
         finally:
             cfgmod.set_config(orig)
@@ -720,6 +728,16 @@ class NewsAShareWiringTests(unittest.TestCase):
         self.assertEqual(
             names, ["get_news", "get_global_news", "get_macro_indicators",
                     "get_prediction_markets"],
+        )
+
+    def test_historical_news_omits_live_prediction_markets(self):
+        names = self._tool_names(
+            {"a_share_native": False},
+            trade_date="2020-01-02",
+        )
+        self.assertEqual(
+            names,
+            ["get_news", "get_global_news", "get_macro_indicators"],
         )
 
 

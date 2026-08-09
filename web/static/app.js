@@ -8,7 +8,8 @@
 //   #/task/<id>              task monitor (polls /api/tasks/<id> every 4s)
 //   #/health                 preflight self-check
 //
-// Agent markdown is rendered verbatim with the offline marked.js copy. The
+// Agent markdown is rendered with marked.js and passed through the vendored
+// DOMPurify allowlist before insertion. The
 // report language itself follows the 🌐 toggle (window.lang() is sent on submit
 // and routed to the run_robust child via YIAGENTS_OUTPUT_LANGUAGE); there is no
 // in-browser post-translation. Only static chrome goes through t() / data-i18n.
@@ -85,11 +86,49 @@
   document.addEventListener("pointermove", (e) => { if (tipEl && tipEl.classList.contains("show")) tipAt(e.clientX, e.clientY); });
   document.addEventListener("pointerout", (e) => { if (e.target.closest && e.target.closest("[data-tip]")) tipHide(); });
 
-  // Render markdown to HTML. Agent output is trusted (our own LLM calls).
+  const MARKDOWN_SANITIZE_CONFIG = Object.freeze({
+    // Reports need only the elements emitted by ordinary Markdown. An explicit
+    // allowlist excludes SVG/MathML, forms, media, embedded documents and every
+    // other active-content surface even if marked preserves raw HTML.
+    ALLOWED_TAGS: [
+      "a", "blockquote", "br", "code", "del", "em", "h1", "h2", "h3",
+      "h4", "h5", "h6", "hr", "kbd", "li", "ol", "p", "pre", "s",
+      "span", "strong", "sub", "sup", "table", "tbody", "td", "tfoot",
+      "th", "thead", "tr", "ul",
+    ],
+    ALLOWED_ATTR: ["align", "colspan", "href", "rowspan", "start", "title"],
+    FORBID_TAGS: ["math", "script", "style", "svg", "template"],
+    FORBID_ATTR: ["formaction", "srcdoc", "style", "xlink:href"],
+    ALLOW_ARIA_ATTR: false,
+    ALLOW_DATA_ATTR: false,
+    SANITIZE_DOM: true,
+    SANITIZE_NAMED_PROPS: true,
+    // Permit web/mail links and local anchors/paths only. This rejects
+    // javascript:, data:, vbscript:, protocol-relative URLs and obfuscated
+    // variants after the browser has decoded the attribute value.
+    ALLOWED_URI_REGEXP: /^(?:(?:https?):\/\/[^\u0000-\u0020]*|mailto:[^\u0000-\u0020]*|(?:\/(?!\/)|\.{1,2}\/|#|\?)[^:]*|[a-z0-9._~-]+(?:[/?#][^:]*)?)$/i,
+  });
+
+  // Render untrusted model/news Markdown to inert, allowlisted HTML. If either
+  // dependency is unavailable or rejects the input, fail closed to plain text.
   function md(text) {
     const t = (text || "").trim();
     if (!t) return "";
-    try { return window.marked.parse(t); } catch (_) { return esc(t); }
+    if (!window.marked || !window.DOMPurify || typeof window.DOMPurify.sanitize !== "function") {
+      return esc(t);
+    }
+    try {
+      return window.DOMPurify.sanitize(window.marked.parse(t), MARKDOWN_SANITIZE_CONFIG);
+    } catch (_) {
+      return esc(t);
+    }
+  }
+
+  function safeReportURL(value) {
+    const url = String(value || "");
+    // Task responses should point to our hash router only. Attribute escaping
+    // remains mandatory even after this scheme/origin restriction.
+    return url.startsWith("#/t/") ? url : null;
   }
 
   function fmtAgo(epoch) {
@@ -183,7 +222,7 @@
             <div class="card-accent ${cssRatingClass(x.latest_rating)}"></div>
             ${x.latest_rating ? ratingBadge(x.latest_rating) : ""}
             <div class="ticker">${esc(x.ticker)}</div>
-            <div class="meta">${t("home_latest")} ${esc(x.latest_date)} · ${x.run_count} ${t("home_runs")}</div>
+            <div class="meta">${t("home_latest")} ${esc(x.latest_date)} · ${esc(x.run_count)} ${t("home_runs")}</div>
           </a>`).join("")}
       </div>`;
 
@@ -218,8 +257,8 @@
       ? data.date_ratings : (data.dates || []).map((d) => ({ date: d }));
     const reports = data.reports || [];
     const dateItems = drs.length
-      ? drs.map((dr) => `<li><a class="date-pill" href="#/t/${encodeURIComponent(ticker)}/${dr.date}">
-            <span>${dr.date}</span>${dr.rating ? ratingBadge(dr.rating) : ""}</a></li>`).join("")
+      ? drs.map((dr) => `<li><a class="date-pill" href="#/t/${encodeURIComponent(ticker)}/${encodeURIComponent(String(dr.date || ""))}">
+            <span>${esc(dr.date)}</span>${dr.rating ? ratingBadge(dr.rating) : ""}</a></li>`).join("")
       : `<li class="muted">${t("detail_no_dates")}</li>`;
     const repItems = reports.length
       ? reports.map((r) =>
@@ -234,7 +273,7 @@
           <div class="ticker-big">${esc(ticker)}</div>
           <div class="company">${drs.length} ${t("home_runs")}</div>
         </div>
-        <span class="date-tag">${drs.length ? (t("home_latest") + " " + drs[drs.length - 1].date) : ""}</span>
+        <span class="date-tag">${drs.length ? (t("home_latest") + " " + esc(drs[drs.length - 1].date)) : ""}</span>
       </div>
       ${(drs.some((dr) => dr.rating)) ? `
       <div class="chart-panel">
@@ -341,7 +380,7 @@
   async function renderReport(ticker, date) {
     view().innerHTML = `<div class="sk-card" style="max-width:560px"><div class="skeleton" style="width:46%"></div><div class="skeleton" style="width:78%;height:22px"></div><div class="skeleton"></div><div class="skeleton" style="width:88%"></div></div>`;
     let run;
-    try { run = await fetchJSON(`/api/tickers/${encodeURIComponent(ticker)}/runs/${date}`); }
+    try { run = await fetchJSON(`/api/tickers/${encodeURIComponent(ticker)}/runs/${encodeURIComponent(date)}`); }
     catch (e) { view().innerHTML = errorBox(e.message); return; }
 
     const s = run.sections || {};
@@ -432,7 +471,7 @@
         </div>
         <div class="field">
           <label>${t("new_date")}</label>
-          <input id="f-date" type="date" value="${today}" />
+          <input id="f-date" type="date" value="${today}" max="${today}" />
           <div class="err" id="f-date-err"></div>
         </div>
         <div class="field">
@@ -441,6 +480,7 @@
             <option value="auto" data-i18n="new_asset_auto">${t("new_asset_auto")}</option>
             <option value="stock" data-i18n="new_asset_stock">${t("new_asset_stock")}</option>
             <option value="crypto" data-i18n="new_asset_crypto">${t("new_asset_crypto")}</option>
+            <option value="crypto_spot" data-i18n="new_asset_crypto_spot">${t("new_asset_crypto_spot")}</option>
             <option value="crypto_perp" data-i18n="new_asset_crypto_perp">${t("new_asset_crypto_perp")}</option>
           </select>
         </div>
@@ -498,8 +538,9 @@
       const statusCls = st.status === "done" ? "pill-ok" : (st.status === "error" ? "pill-err" : "");
       const attempt = st.max_attempts ? `${st.attempt}/${st.max_attempts}` : (st.attempt || "—");
       const spinner = st.status === "running" ? '<span class="spinner"></span>' : "";
-      const reportLink = st.report_url
-        ? `<p style="margin-top:14px"><a class="btn btn-primary" href="${st.report_url}">${t("task_view_report")}</a></p>` : "";
+      const reportURL = safeReportURL(st.report_url);
+      const reportLink = reportURL
+        ? `<p style="margin-top:14px"><a class="btn btn-primary" href="${esc(reportURL)}">${t("task_view_report")}</a></p>` : "";
       const logTail = (st.log_tail && st.log_tail.length)
         ? `<div class="subhead">${t("task_log_tail")}</div><div class="log-tail">${esc(st.log_tail.join("\n"))}</div>` : "";
       view().innerHTML = `
@@ -509,7 +550,7 @@
           <div class="row"><span class="muted">${t("report_company")}</span><strong>${esc(st.ticker)}</strong></div>
           <div class="row"><span class="muted">${t("new_date")}</span><strong>${esc(st.date)}</strong></div>
           <div class="row"><span class="muted">${t("task_status")}</span><span class="${statusCls}">${spinner} ${t(statusKey)}</span></div>
-          <div class="row"><span class="muted">${t("task_attempt")}</span><strong>${attempt}</strong></div>
+          <div class="row"><span class="muted">${t("task_attempt")}</span><strong>${esc(attempt)}</strong></div>
           <div class="row"><span class="muted">${t("task_elapsed")}</span><strong>${st.elapsed_s != null ? Math.round(st.elapsed_s) + "s" : "—"}</strong></div>
           <div class="row"><span class="muted">${t("task_eta")}</span><span class="muted">~8–10 min</span></div>
           ${st.error ? `<div class="row"><span class="muted">error</span><span class="pill-err">${esc(st.error)}</span></div>` : ""}

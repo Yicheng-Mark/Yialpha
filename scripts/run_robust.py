@@ -107,8 +107,11 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--reports-root",
-        default=str(Path.home() / ".yiagents" / "logs" / "reports"),
-        help="报告根目录（默认 ~/.yiagents/logs/reports）",
+        default=str(
+            Path(os.getenv("YIAGENTS_RESULTS_DIR", Path.home() / ".yiagents" / "logs"))
+            / "reports"
+        ),
+        help="报告根目录（默认 $YIAGENTS_RESULTS_DIR/reports，回退 ~/.yiagents/logs/reports）",
     )
     return p.parse_args()
 

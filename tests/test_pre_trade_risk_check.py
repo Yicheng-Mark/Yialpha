@@ -17,15 +17,21 @@ from yiagents.risk.manager import RiskDecision
 pytestmark = pytest.mark.unit
 
 
-def _order(volume: float, price: float = 100.0) -> OrderRequest:
+def _order(
+    volume: float,
+    price: float = 100.0,
+    *,
+    order_type: OrderType = OrderType.LIMIT,
+    offset: Offset = Offset.NONE,
+) -> OrderRequest:
     return OrderRequest(
         symbol="BTCUSDT",
         exchange=Exchange.BINANCE,
         direction=Direction.LONG,
-        type=OrderType.LIMIT,
+        type=order_type,
         volume=volume,
         price=price,
-        offset=Offset.NONE,
+        offset=offset,
         reference="test",
     )
 
@@ -57,13 +63,15 @@ def _decision(
 
 
 class TestPreTradeRiskCheck:
-    def test_no_risk_decision_passes_through(self):
-        """Gate 3: risk overlay disabled / not computed -> orders unchanged."""
+    def test_no_risk_decision_rejects_open_orders(self):
+        """Missing risk context is never permission to increase exposure."""
         orders = [_order(10), _order(20)]
         out = pre_trade_risk_check(orders, None)
-        assert len(out) == 2
-        assert out[0].volume == 10
-        assert out[1].volume == 20
+        assert out == []
+
+    def test_no_risk_decision_preserves_explicit_close(self):
+        close = _order(10, offset=Offset.CLOSE)
+        assert pre_trade_risk_check([close], None) == [close]
 
     def test_blocked_action_drops_all_orders(self):
         """Gate 1: action='blocked' -> empty list."""
@@ -71,13 +79,31 @@ class TestPreTradeRiskCheck:
         out = pre_trade_risk_check(orders, _decision(action="blocked"))
         assert out == []
 
+    @pytest.mark.parametrize("action", ["hold", "reduce", "exit", "unexpected"])
+    def test_non_entry_actions_cannot_open_exposure(self, action):
+        out = pre_trade_risk_check(
+            [_order(10)],
+            _decision(action=action),
+            equity=100_000,
+        )
+        assert out == []
+
     def test_hard_stop_regime_drops_all_orders(self):
-        """Gate 1: regime='hard_stop' -> empty list even if action != blocked."""
+        """A hard stop blocks new exposure even if action != blocked."""
         orders = [_order(10)]
         out = pre_trade_risk_check(
             orders, _decision(action="enter", regime="hard_stop")
         )
         assert out == []
+
+    def test_hard_stop_preserves_reduce_only_close(self):
+        open_order = _order(10, offset=Offset.OPEN)
+        close_order = _order(7, offset=Offset.CLOSE)
+        out = pre_trade_risk_check(
+            [open_order, close_order],
+            _decision(action="enter", regime="hard_stop"),
+        )
+        assert out == [close_order]
 
     def test_weight_cap_clips_limit_order(self):
         """Gate 2: a 15% order clipped to the 10% cap."""
@@ -103,12 +129,11 @@ class TestPreTradeRiskCheck:
         assert len(out) == 1
         assert out[0].volume == pytest.approx(0.01)
 
-    def test_zero_equity_disables_weight_cap(self):
-        """Gate 2: equity=0 -> cap disabled, orders pass (breaker still applies)."""
+    def test_zero_equity_rejects_open_order(self):
+        """A missing account-equity snapshot must fail closed."""
         orders = [_order(10_000)]
         out = pre_trade_risk_check(orders, _decision(), equity=0)
-        assert len(out) == 1
-        assert out[0].volume == 10_000
+        assert out == []
 
     def test_normal_decision_with_small_order_passes_unchanged(self):
         """All three gates pass: a small order in a normal regime is untouched."""
@@ -120,8 +145,8 @@ class TestPreTradeRiskCheck:
         assert len(out) == 1
         assert out[0].volume == 5
 
-    def test_market_order_with_zero_price_passes_weight_cap(self):
-        """Gate 2: a market order (price=0) cannot be value-clipped; it passes."""
+    def test_market_order_without_reference_price_is_rejected(self):
+        """A price-less market order cannot be safely value-capped."""
         market = OrderRequest(
             symbol="BTCUSDT",
             exchange=Exchange.BINANCE,
@@ -133,8 +158,35 @@ class TestPreTradeRiskCheck:
             reference="test",
         )
         out = pre_trade_risk_check([market], _decision(), equity=100_000, max_weight=0.01)
+        assert out == []
+
+    def test_large_market_order_is_clipped_using_reference_price(self):
+        market = _order(
+            1_000_000,
+            price=0.0,
+            order_type=OrderType.MARKET,
+            offset=Offset.OPEN,
+        )
+        out = pre_trade_risk_check(
+            [market],
+            _decision(),
+            equity=100_000,
+            max_weight=0.01,
+            reference_price=50_000,
+        )
         assert len(out) == 1
-        assert out[0].volume == 10
+        assert out[0].volume == pytest.approx(0.02)
+
+    def test_symbol_reference_price_mapping(self):
+        market = _order(10, price=0.0, order_type=OrderType.MARKET)
+        out = pre_trade_risk_check(
+            [market],
+            _decision(),
+            equity=100_000,
+            max_weight=0.01,
+            reference_prices={"BTCUSDT": 20_000},
+        )
+        assert out[0].volume == pytest.approx(0.05)
 
     def test_empty_input_returns_empty(self):
         """No orders in -> no orders out, regardless of risk decision."""

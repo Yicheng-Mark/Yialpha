@@ -27,9 +27,9 @@
 
 ## What is this
 
-YiAgents deploys a team of specialized **LLM agents** that mirror how a real trading firm operates: fundamentals / sentiment / news / technical analysts produce views, bull & bear researchers debate in a structured format, a trader proposes, and a risk team together with a portfolio manager make the final call. On top of this, the framework layers a **deterministic quantitative risk overlay** (Kelly sizing / ATR stops / drawdown breaker / CVaR) and a **four-stage validation + backtest gate** pipeline — pushing a "research toy" toward "deployable engineering."
+YiAgents deploys a team of specialized **LLM agents** that mirror how a real trading firm reasons: fundamentals / sentiment / news / technical analysts produce views, bull & bear researchers debate in a structured format, a trader proposes, and a risk team together with a portfolio manager make the final call. On top of this, the framework layers a **deterministic quantitative risk overlay** (Kelly sizing / ATR stops / drawdown breaker / CVaR) and a **four-stage validation + backtest gate** pipeline for more rigorous analysis.
 
-> ⚠️ **For research only.** Trading performance is driven by many non-deterministic factors (model, temperature, data quality, rebalance cadence). Nothing here constitutes financial, investment, or trading advice.
+> ⚠️ **Analysis only.** The default configuration cannot place orders and cannot execute LLM-generated Python. Keep `YIAGENTS_ANALYSIS_ONLY=true`; reports and backtests are research evidence, not instructions for capital allocation. Nothing here constitutes financial, investment, or trading advice.
 
 ---
 
@@ -52,11 +52,11 @@ Give YiAgents a **ticker + date** and it analyzes from four angles, runs multipl
 | Analyst | Dimension | Data source |
 | ------ | ------ | ------ |
 | Market Analyst | Technical: picks up to 8 complementary indicators (MACD / RSI / Bollinger / ATR / VWMA / SMA / EMA …) by market regime | yfinance / Alpha Vantage |
-| Sentiment Analyst | Social sentiment | Reddit, StockTwits |
+| Sentiment Analyst | Social sentiment | Reddit, StockTwits (current-date analysis only) |
 | News Analyst | Ticker news + macro/global news (Fed, geopolitics, central-bank policy …) | yfinance / Alpha Vantage News |
 | Fundamentals Analyst | Financial fundamentals | yfinance / Alpha Vantage |
 
-Macro data flows through FRED (Federal Reserve), event probabilities through Polymarket (prediction markets), and alternative data can be collected via browser.
+Macro data flows through FRED (Federal Reserve), event probabilities through Polymarket (prediction markets), and alternative data can be collected via browser. Sources without a trustworthy as-of parameter are omitted from historical runs rather than silently substituting today's data.
 
 ### Crypto analysis modes
 
@@ -65,8 +65,8 @@ Crypto has three opt-in modes. `crypto` (Yahoo spot) is the default; `crypto_spo
 | Mode | `--asset-type` | Source | Tools bound to the analyst | Notes |
 | ------ | ------ | ------ | ------ | ------ |
 | Yahoo spot (default) | `crypto` | Yahoo Finance (`BTC-USD`) | indicators + verified_snapshot | Default crypto path; no funding / OI / leverage |
-| Binance spot | `crypto_spot` | Binance spot (`api.binance.com`, optional mirror) | spot_klines / ticker24 / **spot_perp_basis** + indicators + verified_snapshot | New cross-venue basis = perp close − spot close (a fresh alpha dimension) |
-| Binance perpetual | `crypto_perp` | Binance USDT-M perp (`fapi.binance.com`) | 6 native tools: klines / funding / open_interest / long_short_ratio / taker_buy_sell / basis | No RSI/MACD (reads klines directly); Yahoo tools hidden to avoid wrong-pair resolution |
+| Binance spot | `crypto_spot` | Binance spot (`api.binance.com`, optional mirror) | historical: spot_klines + dated indicators/snapshot; current date also: ticker24 / **spot_perp_basis** | Rolling 24h and current cross-venue basis are never injected into historical runs |
+| Binance perpetual | `crypto_perp` | Binance USDT-M perp (`fapi.binance.com`) | historical: klines + funding; current date also: OI / long-short / taker flow / basis | Analysis only. The spot/long-only backtest engine explicitly refuses this mode |
 
 In crypto modes the Fundamentals Analyst is dropped automatically (perpetual/spot pairs have no fundamentals). All Binance requests are hand-written `requests` (not the official SDK) over the existing SOCKS5 proxy, with per-product-line rate limiting and reactive 429/418 backstop.
 
@@ -96,7 +96,7 @@ Data layer (yfinance / Alpha Vantage / FRED / Polymarket / Reddit / StockTwits /
         │
    Quantitative risk overlay (risk_enabled) → position / stop / exposure re-calibration
         │
-   Decision + memory loop (written to ~/.yiagents/memory/)
+   Optional causal memory loop (off by default; as-of filtered)
 ```
 
 - **Ratings**: Research Manager / Portfolio Manager use a **five-tier** scale (Buy / Overweight / Hold / Underweight / Sell); the Trader uses three tiers (Buy / Hold / Sell).
@@ -115,6 +115,13 @@ pip install -e .
 pip install -e ".[web]"        # FastAPI + Uvicorn for the local Web UI
 pip install -e ".[bedrock]"    # Amazon Bedrock provider (AWS SigV4)
 pip install -e ".[dev]"        # ruff / pytest
+```
+
+For a fully reproducible environment (pinned transitive deps), install from
+the lock instead:
+
+```bash
+pip install -r requirements.lock   # core + dev, pinned (regenerate: uv pip compile)
 ```
 
 Docker:
@@ -164,7 +171,7 @@ YIAGENTS_OUTPUT_LANGUAGE=English             # analyst report & final-decision l
 
 ## CLI usage
 
-After install you get the `yiagents` command; you can also run `python -m cli.main` from source.
+After install you get the `yiagents` command; you can also run `python -m yiagents.cli.main` from source. The CLI lives inside the unique `yiagents` namespace so an unrelated top-level `cli` package cannot shadow it.
 
 ### Single analysis: `yiagents analyze`
 
@@ -274,7 +281,7 @@ The LLM picks direction; math owns sizing and risk ([yiagents/risk/](yiagents/ri
 | CVaR | [cvar.py](yiagents/risk/cvar.py) | Conditional value-at-risk, tail constraint |
 | Bus | [manager.py](yiagents/risk/manager.py) | Combines the above; enforces per-ticker / sector / exposure caps |
 
-`risk_enabled` defaults to **True** (the recommended production form): the risk manager deterministically rewrites position size / stop / exposure while the LLM keeps direction. `scripts/run_baseline.py` sets it explicitly per mode (`--baseline` = off, to build the Phase-0 baseline; `--full` = on, for the A/B).
+`risk_enabled` defaults to **True**: the risk manager deterministically rewrites the analytical position size / stop / exposure while the LLM keeps direction. `scripts/run_baseline.py` sets it explicitly per mode (`--baseline` = off, to build the Phase-0 baseline; `--full` = on, for the paired A/B).
 
 ---
 
@@ -304,7 +311,10 @@ Stage 2 (`--full`) runs the baseline-vs-risk-overlay A/B and independently judge
 
 - **Deflated Sharpe Ratio (DSR)** — multiple-testing correction across samples, penalizes overfit ([metrics.py](yiagents/backtest/metrics.py))
 - Beats buy-and-hold? PASS / FAIL verdict, improvement suggestions
+- Baseline and improved legs reuse the same cached LLM decision tape; every ticker/run gets a fresh stateful risk manager
 - Reports, dashboards, and gate verdicts land in `--out` (default `backtest_output/`)
+
+Daily signals execute on the **next available bar**, never on the completed bar the model just read. `Hold` creates no rebalance or fee, and win rate is computed from actual position P&L. `crypto_perp` backtests are deliberately rejected until funding, shorting, leverage, margin, and liquidation are modeled.
 
 ```text
 [AAPL] gate verdict: ✅ PASS | DSR 1.42 | beats B&H True
@@ -335,11 +345,11 @@ One-line telemetry: `python scripts/run_baseline.py --smoke --profile --ticker <
 
 ## Persistence & recovery
 
-**Decision log (on by default):** every completed run appends its decision to `~/.yiagents/memory/trading_memory.md`. On the next run for the same ticker, realized returns (including alpha vs the benchmark) are pulled, a reflection is generated, and the most recent same-ticker decision plus cross-ticker lessons are injected into the portfolio manager's prompt — a "learn from mistakes" loop. Override the path with `YIAGENTS_MEMORY_LOG_PATH`.
+**Decision log (opt-in):** persistence is off by default (`YIAGENTS_MEMORY_ENABLED=false`). When explicitly enabled, completed decisions are written to `~/.yiagents/memory/trading_memory.md`; historical runs only see decisions and realized outcomes known by their as-of date. Legacy reflections without an outcome-availability date are excluded from historical prompts. Override the path with `YIAGENTS_MEMORY_LOG_PATH`.
 
 **Checkpoint resume (opt-in):** turn on with `--checkpoint`. LangGraph archives state after each node, so a crashed / interrupted run resumes from the last successful step; checkpoints are cleaned up on successful completion. Per-ticker SQLite databases live in `~/.yiagents/cache/checkpoints/<TICKER>.db` (override with `YIAGENTS_CACHE_DIR`).
 
-**Global kill switch:** when `YIAGENTS_KILL_SWITCH=true`, the browser-broker execution layer refuses to submit any new order ([browser_broker.py](yiagents/execution/browser_broker.py)).
+**Analysis boundary:** `YIAGENTS_ANALYSIS_ONLY=true` is the default and blocks every live execution path. The legacy and new execution switches must both be explicitly armed after analysis-only mode is disabled; gateways re-check them and `YIAGENTS_KILL_SWITCH` on every submission. PoT host execution is also off, and is always refused on Windows until a real process-isolated sandbox exists.
 
 ---
 
@@ -369,9 +379,10 @@ One-line telemetry: `python scripts/run_baseline.py --smoke --profile --ticker <
 │   ├── execution/            # browser_broker (browser broker + kill switch)
 │   ├── monitoring/           # dashboard (HTML dashboard)
 │   ├── llm_clients/          # multi-provider adapters + rate limiter + shared httpx
+│   ├── cli/                  # interactive CLI (analyze / batch)
 │   ├── default_config.py     # config + env mapping
 │   └── reporting.py
-├── cli/                      # interactive CLI (analyze / batch)
+├── cli/                      # source compatibility shims; packaged CLI is yiagents.cli
 ├── web/                      # FastAPI Web UI (run in place, not packaged)
 ├── scripts/                  # run_baseline / run_robust / run_batch / run_analyst_parallel_ab / …
 ├── tests/                    # test suite — data / risk / backtest / gate / multi-provider / i18n / concurrency
@@ -385,7 +396,7 @@ One-line telemetry: `python scripts/run_baseline.py --smoke --profile --ticker <
 YiAgents is LLM-driven: **two runs of the same ticker + date may differ** — an inherent property of language-model research, not a bug. Sources:
 
 - **Model sampling non-determinism**: even at a fixed temperature, providers do not guarantee byte-identical output; reasoning models sample over their internal reasoning and vary more.
-- **Live data drifts**: news / StockTwits / Reddit return different content over time; even with a fixed historical trading date, social sentiment still reflects "now."
+- **Current-date data drifts**: news / StockTwits / Reddit return different content over time. Historical runs omit current-only social, prediction-market, rolling ticker, and positioning feeds; dated sources are still subject to vendor corrections and coverage changes.
 
 Mitigations: lower `temperature` (`YIAGENTS_TEMPERATURE`), or pick a non-reasoning model explicitly. Already deterministic: company identity is resolved from the ticker and locked before any agent runs; the market analyst's exact prices / indicators come from a verified data snapshot.
 

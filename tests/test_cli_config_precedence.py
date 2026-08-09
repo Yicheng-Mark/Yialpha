@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-import cli.main as m
+import yiagents.cli.main as m
 
 # Minimal selections dict shaped like get_user_selections()'s return value.
 SELECTIONS = {
@@ -67,3 +67,45 @@ def test_checkpoint_flag_overrides_env(flag):
     with mock.patch.object(m, "DEFAULT_CONFIG", patched):
         cfg = m._build_run_config(SELECTIONS, checkpoint=flag)
     assert cfg["checkpoint_enabled"] is flag
+
+
+def test_explicit_batch_workers_enable_concurrency_over_default_off():
+    cfg = {"batch_concurrency": False, "batch_workers": 3}
+    result = m._apply_batch_worker_override(cfg, workers=4)
+    assert result["batch_concurrency"] is True
+
+
+def test_omitted_batch_workers_preserve_master_switch():
+    cfg = {"batch_concurrency": False, "batch_workers": 3}
+    result = m._apply_batch_worker_override(cfg, workers=None)
+    assert result["batch_concurrency"] is False
+
+
+def test_one_batch_worker_explicitly_requests_serial_mode():
+    cfg = {"batch_concurrency": True, "batch_workers": 3}
+    result = m._apply_batch_worker_override(cfg, workers=1)
+    assert result["batch_concurrency"] is False
+
+
+def test_complete_report_prefers_post_overlay_portfolio_decision(monkeypatch):
+    rendered = []
+
+    class QuietConsole:
+        def print(self, *args, **kwargs):
+            return None
+
+    def capture_markdown(value):
+        rendered.append(value)
+        return value
+
+    monkeypatch.setattr(m, "console", QuietConsole())
+    monkeypatch.setattr(m, "Markdown", capture_markdown)
+
+    m.display_complete_report(
+        {
+            "risk_debate_state": {"judge_decision": "raw PM decision"},
+            "final_trade_decision": "post-overlay PM decision",
+        }
+    )
+
+    assert rendered == ["post-overlay PM decision"]

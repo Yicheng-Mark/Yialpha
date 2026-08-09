@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from yiagents.backtest.engine import run_backtest
+from yiagents.backtest.report import render_backtest_report
 from yiagents.risk.manager import (
     PortfolioState,
     RiskDecision,
@@ -158,3 +159,84 @@ def test_backtest_weight_fn_integration_with_engine():
     # Every rebalance obeyed the 20% single-position cap.
     assert all(t.executed_weight <= 0.20 + 1e-9 for t in result.trades)
     assert result.metrics is not None
+
+
+@pytest.mark.unit
+def test_backtest_adapter_preserves_atr_stop_in_trade_rows():
+    dates = list(pd.bdate_range("2024-01-01", periods=30).strftime("%Y-%m-%d"))[::5]
+
+    class FakeGraph:
+        def propagate(self, c, d, asset_type="stock"):
+            return {"final_trade_decision": "**Rating**: Buy"}, "Buy"
+        def _resolve_benchmark(self, t):
+            return "SPY"
+
+    def prices(t, s, e):
+        idx = pd.bdate_range(s, e)
+        return pd.Series([100.0 + i for i in range(len(idx))],
+                         index=idx.strftime("%Y-%m-%d"), dtype=float)
+
+    wfn = build_backtest_weight_fn(
+        RiskManager(atr_mult=2.0), "AAPL", atr_lookup=lambda date: 2.0,
+    )
+    result = run_backtest(
+        FakeGraph(), "AAPL", dates, price_provider=prices, weight_fn=wfn,
+    )
+    assert all(t.stop_loss == pytest.approx(t.price - 4.0) for t in result.trades)
+    assert any(
+        "advisory metadata only" in warning
+        for warning in result.config_summary["risk_warnings"]
+    )
+
+
+@pytest.mark.unit
+def test_missing_atr_is_explicitly_degraded_in_report():
+    dates = list(pd.bdate_range("2024-01-01", periods=20).strftime("%Y-%m-%d"))[::5]
+
+    class FakeGraph:
+        def propagate(self, c, d, asset_type="stock"):
+            return {"final_trade_decision": "**Rating**: Buy"}, "Buy"
+        def _resolve_benchmark(self, t):
+            return "SPY"
+
+    def prices(t, s, e):
+        idx = pd.bdate_range(s, e)
+        return pd.Series([100.0 + i for i in range(len(idx))],
+                         index=idx.strftime("%Y-%m-%d"), dtype=float)
+
+    result = run_backtest(
+        FakeGraph(), "AAPL", dates, price_provider=prices,
+        weight_fn=build_backtest_weight_fn(RiskManager(), "AAPL"),
+    )
+    assert result.config_summary["risk_warnings"]
+    assert all(t.risk_warning for t in result.trades)
+    assert "ATR stop unavailable" in render_backtest_report(result)
+
+
+@pytest.mark.unit
+def test_risk_adapter_treats_hold_as_no_order():
+    dates = list(pd.bdate_range("2024-01-01", periods=25))[::5]
+
+    class FakeGraph:
+        def propagate(self, c, d, asset_type="stock"):
+            rating = "Buy" if d == dates[0].strftime("%Y-%m-%d") else "Hold"
+            return {"final_trade_decision": f"**Rating**: {rating}"}, rating
+        def _resolve_benchmark(self, t):
+            return "SPY"
+
+    date_strings = [d.strftime("%Y-%m-%d") for d in dates]
+
+    def prices(t, s, e):
+        idx = pd.bdate_range(s, e)
+        return pd.Series([100.0 + i for i in range(len(idx))],
+                         index=idx.strftime("%Y-%m-%d"), dtype=float)
+
+    result = run_backtest(
+        FakeGraph(), "AAPL", date_strings, price_provider=prices,
+        weight_fn=build_backtest_weight_fn(
+            RiskManager(), "AAPL", atr_lookup=lambda date: 1.0,
+        ),
+    )
+    assert result.trades[0].is_rebalance is True
+    assert all(t.target_weight is None for t in result.trades[1:])
+    assert all(t.is_rebalance is False for t in result.trades[1:])

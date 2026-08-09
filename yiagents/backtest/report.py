@@ -77,7 +77,13 @@ def render_backtest_report(result: BacktestResult) -> str:
     lines.append(f"- Holding window: {result.holding_days} sessions  |  "
                  f"Run tag: `{result.config_summary.get('run_tag', 'default')}`  |  "
                  f"Index benchmark: `{result.config_summary.get('index_benchmark', 'n/a')}`")
-    lines.append(f"- Rebalances: {len(result.trades)}  |  "
+    lines.append(
+        f"- Signal-to-fill lag: {result.config_summary.get('execution_lag_bars', 1)} "
+        "bar(s), next available close"
+    )
+    lines.append(f"- Decisions: {len(result.trades)}  |  "
+                 f"Actual rebalances: {sum(t.is_rebalance for t in result.trades)}  |  "
+                 f"Position episodes: {m.get('num_trades', 0)}  |  "
                  f"Initial capital: {result.initial_capital:,.0f}  |  "
                  f"Transaction cost: {result.config_summary.get('cost_bps', 0.0)} bps")
     lines.append(f"- Cache: {result.cached_hits} hits / {result.cached_misses} misses")
@@ -86,6 +92,13 @@ def render_backtest_report(result: BacktestResult) -> str:
             f"- ⚠️ Degraded decisions: {result.degraded_decision_count} "
             f"(propagate failed or rating unparseable — forced to Hold)"
         )
+    if result.unexecuted_decision_count:
+        lines.append(
+            f"- WARNING: Unexecuted decisions: {result.unexecuted_decision_count} "
+            "(no strictly-later price bar was available)"
+        )
+    for warning in result.config_summary.get("risk_warnings", []):
+        lines.append(f"- WARNING: {warning}")
     lines.append("")
     lines.append("## Equity curve")
     lines.append("")
@@ -105,7 +118,7 @@ def render_backtest_report(result: BacktestResult) -> str:
     lines.append(f"| Calmar | {_fmt_num(m.get('calmar'))} | n/a |")
     lines.append(f"| Deflated Sharpe | {_fmt_num(m.get('deflated_sharpe'))} | n/a |")
     lines.append(f"| Alpha vs B&H (ann.) | {_fmt_pct(m.get('alpha_vs_buyhold'))} | -- |")
-    lines.append(f"| Win rate (per rebalance) | {_fmt_pct(m.get('win_rate'))} | n/a |")
+    lines.append(f"| Win rate (net position episodes) | {_fmt_pct(m.get('win_rate'))} | n/a |")
     lines.append(f"| Turnover (ann.) | {_fmt_pct(m.get('turnover_annual'))} | n/a |")
     _mdd_date = m.get("max_drawdown_date")
     lines.append(f"| Max drawdown date | {_mdd_date if _mdd_date else 'n/a'} | n/a |")
@@ -155,14 +168,23 @@ def render_backtest_report(result: BacktestResult) -> str:
     if result.trades:
         lines.append("## Trades")
         lines.append("")
-        lines.append("| Date | Rating | Weight | Price | Realized ret | Alpha |")
-        lines.append("|---|---|---:|---:|---:|---:|")
+        lines.append(
+            "| Signal date | Execution date | Rating | Order | Weight | Price | "
+            "Position P&L | Asset fwd ret | Alpha | Stop |"
+        )
+        lines.append("|---|---|---|---|---:|---:|---:|---:|---:|---:|")
         for t in result.trades:
             price_str = f"{t.price:.2f}" if t.price is not None else "n/a"
+            stop_str = f"{t.stop_loss:.2f}" if t.stop_loss is not None else "n/a"
             lines.append(
-                f"| {t.date} | {t.rating} | {t.executed_weight:.2f} | "
-                f"{price_str} | {_fmt_pct(t.raw_return)} | {_fmt_pct(t.alpha_vs_index)} |"
+                f"| {t.date} | {t.execution_date or 'n/a'} | {t.rating} | "
+                f"{'rebalance' if t.is_rebalance else 'hold/no order'} | "
+                f"{t.executed_weight:.2f} | {price_str} | "
+                f"{_fmt_pct(t.position_return)} | {_fmt_pct(t.raw_return)} | "
+                f"{_fmt_pct(t.alpha_vs_index)} | {stop_str} |"
             )
+            if t.risk_warning:
+                lines.append(f"|  |  | Risk warning | {t.risk_warning} |  |  |  |  |  |  |")
         lines.append("")
     return "\n".join(lines)
 

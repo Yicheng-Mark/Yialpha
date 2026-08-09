@@ -26,6 +26,7 @@ import unittest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from yiagents.agents.utils.agent_utils import get_clear_placeholder_from_state
+from yiagents.dataflows.config import get_config, set_config
 from yiagents.graph.analyst_execution import build_analyst_execution_plan
 from yiagents.graph.analyst_fanout import (
     build_analyst_subgraph,
@@ -447,6 +448,46 @@ class WallTimeTrackerTests(unittest.TestCase):
 
         self.assertEqual(started, ["market", "social"])
         self.assertEqual(completed, ["market", "social"])
+
+
+class ContextPropagationTests(unittest.TestCase):
+    def test_fanout_workers_inherit_dataflow_config(self):
+        set_config({"context_probe": 987654})
+        seen: list[int] = []
+        seen_lock = threading.Lock()
+
+        def context_factory(report_key: str, report_text: str):
+            base_factory = _make_scripted_agent_factory(report_key, report_text)
+
+            def factory():
+                node = base_factory()
+
+                def wrapped(state):
+                    with seen_lock:
+                        seen.append(get_config()["context_probe"])
+                    return node(state)
+
+                return wrapped
+
+            return factory
+
+        plan = build_analyst_execution_plan(("market", "social"))
+        factories = {
+            "market": context_factory("market_report", "M"),
+            "social": context_factory("sentiment_report", "S"),
+        }
+        tools = {"market": _make_stub_tool_node(), "social": _make_stub_tool_node()}
+        fanout = create_analyst_fanout_node(
+            plan,
+            factories,
+            tools,
+            ConditionalLogic(),
+        )
+
+        fanout(_make_minimal_state())
+
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {987654})
 
 
 class TestSerialParallelPlaceholderEquivalence(unittest.TestCase):

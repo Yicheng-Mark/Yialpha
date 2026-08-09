@@ -125,7 +125,7 @@ def _clean_identity_value(value: Any) -> str | None:
 
 
 @functools.lru_cache(maxsize=256)
-def resolve_instrument_identity(ticker: str) -> dict:
+def resolve_instrument_identity(ticker: str, curr_date: str | None = None) -> dict:
     """Resolve deterministic identity metadata (company name, sector, …) for a ticker.
 
     This exists to stop the pipeline from hallucinating a *different* company
@@ -137,12 +137,31 @@ def resolve_instrument_identity(ticker: str) -> dict:
     Best-effort by design: if yfinance is unavailable, rate-limited, or doesn't
     recognise the ticker, we return ``{}`` and the caller falls back to
     ticker-only context rather than failing before analysis starts. Cached so
-    the lookup happens at most once per ticker per process.
+    the lookup happens at most once per (ticker, curr_date) per process.
 
     The symbol is normalized first (e.g. ``XAUUSD`` -> ``GC=F``) so identity
     resolves for the same instrument the price path actually fetches (#983).
+
+    Point-in-time guard: ``.info`` is a single current-point snapshot with no
+    date dimension — the company name, sector, industry, and exchange are
+    always *today's* values. On an explicit historical ``curr_date`` (a
+    backtest decision date) surfacing them would leak the future identity,
+    so we refuse and return ``{}`` exactly as the fundamentals overview does
+    (``overview_would_leak_future``). Live mode (``curr_date`` empty/None or
+    today) keeps the snapshot — it is legitimately current then.
     """
     from yiagents.dataflows.symbol_utils import normalize_symbol
+    from yiagents.dataflows.utils import overview_would_leak_future
+
+    # PIT: a past backtest date must not receive today's identity snapshot.
+    # Falls back to ticker-only context (build_instrument_context handles an
+    # empty identity), the same degradation as a yfinance failure.
+    if overview_would_leak_future(curr_date):
+        logger.debug(
+            "Identity snapshot refused for %s on historical date %s (PIT guard)",
+            ticker, curr_date,
+        )
+        return {}
 
     try:
         info = yf.Ticker(normalize_symbol(ticker)).info or {}

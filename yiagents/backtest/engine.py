@@ -99,7 +99,13 @@ def _yfinance_price_provider(ticker: str, start: str, end: str) -> pd.Series:
 
 @dataclass
 class TradeRow:
-    """One rebalance event: what the agents said, and what the simulator did."""
+    """One decision event: what the agents said, and what the simulator did.
+
+    ``date`` is the signal/as-of date.  ``execution_date`` is deliberately a
+    later price bar: the graph is allowed to consume the completed signal-day
+    bar, therefore that same close is not an executable price.  A row may be a
+    genuine hold (``is_rebalance=False`` and ``traded_notional=0``).
+    """
 
     date: str
     rating: str
@@ -109,6 +115,19 @@ class TradeRow:
     raw_return: float | None = None        # realized asset return over the holding period
     alpha_vs_index: float | None = None    # raw_return minus the index's return over the same window
     decision_excerpt: str = ""
+    execution_date: str | None = None
+    previous_weight: float = 0.0
+    traded_notional: float = 0.0
+    transaction_cost: float = 0.0
+    is_rebalance: bool = False
+    # Net portfolio return of the actual long-position episode opened by this
+    # row.  It is filled when the position is closed (or at the backtest end),
+    # and is the source for win-rate.  It intentionally stays None for cash and
+    # repeated Hold decisions.
+    position_return: float | None = None
+    stop_loss: float | None = None
+    risk_action: str | None = None
+    risk_warning: str | None = None
 
 
 @dataclass
@@ -128,6 +147,7 @@ class BacktestResult:
     cached_hits: int = 0
     cached_misses: int = 0
     degraded_decision_count: int = 0
+    unexecuted_decision_count: int = 0
 
     def equity_series(self) -> pd.Series:
         return pd.Series(self.equity, index=self.equity_dates, dtype=float)
@@ -174,6 +194,39 @@ def _asset_return(prices: pd.Series, start_date: str, horizon: int) -> float | N
     return p1 / p0 - 1.0
 
 
+def _execution_date_after_signal(
+    index: pd.Index,
+    signal_date: str,
+    lag_bars: int,
+) -> str | None:
+    """Return the executable bar strictly after ``signal_date``.
+
+    A daily analysis made as of ``signal_date`` may use that day's completed
+    OHLCV.  Consequently the earliest honest close-price fill is the next
+    available bar.  ``lag_bars=1`` means that first strictly-later bar, including
+    the Monday after a weekend signal.
+    """
+    arr = np.asarray(index, dtype=object)
+    later = np.where(arr > str(signal_date))[0]
+    offset = lag_bars - 1
+    if later.size <= offset:
+        return None
+    return str(arr[int(later[offset])])
+
+
+def _finish_open_position_episode(
+    opening_trade: TradeRow | None,
+    opening_equity: float | None,
+    ending_equity: float,
+) -> float | None:
+    """Stamp and return net P&L for one actual long-position episode."""
+    if opening_trade is None or opening_equity is None or opening_equity <= 0:
+        return None
+    realized = float(ending_equity / opening_equity - 1.0)
+    opening_trade.position_return = realized
+    return realized
+
+
 def run_backtest(
     graph: _GraphLike,
     ticker: str,
@@ -186,9 +239,10 @@ def run_backtest(
     cache: DecisionCache | None = None,
     run_tag: str = "default",
     price_provider: Callable[[str, str, str], pd.Series] = _yfinance_price_provider,
-    periods_per_year: int = 252,
+    periods_per_year: int | None = None,
     cost_bps: float = 0.0,
     n_trials: int = 1,
+    execution_lag_bars: int = 1,
     compute_index_alpha: bool = True,
     factor_model: str | None = None,
     event_study: bool = False,
@@ -217,6 +271,10 @@ def run_backtest(
     cost_bps:
         Transaction cost in basis points applied to the traded notional on each
         rebalance (round-trip costs can be split across two calls by the caller).
+    execution_lag_bars:
+        Number of available price bars between a completed daily signal and its
+        fill.  The minimum/default is one: a signal that can read the complete
+        signal-day OHLCV can never fill at that same close.
     n_trials:
         Number of independent strategy variants being compared in this research
         run, forwarded to :func:`compute_metrics` for the Deflated Sharpe Ratio
@@ -253,6 +311,19 @@ def run_backtest(
         raise ValueError("holding_days must be >= 1")
     if not isinstance(n_trials, int) or n_trials < 1:
         raise ValueError(f"n_trials must be an integer >= 1, got {n_trials!r}")
+    if not isinstance(execution_lag_bars, int) or execution_lag_bars < 1:
+        raise ValueError("execution_lag_bars must be an integer >= 1")
+    if asset_type == "crypto_perp":
+        raise NotImplementedError(
+            "crypto_perp backtesting is disabled: this engine is a long-only "
+            "cash/spot simulator and does not model short exposure, funding, "
+            "leverage, margin, or liquidation. Labeling its output as a "
+            "perpetual-futures backtest would be misleading."
+        )
+    if periods_per_year is None:
+        periods_per_year = 365 if asset_type.startswith("crypto") else 252
+    if periods_per_year < 1:
+        raise ValueError("periods_per_year must be >= 1")
 
     weight_fn = weight_fn or _default_weight_fn(rating_to_weight or DEFAULT_RATING_TO_WEIGHT)
 
@@ -282,93 +353,175 @@ def run_backtest(
             logger.warning("Could not load index benchmark %s: %s", index_name, exc)
             index_prices = None
 
-    # --- Portfolio simulation: daily walk, rebalance only on decision dates --
-    decision_set = set(sorted_dates)
-    # Threaded through every sizing call so a risk layer can use history.
+    # Resolve the LLM signal on its explicit as-of date, then map it to a
+    # strictly later executable bar.  Resolution is kept chronological; only
+    # portfolio sizing waits until execution so the risk layer sees the equity
+    # and exposure that really existed at that point.
+    scheduled: dict[str, list[tuple[str, str, str]]] = {}
+    cached_hits = 0
+    cached_misses = 0
+    degraded_decision_count = 0
+    unexecuted_decision_count = 0
+    for signal_date in sorted_dates:
+        rating, decision_md, was_cached, was_degraded = _resolve_decision(
+            graph, ticker, signal_date, asset_type, cache, run_tag,
+        )
+        cached_hits += int(was_cached)
+        cached_misses += int(not was_cached)
+        degraded_decision_count += int(was_degraded)
+        execution_date = _execution_date_after_signal(
+            prices.index, signal_date, execution_lag_bars,
+        )
+        if execution_date is None:
+            unexecuted_decision_count += 1
+            logger.warning(
+                "No price bar %d bar(s) after %s; %s decision cannot execute",
+                execution_lag_bars, signal_date, ticker,
+            )
+            continue
+        scheduled.setdefault(execution_date, []).append(
+            (signal_date, rating, decision_md)
+        )
+
+    # Threaded through every sizing call so a risk layer can use only history
+    # available at the actual execution point.
     ctx: dict[str, Any] = {
         "equity_history": [initial_capital],
         "returns_history": [],
+        "realized_returns": [],
         "holding_days": holding_days,
         "ticker": ticker,
     }
 
     cash = initial_capital
     shares = 0.0
-    current_weight = 0.0
     equity_curve: list[float] = []
     equity_dates: list[str] = []
     trades: list[TradeRow] = []
-    cached_hits = 0
-    cached_misses = 0
     total_traded_notional = 0.0
-    degraded_decision_count = 0
+    opening_trade: TradeRow | None = None
+    opening_equity: float | None = None
 
     for trade_date, price in prices.items():
         if trade_date < sorted_dates[0]:
             continue
 
-        # Mark to market at today's close.
-        equity = cash + shares * float(price)
+        px = float(price)
+        if px <= 0.0 or not np.isfinite(px):
+            raise ValueError(f"Invalid execution price for {ticker} on {trade_date}: {price!r}")
+
+        # Mark to market at today's completed close before any close-price fill.
+        equity = cash + shares * px
         equity_curve.append(float(equity))
-        equity_dates.append(trade_date)
+        equity_dates.append(str(trade_date))
         ctx["equity_history"].append(float(equity))
         if len(equity_curve) >= 2:
             prev = equity_curve[-2]
-            if prev > 0:
-                ctx["returns_history"].append(float(equity / prev - 1.0))
-
-        # Rebalance on a decision date.
-        if trade_date in decision_set:
-            rating, decision_md, was_cached, was_degraded = _resolve_decision(
-                graph, ticker, trade_date, asset_type, cache, run_tag,
+            ctx["returns_history"].append(
+                float(equity / prev - 1.0) if prev > 0 else 0.0
             )
-            if was_cached:
-                cached_hits += 1
+
+        for signal_date, rating, decision_md in scheduled.get(str(trade_date), []):
+            equity_before = cash + shares * px
+            current_value = shares * px
+            previous_weight = (
+                current_value / equity_before if equity_before > 0 else 0.0
+            )
+            ctx.update({
+                "signal_date": signal_date,
+                "execution_date": str(trade_date),
+                "execution_price": px,
+                "current_weight": previous_weight,
+                "current_position_value": current_value,
+            })
+            # Avoid accidentally carrying metadata from an earlier sizing call.
+            ctx.pop("risk_decision", None)
+            ctx.pop("risk_warning", None)
+            requested_weight = weight_fn(rating, signal_date, ctx)
+            risk_decision = ctx.get("risk_decision")
+            risk_warning = ctx.get("risk_warning")
+
+            # None means a literal Hold: do not recompute the old target against
+            # the new equity, do not touch shares/cash, and charge no fee.
+            if requested_weight is None:
+                desired_value = current_value
+                traded_notional = 0.0
+                cost = 0.0
+                target_weight: float | None = None
             else:
-                cached_misses += 1
-            if was_degraded:
-                degraded_decision_count += 1
+                target_weight = float(np.clip(requested_weight, 0.0, 1.0))
+                desired_value = target_weight * equity_before
+                traded_notional = abs(desired_value - current_value)
+                cost = traded_notional * (cost_bps / 10_000.0)
+                cash += (current_value - desired_value) - cost
+                shares = desired_value / px
 
-            target_weight = weight_fn(rating, trade_date, ctx)
-
-            # None == "hold": carry the prior weight, still record the decision.
-            if target_weight is None:
-                target_weight = current_weight
-            target_weight = float(np.clip(target_weight, 0.0, 1.0))
-
-            desired_value = target_weight * equity
-            current_value = shares * float(price)
-            traded_notional = abs(desired_value - current_value)
             total_traded_notional += traded_notional
-            cost = traded_notional * (cost_bps / 10_000.0)
+            equity_after = cash + shares * px
+            executed_weight = (
+                shares * px / equity_after if equity_after > 0 else 0.0
+            )
+            tolerance = max(1e-8, abs(equity_before) * 1e-12)
+            is_rebalance = traded_notional > tolerance
 
-            # Execute rebalance at this close, net of cost.
-            cash += (current_value - desired_value) - cost
-            shares = desired_value / float(price) if float(price) > 0 else 0.0
-            current_weight = target_weight
-
-            raw_ret = _asset_return(prices, trade_date, holding_days)
+            raw_ret = _asset_return(prices, str(trade_date), holding_days)
             alpha = None
             if raw_ret is not None and index_prices is not None and not index_prices.empty:
-                idx_ret = _asset_return(index_prices, trade_date, holding_days)
+                idx_ret = _asset_return(index_prices, str(trade_date), holding_days)
                 if idx_ret is not None:
                     alpha = raw_ret - idx_ret
 
-            trades.append(TradeRow(
-                date=trade_date,
+            row = TradeRow(
+                date=signal_date,
                 rating=rating,
                 target_weight=target_weight,
-                executed_weight=target_weight,
-                price=float(price),
+                executed_weight=executed_weight,
+                price=px,
                 raw_return=raw_ret,
                 alpha_vs_index=alpha,
                 decision_excerpt=_excerpt(decision_md),
-            ))
+                execution_date=str(trade_date),
+                previous_weight=previous_weight,
+                traded_notional=traded_notional,
+                transaction_cost=cost,
+                is_rebalance=is_rebalance,
+                stop_loss=getattr(risk_decision, "stop_loss", None),
+                risk_action=getattr(risk_decision, "action", None),
+                risk_warning=str(risk_warning) if risk_warning else None,
+            )
+            trades.append(row)
+
+            was_invested = previous_weight > 1e-12
+            is_invested = executed_weight > 1e-12
+            if not was_invested and is_invested:
+                opening_trade = row
+                # Pre-fill equity makes the eventual episode return net of the
+                # entry transaction cost already deducted from the portfolio.
+                opening_equity = equity_before
+            elif was_invested and not is_invested:
+                realized = _finish_open_position_episode(
+                    opening_trade, opening_equity, equity_after,
+                )
+                if realized is not None:
+                    ctx["realized_returns"].append(realized)
+                opening_trade = None
+                opening_equity = None
+
+            # Costs are part of same-day equity and the next risk decision must
+            # see them.  Refresh the latest history values after every fill.
+            equity_curve[-1] = float(equity_after)
+            ctx["equity_history"][-1] = float(equity_after)
+            if len(equity_curve) >= 2:
+                prev = equity_curve[-2]
+                ctx["returns_history"][-1] = (
+                    float(equity_after / prev - 1.0) if prev > 0 else 0.0
+                )
 
             if progress:
                 logger.info(
-                    "%s %s: rating=%s weight=%.2f equity=%.0f",
-                    trade_date, ticker, rating, target_weight, equity,
+                    "%s signal %s %s: rating=%s weight=%.2f notional=%.2f equity=%.0f",
+                    signal_date, trade_date, ticker, rating, executed_weight,
+                    traded_notional, equity_after,
                 )
 
     if len(equity_curve) < 2:
@@ -377,10 +530,31 @@ def run_backtest(
             "need a wider date window."
         )
 
-    # --- Buy & hold benchmark of the SAME ticker (the "can we beat holding?") -
-    first_price = float(prices.loc[prices.index >= sorted_dates[0]].iloc[0])
-    bh_shares = initial_capital / first_price if first_price > 0 else 0.0
-    bh_curve = [bh_shares * float(p) for p in prices.loc[prices.index >= sorted_dates[0]].values]
+    # Close any still-open position episode at the final marked equity.  This is
+    # the actual strategy P&L (including costs and any intervening rebalances),
+    # not the underlying asset's hypothetical forward direction.
+    if opening_trade is not None:
+        _finish_open_position_episode(
+            opening_trade, opening_equity, float(equity_curve[-1]),
+        )
+
+    # --- Buy & hold benchmark of the SAME ticker --------------------------
+    # Align entry with the first executable strategy bar rather than granting
+    # B&H (or the strategy) the unavailable signal-day close.
+    first_execution_date = min(scheduled) if scheduled else None
+    bh_cash = initial_capital
+    bh_shares = 0.0
+    bh_curve: list[float] = []
+    for date, price in zip(
+        equity_dates,
+        prices.loc[prices.index >= sorted_dates[0]].values,
+        strict=True,
+    ):
+        px = float(price)
+        if first_execution_date is not None and date >= first_execution_date and bh_shares == 0.0:
+            bh_shares = bh_cash / px
+            bh_cash = 0.0
+        bh_curve.append(float(bh_cash + bh_shares * px))
 
     metrics = compute_metrics(
         equity_curve,
@@ -429,12 +603,19 @@ def run_backtest(
             "asset_type": asset_type,
             "run_tag": run_tag,
             "cost_bps": cost_bps,
+            "execution_lag_bars": execution_lag_bars,
+            "execution_price": "next available close",
+            "periods_per_year": periods_per_year,
             "rating_to_weight": dict(rating_to_weight or DEFAULT_RATING_TO_WEIGHT),
             "index_benchmark": index_name,
+            "risk_warnings": sorted({
+                t.risk_warning for t in trades if t.risk_warning
+            }),
         },
         cached_hits=cached_hits,
         cached_misses=cached_misses,
         degraded_decision_count=degraded_decision_count,
+        unexecuted_decision_count=unexecuted_decision_count,
     )
 
 
@@ -454,15 +635,18 @@ def _augment_metrics(
     only: no I/O, no effect on any agent input or on the equity-derived metrics
     themselves.
     """
-    # Win rate: share of rebalances whose holding-window asset return was
-    # positive. Trades whose ``raw_return`` is None (not enough forward price
-    # data to measure) are excluded from the denominator rather than counted as
-    # losses, so the rate reflects only decidable rebalances.
-    decided = [t for t in trades if t.raw_return is not None]
-    if decided:
-        wins = sum(1 for t in decided if t.raw_return is not None and t.raw_return > 0)
-        metrics.win_rate = wins / len(decided)
-    metrics.num_trades = len(trades)
+    # Win rate is based on net P&L of actual long-position episodes.  Signal
+    # direction and the asset's hypothetical forward return are not trades:
+    # an all-cash strategy therefore has no win rate instead of reporting 100%
+    # merely because the underlying happened to rise.
+    position_returns = [
+        float(t.position_return)
+        for t in trades
+        if t.position_return is not None and np.isfinite(t.position_return)
+    ]
+    if position_returns:
+        metrics.win_rate = sum(ret > 0.0 for ret in position_returns) / len(position_returns)
+    metrics.num_trades = len(position_returns)
 
     # Annualized turnover: traded notional per unit of average equity, per year.
     if equity and len(equity) >= 2 and periods_per_year > 0:
@@ -565,7 +749,9 @@ def _run_event_study(
 
         if not trades:
             return
-        event_dates = [t.date for t in trades]
+        # The price reaction window starts when the signal was executable, not
+        # at the already-consumed signal-day close.
+        event_dates = [t.execution_date or t.date for t in trades]
         ratings = [t.rating for t in trades]
 
         # Widen backwards ~400 calendar days (~270 trading days) to cover the

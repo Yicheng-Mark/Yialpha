@@ -26,7 +26,8 @@ from pathlib import Path
 # Reconfigure before anything logs.
 for _stream in (sys.stdout, sys.stderr):
     with contextlib.suppress(AttributeError, ValueError):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+        reconfigure = _stream.reconfigure  # type: ignore[union-attr]
+        reconfigure(encoding="utf-8", errors="replace")
 
 # Make the project root importable when launched as a script
 # (``python web/app.py`` puts web/ on sys.path, not its parent). ``web`` is not
@@ -41,8 +42,8 @@ from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from cli.utils import normalize_ticker_symbol  # noqa: E402
 from web import health, runner, store  # noqa: E402
+from yiagents.cli.utils import normalize_ticker_symbol  # noqa: E402
 from yiagents.dataflows.utils import safe_ticker_component  # noqa: E402
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -70,7 +71,49 @@ def _assert_cwd_is_project_root() -> None:
 
 _assert_cwd_is_project_root()
 
-app = FastAPI(title="YiAgents Web", version="0.1.0")
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Startup/shutdown lifecycle.
+
+    On startup, clear any stale busy slot left by a previous process that
+    crashed mid-analysis. Fail-closed: we do NOT reattach to or trust an
+    orphaned ``run_robust`` subprocess — its PID is lost with the old process.
+    The orphan writes its result to disk and exits naturally; the freed slot
+    makes the UI usable again immediately.
+    """
+    runner.registry.reset()
+    yield
+
+
+app = FastAPI(title="YiAgents Web", version="0.1.0", lifespan=_lifespan)
+
+_CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data:",
+        "font-src 'self'",
+        "connect-src 'self'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+    )
+)
+
+
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    """Apply defense-in-depth browser restrictions to every response."""
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = _CONTENT_SECURITY_POLICY
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 # Serve the on-disk report tree read-only so the detail view's "download
@@ -150,10 +193,12 @@ async def api_analyze(req: AnalyzeReq):
     # param submitted by the user, so a malformed value is a 400 bad-request,
     # not a missing resource.
     try:
-        datetime.strptime(req.date, "%Y-%m-%d")
+        analysis_date = datetime.strptime(req.date, "%Y-%m-%d").date()
     except ValueError:
         raise HTTPException(status_code=400, detail=f"bad date: {req.date!r}") from None
-    if req.asset_type not in ("auto", "stock", "crypto", "crypto_perp"):
+    if analysis_date > datetime.now().date():
+        raise HTTPException(status_code=400, detail="analysis date cannot be in the future")
+    if req.asset_type not in ("auto", "stock", "crypto", "crypto_spot", "crypto_perp"):
         raise HTTPException(status_code=400, detail=f"bad asset_type: {req.asset_type!r}")
     if req.language not in ("en", "zh"):
         raise HTTPException(status_code=400, detail=f"bad language: {req.language!r}")
@@ -168,6 +213,10 @@ async def api_analyze(req: AnalyzeReq):
 
     task_id = await runner.spawn(ticker, req.date, req.asset_type, req.language)
     st = runner.registry.get(task_id)
+    if st is None:
+        # spawn() registered the task; this is unreachable in practice but
+        # keeps the type contract honest (registry.get returns TaskState | None).
+        raise HTTPException(status_code=500, detail="task registration failed")
     return {"task_id": task_id, "started_at": st.started_at}
 
 

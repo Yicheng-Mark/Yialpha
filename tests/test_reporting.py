@@ -34,6 +34,21 @@ def test_write_report_tree_creates_files(tmp_path):
 
 
 @pytest.mark.unit
+def test_report_prefers_final_risk_adjusted_decision(tmp_path):
+    state = _state()
+    state["final_trade_decision"] = (
+        "**Rating**: Buy\n\n## Quantitative Risk Overlay\n"
+        "- **Target Weight**: 5.0%\n- **Stop Loss**: 95.00"
+    )
+    out = write_report_tree(state, "AAPL", tmp_path)
+    portfolio = (tmp_path / "5_portfolio" / "decision.md").read_text(encoding="utf-8")
+    assert "Quantitative Risk Overlay" in portfolio
+    assert "Stop Loss" in portfolio
+    assert portfolio != state["risk_debate_state"]["judge_decision"]
+    assert "Final Risk-Adjusted Decision" in out.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
 def test_save_reports_explicit_path(tmp_path):
     # Unbound: with an explicit save_path, the method doesn't touch self/config.
     out = YiAgentsGraph.save_reports(None, _state(), "AAPL", save_path=tmp_path)

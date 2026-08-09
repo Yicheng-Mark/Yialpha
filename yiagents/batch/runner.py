@@ -14,10 +14,9 @@ Why this is safe (see plan yiagents-prancy-acorn.md):
   * Shared BACKING files (memory log, OHLCV cache) are serialized by their own
     file locks (yiagents.batch.locks) — installed unconditionally, harmless when
     uncontended.
-  * One batch = one config. YiAgentsGraph.__init__ mutates a module-global
-    config via set_config(), so all K workers MUST carry identical config; we
-    assert it (otherwise a worker fetches data with another asset class's
-    vendors).
+  * One batch = one config. The submitting ContextVar snapshot is copied into
+    every worker; a uniformity guard rejects an accidentally divergent graph
+    config before any work begins.
 
 Master switch ``batch_concurrency`` (default False): when off, the runner runs
 strictly serial (K=1, deterministic order) and is byte-equivalent to today.
@@ -30,18 +29,66 @@ import logging
 import queue
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
 
 from tqdm import tqdm
 
+from yiagents.batch.locks import FileLock
+from yiagents.dataflows.config import get_config, set_config, submit_with_context
+from yiagents.dataflows.utils import safe_ticker_component
 from yiagents.graph.trading_graph import YiAgentsGraph
 
 logger = logging.getLogger(__name__)
 
-# Config keys that drive LLM + vendor behaviour. The module-global set_config()
-# means all workers must agree on these; results_dir / cache paths are shared
-# and intentionally excluded from the uniformity check.
+
+@contextmanager
+def serialized_run(
+    config: dict, ticker: str, trade_date: str, asset_type: str
+) -> Iterator[None]:
+    """Serialize one logical run across threads *and* processes.
+
+    A run touches both checkpoint/cache state and final report/temp paths. Lock
+    under both configured roots so independently launched CLI/Web processes
+    coordinate whenever either shared resource would collide. User-controlled
+    values are validated or hashed before becoming path components.
+    """
+    safe_ticker = safe_ticker_component(ticker.strip().upper())
+    # Reports, checkpoints and temporary state are currently keyed only by
+    # ticker/date. Keep asset_type in this public API for caller compatibility,
+    # but deliberately leave it out of the lock key: unlike asset modes must
+    # still serialize instead of racing on those shared paths.
+    del asset_type
+    run_digest = hashlib.sha256(
+        json.dumps(
+            [safe_ticker, str(trade_date)],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+
+    lock_paths: set[Path] = set()
+    for config_key in ("data_cache_dir", "results_dir"):
+        root_value = config.get(config_key)
+        if not root_value:
+            raise ValueError(f"{config_key} is required for batch run locking")
+        lock_dir = Path(root_value).expanduser().resolve() / ".run_locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_paths.add(lock_dir / f"{safe_ticker}-{run_digest}")
+
+    with ExitStack() as stack:
+        # Stable acquisition order prevents deadlock when the two configured
+        # roots differ between otherwise overlapping callers.
+        for path in sorted(lock_paths, key=str):
+            stack.enter_context(FileLock(path))
+        yield
+
+
+# Config keys that drive LLM + vendor behaviour. Workers intentionally share
+# one submitting context snapshot, so divergent graph configs are rejected;
+# results/cache roots are shared and intentionally excluded from this check.
 _UNIFORM_CONFIG_KEYS = (
     "llm_provider",
     "deep_think_llm",
@@ -115,6 +162,12 @@ class BatchRunner:
         self.selected_analysts = selected_analysts
         self._graph_factory = graph_factory or self._default_graph_factory
         self._signature = _config_signature(config)
+
+        # Graph construction and every worker submission below inherit this
+        # exact context snapshot. ContextVar values do not otherwise cross a
+        # ThreadPoolExecutor boundary.
+        set_config(config)
+        self._runtime_config = get_config()
 
         concurrency = bool(config.get("batch_concurrency", False))
         requested = workers if workers is not None else int(config.get("batch_workers", 3))
@@ -201,35 +254,41 @@ class BatchRunner:
 
     def _run_one(self, ticker: str, trade_date: str, asset_type: str) -> dict:
         """Acquire a graph from the pool, run propagate + save_reports, release."""
-        self._worker_ctx.ticker = ticker
-        graph = self._pool.get()
-        start = time.monotonic()
-        try:
-            final_state, signal = graph.propagate(
-                ticker, trade_date, asset_type=asset_type
-            )
-            report_path = graph.save_reports(final_state, ticker)
-            return {
-                "ticker": ticker,
-                "state": final_state,
-                "signal": signal,
-                "report_path": report_path,
-                "elapsed": time.monotonic() - start,
-                "error": None,
-            }
-        except Exception as exc:
-            # One ticker failing must not abort the batch.
-            logger.exception("Ticker %s failed in batch", ticker)
-            return {
-                "ticker": ticker,
-                "state": None,
-                "signal": None,
-                "report_path": None,
-                "elapsed": time.monotonic() - start,
-                "error": exc,
-            }
-        finally:
-            self._pool.put(graph)
+        # Defensive re-bind: normal submissions already carry a copied context,
+        # but this also covers a runner constructed in one context and invoked
+        # from another. Nested fan-out submissions then inherit the same config.
+        set_config(self._runtime_config)
+        with serialized_run(self._runtime_config, ticker, trade_date, asset_type):
+            self._worker_ctx.ticker = ticker
+            graph = self._pool.get()
+            start = time.monotonic()
+            try:
+                final_state, signal = graph.propagate(
+                    ticker, trade_date, asset_type=asset_type
+                )
+                report_path = graph.save_reports(final_state, ticker)
+                return {
+                    "ticker": ticker,
+                    "state": final_state,
+                    "signal": signal,
+                    "report_path": report_path,
+                    "elapsed": time.monotonic() - start,
+                    "error": None,
+                }
+            except Exception as exc:
+                # One ticker failing must not abort the batch.
+                logger.exception("Ticker %s failed in batch", ticker)
+                return {
+                    "ticker": ticker,
+                    "state": None,
+                    "signal": None,
+                    "report_path": None,
+                    "elapsed": time.monotonic() - start,
+                    "error": exc,
+                }
+            finally:
+                self._pool.put(graph)
+                self._worker_ctx.ticker = None
 
     def _run_serial(
         self, tickers: list[str], trade_date: str, asset_type: str
@@ -243,10 +302,11 @@ class BatchRunner:
         self, tickers: list[str], trade_date: str, asset_type: str
     ) -> list[dict]:
         fail_fast = bool(self.config.get("batch_fail_fast", False))
-        results: list[dict] = []
+        results_by_future: dict = {}
+        failed_ticker: str | None = None
         with ThreadPoolExecutor(max_workers=self.workers) as ex:
             future_to_ticker = {
-                ex.submit(self._run_one, t, trade_date, asset_type): t
+                submit_with_context(ex, self._run_one, t, trade_date, asset_type): t
                 for t in tickers
             }
             pbar = (
@@ -267,18 +327,52 @@ class BatchRunner:
                             "state": None,
                             "signal": None,
                             "report_path": None,
+                            "elapsed": 0.0,
                             "error": exc,
                         }
-                    results.append(res)
+                    results_by_future[fut] = res
                     if pbar:
                         pbar.update(1)
                     if fail_fast and res["error"] is not None:
+                        failed_ticker = t
                         for f in future_to_ticker:
-                            f.cancel()
+                            if f is not fut:
+                                f.cancel()
                         break
             finally:
                 if pbar:
                     pbar.close()
-        # as_completed yields completion order; restore input order.
-        by_ticker = {r["ticker"]: r for r in results}
-        return [by_ticker[t] for t in tickers]
+
+        # Leaving the executor waits for already-running work and cancels only
+        # futures that had not started. Record every input position explicitly:
+        # the old ticker-keyed reconstruction raised KeyError as soon as
+        # fail-fast left a future uncollected (and also collapsed duplicates).
+        for fut, ticker in future_to_ticker.items():
+            if fut in results_by_future:
+                continue
+            if fut.cancelled():
+                error = RuntimeError(
+                    f"cancelled by batch_fail_fast after {failed_ticker or 'another ticker'} failed"
+                )
+                results_by_future[fut] = {
+                    "ticker": ticker,
+                    "state": None,
+                    "signal": None,
+                    "report_path": None,
+                    "elapsed": 0.0,
+                    "error": error,
+                }
+                continue
+            try:
+                results_by_future[fut] = fut.result()
+            except Exception as exc:
+                results_by_future[fut] = {
+                    "ticker": ticker,
+                    "state": None,
+                    "signal": None,
+                    "report_path": None,
+                    "elapsed": 0.0,
+                    "error": exc,
+                }
+
+        return [results_by_future[fut] for fut in future_to_ticker]

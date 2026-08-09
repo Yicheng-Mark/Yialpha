@@ -15,6 +15,7 @@ from yiagents.agents.utils.agent_utils import (
     get_verified_market_snapshot,
 )
 from yiagents.agents.utils.prompt_builder import build_collaborator_prompt, build_fincot_prompt
+from yiagents.dataflows.utils import is_historical_date
 
 # Appended to the system message ONLY for crypto_perp runs. Nudges the analyst
 # to use the perp-native OHLCV and to treat funding/OI + positioning/order-flow
@@ -39,6 +40,15 @@ _PERP_NUDGE = (
     "marker, say so plainly rather than inventing values."
 )
 
+_PERP_HISTORICAL_NUDGE = (
+    " This is a point-in-time historical analysis of a Binance USDT-M "
+    "PERPETUAL. Use get_binance_klines and get_binance_funding_rate with date "
+    "bounds ending on the stated analysis date. Current open-interest snapshots, "
+    "long/short positioning, taker order flow, and basis are intentionally not "
+    "available because they cannot be reconstructed reliably as of that date. "
+    "Do not infer or fabricate those omitted signals."
+)
+
 # Appended to the system message ONLY for crypto_spot runs. Spot shares the
 # generic OHLCV/indicator/snapshot tools with the stock baseline (the symbol
 # resolves correctly), so this nudge only directs the analyst to the spot-
@@ -56,6 +66,13 @@ _SPOT_NUDGE = (
     "get_verified_market_snapshot tools are available and resolve correctly for "
     "this symbol — use them as usual. If a tool returns a sentinel/unavailable "
     "marker, say so plainly rather than inventing values."
+)
+
+_SPOT_HISTORICAL_NUDGE = (
+    " This is a point-in-time historical analysis of a Binance SPOT pair. Use "
+    "get_binance_spot_klines with explicit date bounds. The rolling 24-hour "
+    "ticker and current spot-perpetual basis are intentionally unavailable "
+    "because they would expose present-day data; do not infer them."
 )
 
 # The indicator catalog the analyst selects from. Shared by both prompt forms so
@@ -153,6 +170,7 @@ def create_market_analyst(llm):
     def market_analyst_node(state):
         current_date = state["trade_date"]
         instrument_context = get_instrument_context_from_state(state)
+        historical = is_historical_date(current_date)
 
         # Baseline stock tools. Non-perp runs bind exactly this 3-element list
         # (same objects, same order) so the baseline path is byte-identical.
@@ -173,14 +191,16 @@ def create_market_analyst(llm):
             # MACD-style indicators are therefore not computed for perp (the
             # analyst reads the klines CSV directly) — an accepted trade-off.
             # The non-perp branch is untouched, so stock runs are unaffected.
-            tools = [
-                get_binance_klines,
-                get_binance_funding_rate,
-                get_binance_open_interest,
-                get_binance_long_short_ratio,
-                get_binance_taker_buy_sell,
-                get_binance_basis,
-            ]
+            tools = [get_binance_klines, get_binance_funding_rate]
+            if not historical:
+                tools.extend(
+                    [
+                        get_binance_open_interest,
+                        get_binance_long_short_ratio,
+                        get_binance_taker_buy_sell,
+                        get_binance_basis,
+                    ]
+                )
         elif state.get("asset_type") == "crypto_spot":
             # A Binance SPOT pair. Unlike perp, the symbol resolves correctly
             # via Yahoo (BTCUSDT -> BTC-USD), so get_indicators /
@@ -191,19 +211,26 @@ def create_market_analyst(llm):
             # reference. Stock/crypto/perp branches are untouched.
             tools = [
                 get_binance_spot_klines,
-                get_binance_spot_ticker24,
-                get_binance_spot_perp_basis,
                 get_indicators,
                 get_verified_market_snapshot,
             ]
+            if not historical:
+                tools[1:1] = [
+                    get_binance_spot_ticker24,
+                    get_binance_spot_perp_basis,
+                ]
 
         system_message = _system_message()
         # Perp/spot-only system-message append; other asset types leave
         # system_message unchanged (byte-identical to the baseline).
         if state.get("asset_type") == "crypto_perp":
-            system_message = system_message + _PERP_NUDGE
+            system_message = system_message + (
+                _PERP_HISTORICAL_NUDGE if historical else _PERP_NUDGE
+            )
         elif state.get("asset_type") == "crypto_spot":
-            system_message = system_message + _SPOT_NUDGE
+            system_message = system_message + (
+                _SPOT_HISTORICAL_NUDGE if historical else _SPOT_NUDGE
+            )
 
         prompt = build_collaborator_prompt(include_tools=True)
 

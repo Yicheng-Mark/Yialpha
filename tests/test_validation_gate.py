@@ -59,13 +59,13 @@ def test_gate_fails_when_dsr_zero_or_below():
 
 
 @pytest.mark.unit
-def test_gate_marginal_pass_flagged_when_below_hurdle():
+def test_gate_fails_when_positive_dsr_is_below_hurdle():
     baseline = _result(total_return=0.02, dsr=0.1, bh_total=0.05)
     improved = [_result(total_return=0.12, dsr=0.2, bh_total=0.05)]  # dsr>0 but <0.5
     v = evaluate_gate(baseline, improved)
-    assert v.passes is True
+    assert v.passes is False
     assert v.clears_hurdle is False
-    assert any("marginal" in n.lower() for n in v.notes)
+    assert any("mandatory" in n.lower() for n in v.notes)
 
 
 @pytest.mark.unit
@@ -107,6 +107,7 @@ def test_costs_not_applied_adds_note():
     baseline = _result(total_return=0.02, dsr=0.1, bh_total=0.05)
     improved = [_result(total_return=0.12, dsr=0.6, bh_total=0.05)]
     v = evaluate_gate(baseline, improved, cost_bps_already_applied=False)
+    assert v.passes is False
     assert any("cost" in n.lower() for n in v.notes)
 
 
@@ -115,3 +116,27 @@ def test_empty_improved_raises():
     baseline = _result(total_return=0.02, dsr=0.1, bh_total=0.05)
     with pytest.raises(ValueError):
         evaluate_gate(baseline, [])
+
+
+@pytest.mark.unit
+def test_gate_uses_configured_hurdle_for_pass():
+    baseline = _result(total_return=0.02, dsr=0.1, bh_total=0.05)
+    improved = [_result(total_return=0.12, dsr=0.45, bh_total=0.05)]
+    assert evaluate_gate(baseline, improved, hurdle_dsr=0.4).passes is True
+    assert evaluate_gate(baseline, improved, hurdle_dsr=0.5).passes is False
+
+
+@pytest.mark.unit
+def test_gate_averages_paired_baseline_runs():
+    baselines = [
+        _result(total_return=0.01, dsr=0.1, sharpe=0.2, bh_total=0.05),
+        _result(total_return=0.05, dsr=0.2, sharpe=0.6, bh_total=0.05),
+    ]
+    improved = [
+        _result(total_return=0.10, dsr=0.6, sharpe=1.0, bh_total=0.05),
+        _result(total_return=0.12, dsr=0.7, sharpe=1.2, bh_total=0.05),
+    ]
+    verdict = evaluate_gate(baselines, improved)
+    assert verdict.n_baseline_runs == 2
+    assert verdict.margin_vs_baseline["total_return"] == pytest.approx(0.08)
+    assert verdict.margin_vs_baseline["sharpe"] == pytest.approx(0.7)

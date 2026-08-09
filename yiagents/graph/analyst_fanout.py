@@ -42,6 +42,7 @@ from yiagents.agents.utils.agent_utils import (
     create_msg_delete,
     get_clear_placeholder_from_state,
 )
+from yiagents.dataflows.config import submit_with_context
 
 from .analyst_execution import AnalystExecutionPlan, AnalystNodeSpec
 
@@ -255,7 +256,8 @@ def create_analyst_fanout_node(
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_spec_key: dict[concurrent.futures.Future, str] = {}
             for spec, clone in clones:
-                future = executor.submit(
+                future = submit_with_context(
+                    executor,
                     _invoke_analyst_subgraph,
                     subgraphs[spec.key],
                     clone,

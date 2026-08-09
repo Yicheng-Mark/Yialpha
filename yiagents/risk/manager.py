@@ -300,32 +300,59 @@ def build_backtest_weight_fn(
     sector: str | None = None,
     price_lookup: Callable[[str], float | None] | None = None,
     atr_lookup: Callable[[str], float | None] | None = None,
-) -> Callable[[str, str, dict[str, Any]], float]:
+) -> Callable[[str, str, dict[str, Any]], float | None]:
     """Adapt a RiskManager into the backtest engine's ``weight_fn`` signature.
 
     The engine threads a ``ctx`` dict (``equity_history``, ``returns_history``,
     ``holding_days``). This closure maintains a :class:`PortfolioState` across
     the backtest so the breaker's drawdown and Kelly's ledger accumulate
     correctly. Realized trade returns are fed back into the ledger from
-    ``ctx['realized_returns']`` if the caller populates it.
+    ``ctx['realized_returns']`` if the caller populates it.  The full
+    :class:`RiskDecision` is also published as ``ctx['risk_decision']`` so the
+    engine can preserve fields such as ``stop_loss`` and explicitly label any
+    execution limitation instead of silently reducing the overlay to a weight.
     """
     state = PortfolioState()
+    consumed_realized = 0
 
-    def _fn(rating: str, date: str, ctx: dict[str, Any]) -> float:
+    def _fn(rating: str, date: str, ctx: dict[str, Any]) -> float | None:
+        nonlocal consumed_realized
         equity_series = ctx.get("equity_history") or [0.0]
         state.equity = float(equity_series[-1]) if equity_series else 0.0
         state.returns_history = list(ctx.get("returns_history") or [])
+        state.positions[ticker] = float(ctx.get("current_position_value") or 0.0)
         # Fold in realized closed-trade returns for Kelly win-rate (if provided).
-        for ret in (ctx.get("realized_returns") or []):
+        realized = list(ctx.get("realized_returns") or [])
+        for ret in realized[consumed_realized:]:
             state.trade_history.append({"return": float(ret)})
+        consumed_realized = len(realized)
 
-        price = price_lookup(date) if price_lookup else None
+        price = (price_lookup(date) if price_lookup
+                 else ctx.get("execution_price"))
         atr = atr_lookup(date) if atr_lookup else None
         decision = risk_manager.decide(
             ticker, rating, state, price=price, atr=atr, sector=sector, date=date,
         )
+        ctx["risk_decision"] = decision
+        if risk_manager.use_atr_stop and decision.target_weight > 0.0:
+            if decision.stop_loss is None:
+                ctx["risk_warning"] = (
+                    "ATR stop unavailable for this backtest decision: provide an "
+                    "as-of atr_lookup; no stop was simulated."
+                )
+            else:
+                ctx["risk_warning"] = (
+                    "ATR stop is preserved as advisory metadata only; this "
+                    "close-price backtest does not simulate stop-trigger fills."
+                )
         # Reflect the chosen weight into the state's position map so the next
         # call sees the (approximate) resulting exposure for is_new checks.
+        # A literal Hold carries the actual exposure unless a hard stop requires
+        # flattening; returning a numeric target here would cause needless
+        # drift-rebalancing and fees on every Hold signal.
+        if rating == "Hold" and decision.breaker.regime != "hard_stop":
+            state.positions[ticker] = float(ctx.get("current_position_value") or 0.0)
+            return None
         state.positions[ticker] = decision.target_weight * state.equity
         return decision.target_weight
 

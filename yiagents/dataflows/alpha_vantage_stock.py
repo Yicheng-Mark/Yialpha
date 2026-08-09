@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from .alpha_vantage_common import _filter_csv_by_date_range, _make_api_request
+from .utils import current_pit_end
 
 
 def get_stock(
@@ -20,6 +21,9 @@ def get_stock(
     Returns:
         CSV string containing the daily adjusted time series data filtered to the date range.
     """
+    # PIT guard: clamp the fetch window to the analysis date so a backtest
+    # never sees rows after it. Live mode (no analysis date pinned) is a no-op.
+    end_date = current_pit_end(end_date) or end_date
     # Parse dates to determine the range
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     today = datetime.now()
