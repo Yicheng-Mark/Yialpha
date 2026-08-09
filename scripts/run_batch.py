@@ -46,8 +46,8 @@ for _stream in (sys.stdout, sys.stderr):
     with contextlib.suppress(AttributeError, ValueError):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
-from cli.utils import detect_asset_type, is_valid_ticker_input  # noqa: E402
 from yiagents.batch.runner import BatchRunner  # noqa: E402
+from yiagents.cli.utils import detect_asset_type, is_valid_ticker_input  # noqa: E402
 from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
 
 
@@ -112,6 +112,15 @@ def main() -> int:
     config = DEFAULT_CONFIG.copy()
     # 批量入口默认开启并发（可用 env YIAGENTS_BATCH_CONCURRENCY=false 关掉）。
     config.setdefault("batch_concurrency", True)
+    # 显式 --workers 是权威的：>1 强制开启并发，==1 显式串行，缺省才尊重
+    # env/默认。这样 env YIAGENTS_BATCH_CONCURRENCY=false 不会把用户显式传的
+    # --workers 5 静默压回 1（与 yiagents.cli.main._apply_batch_worker_override
+    # 同语义，避免导入整个 CLI 只为复用这一个纯函数）。
+    if args.workers is not None:
+        if args.workers < 1:
+            print("❌ --workers 必须 >= 1")
+            return 2
+        config["batch_concurrency"] = args.workers > 1
     if args.out:
         config["results_dir"] = args.out
 

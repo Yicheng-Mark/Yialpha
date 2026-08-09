@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "yiagents"
 version = "0.3.0"
-description = "YiAgents: Multi-Agents LLM Financial Trading Framework"
+description = "YiAgents: Multi-Agent LLM Financial Analysis Framework"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -79,13 +79,13 @@ a-share-tushare = [
 ]
 
 [project.scripts]
-yiagents = "cli.main:app"
+yiagents = "yiagents.cli.main:app"
 
 [tool.setuptools.packages.find]
-include = ["yiagents*", "cli*"]
+include = ["yiagents*"]
 
 [tool.setuptools.package-data]
-cli = ["static/*"]
+"yiagents.cli" = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -114,7 +114,7 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["F401"]   # intentional re-exports
-"cli/main.py"    = ["B008"]   # typer.Option(...) defaults are the framework's idiom
+"yiagents/cli/main.py" = ["B008"]  # typer.Option(...) defaults are the framework's idiom
 
 [tool.ruff.lint.isort]
 # Keep multiple aliased names from one module in a single combined import block

@@ -12,7 +12,8 @@ from pathlib import Path
 # 修 batch 命令打印 Rich 结果表（含 ✅/❌）时的 GBK 崩溃，对齐 scripts/run_baseline.py。
 for _stream in (sys.stdout, sys.stderr):
     with contextlib.suppress(AttributeError, ValueError):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+        reconfigure = _stream.reconfigure  # type: ignore[union-attr]
+        reconfigure(encoding="utf-8", errors="replace")
 
 # noqa: E402 — all imports sit after the UTF-8 reconfigure guard above, which must
 # run first so ✅/❌/中文 render on a GBK Windows console.  The guard is a platform
@@ -30,8 +31,18 @@ from rich.spinner import Spinner  # noqa: E402
 from rich.table import Table  # noqa: E402
 from rich.text import Text  # noqa: E402
 
-from cli.stats_handler import StatsCallbackHandler  # noqa: E402
-from cli.utils import (  # noqa: E402
+from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
+from yiagents.graph.analyst_execution import (  # noqa: E402
+    AnalystWallTimeTracker,
+    build_analyst_execution_plan,
+    get_initial_analyst_node,
+    sync_analyst_tracker_from_chunk,
+)
+from yiagents.graph.trading_graph import YiAgentsGraph  # noqa: E402
+from yiagents.reporting import write_report_tree  # noqa: E402
+
+from .stats_handler import StatsCallbackHandler  # noqa: E402
+from .utils import (  # noqa: E402
     ask_anthropic_effort,
     ask_gemini_thinking_config,
     ask_glm_region,
@@ -51,21 +62,12 @@ from cli.utils import (  # noqa: E402
     select_research_depth,
     select_shallow_thinking_agent,
 )
-from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
-from yiagents.graph.analyst_execution import (  # noqa: E402
-    AnalystWallTimeTracker,
-    build_analyst_execution_plan,
-    get_initial_analyst_node,
-    sync_analyst_tracker_from_chunk,
-)
-from yiagents.graph.trading_graph import YiAgentsGraph  # noqa: E402
-from yiagents.reporting import write_report_tree  # noqa: E402
 
 console = Console()
 
 app = typer.Typer(
     name="YiAgents",
-    help="YiAgents CLI: Multi-Agents LLM Financial Trading Framework",
+    help="YiAgents CLI: Multi-Agent LLM Financial Analysis Framework",
     add_completion=True,  # Enable shell completion
 )
 
@@ -832,10 +834,28 @@ def display_complete_report(final_state):
             for title, content in risk_reports:
                 console.print(Panel(Markdown(content), title=title, border_style="blue", padding=(1, 2)))
 
-        # V. Portfolio Manager Decision
-        if risk.get("judge_decision"):
-            console.print(Panel("[bold]V. Portfolio Manager Decision[/bold]", border_style="green"))
-            console.print(Panel(Markdown(risk["judge_decision"]), title="Portfolio Manager", border_style="blue", padding=(1, 2)))
+    # V. Portfolio Manager Decision. Prefer the post-processed decision because
+    # it includes the deterministic risk overlay; the risk judge text is only
+    # a compatibility fallback for partial/legacy states.
+    risk = final_state.get("risk_debate_state") or {}
+    portfolio_decision = final_state.get("final_trade_decision") or risk.get(
+        "judge_decision"
+    )
+    if portfolio_decision:
+        console.print(
+            Panel(
+                "[bold]V. Portfolio Manager Decision[/bold]",
+                border_style="green",
+            )
+        )
+        console.print(
+            Panel(
+                Markdown(portfolio_decision),
+                title="Portfolio Manager",
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
 
 
 def update_research_team_status(status):
@@ -1013,6 +1033,21 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
     return config
 
 
+def _apply_batch_worker_override(config: dict, workers: int | None) -> dict:
+    """Make an explicit ``--workers`` value authoritative.
+
+    With no CLI value, the configured ``batch_concurrency`` master switch is
+    preserved. Supplying ``--workers`` is itself an explicit opt-in (or an
+    explicit serial request for ``1``), so the default-off switch cannot
+    silently force a requested pool back to one worker.
+    """
+    if workers is not None:
+        if workers < 1:
+            raise ValueError("workers must be at least 1")
+        config["batch_concurrency"] = workers > 1
+    return config
+
+
 def run_analysis(checkpoint: bool | None = None):
     # First get all user selections
     selections = get_user_selections()
@@ -1086,14 +1121,30 @@ def run_analysis(checkpoint: bool | None = None):
                         f.write(text)
         return wrapper
 
-    message_buffer.add_message = save_message_decorator(message_buffer, "add_message")
-    message_buffer.add_tool_call = save_tool_call_decorator(message_buffer, "add_tool_call")
-    message_buffer.update_report_section = save_report_section_decorator(message_buffer, "update_report_section")
+    message_buffer.add_message = save_message_decorator(  # type: ignore[method-assign]
+        message_buffer, "add_message"
+    )
+    message_buffer.add_tool_call = save_tool_call_decorator(  # type: ignore[method-assign]
+        message_buffer, "add_tool_call"
+    )
+    message_buffer.update_report_section = save_report_section_decorator(  # type: ignore[method-assign]
+        message_buffer, "update_report_section"
+    )
 
     # Now start the display layout
     layout = create_layout()
 
-    with Live(layout, refresh_per_second=4):
+    # BatchRunner (including the web/run_robust path) takes this same
+    # cross-process lock. The interactive streaming path bypasses BatchRunner,
+    # so it must join the shared run-lock contract explicitly.
+    from yiagents.batch.runner import serialized_run
+
+    with serialized_run(
+        config,
+        selections["ticker"],
+        selections["analysis_date"],
+        selections["asset_type"],
+    ), Live(layout, refresh_per_second=4):
         # Initial display
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
@@ -1126,13 +1177,23 @@ def run_analysis(checkpoint: bool | None = None):
         # Resolve the instrument identity once here so all agents anchor to
         # the real company (#814); the CLI builds state directly rather than
         # going through propagate(), so this must happen on the CLI path too.
+        graph._resolve_pending_entries(  # noqa: SLF001 -- mirror propagate's run contract
+            selections["ticker"],
+            as_of_date=str(selections["analysis_date"]),
+        )
+        past_context = graph.memory_log.get_past_context(
+            selections["ticker"],
+            as_of_date=str(selections["analysis_date"]),
+        )
         instrument_context = graph.resolve_instrument_context(
-            selections["ticker"], selections["asset_type"]
+            selections["ticker"], selections["asset_type"],
+            trade_date=str(selections["analysis_date"]),
         )
         init_agent_state = graph.propagator.create_initial_state(
             selections["ticker"],
             selections["analysis_date"],
             asset_type=selections["asset_type"],
+            past_context=past_context,
             instrument_context=instrument_context,
         )
         # Pass callbacks to graph config for tool execution tracking
@@ -1249,6 +1310,25 @@ def run_analysis(checkpoint: bool | None = None):
         for chunk in trace:
             final_state.update(chunk)
 
+        if not final_state:
+            raise RuntimeError("graph.stream emitted no chunks for this run")
+
+        # The interactive path streams the graph directly for live UI updates,
+        # so apply the same post-processing contract as YiAgentsGraph.propagate
+        # before updating, displaying, or saving report sections.
+        final_state = graph._apply_risk_overlay(  # noqa: SLF001
+            selections["ticker"],
+            selections["analysis_date"],
+            final_state,
+            portfolio_state=None,
+        )
+        graph.curr_state = final_state
+        graph.memory_log.store_decision(
+            ticker=selections["ticker"],
+            trade_date=selections["analysis_date"],
+            final_trade_decision=final_state["final_trade_decision"],
+        )
+
         # Update all agent statuses to completed
         for agent in message_buffer.agent_status:
             message_buffer.update_agent_status(agent, "completed")
@@ -1334,7 +1414,8 @@ def batch(
         None,
         "--workers",
         "-w",
-        help="Concurrency K (pool size). Default: YIAGENTS_BATCH_WORKERS (3).",
+        help="Concurrency K (pool size). An explicit K>1 enables concurrency; "
+        "when omitted, honor YIAGENTS_BATCH_CONCURRENCY/BATCH_WORKERS.",
     ),
 ):
     """Analyze many tickers concurrently (one API key drives many agents).
@@ -1345,8 +1426,9 @@ def batch(
     class (all workers share one config). Reports land under results_dir per
     ticker. Master switch: YIAGENTS_BATCH_CONCURRENCY (false = strictly serial).
     """
-    from cli.utils import is_valid_ticker_input
     from yiagents.batch.runner import BatchRunner
+
+    from .utils import is_valid_ticker_input
 
     bad = [t for t in tickers if not is_valid_ticker_input(t)]
     if bad:
@@ -1371,9 +1453,11 @@ def batch(
         console.print(f"[cyan]Asset type inferred: {resolved} (from {tickers[0]})[/cyan]")
 
     config = DEFAULT_CONFIG.copy()
-    # The batch entry point opts in to concurrency by default; users can force
-    # serial with YIAGENTS_BATCH_CONCURRENCY=false for a G1 baseline.
-    config.setdefault("batch_concurrency", True)
+    try:
+        _apply_batch_worker_override(config, workers)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from None
 
     console.print(
         f"[bold]Batch: {len(tickers)} tickers | date={date} | type={resolved}[/bold]"
