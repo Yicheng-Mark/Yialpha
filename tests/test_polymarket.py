@@ -3,15 +3,12 @@ ranking, formatting, graceful degradation, and router integration.
 
 All API access is mocked, so these run without a network connection.
 """
-import copy
 import unittest
 from unittest import mock
 
 import pytest
 import requests
 
-import yiagents.dataflows.config as config_module
-import yiagents.default_config as default_config
 from yiagents.dataflows import interface, polymarket
 from yiagents.dataflows.config import reset_config, set_config
 

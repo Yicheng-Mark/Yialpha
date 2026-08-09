@@ -2,14 +2,11 @@
 condition derives from VendorError, so the router catches base types and any
 vendor slots in without new handling.
 """
-import copy
 import unittest
 from unittest import mock
 
 import pytest
 
-import yiagents.dataflows.config as config_module
-import yiagents.default_config as default_config
 from yiagents.dataflows import interface
 from yiagents.dataflows.alpha_vantage_common import (
     AlphaVantageNotConfiguredError,

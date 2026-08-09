@@ -5,16 +5,13 @@ The guard raises NoMarketDataError with a stale-specific detail, so the router's
 existing try-next-vendor + single-sentinel handling applies and the sentinel
 surfaces the reason.
 """
-import copy
 import unittest
 from unittest import mock
 
 import pandas as pd
 import pytest
 
-import yiagents.dataflows.config as config_module
 import yiagents.dataflows.y_finance as y_finance
-import yiagents.default_config as default_config
 from yiagents.dataflows import interface
 from yiagents.dataflows.config import reset_config, set_config
 from yiagents.dataflows.stockstats_utils import _assert_ohlcv_not_stale
