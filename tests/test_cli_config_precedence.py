@@ -87,6 +87,70 @@ def test_one_batch_worker_explicitly_requests_serial_mode():
     assert result["batch_concurrency"] is False
 
 
+class _RecordingRunner:
+    """Captures the config/workers the CLI batch command hands to BatchRunner."""
+
+    instances = []
+
+    def __init__(self, config, workers=None, **kwargs):
+        self.config = config
+        self.workers = workers
+        type(self).instances.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def run(self, tickers, date, asset_type="stock"):
+        return [
+            {"ticker": t, "error": None, "elapsed": 0.0, "report_path": ""}
+            for t in tickers
+        ]
+
+
+@pytest.fixture
+def _cli_batch_runner(monkeypatch):
+    """Route the CLI batch command's local BatchRunner import to a recorder."""
+    _RecordingRunner.instances.clear()
+    import yiagents.batch.runner as runner
+
+    monkeypatch.setattr(runner, "BatchRunner", _RecordingRunner)
+    return _RecordingRunner
+
+
+def test_cli_batch_omitted_workers_is_serial_by_default(_cli_batch_runner):
+    """No --workers → BatchRunner sees batch_concurrency=False (K=1).
+
+    Guards against a misleading 'default concurrent' comment/code mismatch:
+    DEFAULT_CONFIG['batch_concurrency'] is False, so the batch entry point is
+    strictly serial unless the user opts in via --workers or env.
+    """
+    m.batch(
+        tickers=["AAPL", "NVDA"],
+        date="2026-01-10",
+        asset_type="stock",
+        workers=None,
+    )
+    assert len(_cli_batch_runner.instances) == 1
+    assert _cli_batch_runner.instances[0].config["batch_concurrency"] is False
+    assert _cli_batch_runner.instances[0].workers is None
+
+
+def test_cli_batch_explicit_workers_enables_concurrency(_cli_batch_runner):
+    """--workers 4 → BatchRunner sees batch_concurrency=True, workers=4."""
+    m.batch(
+        tickers=["AAPL", "NVDA"],
+        date="2026-01-10",
+        asset_type="stock",
+        workers=4,
+    )
+    assert len(_cli_batch_runner.instances) == 1
+    assert _cli_batch_runner.instances[0].config["batch_concurrency"] is True
+    assert _cli_batch_runner.instances[0].workers == 4
+
+
 def test_complete_report_prefers_post_overlay_portfolio_decision(monkeypatch):
     rendered = []
 

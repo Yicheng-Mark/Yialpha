@@ -110,12 +110,10 @@ def main() -> int:
     asset_type = _resolve_asset_type(args.tickers, args.asset_type)
 
     config = DEFAULT_CONFIG.copy()
-    # 批量入口默认开启并发（可用 env YIAGENTS_BATCH_CONCURRENCY=false 关掉）。
-    config.setdefault("batch_concurrency", True)
+    # DEFAULT_CONFIG["batch_concurrency"] = False → 默认严格串行（K=1）。
     # 显式 --workers 是权威的：>1 强制开启并发，==1 显式串行，缺省才尊重
-    # env/默认。这样 env YIAGENTS_BATCH_CONCURRENCY=false 不会把用户显式传的
-    # --workers 5 静默压回 1（与 yiagents.cli.main._apply_batch_worker_override
-    # 同语义，避免导入整个 CLI 只为复用这一个纯函数）。
+    # env/默认。与 yiagents.cli.main._apply_batch_worker_override 同语义
+    # （避免导入整个 CLI 只为复用这一个纯函数）。
     if args.workers is not None:
         if args.workers < 1:
             print("❌ --workers 必须 >= 1")

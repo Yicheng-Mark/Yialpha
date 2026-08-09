@@ -1424,7 +1424,12 @@ def batch(
     layered ABOVE propagate() — agent inputs/depth/reasoning are unchanged, so
     every ticker is byte-equivalent to a serial run. One batch = one asset
     class (all workers share one config). Reports land under results_dir per
-    ticker. Master switch: YIAGENTS_BATCH_CONCURRENCY (false = strictly serial).
+    ticker.
+
+    Concurrency is OFF by default (strictly serial, K=1, byte-equivalent to
+    per-ticker runs). Pass ``--workers K`` with K>1 to fan the ticker list out
+    across a pool of worker graphs; ``--workers 1`` is explicit serial. The
+    env switch ``YIAGENTS_BATCH_CONCURRENCY=true`` also enables the pool.
     """
     from yiagents.batch.runner import BatchRunner
 
