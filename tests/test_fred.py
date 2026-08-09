@@ -3,14 +3,11 @@ missing-value handling, lookahead-safe windowing, and router integration.
 
 All API access is mocked, so these run without a network connection or a key.
 """
-import copy
 import unittest
 from unittest import mock
 
 import pytest
 
-import yiagents.dataflows.config as config_module
-import yiagents.default_config as default_config
 from yiagents.dataflows import fred, interface
 from yiagents.dataflows.config import reset_config, set_config
 

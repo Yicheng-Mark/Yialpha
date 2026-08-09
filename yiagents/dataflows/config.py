@@ -54,7 +54,7 @@ def set_config(config: dict[str, Any]) -> None:
     it, so a worker calling ``set_config`` does not clobber siblings.
     """
     current = _config_var.get()
-    if current is None:
+    if current is None:  # noqa: SIM108 -- ternary would drop the concurrency-safety comment below
         current = deepcopy(default_config.DEFAULT_CONFIG)
     else:
         # Copy so we never mutate the inherited dict in place — a child context

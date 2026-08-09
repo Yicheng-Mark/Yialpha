@@ -5,13 +5,11 @@ Regressions for #988 (explicit single-vendor config still fell back to others),
 #289 (fallback ran for unchosen vendors), and #989 (serious primary failures
 were swallowed without a trace).
 """
-import copy
 import unittest
 from unittest import mock
 
 import pytest
 
-import yiagents.default_config as default_config
 from yiagents.dataflows import interface
 from yiagents.dataflows.config import reset_config, set_config
 from yiagents.dataflows.symbol_utils import NoMarketDataError

@@ -19,8 +19,8 @@ _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "prune_indicators
 class TestPruneIndicatorsCLI:
     def _make_csv(self, tmp_path: Path) -> Path:
         """Create a small CSV with one predictive and one useless indicator."""
-        import pandas as pd
         import numpy as np
+        import pandas as pd
 
         rng = np.random.RandomState(42)
         n = 120
