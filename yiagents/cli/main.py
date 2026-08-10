@@ -1510,6 +1510,7 @@ def config_check():
     No secrets are printed — only SET / MISSING status.
     """
     from yiagents.llm_clients.api_key_env import get_api_key_env
+    from yiagents.llm_clients.openai_client import OPENAI_COMPATIBLE_PROVIDERS
 
     # -- LLM provider + key ---------------------------------------------------
     provider = os.environ.get("YIAGENTS_LLM_PROVIDER", "openai")
@@ -1555,12 +1556,19 @@ def config_check():
     console.print("\n[dim]Risk items:[/dim]")
     _TIMEOUT = "YIAGENTS_LLM_TIMEOUT" + "_S"
     timeout_set = bool(os.environ.get(_TIMEOUT))
+    _spec = OPENAI_COMPATIBLE_PROVIDERS.get(provider.lower())
+    _is_local = _spec is not None and _spec.is_local
     if timeout_set:
         console.print(f"  [green]✅[/green] {_TIMEOUT} is SET")
+    elif _is_local:
+        console.print(
+            f"  [dim]•[/dim] {_TIMEOUT} unset — "
+            f"local provider '{provider}' has no read-timeout (expected)"
+        )
     else:
         console.print(
-            f"  [yellow]⚠️[/yellow] {_TIMEOUT} is unset — "
-            "a stalled LLM socket may hang indefinitely"
+            f"  [green]✅[/green] {_TIMEOUT} unset — "
+            "cloud LLM calls use the built-in 120s default"
         )
 
     proxy = os.environ.get("SOCKS5_PROXY") or os.environ.get("ALL_PROXY")

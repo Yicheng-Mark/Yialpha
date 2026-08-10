@@ -57,3 +57,15 @@ def test_key_optionality():
     assert OPENAI_COMPATIBLE_PROVIDERS["xai"].key_optional is False
     # OLLAMA_BASE_URL is the only base-URL env override.
     assert OPENAI_COMPATIBLE_PROVIDERS["ollama"].base_url_env == "OLLAMA_BASE_URL"
+
+
+@pytest.mark.unit
+def test_is_local_flag():
+    # Only local/generic model servers are exempt from the default read-timeout.
+    assert OPENAI_COMPATIBLE_PROVIDERS["ollama"].is_local is True
+    assert OPENAI_COMPATIBLE_PROVIDERS["openai_compatible"].is_local is True
+    # Every hosted/cloud provider must be False.
+    for _provider, _spec in OPENAI_COMPATIBLE_PROVIDERS.items():
+        if _provider in ("ollama", "openai_compatible"):
+            continue
+        assert _spec.is_local is False, f"{_provider} should not be is_local"

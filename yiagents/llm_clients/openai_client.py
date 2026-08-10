@@ -1,8 +1,8 @@
 import contextlib
+import logging
 import os
 import re
 import threading
-import warnings
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -18,6 +18,8 @@ from .validators import validate_model
 # One-shot guard so the timeout-unset warning fires at most once per process.
 _timeout_warned = False
 _timeout_warn_lock = threading.Lock()
+
+logger = logging.getLogger(__name__)
 
 
 class NormalizedChatOpenAI(ChatOpenAI):
@@ -181,6 +183,16 @@ _PASSTHROUGH_KWARGS = (
 # Drop the kwarg for those rather than crash the run.
 _OPENAI_REASONING_MODEL = re.compile(r"^(gpt-5|o[1-9])")
 
+# Default read-timeout (seconds) applied to CLOUD providers when the operator
+# has not set ``YIAGENTS_LLM_TIMEOUT_S``. ChatOpenAI has no default read timeout,
+# so a half-open socket (server accepts the connection but never responds) blocks
+# forever and hangs the whole batch. Real cloud calls land in <10s; 120s covers
+# the heaviest reasoning call while still recovering from rare stalls. Local
+# providers (Ollama, openai_compatible) are exempt — slow local generation would
+# be killed by a 120s ceiling. See ``OpenAIClient.get_llm`` for the full
+# precedence chain.
+_DEFAULT_CLOUD_TIMEOUT = 120.0
+
 
 def _supports_reasoning_effort(model: str) -> bool:
     """Whether the (native OpenAI) model accepts ``reasoning_effort``."""
@@ -211,6 +223,7 @@ class ProviderSpec:
     placeholder_key: str = "EMPTY"            # sent when no key is available (keyless local servers)
     require_base_url: bool = False            # error if no base_url is resolved (generic endpoint)
     use_responses_api: bool = False           # native OpenAI Responses API
+    is_local: bool = False                    # local model server: exempt from default read-timeout
 
 
 # Single source of truth for the OpenAI-compatible provider family. Dual-region
@@ -232,10 +245,10 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, ProviderSpec] = {
     "groq":       ProviderSpec(base_url="https://api.groq.com/openai/v1"),
     "nvidia":     ProviderSpec(base_url="https://integrate.api.nvidia.com/v1"),
     "ollama":     ProviderSpec(base_url="http://localhost:11434/v1", base_url_env="OLLAMA_BASE_URL",
-                               key_optional=True, placeholder_key="ollama"),
+                               key_optional=True, placeholder_key="ollama", is_local=True),
     # Generic endpoint: user supplies base_url; key optional (keyless local).
     "openai_compatible": ProviderSpec(
-        require_base_url=True, key_optional=True, chat_class=LocalCompatibleChatOpenAI
+        require_base_url=True, key_optional=True, chat_class=LocalCompatibleChatOpenAI, is_local=True
     ),
 }
 
@@ -341,28 +354,33 @@ class OpenAIClient(BaseLLMClient):
         # blocks forever and hangs the whole batch. Setting ``timeout`` here
         # makes such a call raise, so the agent layer's "retry once as free
         # text" fallback (see agents/utils/structured.py) can fire instead of
-        # stalling. Caller-supplied timeout always wins; otherwise the
-        # ``YIAGENTS_LLM_TIMEOUT_S`` env var (seconds) opts in. Defaults to off
-        # so slow local models (e.g. Ollama) keep their current behaviour, but
-        # we warn once so operators know the risk before a stall happens.
+        # stalling. Precedence (first wins):
+        #   1. caller-supplied ``timeout`` kwarg      (explicit per-call override)
+        #   2. ``YIAGENTS_LLM_TIMEOUT_S`` env var     (operator-wide override)
+        #   3. local provider (Ollama / generic)      -> no timeout (slow local
+        #      generation would be killed by a ceiling; this is the expected
+        #      behaviour for self-hosted servers)
+        #   4. cloud provider fallback                -> _DEFAULT_CLOUD_TIMEOUT
+        #      (120s; logs once so operators see the applied default)
         if "timeout" not in llm_kwargs:
             _timeout_env = os.environ.get("YIAGENTS_LLM_TIMEOUT_S")
             if _timeout_env:
                 with contextlib.suppress(ValueError):
                     llm_kwargs["timeout"] = float(_timeout_env)
+            elif spec is not None and spec.is_local:
+                pass  # local model server: no ceiling (intentional)
             else:
+                llm_kwargs["timeout"] = _DEFAULT_CLOUD_TIMEOUT
                 global _timeout_warned
                 with _timeout_warn_lock:
                     if not _timeout_warned:
                         _timeout_warned = True
-                        warnings.warn(
-                            "YIAGENTS_LLM_TIMEOUT_S is not set: LLM calls have "
-                            "no read-timeout, so a half-open socket can hang "
-                            "the batch forever. Set YIAGENTS_LLM_TIMEOUT_S=120 "
-                            "in production (omit for slow local models like "
-                            "Ollama).",
-                            UserWarning,
-                            stacklevel=2,
+                        logger.info(
+                            "YIAGENTS_LLM_TIMEOUT_S unset: cloud LLM calls use "
+                            "the built-in %ss read-timeout default. Set "
+                            "YIAGENTS_LLM_TIMEOUT_S to override; local providers "
+                            "(Ollama, openai_compatible) are always exempt.",
+                            _DEFAULT_CLOUD_TIMEOUT,
                         )
 
         # The subclass (provider quirks) comes from the registry spec.
