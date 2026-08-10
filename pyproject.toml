@@ -136,10 +136,10 @@ ignore = ["E501"]
 combine-as-imports = true
 
 [tool.mypy]
-# Gradual typing: the repo carries inline annotations on ~87% of source files but
-# has never run a type checker. We start permissive (no --strict) and tighten per-
-# module as baselines are cleaned. The CI job scopes mypy to the money path
-# (yiagents/execution) and the state contract (graph/propagation) — see ci.yml.
+# Gradual typing: the repo carries inline annotations on ~87% of source files.
+# We start permissive (no --strict) and tighten per-module as baselines are
+# cleaned. The CI job scopes mypy to the money path (execution), risk overlay,
+# backtest engine, graph, agents, dataflows, and CLI — see ci.yml.
 python_version = "3.10"
 warn_unused_ignores = false
 warn_redundant_casts = true
@@ -154,22 +154,22 @@ ignore_missing_imports = true
 # Skip opening any transitive stub (incl. numpy's PEP 695 `type X = ...` aliases,
 # which require Python 3.12+ and abort the run with a [syntax] error under
 # python_version="3.10"). This mirrors the ``--follow-imports=skip`` CLI flag in
-# ci.yml so a local ``mypy yiagents/execution`` reproduces CI exactly instead of
-# dying on numpy's stub. The explicitly-listed source files are still fully
-# checked; only their transitive stub dependencies are skipped.
+# ci.yml. NOTE: --follow-imports=skip alone only handles *transitive* imports.
+# When a checked source file *directly* does ``import numpy`` (as risk/,
+# backtest/, dataflows/ do), mypy still parses numpy's stub and aborts. The real
+# workaround for direct imports is ``--no-site-packages`` in ci.yml, which makes
+# mypy treat ALL third-party modules as Any so the stub is never parsed. The
+# project's own source files are still fully type-checked either way.
 follow_imports = "skip"
 
 [[tool.mypy.overrides]]
-# numpy>=2.1 ships PEP 695 `type X = ...` aliases in its bundled stub
-# (numpy/__init__.pyi, ~65 occurrences), which require Python 3.12+. We still
-# type-check against python_version="3.10" for the project's own minimum, so
-# parsing the stub raises a [syntax] error that aborts the whole run
-# ("errors prevented further checking"). NB: a per-module follow_imports
-# override does NOT prevent the syntax-parse stage from failing (the stub is
-# parsed before follow policy is applied), so this override alone is cosmetic.
-# The real fix lives in ci.yml: the typecheck job passes --follow-imports=skip
-# globally, which makes mypy skip opening ANY transitive stub (incl. numpy)
-# while still fully checking the explicitly-listed source files. We keep this
+# Forward documentation for the numpy PEP 695 stub issue (numpy>=2.1 ships
+# ``type X = ...`` aliases in numpy/__init__.pyi that require Python 3.12+; we
+# type-check against 3.10 so parsing the stub raises [syntax] and aborts the run
+# before any real issues surface). A per-module follow_imports override does NOT
+# prevent the syntax-parse stage from failing (the stub is parsed before follow
+# policy is applied), so this override alone is cosmetic. The real fixes are the
+# ``--no-site-packages --follow-imports=skip`` CLI flags in ci.yml. We keep this
 # override as forward documentation: if mypy later honors per-module
 # follow_imports at parse time, or if numpy is bumped/pinned differently, this
 # records the intent for numpy specifically.
