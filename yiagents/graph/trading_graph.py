@@ -538,9 +538,13 @@ class YiAgentsGraph:
             overlay += f"- **Stop Loss**: {decision.stop_loss:.2f}\n"
         if decision.entry_price is not None:
             overlay += f"- **Entry Reference**: {decision.entry_price:.2f}\n"
-        # ATR stop silently skipped because price/ATR data failed to load — make
-        # this visible (mirrors the DISABLED banner for build/decide failures).
-        if close is None and decision.target_weight > 0.0:
+        # A sized position with no stop-loss is the silent-degradation signal:
+        # it fires both when price/ATR data failed to load (close is None) AND
+        # when the stop computation itself threw inside RiskManager.decide
+        # (close present but atr invalid). Key off stop_loss + target_weight so
+        # both paths are surfaced (mirrors the DISABLED banner for build/decide
+        # failures).
+        if decision.target_weight > 0.0 and decision.stop_loss is None:
             overlay += (
                 "- **⚠️ Stop-loss not set**: price/ATR data unavailable; this "
                 "position has no ATR-based stop protection.\n"
