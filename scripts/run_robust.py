@@ -25,8 +25,10 @@ import sys
 
 # Windows 控制台默认 GBK，打印 emoji/中文会触发 UnicodeEncodeError；强制 utf-8。
 for _stream in (sys.stdout, sys.stderr):
-    with __import__("contextlib").suppress(AttributeError, ValueError):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if callable(_reconfigure):
+        with __import__("contextlib").suppress(AttributeError, ValueError):
+            _reconfigure(encoding="utf-8", errors="replace")
 
 # noqa: E402 — imports follow the UTF-8 reconfigure guard above; reordering would
 # re-introduce UnicodeEncodeError when printing ❌/✅/中文 on a GBK Windows console.
@@ -170,7 +172,7 @@ def _kill_tree(pid: int) -> None:
         )
     else:
         with contextlib.suppress(ProcessLookupError, OSError):
-            os.killpg(os.getpgid(pid), 9)
+            os.killpg(os.getpgid(pid), 9)  # type: ignore[attr-defined]
 
 
 def _reap(proc: subprocess.Popen, label: str, timeout: float = 30.0) -> None:
@@ -347,17 +349,24 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                 # kwarg is platform-only — Popen rejects start_new_session on
                 # Windows and creationflags is a no-op 0 on POSIX — so the
                 # Windows argv/flags stay byte-identical to the old behavior.
-                popen_kwargs = {
-                    "cwd": str(_PROJECT_ROOT),
-                    "env": child_env,
-                    "stdout": logf,
-                    "stderr": subprocess.STDOUT,
-                }
                 if IS_WINDOWS:
-                    popen_kwargs["creationflags"] = _CREATE_FLAGS
+                    proc = subprocess.Popen(
+                        cmd_base,
+                        cwd=str(_PROJECT_ROOT),
+                        env=child_env,
+                        stdout=logf,
+                        stderr=subprocess.STDOUT,
+                        creationflags=_CREATE_FLAGS,
+                    )
                 else:
-                    popen_kwargs["start_new_session"] = True
-                proc = subprocess.Popen(cmd_base, **popen_kwargs)
+                    proc = subprocess.Popen(
+                        cmd_base,
+                        cwd=str(_PROJECT_ROOT),
+                        env=child_env,
+                        stdout=logf,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
                 _register_proc(proc)  # so the Ctrl+C handler can reach this child
         except OSError as exc:
             result["reason"] = f"spawn_failed: {exc}"

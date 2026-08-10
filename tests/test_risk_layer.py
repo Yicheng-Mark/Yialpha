@@ -90,7 +90,7 @@ def _synthetic_ohlcv(n: int = 30, vol: float = 4.0) -> pd.DataFrame:
     """A small OHLCV frame with a controllable high-low spread (volatility)."""
     dates = pd.bdate_range("2026-01-01", periods=n)
     base = 100.0
-    rng = np.arange(n, dtype=float)
+    rng: np.ndarray = np.arange(n, dtype=float)
     close = base + rng  # gentle uptrend, deterministic
     high = close + vol
     low = close - vol

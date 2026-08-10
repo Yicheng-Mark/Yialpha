@@ -95,9 +95,10 @@ def _structured_pm_llm(captured: dict, decision: PortfolioDecision | None = None
             investment_thesis="Balanced view; neither side carried the debate.",
         )
     structured = MagicMock()
-    structured.invoke.side_effect = lambda prompt: (
-        captured.__setitem__("prompt", prompt) or decision
-    )
+    def _capture_and_return(prompt, _decision=decision):
+        captured["prompt"] = prompt
+        return _decision
+    structured.invoke.side_effect = _capture_and_return
     llm = MagicMock()
     llm.with_structured_output.return_value = structured
     return llm

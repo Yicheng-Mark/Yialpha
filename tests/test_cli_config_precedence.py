@@ -90,7 +90,7 @@ def test_one_batch_worker_explicitly_requests_serial_mode():
 class _RecordingRunner:
     """Captures the config/workers the CLI batch command hands to BatchRunner."""
 
-    instances = []
+    instances: list["_RecordingRunner"] = []
 
     def __init__(self, config, workers=None, **kwargs):
         self.config = config

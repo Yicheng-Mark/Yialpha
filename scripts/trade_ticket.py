@@ -32,7 +32,7 @@ from pathlib import Path
 
 # Windows 控制台是 GBK(cp936)，打印中文/符号会 UnicodeEncodeError —— 强制 UTF-8
 with contextlib.suppress(Exception):
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
 
 # ---------------------------------------------------------------------------
 # 资产类型 / 方向 / 评级 常量
@@ -150,7 +150,7 @@ def _fnum(s) -> float | None:
 
 def parse_trader(md: str) -> dict:
     """解析 3_trading/trader.md（3 档 Action + Entry/Stop）。"""
-    out = {"action": None, "entry": None, "stop": None, "sizing": None}
+    out: dict[str, object] = {"action": None, "entry": None, "stop": None, "sizing": None}
 
     m = re.search(r"\*\*Action\*\*\s*:\s*(\w+)", md, re.I)
     if m:
@@ -174,7 +174,7 @@ def parse_trader(md: str) -> dict:
 
 def parse_pm_decision(md: str) -> dict:
     """解析 5_portfolio/decision.md：5 档评级 + 量化风控覆盖层（若存在）。"""
-    out = {
+    out: dict[str, object] = {
         "rating": None, "price_target": None,
         # 量化风控覆盖层字段（risk_enabled=True 时追加；ATR 止损 / 爆仓体制 / 目标仓位）
         "ovl_action": None, "ovl_target_weight": None, "ovl_stop": None,
@@ -217,7 +217,7 @@ def parse_pm_decision(md: str) -> dict:
 
 def parse_market(md: str) -> dict:
     """解析 1_analysts/market.md：当前价、ATR、支撑/阻力（尽力提取）。"""
-    out = {"current_price": None, "atr": None, "supports": [], "resistances": []}
+    out: dict[str, object] = {"current_price": None, "atr": None, "supports": [], "resistances": []}
     if not md:
         return out
 
@@ -239,14 +239,18 @@ def parse_market(md: str) -> dict:
             break
 
     # 支撑 / 阻力（中英，取数值；best-effort，失败不致命）
+    supports: list[float] = []
+    resistances: list[float] = []
     for m in re.finditer(r"(?:支撑|Support)[^$\d]{0,12}\$?\s*([\d,]+\.?\d*)", md, re.I):
         v = _fnum(m.group(1))
         if v:
-            out["supports"].append(v)
+            supports.append(v)
     for m in re.finditer(r"(?:阻力|压力|Resistance)[^$\d]{0,12}\$?\s*([\d,]+\.?\d*)", md, re.I):
         v = _fnum(m.group(1))
         if v:
-            out["resistances"].append(v)
+            resistances.append(v)
+    out["supports"] = supports
+    out["resistances"] = resistances
     return out
 
 

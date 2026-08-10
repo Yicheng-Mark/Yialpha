@@ -52,3 +52,46 @@ def test_invalid_key_not_mislabeled_as_rate_limit(monkeypatch):
     with pytest.raises(av.AlphaVantageRateLimitError):  # sanity: rate-limit path still distinct
         monkeypatch.setattr(av.requests, "get", _patched_get('{"Note": "API call frequency is 5 calls per minute."}'))
         av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+
+
+# ---------------------------------------------------------------------------
+# _filter_csv_by_date_range — PIT date filter must never leak future rows.
+# ---------------------------------------------------------------------------
+
+_VALID_CSV = (
+    "timestamp,open,high,low,close,volume\n"
+    "2025-01-01,100,101,99,100.5,1000\n"
+    "2025-01-02,100.5,102,100,101.0,1100\n"
+    "2025-01-03,101,103,100.5,102.5,1200\n"
+    "2025-01-04,102.5,104,102,103.0,1300\n"
+    "2025-01-05,103,105,102.5,104.5,1400\n"
+)
+
+
+@pytest.mark.unit
+def test_filter_success_returns_only_rows_in_range():
+    """Normal CSV + date range → only rows within [start, end] are returned."""
+    result = av._filter_csv_by_date_range(_VALID_CSV, "2025-01-02", "2025-01-04")
+    assert "2025-01-01" not in result  # before start
+    assert "2025-01-05" not in result  # after end
+    assert "2025-01-02" in result
+    assert "2025-01-03" in result
+    assert "2025-01-04" in result
+
+
+@pytest.mark.unit
+def test_filter_failure_raises_not_returns_unfiltered():
+    """A malformed CSV (no parseable date column) must RAISE, not return the
+    unfiltered data — otherwise a backtest silently sees future rows (lookahead
+    leak) and a live run is over-fed.  This mirrors the y_finance.py contract.
+    """
+    bad_csv = "garbage_col,foo\nnot_a_date,42\nalso_bad,99\n"
+    with pytest.raises((ValueError, TypeError)):
+        av._filter_csv_by_date_range(bad_csv, "2025-01-01", "2025-01-03")
+
+
+@pytest.mark.unit
+def test_filter_empty_csv_returns_empty():
+    """Empty / whitespace-only CSV is a no-op (no rows to filter, no leak)."""
+    assert av._filter_csv_by_date_range("", "2025-01-01", "2025-01-03") == ""
+    assert av._filter_csv_by_date_range("   \n  ", "2025-01-01", "2025-01-03") == "   \n  "
