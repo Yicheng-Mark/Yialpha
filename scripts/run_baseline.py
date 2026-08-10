@@ -55,6 +55,10 @@ for _stream in (sys.stdout, sys.stderr):
         with contextlib.suppress(ValueError):
             _reconfigure(encoding="utf-8", errors="replace")
 
+from yiagents.logging_config import setup_logging  # noqa: E402
+
+setup_logging()
+
 import pandas as pd  # noqa: E402
 
 from yiagents.backtest.cache import DecisionCache  # noqa: E402

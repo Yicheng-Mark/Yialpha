@@ -187,6 +187,18 @@ def resolve_instrument_identity(ticker: str, curr_date: str | None = None) -> di
     return identity
 
 
+def clear_identity_cache() -> None:
+    """Flush the :func:`resolve_instrument_identity` LRU cache.
+
+    For a *historical* ``curr_date`` the cached identity is deterministic and
+    never needs clearing. For *live* mode (``curr_date=None``) the identity is
+    cached for the process lifetime, so a corporate action (rename, delisting,
+    ticker change) would leave a long-running live process serving stale
+    identity metadata. Call this after such an event to force a fresh lookup.
+    """
+    resolve_instrument_identity.cache_clear()
+
+
 def build_instrument_context(
     ticker: str,
     asset_type: str = "stock",

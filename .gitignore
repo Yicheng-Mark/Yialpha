@@ -233,3 +233,6 @@ analysis_output/
 
 # pytest cache (stale lastfailed can reference renamed/deleted tests)
 .pytest_cache/
+
+# Stray office files — not source artifacts and never belong in the repo
+*.xlsx

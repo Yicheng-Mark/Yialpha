@@ -30,6 +30,12 @@ for _stream in (sys.stdout, sys.stderr):
 
 # noqa: E402 — imports follow the UTF-8 reconfigure guard above; reordering would
 # re-introduce UnicodeEncodeError when printing ❌/✅/中文 on a GBK Windows console.
+from yiagents.logging_config import setup_logging  # noqa: E402
+
+setup_logging()  # noqa: E402 — centralised logging before any other import fires
+
+# noqa: E402 — imports follow the UTF-8 reconfigure guard above; reordering would
+# re-introduce UnicodeEncodeError when printing ❌/✅/中文 on a GBK Windows console.
 import argparse  # noqa: E402
 import contextlib  # noqa: E402
 import os  # noqa: E402
