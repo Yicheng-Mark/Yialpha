@@ -138,6 +138,23 @@ check_untyped_defs = false
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# numpy>=2.1 ships PEP 695 `type X = ...` aliases in its bundled stub
+# (numpy/__init__.pyi, ~65 occurrences), which require Python 3.12+. We still
+# type-check against python_version="3.10" for the project's own minimum, so
+# parsing the stub raises a [syntax] error that aborts the whole run
+# ("errors prevented further checking"). NB: a per-module follow_imports
+# override does NOT prevent the syntax-parse stage from failing (the stub is
+# parsed before follow policy is applied), so this override alone is cosmetic.
+# The real fix lives in ci.yml: the typecheck job passes --follow-imports=skip
+# globally, which makes mypy skip opening ANY transitive stub (incl. numpy)
+# while still fully checking the explicitly-listed source files. We keep this
+# override as forward documentation: if mypy later honors per-module
+# follow_imports at parse time, or if numpy is bumped/pinned differently, this
+# records the intent for numpy specifically.
+module = "numpy"
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
 # The execution layer is money-touching: check function bodies there even when
 # defs are untyped, so a wrong-type arg is caught before order placement.
 module = "yiagents.execution.*"
