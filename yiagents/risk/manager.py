@@ -249,7 +249,16 @@ class RiskManager:
                 if atr is not None:
                     stop_loss = atr_stop_from_values(entry_price, float(atr), self.atr_mult)
                 # No ATR supplied -> no stop; caller can backfill via latest_atr.
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as exc:
+                # A position is being sized but the stop computation failed
+                # (atr <= 0, non-numeric, ...). This must not be silent: the
+                # decision will carry stop_loss=None on a sized position, and
+                # _apply_risk_overlay keys its "Stop-loss not set" warning off
+                # exactly that. Log so the root cause is traceable in logs too.
+                logger.warning(
+                    "ATR stop-loss computation failed for entry_price=%s atr=%s: %s",
+                    entry_price, atr, exc,
+                )
                 stop_loss = None
 
         position_value = target_weight * state.equity if state.equity > 0 else 0.0

@@ -132,6 +132,34 @@ def test_overlay_no_marker_for_sell_without_price(monkeypatch):
 
 
 @pytest.mark.unit
+def test_overlay_marks_stop_computation_failure(monkeypatch, caplog):
+    """Bullish position + price present but ATR invalid -> visible marker.
+
+    Closes the F1 silent-degradation gap: when ``close`` is available but the
+    ATR stop *computation* throws inside RiskManager.decide (atr <= 0, non-numeric),
+    the guard ``target_weight > 0.0 and stop_loss is None`` must still fire --
+    unlike the old ``close is None`` guard which only caught missing-data, not
+    computation-failure. The manager-side warning is also asserted via caplog.
+    """
+    import logging
+
+    g = _make_graph(risk_enabled=True)
+    # close valid, atr negative -> atr_stop_from_values raises ValueError.
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (190.0, -1.0))
+    state = {"final_trade_decision": "**Rating**: Buy\n\nThesis."}
+    with caplog.at_level(logging.WARNING, logger="yiagents.risk.manager"):
+        out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
+    md = out["final_trade_decision"]
+    # Position is sized but stop failed -> marker visible (the F1 fix).
+    assert "Stop-loss not set" in md
+    assert "**Stop Loss**" not in md
+    # Manager logged the computation failure (root cause traceable).
+    assert any(
+        "ATR stop-loss computation failed" in r.message for r in caplog.records
+    )
+
+
+@pytest.mark.unit
 def test_overlay_coerces_dict_portfolio_state(monkeypatch):
     g = _make_graph(risk_enabled=True)
     monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (100.0, 2.0))
