@@ -375,3 +375,26 @@ class TestConfigCheckTimeout:
         assert result.exit_code == 0
         assert "local provider" in result.output.lower()
         assert "expected" in result.output.lower()
+
+    # Native (non-OpenAI-compatible) providers are always cloud, so config-check
+    # must show the 120s default message for them too (gap B — the timeout
+    # safety net now applies to all clients, and the CLI reflects that).
+
+    def test_anthropic_shows_default_message(self, monkeypatch):
+        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.delenv("YIAGENTS_LLM_TIMEOUT_S", raising=False)
+        result = runner.invoke(app, ["config-check"])
+        assert result.exit_code == 0
+        assert "120s" in result.output
+        assert "default" in result.output
+
+    def test_google_shows_default_message(self, monkeypatch):
+        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "google")
+        monkeypatch.setenv("GOOGLE_API_KEY", "sk-test")
+        monkeypatch.delenv("YIAGENTS_LLM_TIMEOUT_S", raising=False)
+        result = runner.invoke(app, ["config-check"])
+        assert result.exit_code == 0
+        assert "120s" in result.output
+        assert "default" in result.output
+

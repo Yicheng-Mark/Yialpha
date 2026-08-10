@@ -1,6 +1,7 @@
 import os
 from typing import Any
 
+from ._timeout import resolve_timeout
 from .base_client import BaseLLMClient, normalize_content
 from .validators import validate_model
 
@@ -59,9 +60,16 @@ class BedrockClient(BaseLLMClient):
             or _DEFAULT_REGION
         )
         llm_kwargs: dict[str, Any] = {"model": self.model, "region_name": region}
-        for key in ("temperature", "max_tokens", "max_retries", "callbacks"):
+        for key in ("temperature", "max_tokens", "max_retries", "callbacks", "timeout"):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
+
+        # Read-timeout safety net (shared with all LLM clients).
+        # ChatBedrockConverse's ``timeout`` sets botocore connect/read timeouts;
+        # without it a half-open socket hangs the batch. Bedrock is always a
+        # cloud provider -> is_local=False.
+        resolve_timeout(llm_kwargs, is_local=False, provider_name="bedrock")
+
         return chat_cls(**llm_kwargs)
 
     def validate_model(self) -> bool:

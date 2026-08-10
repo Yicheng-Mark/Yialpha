@@ -61,6 +61,7 @@ only advertised to the news analyst when ``YIAGENTS_A_SHARE_NATIVE`` is on
 
 from __future__ import annotations
 
+import contextlib
 import io
 import logging
 import math
@@ -558,7 +559,6 @@ def get_a_share_northbound_native(
     """
     ak = _require_akshare()
     code = _to_akshare_code(ticker)
-    market = _market_for(ticker)
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
     upper_set = bool(upper)
@@ -709,10 +709,8 @@ def get_a_share_sector_flow_native(
 
     # Resolve the stock's own industry (best-effort; not critical).
     my_sector = None
-    try:
+    with contextlib.suppress(Exception):
         my_sector = _stock_industry(ak, code)
-    except Exception:
-        pass
 
     out = io.StringIO()
     out.write(f"# A-share Sector Fund Flow (AKShare / Eastmoney) — {ticker}'s sector\n")
@@ -728,7 +726,7 @@ def get_a_share_sector_flow_native(
                   "reconstructed for a historical date. Treat this as current "
                   "context, not as a point-in-time backtest signal.\n")
     if df is None or getattr(df, "empty", True):
-        out.write(f"\nNo sector fund-flow data returned. Report 'no coverage found' "
+        out.write("\nNo sector fund-flow data returned. Report 'no coverage found' "
                   "and do not fabricate flows.")
         return out.getvalue().rstrip("\n")
 

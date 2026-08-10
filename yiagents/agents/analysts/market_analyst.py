@@ -1,4 +1,8 @@
 from yiagents.agents.utils.agent_utils import (
+    get_a_share_market_breadth_native,
+    get_a_share_northbound_native,
+    get_a_share_realtime_quote_native,
+    get_a_share_sector_flow_native,
     get_binance_basis,
     get_binance_funding_rate,
     get_binance_klines,
@@ -11,10 +15,6 @@ from yiagents.agents.utils.agent_utils import (
     get_indicators,
     get_instrument_context_from_state,
     get_language_instruction,
-    get_a_share_market_breadth_native,
-    get_a_share_northbound_native,
-    get_a_share_realtime_quote_native,
-    get_a_share_sector_flow_native,
     get_stock_data,
     get_verified_market_snapshot,
 )

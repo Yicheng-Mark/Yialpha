@@ -3,6 +3,7 @@ from typing import Any
 
 from langchain_anthropic import ChatAnthropic
 
+from ._timeout import resolve_timeout
 from .base_client import BaseLLMClient, normalize_content
 from .validators import validate_model
 
@@ -67,6 +68,11 @@ class AnthropicClient(BaseLLMClient):
             if key == "effort" and not _supports_effort(self.model):
                 continue
             llm_kwargs[key] = self.kwargs[key]
+
+        # Read-timeout safety net (shared with all LLM clients). ChatAnthropic
+        # has no default read timeout, so without this a half-open socket would
+        # hang the batch. Anthropic is always a cloud provider -> is_local=False.
+        resolve_timeout(llm_kwargs, is_local=False, provider_name="anthropic")
 
         return NormalizedChatAnthropic(**llm_kwargs)
 

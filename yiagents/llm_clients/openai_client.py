@@ -1,8 +1,6 @@
-import contextlib
 import logging
 import os
 import re
-import threading
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -10,14 +8,11 @@ from urllib.parse import urlparse
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
+from ._timeout import resolve_timeout
 from .api_key_env import get_api_key_env
 from .base_client import BaseLLMClient, normalize_content
 from .capabilities import get_capabilities
 from .validators import validate_model
-
-# One-shot guard so the timeout-unset warning fires at most once per process.
-_timeout_warned = False
-_timeout_warn_lock = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -183,15 +178,10 @@ _PASSTHROUGH_KWARGS = (
 # Drop the kwarg for those rather than crash the run.
 _OPENAI_REASONING_MODEL = re.compile(r"^(gpt-5|o[1-9])")
 
-# Default read-timeout (seconds) applied to CLOUD providers when the operator
-# has not set ``YIAGENTS_LLM_TIMEOUT_S``. ChatOpenAI has no default read timeout,
-# so a half-open socket (server accepts the connection but never responds) blocks
-# forever and hangs the whole batch. Real cloud calls land in <10s; 120s covers
-# the heaviest reasoning call while still recovering from rare stalls. Local
-# providers (Ollama, openai_compatible) are exempt — slow local generation would
-# be killed by a 120s ceiling. See ``OpenAIClient.get_llm`` for the full
-# precedence chain.
-_DEFAULT_CLOUD_TIMEOUT = 120.0
+# The read-timeout safety net (the 120s cloud default, the YIAGENTS_LLM_TIMEOUT_S
+# precedence chain) lives in ``._timeout`` — the single source shared by all LLM
+# clients (OpenAI family + native Anthropic / Google / Azure / Bedrock). See
+# ``OpenAIClient.get_llm`` for the call site.
 
 
 def _supports_reasoning_effort(model: str) -> bool:
@@ -349,39 +339,18 @@ class OpenAIClient(BaseLLMClient):
                 continue
             llm_kwargs[key] = self.kwargs[key]
 
-        # Read-timeout safety net. ChatOpenAI has no default read timeout, so a
-        # half-open socket (server accepts the connection but never responds)
-        # blocks forever and hangs the whole batch. Setting ``timeout`` here
-        # makes such a call raise, so the agent layer's "retry once as free
-        # text" fallback (see agents/utils/structured.py) can fire instead of
-        # stalling. Precedence (first wins):
-        #   1. caller-supplied ``timeout`` kwarg      (explicit per-call override)
-        #   2. ``YIAGENTS_LLM_TIMEOUT_S`` env var     (operator-wide override)
-        #   3. local provider (Ollama / generic)      -> no timeout (slow local
-        #      generation would be killed by a ceiling; this is the expected
-        #      behaviour for self-hosted servers)
-        #   4. cloud provider fallback                -> _DEFAULT_CLOUD_TIMEOUT
-        #      (120s; logs once so operators see the applied default)
-        if "timeout" not in llm_kwargs:
-            _timeout_env = os.environ.get("YIAGENTS_LLM_TIMEOUT_S")
-            if _timeout_env:
-                with contextlib.suppress(ValueError):
-                    llm_kwargs["timeout"] = float(_timeout_env)
-            elif spec is not None and spec.is_local:
-                pass  # local model server: no ceiling (intentional)
-            else:
-                llm_kwargs["timeout"] = _DEFAULT_CLOUD_TIMEOUT
-                global _timeout_warned
-                with _timeout_warn_lock:
-                    if not _timeout_warned:
-                        _timeout_warned = True
-                        logger.info(
-                            "YIAGENTS_LLM_TIMEOUT_S unset: cloud LLM calls use "
-                            "the built-in %ss read-timeout default. Set "
-                            "YIAGENTS_LLM_TIMEOUT_S to override; local providers "
-                            "(Ollama, openai_compatible) are always exempt.",
-                            _DEFAULT_CLOUD_TIMEOUT,
-                        )
+        # Read-timeout safety net (shared with all LLM clients). ChatOpenAI has
+        # no default read timeout, so a half-open socket blocks forever; setting
+        # ``timeout`` makes such a call raise so the agent layer's "retry once
+        # as free text" fallback (see agents/utils/structured.py) can fire
+        # instead of stalling. See ``_timeout.resolve_timeout`` for the full
+        # precedence chain; local providers (Ollama, openai_compatible) are
+        # exempt from the cloud ceiling.
+        resolve_timeout(
+            llm_kwargs,
+            is_local=(spec is not None and spec.is_local),
+            provider_name=self.get_provider_name(),
+        )
 
         # The subclass (provider quirks) comes from the registry spec.
         return chat_cls(**llm_kwargs)
