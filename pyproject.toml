@@ -103,6 +103,16 @@ filterwarnings = [
     "ignore::DeprecationWarning",
 ]
 
+[tool.coverage.run]
+source = ["yiagents"]
+
+[tool.coverage.report]
+# Coverage gate: baseline is 78% (2026-08-10). The 3-point cushion absorbs
+# minor fluctuations from new untested modules without flaking CI; the gate
+# still catches real regressions. Raise the floor as coverage improves.
+fail_under = 75
+show_missing = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

@@ -329,7 +329,7 @@ The concurrency / transport / observation layers never touch any agent's input. 
 
 | Switch (env) | Default | Effect |
 | ------ | ------ | ------ |
-| `YIAGENTS_LLM_TIMEOUT_S` | 120 | Per-call read timeout; half-open connections raise `APITimeoutError` and recover via the SDK's built-in retry |
+| `YIAGENTS_LLM_TIMEOUT_S` | off (unset) | Per-call read timeout (seconds); half-open connections raise `APITimeoutError` and recover via the SDK's built-in retry. **Off by default** — set to 120 in production to prevent indefinite hangs on half-open sockets (omit for slow local models like Ollama) |
 | `YIAGENTS_HTTP_KEEPALIVE` | false | Process-wide shared `httpx.Client`; reuses TLS / SOCKS5 connections |
 | `YIAGENTS_LLM_MAX_RETRIES` | 2 | Per-call retry count (= langchain default, equivalent) |
 | `YIAGENTS_NODE_PERF_TELEMETRY` | false | Per-node wall-time + token telemetry; `--profile` turns it on, writes `node_perf_<date>.json` |

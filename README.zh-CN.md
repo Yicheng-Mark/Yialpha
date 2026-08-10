@@ -322,7 +322,7 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 
 | 开关（env） | 默认 | 作用 |
 | ------ | ------ | ------ |
-| `YIAGENTS_LLM_TIMEOUT_S` | 120 | 单次 LLM 读超时；半开连接 → `APITimeoutError` → SDK 内置重试恢复 |
+| `YIAGENTS_LLM_TIMEOUT_S` | off（未设） | 单次 LLM 读超时（秒）；半开连接 → `APITimeoutError` → SDK 内置重试恢复。**默认 OFF**——生产环境建议设为 120 以防半开 socket 永久挂起（本地慢模型如 Ollama 可不设） |
 | `YIAGENTS_HTTP_KEEPALIVE` | false | 进程级共享 `httpx.Client`，复用 TLS / SOCKS5 连接 |
 | `YIAGENTS_LLM_MAX_RETRIES` | 2 | 单调用重试次数（= langchain 默认，等价） |
 | `YIAGENTS_NODE_PERF_TELEMETRY` | false | 节点级墙钟 + token 遥测；`--profile` 一键开，产物 `node_perf_<date>.json` |
