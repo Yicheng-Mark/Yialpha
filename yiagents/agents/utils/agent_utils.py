@@ -7,11 +7,18 @@ import yfinance as yf
 from langchain_core.messages import HumanMessage, RemoveMessage
 
 from yiagents.agents.utils.a_share_native_tools import (
+    get_a_share_balance_sheet_native,
+    get_a_share_cashflow_statement_native,
     get_a_share_dragon_tiger_native,
     get_a_share_fundamentals_native,
+    get_a_share_income_statement_native,
+    get_a_share_market_breadth_native,
     get_a_share_money_flow_native,
     get_a_share_news_native,
+    get_a_share_northbound_native,
     get_a_share_ohlc_native,
+    get_a_share_realtime_quote_native,
+    get_a_share_sector_flow_native,
 )
 
 # Import tools from separate utility files
@@ -75,9 +82,16 @@ __all__ = [
     "get_margin_trading",
     "get_a_share_fundamentals_native",
     "get_a_share_ohlc_native",
+    "get_a_share_income_statement_native",
+    "get_a_share_balance_sheet_native",
+    "get_a_share_cashflow_statement_native",
     "get_a_share_news_native",
     "get_a_share_money_flow_native",
     "get_a_share_dragon_tiger_native",
+    "get_a_share_northbound_native",
+    "get_a_share_sector_flow_native",
+    "get_a_share_realtime_quote_native",
+    "get_a_share_market_breadth_native",
     "get_news",
     "get_global_news",
     "get_insider_transactions",

@@ -4,8 +4,12 @@ from typing import Any
 
 from .akshare_vendor import (
     get_a_share_dragon_tiger_native as get_akshare_a_share_dragon_tiger,
+    get_a_share_market_breadth_native as get_akshare_a_share_market_breadth,
     get_a_share_money_flow_native as get_akshare_a_share_money_flow,
     get_a_share_news_native as get_akshare_a_share_news,
+    get_a_share_northbound_native as get_akshare_a_share_northbound,
+    get_a_share_realtime_quote_native as get_akshare_a_share_realtime_quote,
+    get_a_share_sector_flow_native as get_akshare_a_share_sector_flow,
 )
 from .alpha_vantage import (
     get_balance_sheet as get_alpha_vantage_balance_sheet,
@@ -19,7 +23,10 @@ from .alpha_vantage import (
     get_stock as get_alpha_vantage_stock,
 )
 from .baostock_vendor import (
+    get_a_share_balance_sheet_native as get_baostock_a_share_balance_sheet,
+    get_a_share_cashflow_statement_native as get_baostock_a_share_cashflow,
     get_a_share_fundamentals_native as get_baostock_a_share_fundamentals,
+    get_a_share_income_statement_native as get_baostock_a_share_income,
     get_a_share_ohlc_native as get_baostock_a_share_ohlc,
 )
 from .binance import (
@@ -180,13 +187,20 @@ TOOLS_CATEGORIES = {
     # block / non-A-share ticker / missing optional dependency degrades to a
     # sentinel rather than aborting the run.
     "a_share_native": {
-        "description": "Native China A-share OHLC + TTM valuation (BaoStock) + news / money flow / dragon-tiger (AKShare). A-share only.",
+        "description": "Native China A-share OHLC + TTM valuation + quarterly statements (BaoStock) + news / money flow / dragon-tiger / northbound / sector-flow / realtime / breadth (AKShare). A-share only.",
         "tools": [
             "get_a_share_fundamentals_native",
             "get_a_share_ohlc_native",
+            "get_a_share_income_statement_native",
+            "get_a_share_balance_sheet_native",
+            "get_a_share_cashflow_statement_native",
             "get_a_share_news_native",
             "get_a_share_money_flow_native",
             "get_a_share_dragon_tiger_native",
+            "get_a_share_northbound_native",
+            "get_a_share_sector_flow_native",
+            "get_a_share_realtime_quote_native",
+            "get_a_share_market_breadth_native",
         ],
     },
 }
@@ -335,6 +349,22 @@ VENDOR_METHODS: dict[str, dict[str, Callable[..., Any] | list[Any]]] = {
     "get_a_share_ohlc_native": {
         "baostock": get_baostock_a_share_ohlc,
     },
+    # A-share quarterly income statement (利润表) via BaoStock's
+    # query_profit_data. PIT: pubDate <= curr_date. Same optional-category
+    # contract — a baostock block / non-A-share ticker degrades to sentinel.
+    "get_a_share_income_statement_native": {
+        "baostock": get_baostock_a_share_income,
+    },
+    # A-share quarterly balance sheet (资产负债表) via BaoStock's
+    # query_balance_data. PIT: pubDate <= curr_date. Same contract.
+    "get_a_share_balance_sheet_native": {
+        "baostock": get_baostock_a_share_balance_sheet,
+    },
+    # A-share quarterly cashflow statement (现金流表) via BaoStock's
+    # query_cash_flow_data. PIT: pubDate <= curr_date. Same contract.
+    "get_a_share_cashflow_statement_native": {
+        "baostock": get_baostock_a_share_cashflow,
+    },
     # A-share news (AKShare / 东财 stock_news_em). Reached directly (proxy env
     # popped) so the domestic HTTP host cannot hang on the SOCKS5 tunnel. Tushare
     # wires in as a second news vendor in Phase 3. Same optional-category contract.
@@ -354,6 +384,31 @@ VENDOR_METHODS: dict[str, dict[str, Callable[..., Any] | list[Any]]] = {
     # 上榜后N日 forward-return columns are dropped (lookahead). Same contract.
     "get_a_share_dragon_tiger_native": {
         "akshare": get_akshare_a_share_dragon_tiger,
+    },
+    # A-share northbound capital (北向资金 / Stock Connect individual holding)
+    # via AKShare's stock_hsgt_individual_em (东财). Reached directly (proxy env
+    # popped). PIT: 持股日期<=curr_date. Same optional-category contract.
+    "get_a_share_northbound_native": {
+        "akshare": get_akshare_a_share_northbound,
+    },
+    # A-share sector/industry fund-flow ranking via AKShare's
+    # stock_sector_fund_flow_rank (东财). Live snapshot (no historical date param)
+    # so a historical curr_date returns the current snapshot with a caveat.
+    # Same optional-category contract.
+    "get_a_share_sector_flow_native": {
+        "akshare": get_akshare_a_share_sector_flow,
+    },
+    # A-share real-time spot quote via AKShare's stock_zh_a_spot_em (东财). Live
+    # mode only; a historical curr_date returns a sentinel explaining that
+    # real-time data cannot be reconstructed for a past date (no lookahead).
+    "get_a_share_realtime_quote_native": {
+        "akshare": get_akshare_a_share_realtime_quote,
+    },
+    # A-share market breadth (advance-decline counts) via AKShare's
+    # stock_zh_a_spot (whole-market real-time). Live mode only; same sentinel
+    # contract as the real-time quote for historical dates.
+    "get_a_share_market_breadth_native": {
+        "akshare": get_akshare_a_share_market_breadth,
     },
 }
 

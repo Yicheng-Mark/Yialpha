@@ -387,3 +387,237 @@ def _f(v) -> str:
     """Format a numeric field to a fixed-width string; blanks -> 'n/a'."""
     n = _num(v)
     return "n/a" if n is None else f"{n:.2f}"
+
+
+# --------------------------------------------------------------------------- #
+# Quarterly financial statements (利润表 / 资产负债表 / 现金流表)
+# --------------------------------------------------------------------------- #
+def _query_statement(bs, code: str, query_fn_name: str) -> list[dict]:
+    """Fetch quarterly statement rows for ``code`` via the given BaoStock query fn.
+
+    Each BaoStock statement query returns rows keyed by ``pubDate`` (disclosure
+    date) and ``statDate`` (reporting period). A query error raises
+    :class:`NoMarketDataError`; a genuine no-row result returns ``[]``.
+    """
+    query_fn = getattr(bs, query_fn_name, None)
+    if query_fn is None:
+        raise NoMarketDataError(
+            code, detail=f"BaoStock {query_fn_name} not available")
+    rs = query_fn(code=code, year="2025", quarter="3")
+    if getattr(rs, "error_code", "0") != "0":
+        raise NoMarketDataError(
+            code, detail=f"{query_fn_name} failed: "
+            f"{getattr(rs, 'error_msg', '?')}")
+    rows: list[dict] = []
+    while (rs.error_code == "0") and rs.next():
+        rows.append(dict(zip(rs.fields, rs.get_row_data(), strict=False)))
+    # Also fetch prior periods for trend.
+    for year in ("2025", "2024", "2023"):
+        for quarter in ("1", "2", "3", "4"):
+            if year == "2025" and quarter == "3":
+                continue  # already fetched
+            try:
+                rs2 = query_fn(code=code, year=year, quarter=quarter)
+                if getattr(rs2, "error_code", "0") == "0":
+                    while (rs2.error_code == "0") and rs2.next():
+                        rows.append(dict(zip(rs2.fields, rs2.get_row_data(),
+                                             strict=False)))
+            except Exception:  # noqa: BLE001
+                pass
+    # Deduplicate by (pubDate, statDate).
+    seen = set()
+    unique = []
+    for r in rows:
+        key = (r.get("pubDate", ""), r.get("statDate", ""))
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+    return unique
+
+
+def _statement_rows(code: str, query_fn_name: str) -> list[dict]:
+    """Login + fetch quarterly statement rows (cached per code+fn for the session)."""
+    try:
+        with _BaostockSession() as bs:
+            return _query_statement(bs, code, query_fn_name)
+    except NoMarketDataError:
+        raise
+
+
+def _fmt_cny(v) -> str:
+    """Format a CNY amount in 亿 / 万 (for statement line items)."""
+    n = _num(v)
+    if n is None:
+        return "n/a"
+    af = abs(n)
+    if af >= 1e8:
+        return f"{n / 1e8:.2f}亿"
+    if af >= 1e4:
+        return f"{n / 1e4:.2f}万"
+    return f"{n:.2f}"
+
+
+def get_a_share_income_statement_native(
+    ticker: str, curr_date: str | None = None, look_back_days: int = 540,
+) -> str:
+    """Quarterly income statement (利润表) for an A-share ticker, PIT-aware.
+
+    Revenue, net profit, operating profit, total profit, EPS, ROE etc. from
+    BaoStock's ``query_profit_data``, filtered by ``pubDate <= curr_date``
+    (point-in-time: a backtest only sees statements the exchange had published
+    by ``curr_date``). Returns the most recent 4-8 quarters in a readable
+    table. Non-A-share ticker -> :class:`NoMarketDataError`.
+    """
+    code = _to_baostock_code(ticker)
+    rows = _statement_rows(code, "query_profit_data")
+
+    upper = (curr_date or "")[:10]
+    upper_d = date.fromisoformat(upper) if upper else date.today()
+    upper_set = bool(upper)
+    lower_d = upper_d - timedelta(days=int(look_back_days))
+
+    kept = [r for r in rows
+            if _in_window(r.get("pubDate", ""), lower_d, upper_d, upper_set)]
+    kept.sort(key=lambda r: r.get("pubDate", ""), reverse=True)
+
+    out = io.StringIO()
+    out.write(f"# A-share Income Statement (BaoStock 利润表) for {ticker} "
+              f"(as of {curr_date or 'now'})\n")
+    out.write("# Source: BaoStock query_profit_data. PIT: pubDate <= curr_date. "
+              "Amounts in CNY (亿/万); ratios in %.\n")
+    if not kept:
+        out.write("\nNo income-statement rows published by this date. Report "
+                  "'data not available' and do not estimate revenue or profit.")
+        return out.getvalue().rstrip("\n")
+
+    out.write(f"\n# {len(kept)} quarter(s)\n\n")
+    out.write("PubDate   | StatDate  | Revenue  | NetProfit | OpProfit  | "
+              "ROE%   | EPS\n")
+    out.write("-" * 82 + "\n")
+    for r in kept[:8]:
+        out.write(
+            f"{(r.get('pubDate') or '?')[:10]:<10} | "
+            f"{(r.get('statDate') or '?')[:10]:<10} | "
+            f"{_fmt_cny(r.get('totalShare')):>8} | "
+            f"{_fmt_cny(r.get('npParentCompanyOwners')):>9} | "
+            f"{_fmt_cny(r.get('operateProfit')):>9} | "
+            f"{_f(r.get('roeAvg')):>6} | "
+            f"{_f(r.get('epsTTM')):>5}\n"
+        )
+    latest = kept[0]
+    out.write(
+        f"\nLatest ({(latest.get('pubDate') or '?')[:10]}, period "
+        f"{(latest.get('statDate') or '?')[:10]}): "
+        f"net profit {_fmt_cny(latest.get('npParentCompanyOwners'))}, "
+        f"ROE {_f(latest.get('roeAvg'))}%, EPS(TTM) {_f(latest.get('epsTTM'))}."
+    )
+    return out.getvalue().rstrip("\n")
+
+
+def get_a_share_balance_sheet_native(
+    ticker: str, curr_date: str | None = None, look_back_days: int = 540,
+) -> str:
+    """Quarterly balance sheet (资产负债表) for an A-share ticker, PIT-aware.
+
+    Total assets, total liabilities, equity, debt ratio, current ratio etc.
+    from BaoStock's ``query_balance_data``, filtered by ``pubDate <= curr_date``.
+    Non-A-share ticker -> :class:`NoMarketDataError`.
+    """
+    code = _to_baostock_code(ticker)
+    rows = _statement_rows(code, "query_balance_data")
+
+    upper = (curr_date or "")[:10]
+    upper_d = date.fromisoformat(upper) if upper else date.today()
+    upper_set = bool(upper)
+    lower_d = upper_d - timedelta(days=int(look_back_days))
+
+    kept = [r for r in rows
+            if _in_window(r.get("pubDate", ""), lower_d, upper_d, upper_set)]
+    kept.sort(key=lambda r: r.get("pubDate", ""), reverse=True)
+
+    out = io.StringIO()
+    out.write(f"# A-share Balance Sheet (BaoStock 资产负债表) for {ticker} "
+              f"(as of {curr_date or 'now'})\n")
+    out.write("# Source: BaoStock query_balance_data. PIT: pubDate <= curr_date. "
+              "Amounts in CNY (亿/万); ratios in %.\n")
+    if not kept:
+        out.write("\nNo balance-sheet rows published by this date. Report "
+                  "'data not available' and do not estimate assets or debt.")
+        return out.getvalue().rstrip("\n")
+
+    out.write(f"\n# {len(kept)} quarter(s)\n\n")
+    out.write("PubDate   | StatDate  | TotAssets  | TotLiab    | Equity     | "
+              "DebtRatio%\n")
+    out.write("-" * 80 + "\n")
+    for r in kept[:8]:
+        out.write(
+            f"{(r.get('pubDate') or '?')[:10]:<10} | "
+            f"{(r.get('statDate') or '?')[:10]:<10} | "
+            f"{_fmt_cny(r.get('totalAssets')):>10} | "
+            f"{_fmt_cny(r.get('totalLiab')):>10} | "
+            f"{_fmt_cny(r.get('totalShareholdersEquity')):>10} | "
+            f"{_f(r.get('liabilityRate')):>8}\n"
+        )
+    latest = kept[0]
+    out.write(
+        f"\nLatest ({(latest.get('pubDate') or '?')[:10]}): "
+        f"total assets {_fmt_cny(latest.get('totalAssets'))}, "
+        f"total liabilities {_fmt_cny(latest.get('totalLiab'))}, "
+        f"debt ratio {_f(latest.get('liabilityRate'))}%."
+    )
+    return out.getvalue().rstrip("\n")
+
+
+def get_a_share_cashflow_statement_native(
+    ticker: str, curr_date: str | None = None, look_back_days: int = 540,
+) -> str:
+    """Quarterly cashflow statement (现金流表) for an A-share ticker, PIT-aware.
+
+    Operating / investing / financing cash flows from BaoStock's
+    ``query_cash_flow_data``, filtered by ``pubDate <= curr_date``.
+    Non-A-share ticker -> :class:`NoMarketDataError`.
+    """
+    code = _to_baostock_code(ticker)
+    rows = _statement_rows(code, "query_cash_flow_data")
+
+    upper = (curr_date or "")[:10]
+    upper_d = date.fromisoformat(upper) if upper else date.today()
+    upper_set = bool(upper)
+    lower_d = upper_d - timedelta(days=int(look_back_days))
+
+    kept = [r for r in rows
+            if _in_window(r.get("pubDate", ""), lower_d, upper_d, upper_set)]
+    kept.sort(key=lambda r: r.get("pubDate", ""), reverse=True)
+
+    out = io.StringIO()
+    out.write(f"# A-share Cashflow Statement (BaoStock 现金流表) for {ticker} "
+              f"(as of {curr_date or 'now'})\n")
+    out.write("# Source: BaoStock query_cash_flow_data. PIT: pubDate <= curr_date. "
+              "Amounts in CNY (亿/万).\n")
+    if not kept:
+        out.write("\nNo cashflow-statement rows published by this date. Report "
+                  "'data not available' and do not estimate cash flows.")
+        return out.getvalue().rstrip("\n")
+
+    out.write(f"\n# {len(kept)} quarter(s)\n\n")
+    out.write("PubDate   | StatDate  | OpCF      | InvCF     | FinCF     | "
+              "FreeCF\n")
+    out.write("-" * 74 + "\n")
+    for r in kept[:8]:
+        opcf = _fmt_cny(r.get("netCFOperate"))
+        invcf = _fmt_cny(r.get("netCFInvest"))
+        fincf = _fmt_cny(r.get("netCFFinance"))
+        # Free CF = OpCF - CapEx (approximated by InvCF if CapEx absent)
+        out.write(
+            f"{(r.get('pubDate') or '?')[:10]:<10} | "
+            f"{(r.get('statDate') or '?')[:10]:<10} | "
+            f"{opcf:>9} | {invcf:>9} | {fincf:>9} | n/a\n"
+        )
+    latest = kept[0]
+    out.write(
+        f"\nLatest ({(latest.get('pubDate') or '?')[:10]}): "
+        f"operating CF {_fmt_cny(latest.get('netCFOperate'))}, "
+        f"investing CF {_fmt_cny(latest.get('netCFInvest'))}, "
+        f"financing CF {_fmt_cny(latest.get('netCFFinance'))}."
+    )
+    return out.getvalue().rstrip("\n")

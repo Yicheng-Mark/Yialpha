@@ -295,7 +295,10 @@ class FundamentalsAShareWiringTests(unittest.TestCase):
             ["get_fundamentals", "get_balance_sheet", "get_cashflow",
              "get_income_statement", "get_a_share_fundamentals_native",
              "get_a_share_ohlc_native", "get_a_share_money_flow_native",
-             "get_a_share_dragon_tiger_native"],
+             "get_a_share_dragon_tiger_native",
+             "get_a_share_income_statement_native",
+             "get_a_share_balance_sheet_native",
+             "get_a_share_cashflow_statement_native"],
         )
 
     def test_on_with_non_a_share_is_byte_equivalent(self):
@@ -869,6 +872,472 @@ def test_router_falls_back_from_tushare_to_baostock(monkeypatch, tmp_path):
         cfgmod.set_config(orig)
     # Fell through to BaoStock's fundamentals formatter.
     assert "# A-share Valuation (BaoStock" in out
+
+
+# --------------------------------------------------------------------------- #
+# Northbound capital / sector flow / realtime / breadth (Phase 5 — AKShare)
+# --------------------------------------------------------------------------- #
+
+def _northbound_df():
+    """Synthetic stock_hsgt_individual_em DataFrame."""
+    return pd.DataFrame([
+        {"持股日期": "2024-05-01", "持股数量": 8.0e7, "持股数量占发行股": 0.64,
+         "持股市值": 8.0e9, "持股市值占比": 0.5},
+        {"持股日期": "2024-06-10", "持股数量": 1.0e8, "持股数量占发行股": 0.80,
+         "持股市值": 9.5e9, "持股市值占比": 0.6},
+        {"持股日期": "2024-06-12", "持股数量": 9.0e7, "持股数量占发行股": 0.72,
+         "持股市值": 8.6e9, "持股市值占比": 0.55},
+        {"持股日期": "2024-06-14", "持股数量": 1.2e8, "持股数量占发行股": 0.96,
+         "持股市值": 1.16e10, "持股市值占比": 0.75},
+        {"持股日期": "2024-12-20", "持股数量": 2.0e8, "持股数量占发行股": 1.6,
+         "持股市值": 2.4e10, "持股市值占比": 1.5},  # future -> PIT drop
+    ])
+
+
+# --- northbound ---
+@pytest.mark.unit
+def test_northbound_pit_drops_future_and_window(monkeypatch):
+    _patch_ak(monkeypatch, stock_hsgt_individual_em=lambda stock: _northbound_df())
+    out = akv.get_a_share_northbound_native("600519.SS", "2024-06-15", 30)
+    assert "# A-share Northbound" in out
+    assert "2024-06-14" in out
+    assert "2024-06-10" in out
+    assert "2024-06-12" in out
+    assert "2024-12-20" not in out      # future -> PIT drop
+    assert "2024-05-01" not in out      # outside 30d window
+
+
+@pytest.mark.unit
+def test_northbound_summary(monkeypatch):
+    _patch_ak(monkeypatch, stock_hsgt_individual_em=lambda stock: _northbound_df())
+    out = akv.get_a_share_northbound_native("600519.SS", "2024-06-15", 30)
+    # window summary should show 增持 (1.2e8 > 1.0e8 from first in window)
+    assert "增持" in out
+    assert "窗口变化" in out
+
+
+@pytest.mark.unit
+def test_northbound_empty_honest(monkeypatch):
+    _patch_ak(monkeypatch, stock_hsgt_individual_em=lambda stock: pd.DataFrame())
+    out = akv.get_a_share_northbound_native("600519.SS", "2024-06-15", 30)
+    assert "No northbound holding rows" in out
+
+
+@pytest.mark.unit
+def test_northbound_transport_error_degrades(monkeypatch):
+    _patch_ak(monkeypatch, stock_hsgt_individual_em=_boom(ConnectionError("boom")))
+    with pytest.raises(NoMarketDataError):
+        akv.get_a_share_northbound_native("600519.SS", "2024-06-15", 30)
+
+
+@pytest.mark.unit
+def test_northbound_rate_limit_typed(monkeypatch):
+    _patch_ak(monkeypatch, stock_hsgt_individual_em=_boom(RuntimeError("请求过于频繁")))
+    with pytest.raises(VendorRateLimitError):
+        akv.get_a_share_northbound_native("600519.SS", "2024-06-15", 30)
+
+
+@pytest.mark.unit
+def test_router_routes_northbound_via_akshare(monkeypatch):
+    _patch_ak(monkeypatch, stock_hsgt_individual_em=lambda stock: _northbound_df())
+    from yiagents.dataflows import config as cfgmod
+    from yiagents.dataflows.interface import route_to_vendor
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
+                                                    "a_share_native": "akshare"}})
+        out = route_to_vendor("get_a_share_northbound_native", "600519.SS", "2024-06-15", 30)
+    finally:
+        cfgmod.set_config(orig)
+    assert "# A-share Northbound" in out
+
+
+@pytest.mark.unit
+def test_router_northbound_non_a_share_degrades_to_sentinel(monkeypatch):
+    from yiagents.dataflows import config as cfgmod
+    from yiagents.dataflows.interface import route_to_vendor
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
+                                                    "a_share_native": "akshare"}})
+        out = route_to_vendor("get_a_share_northbound_native", "AAPL", "2024-06-15", 30)
+    finally:
+        cfgmod.set_config(orig)
+    assert out.startswith("NO_DATA_AVAILABLE")
+
+
+# --- sector flow ---
+def _sector_flow_df():
+    """Synthetic stock_sector_fund_flow_rank DataFrame."""
+    return pd.DataFrame([
+        {"名称": "白酒", "今日主力净流入-净额": 5.0e8, "今日主力净流入-净占比": 3.5,
+         "今日超大单净流入-净额": 3.0e8, "今日大单净流入-净额": 2.0e8},
+        {"名称": "半导体", "今日主力净流入-净额": 3.0e8, "今日主力净流入-净占比": 2.0,
+         "今日超大单净流入-净额": 2.0e8, "今日大单净流入-净额": 1.0e8},
+        {"名称": "房地产", "今日主力净流入-净额": -2.0e8, "今日主力净流入-净占比": -1.5,
+         "今日超大单净流入-净额": -1.5e8, "今日大单净流入-净额": -5.0e7},
+        {"名称": "", "今日主力净流入-净额": 1.0e7, "今日主力净流入-净占比": 0.1,
+         "今日超大单净流入-净额": 5.0e6, "今日大单净流入-净额": 5.0e6},
+    ])
+
+
+@pytest.mark.unit
+def test_sector_flow_with_industry(monkeypatch):
+    _patch_ak(
+        monkeypatch,
+        stock_sector_fund_flow_rank=lambda **kw: _sector_flow_df(),
+        stock_board_industry_name_ths=lambda symbol: pd.DataFrame([
+            {"代码": "600519", "所属行业": "白酒"},
+        ]),
+    )
+    out = akv.get_a_share_sector_flow_native("600519.SS", None, 1)
+    assert "# A-share Sector Fund Flow" in out
+    assert "白酒" in out
+    assert "本股所属" in out         # stock's sector highlighted
+    assert "房地产" in out           # other sector present
+
+
+@pytest.mark.unit
+def test_sector_flow_without_industry(monkeypatch):
+    """If industry lookup fails, still returns sector ranking (no marker)."""
+    _patch_ak(
+        monkeypatch,
+        stock_sector_fund_flow_rank=lambda **kw: _sector_flow_df(),
+    )
+    out = akv.get_a_share_sector_flow_native("600519.SS", None, 1)
+    assert "# A-share Sector Fund Flow" in out
+    assert "could not be resolved" in out
+    assert "本股所属" not in out
+
+
+@pytest.mark.unit
+def test_sector_flow_empty_honest(monkeypatch):
+    _patch_ak(
+        monkeypatch,
+        stock_sector_fund_flow_rank=lambda **kw: pd.DataFrame(),
+    )
+    out = akv.get_a_share_sector_flow_native("600519.SS", None, 1)
+    assert "No sector fund-flow data" in out
+
+
+@pytest.mark.unit
+def test_sector_flow_transport_error_degrades(monkeypatch):
+    _patch_ak(
+        monkeypatch,
+        stock_sector_fund_flow_rank=_boom(ConnectionError("boom")),
+    )
+    with pytest.raises(NoMarketDataError):
+        akv.get_a_share_sector_flow_native("600519.SS", None, 1)
+
+
+@pytest.mark.unit
+def test_router_routes_sector_flow_via_akshare(monkeypatch):
+    _patch_ak(
+        monkeypatch,
+        stock_sector_fund_flow_rank=lambda **kw: _sector_flow_df(),
+        stock_board_industry_name_ths=lambda symbol: pd.DataFrame([
+            {"代码": "600519", "所属行业": "白酒"},
+        ]),
+    )
+    from yiagents.dataflows import config as cfgmod
+    from yiagents.dataflows.interface import route_to_vendor
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
+                                                    "a_share_native": "akshare"}})
+        out = route_to_vendor("get_a_share_sector_flow_native", "600519.SS", None, 1)
+    finally:
+        cfgmod.set_config(orig)
+    assert "# A-share Sector Fund Flow" in out
+
+
+# --- realtime quote ---
+def _spot_em_df():
+    """Synthetic stock_zh_a_spot_em DataFrame (whole market, filter by 代码)."""
+    return pd.DataFrame([
+        {"代码": "600519", "名称": "贵州茅台", "最新价": 1685.50, "涨跌幅": 1.23,
+         "涨跌额": 20.5, "成交量": 1234567, "成交额": 2.0e10, "换手率": 0.15,
+         "市盈率-动态": 28.5, "市净率": 9.2, "最高": 1690.0, "最低": 1668.0,
+         "今开": 1670.0, "昨收": 1665.0},
+        {"代码": "000001", "名称": "平安银行", "最新价": 11.50, "涨跌幅": -0.43,
+         "涨跌额": -0.05, "成交量": 99999999, "成交额": 1.1e9, "换手率": 0.52,
+         "市盈率-动态": 4.5, "市净率": 0.55, "最高": 11.6, "最低": 11.4,
+         "今开": 11.55, "昨收": 11.55},
+    ])
+
+
+@pytest.mark.unit
+def test_realtime_quote_live_mode(monkeypatch):
+    _patch_ak(monkeypatch, stock_zh_a_spot_em=lambda: _spot_em_df())
+    out = akv.get_a_share_realtime_quote_native("600519.SS")
+    assert "# A-share Real-Time Quote" in out
+    assert "贵州茅台" in out
+    assert "1685.50" in out         # latest price
+    assert "1.23%" in out           # change %
+
+
+@pytest.mark.unit
+def test_realtime_quote_historical_sentinel(monkeypatch):
+    """A historical curr_date -> REAL_TIME_UNAVAILABLE sentinel (no lookahead)."""
+    _patch_ak(monkeypatch, stock_zh_a_spot_em=lambda: _spot_em_df())
+    out = akv.get_a_share_realtime_quote_native("600519.SS", "2024-06-15")
+    assert "REAL_TIME_UNAVAILABLE" in out
+    assert "historical" in out.lower()
+
+
+@pytest.mark.unit
+def test_realtime_quote_not_found(monkeypatch):
+    _patch_ak(monkeypatch, stock_zh_a_spot_em=lambda: _spot_em_df())
+    out = akv.get_a_share_realtime_quote_native("999999.SZ")
+    assert "not found" in out
+
+
+@pytest.mark.unit
+def test_realtime_quote_transport_error(monkeypatch):
+    _patch_ak(monkeypatch, stock_zh_a_spot_em=_boom(ConnectionError("boom")))
+    with pytest.raises(NoMarketDataError):
+        akv.get_a_share_realtime_quote_native("600519.SS")
+
+
+@pytest.mark.unit
+def test_router_routes_realtime_via_akshare(monkeypatch):
+    _patch_ak(monkeypatch, stock_zh_a_spot_em=lambda: _spot_em_df())
+    from yiagents.dataflows import config as cfgmod
+    from yiagents.dataflows.interface import route_to_vendor
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
+                                                    "a_share_native": "akshare"}})
+        out = route_to_vendor("get_a_share_realtime_quote_native", "600519.SS", "")
+    finally:
+        cfgmod.set_config(orig)
+    assert "# A-share Real-Time Quote" in out
+
+
+# --- market breadth ---
+def _breadth_df():
+    """Synthetic stock_zh_a_spot DataFrame for breadth aggregation."""
+    return pd.DataFrame([
+        {"涨跌幅": 5.0}, {"涨跌幅": 3.0}, {"涨跌幅": -2.0}, {"涨跌幅": -1.0},
+        {"涨跌幅": 10.0},   # limit up (>= 9.9)
+        {"涨跌幅": -10.0},  # limit down (<= -9.9)
+        {"涨跌幅": 0.0},    # flat
+    ])
+
+
+@pytest.mark.unit
+def test_market_breadth_live_mode(monkeypatch):
+    _patch_ak(monkeypatch, stock_zh_a_spot=lambda: _breadth_df())
+    out = akv.get_a_share_market_breadth_native()
+    assert "# A-share Market Breadth" in out
+    assert "上涨" in out
+    assert "下跌" in out
+    assert "涨停" in out
+    assert "跌停" in out
+    assert "涨跌比" in out
+
+
+@pytest.mark.unit
+def test_market_breadth_historical_sentinel(monkeypatch):
+    _patch_ak(monkeypatch, stock_zh_a_spot=lambda: _breadth_df())
+    out = akv.get_a_share_market_breadth_native("2024-06-15")
+    assert "REAL_TIME_UNAVAILABLE" in out
+
+
+@pytest.mark.unit
+def test_market_breadth_transport_error(monkeypatch):
+    _patch_ak(monkeypatch, stock_zh_a_spot=_boom(ConnectionError("boom")))
+    with pytest.raises(NoMarketDataError):
+        akv.get_a_share_market_breadth_native()
+
+
+@pytest.mark.unit
+def test_router_routes_breadth_via_akshare(monkeypatch):
+    _patch_ak(monkeypatch, stock_zh_a_spot=lambda: _breadth_df())
+    from yiagents.dataflows import config as cfgmod
+    from yiagents.dataflows.interface import route_to_vendor
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
+                                                    "a_share_native": "akshare"}})
+        out = route_to_vendor("get_a_share_market_breadth_native", "")
+    finally:
+        cfgmod.set_config(orig)
+    assert "# A-share Market Breadth" in out
+
+
+# --- market analyst wiring ---
+class MarketAnalystAShareWiringTests(unittest.TestCase):
+    """a_share_native — default-off byte-equivalence + on-appends-market-tools."""
+
+    def _tool_names(self, config_overrides=None, ticker="600519.SS"):
+        from yiagents.agents.analysts.market_analyst import create_market_analyst
+        from yiagents.dataflows import config as cfgmod
+        orig = cfgmod.get_config()
+        try:
+            if config_overrides:
+                cfgmod.set_config({**orig, **config_overrides})
+            llm = _RecordingLLM()
+            node = create_market_analyst(llm)
+            state = _state(ticker)
+            node(state)
+            return [t.name for t in llm.bound_tools]
+        finally:
+            cfgmod.set_config(orig)
+
+    def test_default_off_byte_equivalent_baseline(self):
+        names = self._tool_names({"a_share_native": False})
+        self.assertEqual(
+            names,
+            ["get_stock_data", "get_indicators", "get_verified_market_snapshot"],
+        )
+
+    def test_on_with_a_share_appends_northbound_and_sector(self):
+        names = self._tool_names({"a_share_native": True}, ticker="600519.SS")
+        # Baseline 3 tools + 4 new A-share market tools.
+        self.assertIn("get_stock_data", names)
+        self.assertIn("get_indicators", names)
+        self.assertIn("get_verified_market_snapshot", names)
+        self.assertIn("get_a_share_northbound_native", names)
+        self.assertIn("get_a_share_sector_flow_native", names)
+        self.assertIn("get_a_share_realtime_quote_native", names)
+        self.assertIn("get_a_share_market_breadth_native", names)
+
+    def test_on_with_non_a_share_is_byte_equivalent(self):
+        names = self._tool_names({"a_share_native": True}, ticker="AAPL")
+        self.assertEqual(
+            names,
+            ["get_stock_data", "get_indicators", "get_verified_market_snapshot"],
+        )
+
+
+# --------------------------------------------------------------------------- #
+# BaoStock quarterly statements (Phase 6 — income / balance / cashflow)
+# --------------------------------------------------------------------------- #
+
+def _profit_rows():
+    """Synthetic BaoStock query_profit_data result rows."""
+    return [
+        {"code": "sh.600519", "pubDate": "2024-10-30", "statDate": "2024-09-30",
+         "totalShare": 1.256e9, "npParentCompanyOwners": 6.08e10,
+         "operateProfit": 7.5e10, "roeAvg": 15.2, "epsTTM": 48.42},
+        {"code": "sh.600519", "pubDate": "2024-08-29", "statDate": "2024-06-30",
+         "totalShare": 1.256e9, "npParentCompanyOwners": 4.17e10,
+         "operateProfit": 5.2e10, "roeAvg": 14.8, "epsTTM": 33.19},
+        {"code": "sh.600519", "pubDate": "2025-04-15", "statDate": "2024-12-31",
+         "totalShare": 1.256e9, "npParentCompanyOwners": 8.6e10,
+         "operateProfit": 1.05e11, "roeAvg": 16.1, "epsTTM": 68.47},  # future
+    ]
+
+
+def _balance_rows():
+    """Synthetic BaoStock query_balance_data result rows."""
+    return [
+        {"code": "sh.600519", "pubDate": "2024-10-30", "statDate": "2024-09-30",
+         "totalAssets": 4.5e11, "totalLiab": 1.2e11,
+         "totalShareholdersEquity": 3.3e11, "liabilityRate": 26.7},
+        {"code": "sh.600519", "pubDate": "2024-08-29", "statDate": "2024-06-30",
+         "totalAssets": 4.4e11, "totalLiab": 1.1e11,
+         "totalShareholdersEquity": 3.3e11, "liabilityRate": 25.0},
+    ]
+
+
+def _cashflow_rows():
+    """Synthetic BaoStock query_cash_flow_data result rows."""
+    return [
+        {"code": "sh.600519", "pubDate": "2024-10-30", "statDate": "2024-09-30",
+         "netCFOperate": 5.0e10, "netCFInvest": -2.0e10, "netCFFinance": -1.0e10},
+        {"code": "sh.600519", "pubDate": "2024-08-29", "statDate": "2024-06-30",
+         "netCFOperate": 3.5e10, "netCFInvest": -1.5e10, "netCFFinance": -0.8e10},
+    ]
+
+
+@pytest.mark.unit
+def test_income_statement_pit_drops_future(monkeypatch):
+    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn: _profit_rows())
+    out = bsv.get_a_share_income_statement_native("600519.SS", "2024-11-01", 540)
+    assert "# A-share Income Statement" in out
+    assert "2024-10-30" in out         # published before curr_date -> kept
+    assert "2024-08-29" in out         # kept
+    assert "2025-04-15" not in out     # future pubDate -> PIT drop
+
+
+@pytest.mark.unit
+def test_income_statement_empty_honest(monkeypatch):
+    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn: [])
+    out = bsv.get_a_share_income_statement_native("600519.SS", "2024-06-15", 540)
+    assert "No income-statement rows" in out
+
+
+@pytest.mark.unit
+def test_balance_sheet_pit(monkeypatch):
+    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn: _balance_rows())
+    out = bsv.get_a_share_balance_sheet_native("600519.SS", "2024-11-01", 540)
+    assert "# A-share Balance Sheet" in out
+    assert "2024-10-30" in out
+    assert "debt ratio" in out.lower() or "liabilityRate" in out or "26.70" in out
+
+
+@pytest.mark.unit
+def test_cashflow_statement_pit(monkeypatch):
+    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn: _cashflow_rows())
+    out = bsv.get_a_share_cashflow_statement_native("600519.SS", "2024-11-01", 540)
+    assert "# A-share Cashflow Statement" in out
+    assert "2024-10-30" in out
+
+
+@pytest.mark.unit
+def test_router_routes_income_statement_via_baostock(monkeypatch):
+    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn: _profit_rows())
+    from yiagents.dataflows import config as cfgmod
+    from yiagents.dataflows.interface import route_to_vendor
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
+                                                    "a_share_native": "baostock"}})
+        out = route_to_vendor("get_a_share_income_statement_native", "600519.SS",
+                              "2024-11-01", 540)
+    finally:
+        cfgmod.set_config(orig)
+    assert "# A-share Income Statement" in out
+
+
+@pytest.mark.unit
+def test_router_income_statement_non_a_share_degrades(monkeypatch):
+    from yiagents.dataflows import config as cfgmod
+    from yiagents.dataflows.interface import route_to_vendor
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
+                                                    "a_share_native": "baostock"}})
+        out = route_to_vendor("get_a_share_income_statement_native", "AAPL",
+                              "2024-11-01", 540)
+    finally:
+        cfgmod.set_config(orig)
+    assert out.startswith("NO_DATA_AVAILABLE")
+
+
+class FundamentalsAShareStatementWiringTests(unittest.TestCase):
+    """Verify the 3 quarterly-statement tools are bound to the fundamentals analyst."""
+
+    def _tool_names(self, config_overrides=None, ticker="600519.SS"):
+        from yiagents.dataflows import config as cfgmod
+        orig = cfgmod.get_config()
+        try:
+            if config_overrides:
+                cfgmod.set_config({**orig, **config_overrides})
+            llm = _RecordingLLM()
+            node = create_fundamentals_analyst(llm)
+            node(_state(ticker))
+            return [t.name for t in llm.bound_tools]
+        finally:
+            cfgmod.set_config(orig)
+
+    def test_on_with_a_share_appends_statement_tools(self):
+        names = self._tool_names({"a_share_native": True}, ticker="600519.SS")
+        self.assertIn("get_a_share_income_statement_native", names)
+        self.assertIn("get_a_share_balance_sheet_native", names)
+        self.assertIn("get_a_share_cashflow_statement_native", names)
 
 
 if __name__ == "__main__":
