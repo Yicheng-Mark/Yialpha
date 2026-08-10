@@ -1,6 +1,8 @@
 import contextlib
 import os
 import re
+import threading
+import warnings
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -12,6 +14,10 @@ from .api_key_env import get_api_key_env
 from .base_client import BaseLLMClient, normalize_content
 from .capabilities import get_capabilities
 from .validators import validate_model
+
+# One-shot guard so the timeout-unset warning fires at most once per process.
+_timeout_warned = False
+_timeout_warn_lock = threading.Lock()
 
 
 class NormalizedChatOpenAI(ChatOpenAI):
@@ -337,12 +343,27 @@ class OpenAIClient(BaseLLMClient):
         # text" fallback (see agents/utils/structured.py) can fire instead of
         # stalling. Caller-supplied timeout always wins; otherwise the
         # ``YIAGENTS_LLM_TIMEOUT_S`` env var (seconds) opts in. Defaults to off
-        # so slow local models (e.g. Ollama) keep their current behaviour.
+        # so slow local models (e.g. Ollama) keep their current behaviour, but
+        # we warn once so operators know the risk before a stall happens.
         if "timeout" not in llm_kwargs:
             _timeout_env = os.environ.get("YIAGENTS_LLM_TIMEOUT_S")
             if _timeout_env:
                 with contextlib.suppress(ValueError):
                     llm_kwargs["timeout"] = float(_timeout_env)
+            else:
+                global _timeout_warned
+                with _timeout_warn_lock:
+                    if not _timeout_warned:
+                        _timeout_warned = True
+                        warnings.warn(
+                            "YIAGENTS_LLM_TIMEOUT_S is not set: LLM calls have "
+                            "no read-timeout, so a half-open socket can hang "
+                            "the batch forever. Set YIAGENTS_LLM_TIMEOUT_S=120 "
+                            "in production (omit for slow local models like "
+                            "Ollama).",
+                            UserWarning,
+                            stacklevel=2,
+                        )
 
         # The subclass (provider quirks) comes from the registry spec.
         return chat_cls(**llm_kwargs)
