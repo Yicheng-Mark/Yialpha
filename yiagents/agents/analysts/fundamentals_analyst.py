@@ -1,6 +1,9 @@
 from yiagents.agents.utils.agent_utils import (
+    get_a_share_balance_sheet_native,
+    get_a_share_cashflow_statement_native,
     get_a_share_dragon_tiger_native,
     get_a_share_fundamentals_native,
+    get_a_share_income_statement_native,
     get_a_share_money_flow_native,
     get_a_share_ohlc_native,
     get_balance_sheet,
@@ -66,9 +69,17 @@ _A_SHARE_NATIVE_NUDGE = (
     "bullish, persistent negative = distribution / bearish) and "
     "`get_a_share_dragon_tiger_native` (龙虎榜 appearances — net institutional "
     "buy-in vs sell-out, a smart-money signal; most stocks do not appear in a "
-    "given window, which is normal, not bearish). If a tool returns 'data not "
-    "available' or 'no coverage found' for this symbol/date, report that honestly "
-    "and do not estimate multiples, prices, capital flow, or dragon-tiger activity."
+    "given window, which is normal, not bearish). NEW: "
+    "`get_a_share_income_statement_native` (quarterly 利润表 — revenue, net "
+    "profit, ROE, EPS), `get_a_share_balance_sheet_native` (quarterly 资产负债表 "
+    "— total assets, liabilities, debt ratio), and "
+    "`get_a_share_cashflow_statement_native` (quarterly 现金流表 — operating / "
+    "investing / financing cash flows). These quarterly statements are PIT-correct "
+    "(pubDate <= curr_date) and provide the A-share financial-statement detail the "
+    "default path covers thinly. If a tool returns 'data not available' or 'no "
+    "coverage found' for this symbol/date, report that honestly and do not "
+    "estimate multiples, prices, capital flow, dragon-tiger activity, or "
+    "statement line items."
 )
 
 
@@ -128,6 +139,9 @@ def create_fundamentals_analyst(llm):
                 get_a_share_ohlc_native,
                 get_a_share_money_flow_native,
                 get_a_share_dragon_tiger_native,
+                get_a_share_income_statement_native,
+                get_a_share_balance_sheet_native,
+                get_a_share_cashflow_statement_native,
             ])
 
         system_message = (
