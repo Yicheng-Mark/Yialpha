@@ -81,6 +81,54 @@ def test_overlay_survives_missing_price(monkeypatch):
     assert "Quantitative Risk Overlay" in md
     assert "**Stop Loss**" not in md
     assert "**Entry Reference**" not in md
+    # Bullish position with no price data -> the missing-stop is now visible.
+    assert "Stop-loss not set" in md
+
+
+@pytest.mark.unit
+def test_overlay_marks_missing_atr_warning(monkeypatch):
+    """Bullish position + price/ATR unavailable -> visible degradation marker.
+
+    Completes the three-path fail-open visibility coverage alongside
+    ``test_overlay_build_failure_marks_decision`` and
+    ``test_overlay_decide_failure_marks_decision``.
+    """
+    g = _make_graph(risk_enabled=True)
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (None, None))
+    state = {"final_trade_decision": "**Rating**: Buy\n\nThesis."}
+    out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
+    md = out["final_trade_decision"]
+    # Overlay ran (not disabled), but the missing stop is now visible.
+    assert "Quantitative Risk Overlay" in md
+    assert "⚠️ Quantitative Risk Overlay DISABLED" not in md
+    assert "Stop-loss not set" in md
+    assert "price/ATR data unavailable" in md
+    # Rating and thesis are untouched.
+    assert parse_rating(md) == "Buy"
+    assert "Thesis." in md
+
+
+@pytest.mark.unit
+def test_overlay_no_marker_when_price_available(monkeypatch):
+    """Price loaded normally -> no false-positive missing-stop marker."""
+    g = _make_graph(risk_enabled=True)
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (190.0, 3.0))
+    state = {"final_trade_decision": "**Rating**: Buy"}
+    out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
+    md = out["final_trade_decision"]
+    assert "Stop-loss not set" not in md
+    assert "**Stop Loss**" in md  # stop was computed normally
+
+
+@pytest.mark.unit
+def test_overlay_no_marker_for_sell_without_price(monkeypatch):
+    """Sell (target_weight <= 0) + no price -> no marker (no stop expected anyway)."""
+    g = _make_graph(risk_enabled=True)
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (None, None))
+    state = {"final_trade_decision": "**Rating**: Sell"}
+    out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
+    md = out["final_trade_decision"]
+    assert "Stop-loss not set" not in md
 
 
 @pytest.mark.unit

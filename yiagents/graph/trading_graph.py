@@ -448,8 +448,8 @@ class YiAgentsGraph:
             close, atr = latest_atr_from_frame(frame)
             return float(close), float(atr)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("risk overlay could not load price/ATR for %s on %s: %s",
-                         ticker, trade_date, exc)
+            logger.warning("risk overlay could not load price/ATR for %s on %s: %s",
+                           ticker, trade_date, exc)
             return None, None
 
     @staticmethod
@@ -538,6 +538,13 @@ class YiAgentsGraph:
             overlay += f"- **Stop Loss**: {decision.stop_loss:.2f}\n"
         if decision.entry_price is not None:
             overlay += f"- **Entry Reference**: {decision.entry_price:.2f}\n"
+        # ATR stop silently skipped because price/ATR data failed to load — make
+        # this visible (mirrors the DISABLED banner for build/decide failures).
+        if close is None and decision.target_weight > 0.0:
+            overlay += (
+                "- **⚠️ Stop-loss not set**: price/ATR data unavailable; this "
+                "position has no ATR-based stop protection.\n"
+            )
         overlay += (
             f"- **Drawdown Regime**: {decision.breaker.regime}"
             f" ({decision.breaker.current_drawdown:.1%})\n"
