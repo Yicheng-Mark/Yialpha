@@ -867,85 +867,92 @@ class YiAgentsGraph:
         # explicit date) leave it unset = no-op pass-through.
         set_analysis_date(str(trade_date)) if str(trade_date) else set_analysis_date(None)
 
-        # Initialize state — inject memory log context for PM and the
-        # deterministically resolved instrument identity for all agents.
-        past_context = self.memory_log.get_past_context(
-            company_name,
-            as_of_date=str(trade_date),
-        )
-        instrument_context = self.resolve_instrument_context(
-            company_name, asset_type, trade_date=str(trade_date),
-        )
-        init_agent_state = self.propagator.create_initial_state(
-            company_name,
-            trade_date,
-            asset_type=asset_type,
-            past_context=past_context,
-            instrument_context=instrument_context,
-            portfolio_state=portfolio_state,
-        )
-        args = self.propagator.get_graph_args()
+        try:
+            # Initialize state — inject memory log context for PM and the
+            # deterministically resolved instrument identity for all agents.
+            past_context = self.memory_log.get_past_context(
+                company_name,
+                as_of_date=str(trade_date),
+            )
+            instrument_context = self.resolve_instrument_context(
+                company_name, asset_type, trade_date=str(trade_date),
+            )
+            init_agent_state = self.propagator.create_initial_state(
+                company_name,
+                trade_date,
+                asset_type=asset_type,
+                past_context=past_context,
+                instrument_context=instrument_context,
+                portfolio_state=portfolio_state,
+            )
+            args = self.propagator.get_graph_args()
 
-        # Inject thread_id so same ticker+date+graph-shape resumes; a different
-        # date or graph shape starts fresh (#1089).
-        if self.config.get("checkpoint_enabled"):
-            tid = thread_id(company_name, str(trade_date), self._run_signature(asset_type))
-            args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
+            # Inject thread_id so same ticker+date+graph-shape resumes; a different
+            # date or graph shape starts fresh (#1089).
+            if self.config.get("checkpoint_enabled"):
+                tid = thread_id(company_name, str(trade_date), self._run_signature(asset_type))
+                args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
 
-        if self.debug:
-            trace = []
-            last_printed = None
-            for chunk in self.graph.stream(init_agent_state, **args):
-                if chunk["messages"]:
-                    msg = chunk["messages"][-1]
-                    # Nodes after the trader don't append to messages, so the
-                    # same trailing message repeats across chunks. Print it only
-                    # when it changes (#1027); the trace/state merge is unchanged.
-                    signature = (type(msg).__name__, getattr(msg, "content", None))
-                    if signature != last_printed:
-                        msg.pretty_print()
-                        last_printed = signature
-                    trace.append(chunk)
-            # Streamed chunks are per-node deltas. Merge them so the returned
-            # state matches what graph.invoke() yields in the non-debug path.
-            final_state = {}
-            for chunk in trace:
-                final_state.update(chunk)
-        else:
-            final_state = self._invoke_or_stream(init_agent_state, args)
+            if self.debug:
+                trace = []
+                last_printed = None
+                for chunk in self.graph.stream(init_agent_state, **args):
+                    if chunk["messages"]:
+                        msg = chunk["messages"][-1]
+                        # Nodes after the trader don't append to messages, so the
+                        # same trailing message repeats across chunks. Print it only
+                        # when it changes (#1027); the trace/state merge is unchanged.
+                        signature = (type(msg).__name__, getattr(msg, "content", None))
+                        if signature != last_printed:
+                            msg.pretty_print()
+                            last_printed = signature
+                        trace.append(chunk)
+                # Streamed chunks are per-node deltas. Merge them so the returned
+                # state matches what graph.invoke() yields in the non-debug path.
+                final_state = {}
+                for chunk in trace:
+                    final_state.update(chunk)
+            else:
+                final_state = self._invoke_or_stream(init_agent_state, args)
 
-        # Phase 1: deterministically override size / stop / exposure (LLM kept
-        # the direction). No-op when risk_enabled is off.
-        final_state = self._apply_risk_overlay(
-            company_name, trade_date, final_state, portfolio_state,
-        )
-
-        # Store current state for reflection.
-        self.curr_state = final_state
-
-        # Log state to disk.
-        self._log_state(trade_date, final_state)
-
-        # T0: dump per-node perf telemetry next to full_states_log. No-op when
-        # telemetry is off (perf_tracker is None).
-        if self.perf_tracker is not None:
-            self._dump_perf(trade_date)
-
-        # Store decision for deferred reflection on the next same-ticker run.
-        self.memory_log.store_decision(
-            ticker=company_name,
-            trade_date=trade_date,
-            final_trade_decision=final_state["final_trade_decision"],
-        )
-
-        # Clear checkpoint on successful completion to avoid stale state.
-        if self.config.get("checkpoint_enabled"):
-            clear_checkpoint(
-                self.config["data_cache_dir"], company_name, str(trade_date),
-                self._run_signature(asset_type),
+            # Phase 1: deterministically override size / stop / exposure (LLM kept
+            # the direction). No-op when risk_enabled is off.
+            final_state = self._apply_risk_overlay(
+                company_name, trade_date, final_state, portfolio_state,
             )
 
-        return final_state, self.process_signal(final_state["final_trade_decision"])
+            # Store current state for reflection.
+            self.curr_state = final_state
+
+            # Log state to disk.
+            self._log_state(trade_date, final_state)
+
+            # T0: dump per-node perf telemetry next to full_states_log. No-op when
+            # telemetry is off (perf_tracker is None).
+            if self.perf_tracker is not None:
+                self._dump_perf(trade_date)
+
+            # Store decision for deferred reflection on the next same-ticker run.
+            self.memory_log.store_decision(
+                ticker=company_name,
+                trade_date=trade_date,
+                final_trade_decision=final_state["final_trade_decision"],
+            )
+
+            # Clear checkpoint on successful completion to avoid stale state.
+            if self.config.get("checkpoint_enabled"):
+                clear_checkpoint(
+                    self.config["data_cache_dir"], company_name, str(trade_date),
+                    self._run_signature(asset_type),
+                )
+
+            return final_state, self.process_signal(final_state["final_trade_decision"])
+        finally:
+            # Clear the PIT analysis date so it cannot leak into a subsequent run
+            # in the same context (e.g. a live analysis after a backtest in the
+            # same process). The batch runner copies a fresh context per worker,
+            # so this is belt-and-braces for non-batch callers.
+            set_analysis_date(None)
 
     def _log_state(self, trade_date, final_state):
         """Log the final state to a JSON file."""

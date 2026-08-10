@@ -299,8 +299,6 @@ rich==15.0.0
     #   typer
 ruff==0.16.2
     # via yiagents (pyproject.toml)
-setuptools==84.0.0
-    # via yiagents (pyproject.toml)
 shellingham==1.5.4
     # via typer
 six==1.17.0

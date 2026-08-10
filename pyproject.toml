@@ -141,6 +141,14 @@ check_untyped_defs = false
 # py.typed markers; silence their import errors so real issues stay visible.
 ignore_missing_imports = true
 
+# Skip opening any transitive stub (incl. numpy's PEP 695 `type X = ...` aliases,
+# which require Python 3.12+ and abort the run with a [syntax] error under
+# python_version="3.10"). This mirrors the ``--follow-imports=skip`` CLI flag in
+# ci.yml so a local ``mypy yiagents/execution`` reproduces CI exactly instead of
+# dying on numpy's stub. The explicitly-listed source files are still fully
+# checked; only their transitive stub dependencies are skipped.
+follow_imports = "skip"
+
 [[tool.mypy.overrides]]
 # numpy>=2.1 ships PEP 695 `type X = ...` aliases in its bundled stub
 # (numpy/__init__.pyi, ~65 occurrences), which require Python 3.12+. We still

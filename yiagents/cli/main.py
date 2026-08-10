@@ -18,6 +18,10 @@ for _stream in (sys.stdout, sys.stderr):
 # noqa: E402 — all imports sit after the UTF-8 reconfigure guard above, which must
 # run first so ✅/❌/中文 render on a GBK Windows console.  The guard is a platform
 # shim, not a code-ordering bug; reordering would re-introduce UnicodeEncodeError.
+from yiagents.logging_config import setup_logging  # noqa: E402
+
+setup_logging()
+
 import typer  # noqa: E402
 from rich import box  # noqa: E402
 from rich.align import Align  # noqa: E402

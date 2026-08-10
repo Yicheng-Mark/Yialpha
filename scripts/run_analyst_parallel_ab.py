@@ -63,6 +63,12 @@ for _stream in (sys.stdout, sys.stderr):
     with contextlib.suppress(AttributeError, ValueError):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
+# Centralised logging: make INFO/DEBUG from agents/dataflows visible at runtime
+# (otherwise Python's default WARNING-only root logger silently swallows them).
+from yiagents.logging_config import setup_logging  # noqa: E402
+
+setup_logging()  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Optional accelerator availability flags (tested via monkeypatch).
 # Both are False on this machine: ``python -c "import scipy"`` and

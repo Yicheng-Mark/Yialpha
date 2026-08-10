@@ -46,6 +46,10 @@ for _stream in (sys.stdout, sys.stderr):
     with contextlib.suppress(AttributeError, ValueError):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
+from yiagents.logging_config import setup_logging  # noqa: E402
+
+setup_logging()
+
 from yiagents.batch.runner import BatchRunner  # noqa: E402
 from yiagents.cli.utils import detect_asset_type, is_valid_ticker_input  # noqa: E402
 from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
