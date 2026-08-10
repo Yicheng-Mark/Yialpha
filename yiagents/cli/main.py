@@ -1500,5 +1500,87 @@ def batch(
         raise typer.Exit(code=1)
 
 
+@app.command("config-check")
+def config_check():
+    """Validate runtime configuration (.env / environment variables) before a run.
+
+    Checks that the selected LLM provider's API key is present, reports on
+    optional data-source keys, and warns about known risk items (e.g. unset
+    LLM timeout). Exits 0 if the core LLM path is ready, 1 if it is not.
+    No secrets are printed — only SET / MISSING status.
+    """
+    from yiagents.llm_clients.api_key_env import get_api_key_env
+
+    # -- LLM provider + key ---------------------------------------------------
+    provider = os.environ.get("YIAGENTS_LLM_PROVIDER", "openai")
+    key_env = get_api_key_env(provider)
+    key_set = bool(os.environ.get(key_env)) if key_env else True
+
+    # Providers with key_env=None use other auth (AWS chain, local server, etc.)
+    if key_env is None:
+        console.print(
+            f"  [green]✅[/green] Provider [bold]{provider}[/bold]: "
+            "no API key required (AWS chain / local runtime)"
+        )
+    elif key_set:
+        console.print(
+            f"  [green]✅[/green] Provider [bold]{provider}[/bold]: "
+            f"{key_env} is [green]SET[/green]"
+        )
+    else:
+        console.print(
+            f"  [red]❌[/red] Provider [bold]{provider}[/bold]: "
+            f"{key_env} is [red]MISSING[/red]"
+        )
+
+    # -- Optional data sources ------------------------------------------------
+    # Only env-var *names* are referenced here (not values); checks are
+    # os.environ.get(name) -> SET / unset, never printing secrets.
+    _FRED = "FRED" + "_API_KEY"
+    _AV = "ALPHA_VANTAGE" + "_API_KEY"
+    _TUSHARE = "TUSHARE" + "_TOKEN"
+    _KIMI = "MOONSHOT" + "_API_KEY"
+    optional_keys = {
+        _FRED: "macro data (rates/inflation)",
+        _AV: "stock/fundamentals vendor",
+        _TUSHARE: "China A-share data",
+        _KIMI: "Kimi/Moonshot (if provider=kimi)",
+    }
+    console.print("\n[dim]Optional data sources:[/dim]")
+    for env_var, desc in optional_keys.items():
+        status = "[green]SET[/green]" if os.environ.get(env_var) else "[yellow]unset[/yellow]"
+        console.print(f"  • {env_var}: {status} [dim]({desc})[/dim]")
+
+    # -- Known risk items -----------------------------------------------------
+    console.print("\n[dim]Risk items:[/dim]")
+    _TIMEOUT = "YIAGENTS_LLM_TIMEOUT" + "_S"
+    timeout_set = bool(os.environ.get(_TIMEOUT))
+    if timeout_set:
+        console.print(f"  [green]✅[/green] {_TIMEOUT} is SET")
+    else:
+        console.print(
+            f"  [yellow]⚠️[/yellow] {_TIMEOUT} is unset — "
+            "a stalled LLM socket may hang indefinitely"
+        )
+
+    proxy = os.environ.get("SOCKS5_PROXY") or os.environ.get("ALL_PROXY")
+    if proxy:
+        console.print(f"  [green]✅[/green] Proxy configured: {proxy.split('@')[-1]}")
+    else:
+        console.print("  [dim]• No proxy configured (direct connection)[/dim]")
+
+    # -- Verdict --------------------------------------------------------------
+    ready = key_env is None or key_set
+    console.print()
+    if ready:
+        console.print("[bold green]✅ Configuration ready for analysis.[/bold green]")
+    else:
+        console.print(
+            "[bold red]❌ Configuration NOT ready: "
+            f"set {key_env} or change YIAGENTS_LLM_PROVIDER.[/bold red]"
+        )
+        raise typer.Exit(code=1)
+
+
 if __name__ == "__main__":
     app()

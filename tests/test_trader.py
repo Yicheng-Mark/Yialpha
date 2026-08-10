@@ -27,9 +27,10 @@ def _structured_llm(proposal: TraderProposal, captured: dict | None = None) -> M
     if captured is None:
         structured.invoke.return_value = proposal
     else:
-        structured.invoke.side_effect = lambda prompt: (
-            captured.__setitem__("prompt", prompt) or proposal
-        )
+        def _capture_and_return(prompt, _proposal=proposal):
+            captured["prompt"] = prompt
+            return _proposal
+        structured.invoke.side_effect = _capture_and_return
     llm = MagicMock()
     llm.with_structured_output.return_value = structured
     return llm

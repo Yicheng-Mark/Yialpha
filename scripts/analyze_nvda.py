@@ -9,8 +9,10 @@ import sys
 
 # Windows 控制台默认 GBK，打印 ❌/✅ 会触发 UnicodeEncodeError；强制 utf-8。
 for _stream in (sys.stdout, sys.stderr):
-    with __import__("contextlib").suppress(AttributeError, ValueError):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if callable(_reconfigure):
+        with __import__("contextlib").suppress(AttributeError, ValueError):
+            _reconfigure(encoding="utf-8", errors="replace")
 
 # noqa: E402 — imports sit after the UTF-8 reconfigure guard above (Windows GBK shim).
 from pathlib import Path  # noqa: E402

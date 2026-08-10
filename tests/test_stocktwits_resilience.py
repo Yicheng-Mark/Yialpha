@@ -31,7 +31,7 @@ class StockTwitsResilienceTests:
         "exc",
         [
             http.client.IncompleteRead(b""),
-            HTTPError("url", 503, "down", {}, None),
+            HTTPError("url", 503, "down", {}, None),  # type: ignore[arg-type]
             TimeoutError("slow"),
         ],
     )

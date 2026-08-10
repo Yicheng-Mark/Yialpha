@@ -149,6 +149,10 @@ def _filter_csv_by_date_range(csv_data: str, start_date: str, end_date: str) -> 
         return filtered_df.to_csv(index=False)
 
     except Exception:
-        # If filtering fails, return original data with a warning
+        # Do NOT return the unfiltered CSV on filter failure — that would leak
+        # future rows into a backtest (lookahead) and over-feed the analyst in
+        # live mode. Surface the failure so the router emits its sentinel,
+        # matching the y_finance.py contract (see _get_stock_stats_bulk /
+        # get_stockstats_indicator which also raise on filter failure).
         logger.warning("Failed to filter CSV data by date range", exc_info=True)
-        return csv_data
+        raise

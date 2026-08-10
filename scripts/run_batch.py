@@ -43,8 +43,10 @@ if _PROJECT_ROOT not in sys.path:
 
 # Windows 控制台默认 GBK，打印 ✅/❌/中文会触发 UnicodeEncodeError；强制 utf-8。
 for _stream in (sys.stdout, sys.stderr):
-    with contextlib.suppress(AttributeError, ValueError):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if callable(_reconfigure):
+        with contextlib.suppress(AttributeError, ValueError):
+            _reconfigure(encoding="utf-8", errors="replace")
 
 from yiagents.logging_config import setup_logging  # noqa: E402
 

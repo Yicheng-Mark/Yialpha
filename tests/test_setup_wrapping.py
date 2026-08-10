@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from langgraph.prebuilt import ToolNode
 
+from yiagents.graph.conditional_logic import ConditionalLogic
 from yiagents.graph.perf_telemetry import NodePerfTracker, wrap_node
 from yiagents.graph.setup import GraphSetup
 
@@ -31,7 +32,7 @@ def _make_setup(perf_tracker=None) -> GraphSetup:
         _StubLLM(),
         _StubLLM(),
         {k: ToolNode([]) for k in ("market", "social", "news", "fundamentals")},
-        conditional_logic=None,  # not exercised by _wrap_node
+        conditional_logic=ConditionalLogic(),  # not exercised by _wrap_node
         perf_tracker=perf_tracker,
     )
 

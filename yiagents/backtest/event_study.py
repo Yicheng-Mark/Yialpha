@@ -159,7 +159,7 @@ def bootstrap_ci(
     if n < 2:
         return None
     rng = np.random.default_rng(rng_seed)
-    means = np.empty(n_bootstrap, dtype=float)
+    means: np.ndarray = np.empty(n_bootstrap, dtype=float)
     for i in range(n_bootstrap):
         means[i] = rng.choice(arr, size=n, replace=True).mean()
     return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))

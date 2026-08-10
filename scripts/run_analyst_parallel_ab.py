@@ -60,8 +60,10 @@ if _PROJECT_ROOT not in sys.path:
 # Windows console defaults to GBK (cp936); printing the ✅/❌ glyphs or CJK
 # triggers UnicodeEncodeError. Force utf-8 on stdout/stderr (Python 3.7+).
 for _stream in (sys.stdout, sys.stderr):
-    with contextlib.suppress(AttributeError, ValueError):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if callable(_reconfigure):
+        with contextlib.suppress(AttributeError, ValueError):
+            _reconfigure(encoding="utf-8", errors="replace")
 
 # Centralised logging: make INFO/DEBUG from agents/dataflows visible at runtime
 # (otherwise Python's default WARNING-only root logger silently swallows them).
@@ -396,8 +398,10 @@ def risk_overlay_determinism(runs: list[dict]) -> bool:
         # If some have an overlay and some don't, that's inconsistent.
         if any(o is None for o in overlays):
             return False
-        ref = overlays[0]
+        # After the None-check above, all overlays are dicts.
+        ref = overlays[0] or {}
         for o in overlays[1:]:
+            o = o or {}
             for key in ("target_weight", "stop_loss", "entry_price"):
                 a = ref.get(key)
                 b = o.get(key)
@@ -715,8 +719,8 @@ def _compute_metrics(
     # that dilutes the analyst-only speedup with the serial debate/trader/risk/PM
     # tail and would falsely fail a correct implementation. The whole-run ratio
     # is still recorded as informational-only in ``speedup_wall_full``.
-    serial_segs = [r.get("analyst_segment") for r in serial_runs]
-    par_segs = [r.get("analyst_segment") for r in parallel_runs]
+    serial_segs: list[float | None] = [r.get("analyst_segment") for r in serial_runs]
+    par_segs: list[float | None] = [r.get("analyst_segment") for r in parallel_runs]
     serial_walls = [r.get("wall_full", 0.0) for r in serial_runs]
     par_walls = [r.get("wall_full", 0.0) for r in parallel_runs]
     speedup_na = dry_run
@@ -731,8 +735,9 @@ def _compute_metrics(
         and all(x is not None and x > 0 for x in par_segs)
     )
     if segs_ok:
-        speedup = (sum(serial_segs) / len(serial_segs)) / \
-                  (sum(par_segs) / len(par_segs))
+        ss = [x for x in serial_segs if x is not None]
+        ps = [x for x in par_segs if x is not None]
+        speedup = (sum(ss) / len(ss)) / (sum(ps) / len(ps))
     else:
         # Clean analyst segment unavailable for at least one leg — record the
         # diluted whole-run ratio above for visibility, but mark the gate
