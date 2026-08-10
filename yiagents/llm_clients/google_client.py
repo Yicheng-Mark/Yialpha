@@ -2,6 +2,7 @@ from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+from ._timeout import resolve_timeout
 from .base_client import BaseLLMClient, normalize_content
 from .validators import validate_model
 
@@ -49,6 +50,11 @@ class GoogleClient(BaseLLMClient):
             if "pro" in self.model.lower() and thinking_level == "minimal":
                 thinking_level = "low"
             llm_kwargs["thinking_level"] = thinking_level
+
+        # Read-timeout safety net (shared with all LLM clients). ChatGoogle has
+        # no default read timeout, so without this a half-open socket would
+        # hang the batch. Google is always a cloud provider -> is_local=False.
+        resolve_timeout(llm_kwargs, is_local=False, provider_name="google")
 
         return NormalizedChatGoogleGenerativeAI(**llm_kwargs)
 
