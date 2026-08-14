@@ -23,7 +23,54 @@ rr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rr)
 
 
-class TestReap(unittest.TestCase):
+class TestCoreSentinelCount(unittest.TestCase):
+    """The DEGRADED verdict source: full_states_log's data_quality block."""
+
+    def _write_log(self, reports_root: Path, ticker: str, date: str, payload) -> Path:
+        # Real layout: full_states_log lives NEXT TO the reports/ dir
+        # (~/.yiagents/logs/<TICKER>/...), i.e. under reports_root.parent.
+        log_dir = reports_root.parent / ticker / "YiAgentsStrategy_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log = log_dir / f"full_states_log_{date}.json"
+        import json as _json
+
+        log.write_text(_json.dumps(payload), encoding="utf-8")
+        return log
+
+    def test_reads_core_sentinel_count(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "reports"
+            root.mkdir()
+            self._write_log(
+                root, "NVDA", "2026-06-10",
+                {"data_quality": {"core_sentinel_count": 3,
+                                  "optional_sentinel_count": 1, "sentinels": []}},
+            )
+            self.assertEqual(
+                rr._core_sentinel_count(root, "NVDA", "2026-06-10"), 3
+            )
+
+    def test_missing_log_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "reports"
+            root.mkdir()
+            self.assertIsNone(
+                rr._core_sentinel_count(root, "NVDA", "2026-06-10")
+            )
+
+    def test_legacy_log_without_block_returns_none(self):
+        # Older runs (pre-data_quality) must read as UNKNOWN, not zero —
+        # "0 sentinels" would wrongly certify a data-vacuum report as clean.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "reports"
+            root.mkdir()
+            self._write_log(root, "AAPL", "2026-01-05", {"final_trade_decision": "x"})
+            self.assertIsNone(
+                rr._core_sentinel_count(root, "AAPL", "2026-01-05")
+            )
+
+
+
     def test_clean_exit_does_not_force_kill(self):
         killed = {"n": 0}
 

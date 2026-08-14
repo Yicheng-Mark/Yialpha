@@ -59,7 +59,9 @@ from .errors import NoMarketDataError, VendorNotConfiguredError, VendorRateLimit
 logger = logging.getLogger(__name__)
 
 _TOKEN_ENV = "TUSHARE_TOKEN"
-_TIMEOUT_S = 20
+# No per-call timeout constant here: tushare reuses akshare_vendor's
+# _direct_connect window, which applies that module's _TIMEOUT_S as the
+# default requests read timeout (tushare's SDK exposes no timeout param).
 
 
 def _require_tushare():

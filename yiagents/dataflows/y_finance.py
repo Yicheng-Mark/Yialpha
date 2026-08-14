@@ -11,6 +11,7 @@ from .stockstats_utils import (
     _assert_ohlcv_not_stale,
     filter_financials_by_date,
     load_ohlcv,
+    read_cached_ohlcv,
     yf_retry,
 )
 from .symbol_utils import NoMarketDataError, normalize_symbol
@@ -35,25 +36,43 @@ def get_YFin_data_online(
 
     # Resolve broker/forex symbols to Yahoo's convention (XAUUSD+ -> GC=F).
     canonical = normalize_symbol(symbol)
-    ticker = yf.Ticker(canonical)
 
-    # yfinance treats ``end`` as EXCLUSIVE, so it would drop the requested
-    # end_date row (and the current day when end_date is today). Request one day
-    # past end_date so the requested range is actually inclusive (#986/#987).
-    end_inclusive = (end_dt + relativedelta(days=1)).strftime("%Y-%m-%d")
-    data = yf_retry(
-        lambda: ticker.history(start=start_date, end=end_inclusive),
-        symbol=symbol,
-        canonical=canonical,
-    )
+    # Opportunistic cache reuse: the indicator pipeline's per-symbol OHLCV
+    # cache (5y window, PIT-filtered to end_date, freshness + staleness rules
+    # enforced by read_cached_ohlcv) often already holds exactly this window —
+    # serving it here avoids a second Yahoo round-trip for the same symbol in
+    # one run. Any miss (no cache, stale, window not covered) falls through
+    # to the original online path unchanged.
+    data = None
+    cached = read_cached_ohlcv(canonical, end_date)
+    if cached is not None:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        sliced = cached[cached["Date"] >= start_dt]
+        if not sliced.empty and cached["Date"].min() <= start_dt:
+            sliced = sliced.copy()
+            sliced.index = pd.DatetimeIndex(sliced.pop("Date"))
+            data = sliced
 
-    # Empty result means the symbol is unknown/delisted. Raise a typed error
-    # instead of returning prose: the routing layer turns it into a single
-    # unambiguous "no data" signal so the agent never fabricates a price.
-    if data.empty:
-        raise NoMarketDataError(
-            symbol, canonical, f"no rows between {start_date} and {end_date}"
+    if data is None:
+        ticker = yf.Ticker(canonical)
+        # yfinance treats ``end`` as EXCLUSIVE, so it would drop the requested
+        # end_date row (and the current day when end_date is today). Request
+        # one day past end_date so the requested range is actually inclusive
+        # (#986/#987).
+        end_inclusive = (end_dt + relativedelta(days=1)).strftime("%Y-%m-%d")
+        data = yf_retry(
+            lambda: ticker.history(start=start_date, end=end_inclusive),
+            symbol=symbol,
+            canonical=canonical,
         )
+        # Empty result means the symbol is unknown/delisted. Raise a typed
+        # error instead of returning prose: the routing layer turns it into a
+        # single unambiguous "no data" signal so the agent never fabricates
+        # a price.
+        if data.empty:
+            raise NoMarketDataError(
+                symbol, canonical, f"no rows between {start_date} and {end_date}"
+            )
 
     # Remove timezone info from index for cleaner output
     if data.index.tz is not None:

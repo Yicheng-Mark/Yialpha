@@ -29,6 +29,7 @@ from pathlib import Path
 
 from yiagents.agents.utils.rating import parse_rating
 from yiagents.dataflows.utils import safe_ticker_component
+from yiagents.graph.overlay_fields import parse_overlay
 
 
 def _resolve_logs_root() -> Path:
@@ -51,41 +52,11 @@ _NON_TICKER_DIRS = {"reports", "robust"}
 
 _DATE_RE = re.compile(r"full_states_log_(\d{4}-\d{2}-\d{2})\.json$")
 
-# Marker the Portfolio Manager's overlay appends to final_trade_decision. The
-# section below it holds the quantitative-risk numbers.
-_OVERLAY_MARKER = "## Quantitative Risk Overlay"
-
-# Replicated from scripts/analyze_window.py::_FIELDS. ``scripts/`` is not a
-# package (no __init__.py), so it cannot be imported; this is a faithful copy
-# of the same regex set, scoped to the overlay block only.
-_OVERLAY_FIELDS = {
-    "action": r"\*\*Action\*\*:\s*(.+)",
-    "target_weight": r"\*\*Target Weight\*\*:\s*([0-9.]+%)",
-    "position_value": r"\*\*Target Weight\*\*:.*?\(([-0-9,]+)\)",
-    "stop_loss": r"\*\*Stop Loss\*\*:\s*([-0-9.]+)",
-    "entry": r"\*\*Entry Reference\*\*:\s*([-0-9.]+)",
-    "regime": r"\*\*Drawdown Regime\*\*:\s*(\S+)",
-    "rationale": r"\*\*Rationale\*\*:\s*(.+)",
-}
-
-
-def parse_overlay_local(decision_md: str) -> dict | None:
-    """Extract the risk-overlay numbers the PM appends to its final decision.
-
-    Returns ``None`` when the overlay section is absent (risk overlay off, or
-    the field is empty); a dict of the parsed fields (possibly partial — e.g.
-    ``position_value`` is absent when the overlay uses list form without a
-    parenthetical dollar amount) when present.
-    """
-    if not decision_md or _OVERLAY_MARKER not in decision_md:
-        return None
-    block = decision_md[decision_md.index(_OVERLAY_MARKER) :]
-    out: dict[str, str] = {}
-    for key, pat in _OVERLAY_FIELDS.items():
-        m = re.search(pat, block)
-        if m:
-            out[key] = m.group(1).strip()
-    return out
+# Alias kept for callers/tests that imported the local name; the marker,
+# field map and parser are owned by yiagents.graph.overlay_fields (the
+# module beside the renderer) so this side can never drift from the
+# analyze_window script's copy again.
+parse_overlay_local = parse_overlay
 
 
 def _strategy_dir(ticker: str) -> Path:

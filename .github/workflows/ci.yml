@@ -22,10 +22,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install (with dev extras)
+      - name: Install (with dev + web extras)
+        # [web] is required, not optional, here: tests/test_web_*.py import
+        # fastapi.testclient at module scope, so a [dev]-only install fails at
+        # collection time and the web regression suite silently never runs.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,web]"
       - name: Run test suite with coverage
         # Coverage stays local (no upload yet): the term-missing report surfaces
         # untested modules directly in the CI log so the gaps are visible
@@ -57,8 +60,9 @@ jobs:
         # treat ALL third-party modules as Any, so the stub is never parsed.
         # The project's own source files are still fully type-checked.
         # Scope widened 2026-08-10 from money-path-only (7 files) to 6 packages
-        # (~111 files) — all pass at the default strictness with zero code changes.
-        run: mypy --no-site-packages --follow-imports=skip yiagents/execution yiagents/risk yiagents/backtest yiagents/graph yiagents/agents yiagents/dataflows yiagents/cli
+        # (~111 files), and 2026-08-14 to add llm_clients (every agent's LLM
+        # transport), batch, monitoring, and the four top-level modules.
+        run: mypy --no-site-packages --follow-imports=skip yiagents/execution yiagents/risk yiagents/backtest yiagents/graph yiagents/agents yiagents/dataflows yiagents/cli yiagents/llm_clients yiagents/batch yiagents/monitoring yiagents/reporting.py yiagents/config_snapshot.py yiagents/default_config.py yiagents/logging_config.py
 
   smoke-install:
     name: clean-install smoke

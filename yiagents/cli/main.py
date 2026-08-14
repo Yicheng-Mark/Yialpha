@@ -1376,6 +1376,33 @@ def run_analysis(checkpoint: bool | None = None):
         display_complete_report(final_state)
 
 
+def _warn_config_drift() -> None:
+    """Interactive-entry helper: warn when the config drifted from the last snapshot.
+
+    The self-improvement loop's audit trail is only useful if drift is
+    *noticed*: ``yiagents snapshot record`` pins a config, and this check
+    surfaces (non-blocking, fail-soft) that the live config no longer matches
+    it — e.g. an ``indicator_battery`` prune was applied without a follow-up
+    snapshot. Point the user at ``yiagents snapshot diff`` for the detail.
+    """
+    try:
+        from yiagents.config_snapshot import diff_against_last_snapshot
+
+        diffs = diff_against_last_snapshot(dict(DEFAULT_CONFIG))
+        if diffs:
+            console.print(
+                f"[yellow]⚠️  Config drifted from the last recorded snapshot "
+                f"({len(diffs)} key(s): {', '.join(sorted(diffs)[:8])}"
+                f"{'…' if len(diffs) > 8 else ''}). Run `yiagents snapshot diff` "
+                f"for details, then `yiagents snapshot record` after applying "
+                f"intentional changes.[/yellow]"
+            )
+    except Exception:  # noqa: BLE001 -- advisory only, never blocks the CLI
+        import logging
+
+        logging.getLogger(__name__).debug("config drift check failed", exc_info=True)
+
+
 @app.command()
 def analyze(
     checkpoint: bool | None = typer.Option(
@@ -1394,6 +1421,7 @@ def analyze(
         from yiagents.graph.checkpointer import clear_all_checkpoints
         n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
         console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
+    _warn_config_drift()
     run_analysis(checkpoint=checkpoint)
 
 

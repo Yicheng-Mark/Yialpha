@@ -88,6 +88,63 @@ def test_tz_aware_index_stripped(monkeypatch):
     assert "2026-06-10" in result
 
 
+@pytest.mark.unit
+def test_fresh_ohlcv_cache_serves_without_yahoo_call(monkeypatch):
+    """The indicator pipeline's cache serves the window -> no Ticker call.
+
+    One run previously hit Yahoo twice per symbol (indicator pipeline +
+    stock-data tool); the opportunistic cache read collapses that.
+    """
+    cached = pd.DataFrame({
+        # First row predates the requested start so the cache COVERS the window.
+        "Date": pd.to_datetime(["2026-05-30", "2026-06-09", "2026-06-10"]),
+        "Open": [329.0, 330.0, 331.0], "High": [330.0, 332.0, 333.0],
+        "Low": [327.0, 328.0, 329.0], "Close": [329.9, 330.58, 331.2],
+        "Volume": [900_000, 1_000_000, 1_100_000],
+    })
+
+    def boom(s):
+        raise AssertionError("yf.Ticker must not be reached on a cache hit")
+
+    monkeypatch.setattr(y_finance.yf, "Ticker", boom)
+    monkeypatch.setattr(
+        y_finance, "read_cached_ohlcv", lambda sym, curr: cached.copy()
+    )
+    out = y_finance.get_YFin_data_online("AAPL", "2026-06-01", "2026-06-10")
+    assert "Stock data for AAPL" in out
+    assert "2026-06-10" in out
+
+
+@pytest.mark.unit
+def test_cache_not_covering_window_falls_back_online(monkeypatch):
+    """start_date older than the cache's first row -> the online path runs."""
+    dummy = _DummyTicker("AAPL")
+    monkeypatch.setattr(y_finance.yf, "Ticker", lambda s: dummy)
+    cached = pd.DataFrame({
+        "Date": pd.to_datetime(["2026-06-09", "2026-06-10"]),
+        "Open": [330.0, 331.0], "High": [332.0, 333.0],
+        "Low": [328.0, 329.0], "Close": [330.58, 331.2],
+        "Volume": [1_000_000, 1_100_000],
+    })
+    monkeypatch.setattr(
+        y_finance, "read_cached_ohlcv", lambda sym, curr: cached.copy()
+    )
+    # Request a window starting BEFORE the cache's coverage.
+    out = y_finance.get_YFin_data_online("AAPL", "2026-01-01", "2026-06-10")
+    assert "Stock data for" in out
+    assert "2026-06-10" in out
+
+
+@pytest.mark.unit
+def test_cache_miss_falls_back_online(monkeypatch):
+    """No cache at all -> the original online path runs unchanged."""
+    dummy = _DummyTicker("AAPL")
+    monkeypatch.setattr(y_finance.yf, "Ticker", lambda s: dummy)
+    monkeypatch.setattr(y_finance, "read_cached_ohlcv", lambda sym, curr: None)
+    out = y_finance.get_YFin_data_online("AAPL", "2026-06-01", "2026-06-11")
+    assert "Stock data for" in out
+
+
 # ---------------------------------------------------------------------------
 # get_fundamentals
 # ---------------------------------------------------------------------------

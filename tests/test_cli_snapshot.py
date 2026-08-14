@@ -95,3 +95,50 @@ class TestSnapshotList:
         assert "change 4" in result.output
         assert "change 3" in result.output
         assert "change 0" not in result.output
+
+
+@pytest.mark.unit
+class TestConfigDriftWarning:
+    """The interactive-entry drift check (analyze startup advisory)."""
+
+    def test_no_drift_no_warning(self, isolated_history, monkeypatch):
+        import yiagents.cli.main as cli_main
+
+        recorded = {"n": 0}
+        monkeypatch.setattr(
+            "yiagents.config_snapshot.diff_against_last_snapshot",
+            lambda cfg, **kw: (recorded.__setitem__("n", recorded["n"] + 1) or {}),
+        )
+        cli_main.console.begin_capture()
+        cli_main._warn_config_drift()
+        out = cli_main.console.end_capture()
+        assert "drifted" not in out
+        assert recorded["n"] == 1
+
+    def test_drift_prints_warning(self, isolated_history, monkeypatch):
+        import yiagents.cli.main as cli_main
+
+        monkeypatch.setattr(
+            "yiagents.config_snapshot.diff_against_last_snapshot",
+            lambda cfg, **kw: {"indicator_battery": (None, ["rsi"])},
+        )
+        cli_main.console.begin_capture()
+        cli_main._warn_config_drift()
+        out = cli_main.console.end_capture()
+        assert "drifted" in out
+        assert "indicator_battery" in out
+        assert "snapshot diff" in out
+
+    def test_check_failure_is_silent(self, isolated_history, monkeypatch):
+        import yiagents.cli.main as cli_main
+
+        def boom(cfg, **kw):
+            raise RuntimeError("snapshot dir on fire")
+
+        monkeypatch.setattr(
+            "yiagents.config_snapshot.diff_against_last_snapshot", boom
+        )
+        cli_main.console.begin_capture()
+        cli_main._warn_config_drift()  # must not raise
+        out = cli_main.console.end_capture()
+        assert "drifted" not in out

@@ -8,6 +8,22 @@ import pytest
 import yiagents.dataflows.alpha_vantage_common as av
 
 
+@pytest.fixture(autouse=True)
+def _isolated_av_cache(tmp_path, monkeypatch):
+    """Route the AV disk cache into a per-test tmp dir.
+
+    ``_make_api_request`` caches responses on disk; without isolation the
+    first test's fake body would be served to every later test (and pollute
+    the user's real cache directory).
+    """
+    def _cache_dir(name):
+        d = tmp_path / name
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d)
+
+    monkeypatch.setattr(av, "vendor_cache_dir", _cache_dir)
+
+
 class _FakeResponse:
     def __init__(self, text):
         self.text = text
@@ -52,6 +68,41 @@ def test_invalid_key_not_mislabeled_as_rate_limit(monkeypatch):
     with pytest.raises(av.AlphaVantageRateLimitError):  # sanity: rate-limit path still distinct
         monkeypatch.setattr(av.requests, "get", _patched_get('{"Note": "API call frequency is 5 calls per minute."}'))
         av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+
+
+@pytest.mark.unit
+def test_second_identical_request_served_from_cache(monkeypatch):
+    """The disk cache collapses N identical batch-run calls to one HTTP hit."""
+    calls = {"n": 0}
+
+    def counting_get(url, params=None, **kwargs):
+        calls["n"] += 1
+        return _FakeResponse("Date,Close\n2025-01-02,1.0")
+
+    monkeypatch.setattr(av.requests, "get", counting_get)
+    first = av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+    second = av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+    assert calls["n"] == 1
+    assert first == second
+
+
+@pytest.mark.unit
+def test_transient_connection_error_retried_once(monkeypatch):
+    monkeypatch.setattr(
+        "yiagents.dataflows.netretry.time.sleep", lambda s: None
+    )
+    calls = {"n": 0}
+
+    def flaky_get(url, params=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise av.requests.exceptions.ConnectionError("reset")
+        return _FakeResponse("Date,Close\n2025-01-02,1.0")
+
+    monkeypatch.setattr(av.requests, "get", flaky_get)
+    out = av._make_api_request("TIME_SERIES_DAILY", {"symbol": "MSFT"})
+    assert "2025-01-02" in out
+    assert calls["n"] == 2
 
 
 # ---------------------------------------------------------------------------

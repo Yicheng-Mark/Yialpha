@@ -37,6 +37,23 @@ from yiagents.execution.domain import (
 from yiagents.graph import checkpointer
 
 
+@pytest.fixture(autouse=True)
+def _isolated_search_cache(tmp_path, monkeypatch):
+    """Route the global-news Search disk cache into a per-test tmp dir.
+
+    ``_cached_search_news`` serves repeats from disk, which would otherwise
+    bypass the mocked ``yf.Search`` of a later test (and pollute the real
+    user cache).
+    """
+    def _cache_dir(name):
+        d = tmp_path / name
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d)
+
+    monkeypatch.setattr(ynews, "vendor_cache_dir", _cache_dir)
+
+
+
 # --------------------------------------------------------------------------- #
 # H1/H2 — yfinance news vendors raise instead of returning error prose
 # --------------------------------------------------------------------------- #

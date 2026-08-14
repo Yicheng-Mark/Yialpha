@@ -193,6 +193,29 @@ def _needs_same_day_refresh(data_file, curr_date_dt, today_date) -> bool:
     return time.time() - os.path.getmtime(data_file) > OHLCV_CACHE_TTL_SECONDS
 
 
+def _ohlcv_cache_window() -> tuple[str, str]:
+    """The fixed download window anchoring every OHLCV cache filename.
+
+    yfinance ``end`` is EXCLUSIVE; request tomorrow so today's row is included
+    when curr_date is the current day (#986). Look-ahead is still prevented by
+    the caller's curr_date filter.
+    """
+    today_date = pd.Timestamp.today()
+    start_str = (today_date - pd.DateOffset(years=5)).strftime("%Y-%m-%d")
+    end_str = (today_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    return start_str, end_str
+
+
+def _ohlcv_cache_path(config: dict, safe_symbol: str) -> str:
+    """Per-symbol cache file: one file over the fixed 5y-to-today window."""
+    os.makedirs(config["data_cache_dir"], exist_ok=True)
+    start_str, end_str = _ohlcv_cache_window()
+    return os.path.join(
+        config["data_cache_dir"],
+        f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv",
+    )
+
+
 def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     """Fetch OHLCV data with caching, filtered to prevent look-ahead bias.
 
@@ -209,20 +232,9 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     config = get_config()
     curr_date_dt = pd.to_datetime(curr_date)
 
-    # Cache uses a fixed window (5y to today) so one file per symbol.
+    data_file = _ohlcv_cache_path(config, safe_symbol)
     today_date = pd.Timestamp.today()
-    start_date = today_date - pd.DateOffset(years=5)
-    start_str = start_date.strftime("%Y-%m-%d")
-    # yfinance ``end`` is EXCLUSIVE; request tomorrow so today's row is included
-    # when curr_date is the current day (#986). Look-ahead is still prevented by
-    # the curr_date filter below.
-    end_str = (today_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-
-    os.makedirs(config["data_cache_dir"], exist_ok=True)
-    data_file = os.path.join(
-        config["data_cache_dir"],
-        f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv",
-    )
+    start_str, end_str = _ohlcv_cache_window()
 
     # The cache read + (on miss) download + write must be atomic per symbol:
     # two workers fetching the SAME symbol would otherwise both miss the cache,
@@ -283,6 +295,44 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     # feeding year-old prices into indicators (#1021).
     _assert_ohlcv_not_stale(data, curr_date, symbol, canonical)
 
+    return data
+
+
+def read_cached_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame | None:
+    """Read the per-symbol OHLCV cache with ZERO network fallback.
+
+    Same freshness/staleness/PIT rules as :func:`load_ohlcv`, but a miss
+    returns ``None`` instead of downloading — so callers (the stock-data
+    tool) can opportunistically reuse the cache and only hit Yahoo when it
+    cannot serve the request. The frame is PIT-filtered to ``curr_date``.
+    """
+    canonical = normalize_symbol(symbol)
+    safe_symbol = safe_ticker_component(canonical)
+
+    config = get_config()
+    curr_date_dt = pd.to_datetime(curr_date)
+    today_date = pd.Timestamp.today()
+
+    data_file = _ohlcv_cache_path(config, safe_symbol)
+    if not os.path.exists(data_file):
+        return None
+    if _needs_same_day_refresh(data_file, curr_date_dt, today_date):
+        return None
+    try:
+        cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    if cached.empty or "Close" not in cached.columns:
+        return None
+
+    data = _clean_dataframe(cached)
+    data = data[data["Date"] <= curr_date_dt]
+    if data.empty:
+        return None
+    try:
+        _assert_ohlcv_not_stale(data, curr_date, symbol, canonical)
+    except NoMarketDataError:
+        return None
     return data
 
 

@@ -51,6 +51,23 @@ def _isolate_config():
     reset_config()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_vendor_cache(tmp_path):
+    """Point ``data_cache_dir`` at a per-test tmp directory.
+
+    Vendor disk caches (OHLCV per-symbol CSVs, eastmoney/sec/baostock/fred/
+    alphavantage/yfnews) must never read from — or write into — the
+    developer's real ``~/.yiagents/cache`` during tests: a fresh real-world
+    cache file would bypass a test's mocked network path, and a mocked
+    response would pollute the real cache. Tests that manage their own
+    cache dir call ``set_config`` in the test body, which runs after this
+    fixture and therefore wins.
+    """
+    from yiagents.dataflows.config import set_config
+
+    set_config({"data_cache_dir": str(tmp_path / "vendor-cache")})
+
+
 @pytest.fixture()
 def mock_llm_client():
     client = MagicMock()

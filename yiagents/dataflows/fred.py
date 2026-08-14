@@ -8,13 +8,17 @@ A free API key (https://fred.stlouisfed.org/docs/api/api_key.html) is read from
 ``FRED_API_KEY``; if it is unset the vendor raises ``FredNotConfiguredError`` so
 the routing layer treats it as "unavailable" rather than a hard crash.
 """
+import hashlib
+import json
 import logging
 import os
 from datetime import datetime, timedelta
 
 import requests
 
+from .disk_cache import cached_or_fetch, vendor_cache_dir
 from .errors import VendorNotConfiguredError
+from .netretry import with_transient_retry
 
 logger = logging.getLogger(__name__)
 
@@ -117,21 +121,49 @@ def _resolve_series_id(indicator: str) -> str:
 
 
 def _request(path: str, params: dict) -> dict:
-    """GET a FRED endpoint, surfacing FRED's JSON error body on a bad request."""
+    """GET a FRED endpoint (cached), surfacing FRED's JSON error body on a bad
+    request.
+
+    Responses are cached on disk for 1 day keyed by endpoint + params (sans
+    API key): macro series update at most daily, and a batch run over N
+    tickers re-requests the *same* series per ticker — the cache collapses
+    that to one network call. Transport hiccups get one retry.
+    """
     api_params = {**params, "api_key": get_api_key(), "file_type": "json"}
-    response = requests.get(
-        f"{FRED_API_BASE}/{path}", params=api_params, timeout=REQUEST_TIMEOUT
+    # Cache key excludes the API key: same query, same bytes expected.
+    key_blob = json.dumps(
+        {"path": path, "params": params}, sort_keys=True, default=str
+    ).encode("utf-8")
+    digest = hashlib.sha256(key_blob).hexdigest()[:12]
+    filename = f"{path.replace('/', '_')}_{digest}.json"
+
+    def _http() -> bytes:
+        response = requests.get(
+            f"{FRED_API_BASE}/{path}", params=api_params, timeout=REQUEST_TIMEOUT
+        )
+        # FRED returns 400 with a JSON {"error_message": ...} for unknown series
+        # IDs or malformed params; turn that into a clear, actionable error.
+        if response.status_code == 400:
+            try:
+                message = response.json().get("error_message", response.text)
+            except ValueError:
+                message = response.text
+            raise ValueError(f"FRED request failed: {message}")
+        response.raise_for_status()
+        return response.content
+
+    def _fetch() -> bytes:
+        return with_transient_retry(
+            _http, vendor="fred",
+            retry_on=(requests.exceptions.ConnectionError, requests.exceptions.Timeout),
+        )
+
+    raw = cached_or_fetch(
+        vendor_cache_dir("fred"), filename, _fetch, ttl_days=1.0, vendor="fred",
     )
-    # FRED returns 400 with a JSON {"error_message": ...} for unknown series IDs
-    # or malformed params; turn that into a clear, actionable error.
-    if response.status_code == 400:
-        try:
-            message = response.json().get("error_message", response.text)
-        except ValueError:
-            message = response.text
-        raise ValueError(f"FRED request failed: {message}")
-    response.raise_for_status()
-    return response.json()
+    if raw is None:  # unreachable: fail_open is never set for this vendor
+        raise RuntimeError("fred: cache helper returned None")
+    return json.loads(raw)
 
 
 def get_macro_data(

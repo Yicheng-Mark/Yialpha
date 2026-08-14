@@ -86,8 +86,18 @@ DeepSeek 两档分工（2026-07-05 起，原「一律 v4-pro」已废弃——�
 IC 剪枝结论的**真实落地路径**（此前 `prune_indicators_cli.py --suggest-config` 指向不存在的 `indicator_battery` 幻影键，指标清单只能手改 prompt 常量）：
 
 - **`indicator_battery` 配置键**（`default_config.py`，默认 `None` = 全目录字节等价）：market analyst 的指标目录现由结构化 `_INDICATOR_SECTIONS` 渲染（`agents/analysts/market_analyst.py`），list 值只保留所指指标、空节整节消失；未知名 warning + 忽略，全未知/空列表 warning + 回退全目录（分析师永远有工具词汇）；`yiagents config-check` 校验名单（❌ 标记但不阻断 exit code）。默认渲染与重构前 hand-written 字面量**字节等价**（`tests/test_indicator_battery.py` 固化 git HEAD 快照）。
-- **`yiagents snapshot record/diff/list`**：`config_snapshot.py`（机制完整但此前运行时零调用）的 CLI 入口。人工流程（fail-closed，永不自动改 live config）：`scripts/prune_indicators_cli.py --suggest-config` 产出证据 → 人工审查 → 人工改 `indicator_battery` → `yiagents snapshot record --reason ... --evidence ...` 落 append-only 快照（`<data_cache_dir>/config_history/`，带 git commit + 指纹）→ `run_analyst_parallel_ab.py` A/B 对比 → `snapshot diff` 检测漂移。
+- **`yiagents snapshot record/diff/list`**：`config_snapshot.py`（机制完整但此前运行时零调用）的 CLI 入口。人工流程（fail-closed，永不自动改 live config）：`scripts/prune_indicators_cli.py --suggest-config` 产出证据 → 人工审查 → 人工改 `indicator_battery` → `yiagents snapshot record --reason ... --evidence ...` 落 append-only 快照（`<data_cache_dir>/config_history/`，带 git commit + 指纹）→ `run_analyst_parallel_ab.py` A/B 对比 → `snapshot diff` 检测漂移。`yiagents analyze`（交互入口）启动时自动比对最新快照指纹，漂移打一行 WARNING 指向 `snapshot diff`（advisory，不阻断）。
 - 13 处残留静默退化已收口（2026-08-14 审计）：`yfinance_news.py` 两处错误字符串改 re-raise（news 是 core 类别，fail-closed 契约自此完整）；13F 畸形 filing_date 由 fail-open `pass` 改 fail-closed `continue`（对齐 CUSIP 门）；baostock 季报失败 / 回测基准 SPY 回退 / checkpoint 清理失败 / fin_cot prompt 降级 / memory 畸形日期 / Binance 恢复查询失败全部补日志。
+
+### 证据链全机械化（2026-08-14 二期）
+
+此前链条里每个箭头都要人手工搬运数据；现在**证据的采集与流转全部机械化了，只有「应用」一步留给人**（fail-closed 哲学不变）：
+
+- **IC 数据集导出器 `scripts/export_ic_dataset.py`**（此前最上游断点：prune CLI 需要的 `date, forward_return, <指标>` CSV 只能人手拼）：从 OHLCV 缓存 + stockstats 直接算指标列 + `shift(-N)` 前瞻收益（末尾 N 行 drop——不伪造未实现的 forward_return），产出的 CSV 直接喂 prune CLI。指标名对 `INDICATOR_NAMES` 白名单校验；算不出的指标 skip + WARNING（绝不零填充）。
+- **prune CLI `--json-out`**（此前建议只 print 到 stdout）：写结构化 verdict（params + keep/prune + 每指标 mean|IC|/finite_windows/longest_low_run），下游工具无需解析 markdown。
+- **数据质量结构化落盘**（此前"全数据源失败仍产出 HOLD 报告"只有 LLM 散文说明）：router 每发一个 `NO_DATA_AVAILABLE`/`DATA_UNAVAILABLE` 哨兵就记一条 `{method, kind, detail}`（`dataflows/quality.py`，ContextVar per-run）；`_log_state` 把 `pm_rating`（PM 结构化评级，此前被拍平进 markdown）+ `data_quality` 块写进 `full_states_log_<date>.json`。
+- **run_robust DEGRADED 判定**（此前"有新 complete_report.md 即成功"）：成功后读 full_states_log 的 `data_quality.core_sentinel_count`，>0 打 DEGRADED 标记（默认不改 exit code 语义）；`--require-data-quality` 升级为失败重跑。旧版日志（无该字段）读作 None=未知，绝不误判为 0。
+- 完整人工流程：`export_ic_dataset.py NVDA --horizon 5` → `prune_indicators_cli.py ic_data/NVDA_5d.csv --json-out ...` → 人工审查 → 人工改 `indicator_battery` → `snapshot record` → A/B → `snapshot diff`。
 
 ## Binance 资产类型（crypto_perp / crypto_spot）
 

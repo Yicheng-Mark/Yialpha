@@ -27,18 +27,27 @@ The script prints a markdown report to stdout and, with ``--output``, writes it
 to a file. With ``--suggest-config``, it additionally prints a Python config
 snippet showing the kept ``indicator_battery`` list (the real config key the
 market analyst reads its catalog from) — for manual review only, never
-auto-applied.
+auto-applied. With ``--json-out``, it also writes a machine-readable verdict
+(the same keep/prune decision plus per-indicator IC statistics) so downstream
+tooling can consume the suggestion without parsing markdown.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
-from yiagents.backtest.ic import build_ic_report, prune_indicators, rolling_ic
+from yiagents.backtest.ic import (
+    build_ic_report,
+    consecutive_below_threshold,
+    prune_indicators,
+    rolling_ic,
+)
 
 
 def _load_ic_data(csv_path: str) -> tuple[pd.Series, dict[str, pd.Series]]:
@@ -92,6 +101,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Write the markdown report to this file (default: stdout only)",
     )
     parser.add_argument(
+        "--json-out", type=str, default=None,
+        help="Write a machine-readable verdict (params + keep/prune + "
+        "per-indicator IC stats) to this JSON file. This is the structured "
+        "hand-off for downstream tooling — applying it to the live config "
+        "remains a human decision (fail-closed).",
+    )
+    parser.add_argument(
         "--suggest-config", action="store_true",
         help="Also print a YAML config-diff suggestion (manual review only)",
     )
@@ -135,6 +151,44 @@ def main(argv: list[str] | None = None) -> int:
     if args.output:
         Path(args.output).write_text(report, encoding="utf-8")
         print(f"\nReport written to {args.output}", file=sys.stderr)
+
+    if args.json_out:
+        # Machine-readable verdict: same decision, plus the per-indicator
+        # evidence behind it. Consumed by tooling; applying the prune to the
+        # live config stays a human step (fail-closed contract).
+        per_indicator: dict[str, dict] = {}
+        for name, series in ic_by_indicator.items():
+            finite = series.dropna()
+            finite_abs = finite.abs()
+            per_indicator[name] = {
+                "verdict": "prune" if name in set(result["prune"]) else "keep",
+                "mean_abs_ic": (
+                    float(finite_abs.mean()) if not finite_abs.empty else None
+                ),
+                "finite_windows": int(len(finite)),
+                "longest_low_run": int(
+                    consecutive_below_threshold(
+                        series, threshold=args.min_abs_ic,
+                        min_consecutive=args.min_consecutive,
+                    )
+                ),
+            }
+        verdict = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "params": {
+                "window": args.window,
+                "min_abs_ic": args.min_abs_ic,
+                "min_consecutive": args.min_consecutive,
+                "min_observations": args.min_observations,
+            },
+            "keep": list(result["keep"]),
+            "prune": list(result["prune"]),
+            "per_indicator": per_indicator,
+        }
+        Path(args.json_out).write_text(
+            json.dumps(verdict, indent=2), encoding="utf-8"
+        )
+        print(f"\nJSON verdict written to {args.json_out}", file=sys.stderr)
 
     if args.suggest_config and result["prune"]:
         # Suggest the kept names in the CSV's own column order — only the

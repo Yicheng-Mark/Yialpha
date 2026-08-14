@@ -98,16 +98,22 @@ def _require_akshare():
 
 
 class _direct_connect:
-    """Context manager: pop proxy env vars around a domestic HTTP call.
+    """Context manager: pop proxy env vars + default timeout around a domestic call.
 
     AKShare's internal ``requests`` calls read ``HTTP_PROXY``/``HTTPS_PROXY``
     from the environment; if those point at the SOCKS5 VPN, requests to
-    domestic Eastmoney/Sina hang forever. Popping them for the duration of the
-    call forces a direct connection; they are always restored in ``finally``
+    domestic Eastmoney/Sina hang forever. Popping them for the duration of
+    the call forces a direct connection; they are always restored in ``finally``
     (even on error) and the whole window is serialized by ``_call_lock`` so
     concurrent calls are safe. Mirrors the proxy-bypass *intent* of
     :func:`eastmoney._session` (``trust_env=False``) but at the env level, since
     AKShare owns its sessions internally.
+
+    The same window also applies :data:`_TIMEOUT_S` as a default read timeout:
+    AKShare exposes no per-call timeout parameter, so without this a half-open
+    domestic socket blocks until run_robust's OS-level watchdog kills the
+    process. The shim only fills in timeouts for requests that pass none (see
+    :mod:`yiagents.dataflows.timeout_shim`).
     """
 
     def __init__(self):
@@ -118,15 +124,25 @@ class _direct_connect:
         for key in _PROXY_ENV_KEYS:
             if key in os.environ:
                 self._saved[key] = os.environ.pop(key)
+        # Inner import keeps module import light; the patch window is strictly
+        # inside the popped-proxy + call-lock window.
+        from .timeout_shim import default_request_timeout
+
+        self._timeout_ctx = default_request_timeout(_TIMEOUT_S)
+        self._timeout_ctx.__enter__()
         return self
 
     def __exit__(self, exc_type, exc, tb):
         # Restore every popped var (unset ones are left unset, matching the
-        # pre-call state).
-        for key, val in self._saved.items():
-            os.environ[key] = val
-        self._saved.clear()
-        _call_lock.release()
+        # pre-call state). Timeout shim unwinds first so the requests patch
+        # window is strictly inside the popped-proxy window.
+        try:
+            self._timeout_ctx.__exit__(exc_type, exc, tb)
+        finally:
+            for key, val in self._saved.items():
+                os.environ[key] = val
+            self._saved.clear()
+            _call_lock.release()
         return False
 
 
