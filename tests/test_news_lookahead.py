@@ -12,6 +12,22 @@ import pytest
 import yiagents.dataflows.yfinance_news as ynews
 
 
+@pytest.fixture(autouse=True)
+def _isolated_search_cache(tmp_path, monkeypatch):
+    """Route the global-news Search disk cache into a per-test tmp dir.
+
+    ``_cached_search_news`` serves repeats from disk, which would otherwise
+    bypass the mocked ``yf.Search`` of a later test (and pollute the real
+    user cache).
+    """
+    def _cache_dir(name):
+        d = tmp_path / name
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d)
+
+    monkeypatch.setattr(ynews, "vendor_cache_dir", _cache_dir)
+
+
 def _epoch(date_str):
     return int(time.mktime(datetime.strptime(date_str, "%Y-%m-%d").timetuple()))
 

@@ -41,13 +41,12 @@ import io
 import json
 import logging
 import os
-import threading
 import time
 from datetime import date, timedelta
 
 import requests
 
-from .config import get_config
+from .disk_cache import MinIntervalThrottle, cached_or_fetch, vendor_cache_dir
 from .errors import NoMarketDataError, VendorRateLimitError
 
 logger = logging.getLogger(__name__)
@@ -64,8 +63,7 @@ _TIMEOUT = 20
 # sec_edgar's spacing). Eastmoney's public endpoints tolerate bursts, but a
 # tiny gap keeps a single analysis well under any implicit ceiling.
 _MIN_INTERVAL = 0.12
-_last_request = [0.0]
-_throttle_lock = threading.Lock()
+_throttler = MinIntervalThrottle(_MIN_INTERVAL)
 # Transient connection drops (a bare RemoteDisconnected) are retried a couple of
 # times with backoff before degrading. Transport resilience only; it lives
 # entirely on the opt-in (a_stock) path so default-off runs are unaffected.
@@ -95,20 +93,11 @@ def _session() -> requests.Session:
 
 def _throttle() -> None:
     """Enforce a minimum spacing between Eastmoney requests (thread-safe)."""
-    with _throttle_lock:
-        elapsed = time.time() - _last_request[0]
-        if elapsed < _MIN_INTERVAL:
-            time.sleep(_MIN_INTERVAL - elapsed)
-        _last_request[0] = time.time()
+    _throttler.wait()
 
 
 def _cache_dir() -> str:
-    cfg = get_config()
-    base = cfg.get("data_cache_dir") or os.path.join(
-        os.path.expanduser("~"), ".yiagents", "cache")
-    path = os.path.join(base, "eastmoney")
-    os.makedirs(path, exist_ok=True)
-    return path
+    return vendor_cache_dir("eastmoney")
 
 
 def _direct_get(url: str, params: dict | None = None) -> bytes:
@@ -151,30 +140,20 @@ def _cached_or_fetch(path: str, url: str, params: dict | None = None,
                      ttl_days: float = 1.0) -> bytes:
     """Serve from a fresh on-disk cache, else fetch + cache.
 
-    Falls back to a stale cache on a fetch failure (a slightly-old daily series
-    beats no data). Daily series, so the default TTL is 1 day.
+    Thin adapter over the shared :func:`disk_cache.cached_or_fetch`: the
+    signature keeps a full ``path`` (tests and sibling vendors patch/call this
+    name); it is split into base dir + filename for the containment-checked
+    shared implementation. Falls back to a stale cache on a fetch failure (a
+    slightly-old daily series beats no data), with a WARNING carrying the
+    cache age. Daily series, so the default TTL is 1 day.
     """
-    stale: bytes | None = None
-    if os.path.exists(path):
-        try:
-            with open(path, "rb") as fh:
-                stale = fh.read()
-        except OSError:
-            stale = None
-        if stale is not None and (time.time() - os.path.getmtime(path)) < ttl_days * 86_400.0:
-            return stale
-    try:
-        raw = _direct_get(url, params)
-    except NoMarketDataError:
-        if stale is not None:
-            logger.warning("eastmoney: fetch failed; serving stale cache for %s", path)
-            return stale
-        raise
-    try:
-        with open(path, "wb") as fh:
-            fh.write(raw)
-    except OSError as exc:  # noqa: BLE001 -- caching is best-effort
-        logger.warning("eastmoney: could not write cache %s: %s", path, exc)
+    raw = cached_or_fetch(
+        os.path.dirname(path), os.path.basename(path),
+        lambda: _direct_get(url, params),
+        ttl_days=ttl_days, vendor="eastmoney",
+    )
+    if raw is None:  # unreachable: fail_open is never set for this vendor
+        raise NoMarketDataError(url, detail="cache helper returned None")
     return raw
 
 

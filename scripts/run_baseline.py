@@ -171,79 +171,21 @@ def preflight(ticker: str) -> int:
 
     5 项检查：依赖(含 PySocks) / env+key / 代理端口 / yfinance 实拉 / DeepSeek 探活。
     DeepSeek 用免费 GET /v1/models（非 chat completion），走 NO_PROXY 直连，零 LLM 成本。
+
+    检查逻辑由 yiagents.monitoring.preflight.run_health 单一实现（web 健康页
+    用同一份）；本函数只负责把结构化结果渲染成中文 stdout。
     """
-    import importlib
-    import os
-    import socket
+    from yiagents.monitoring.preflight import run_health
 
     print(f"\n=== 起飞检查（preflight）：{ticker} ===")
-    ok = True
-
-    def check(name, cond, hint=""):
-        nonlocal ok
-        if not cond:
-            ok = False
-        line = f"  {'✅' if cond else '❌'} {name}"
-        if not cond and hint:
-            line += f"  → {hint}"
+    report = run_health(ticker)
+    for c in report["checks"]:
+        line = f"  {'✅' if c['ok'] else '❌'} {c['name']}"
+        if not c["ok"] and c.get("hint"):
+            line += f"  → {c['hint']}"
         print(line)
 
-    # 1) 关键 Python 依赖（PySocks 是 requests/yfinance 走 socks5h 代理的前提）
-    for mod in ["socks", "yfinance", "pandas", "httpx", "dotenv"]:
-        try:
-            importlib.import_module(mod)
-            check(f"依赖 {mod}", True)
-        except ImportError:
-            hint = 'pip install "requests[socks]"  # 装 PySocks' if mod == "socks" else f"pip install {mod}"
-            check(f"依赖 {mod}", False, hint)
-
-    # 2) env / key（.env 由 yiagents 导入时通过 find_dotenv(usecwd=True) 加载，
-    #    故必须从项目根目录运行，否则 os.environ 里拿不到 key）
-    key = os.environ.get("DEEPSEEK_API_KEY", "")
-    check("DEEPSEEK_API_KEY 已设置", bool(key),
-          ".env 未加载——确认从项目根目录（含 .env 的目录）运行")
-    check("LLM provider 已设置", bool(os.environ.get("YIAGENTS_LLM_PROVIDER")),
-          ".env 里 YIAGENTS_LLM_PROVIDER 缺失")
-
-    # 3) 代理端口可达（解析 HTTPS_PROXY 里的 host:port，TCP 探测）
-    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY", "")
-    host, port = "127.0.0.1", 1080
-    if "://" in proxy:
-        hp = proxy.split("://", 1)[1].split("/", 1)[0]
-        if ":" in hp:
-            host = hp.split(":", 1)[0]
-            with contextlib.suppress(ValueError):
-                port = int(hp.rsplit(":", 1)[1])
-    try:
-        socket.create_connection((host, port), timeout=3).close()
-        check(f"代理端口 {host}:{port} 可达", True)
-    except OSError:
-        check(f"代理端口 {host}:{port} 可达", False, "确认 V2Ray/Xray 在监听该端口")
-
-    # 4) yfinance 实拉（代理+数据 的真证明；失败时打印原始异常定位）
-    try:
-        import yfinance as yf
-        df = yf.Ticker(ticker).history(period="5d", auto_adjust=True)
-        check(f"yfinance 拉到 {ticker} 数据", len(df) > 0,
-              "代理/PySocks/Yahoo 限流；若 PySocks 已装仍失败，检查 yfinance 底层是否走 curl_cffi")
-    except Exception as e:  # noqa: BLE001
-        check(f"yfinance 拉到 {ticker} 数据", False, repr(e)[:140])
-
-    # 5) DeepSeek 连通（free GET /v1/models，走直连 NO_PROXY，零 LLM 成本）
-    if key:
-        try:
-            import httpx
-            r = httpx.get("https://api.deepseek.com/v1/models",
-                          headers={"Authorization": f"Bearer {key}"}, timeout=12)
-            hint = f"HTTP {r.status_code}"
-            if r.status_code in (401, 403):
-                hint += "（key 无效或未充值）"
-            check("DeepSeek API 可达且 key 有效", r.status_code == 200, hint)
-        except Exception as e:  # noqa: BLE001
-            check("DeepSeek API 可达且 key 有效", False, repr(e)[:140])
-    else:
-        check("DeepSeek API 可达且 key 有效", False, "无 key，跳过（见上）")
-
+    ok = report["ok"]
     verdict = "✅ 全部通过，可以跑 --smoke" if ok else "❌ 有未通过项，先修上面 ❌ 再跑 --smoke"
     print(f"\n  → {verdict}")
     return 0 if ok else 2

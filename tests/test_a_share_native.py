@@ -205,9 +205,9 @@ def test_router_optional_category_degrades_to_sentinel(monkeypatch):
 
 
 @pytest.mark.unit
-def test_router_missing_dependency_degrades_to_sentinel(monkeypatch):
+def test_router_missing_dependency_degrades_to_sentinel(monkeypatch, tmp_path):
     """baostock not installed -> NoMarketDataError from _require_baostock only
-    fires on the login path; _cached_daily is patched to force that path."""
+    fires on the login path; an empty cache dir forces that path."""
     import builtins
     real_import = builtins.__import__
 
@@ -216,9 +216,9 @@ def test_router_missing_dependency_degrades_to_sentinel(monkeypatch):
             raise ImportError("no baostock")
         return real_import(name, *a, **k)
     monkeypatch.setattr(builtins, "__import__", _block)
-    # Blow the on-disk cache so _cached_daily actually logs in.
-    monkeypatch.setattr(bsv, "_read_cache", lambda p: None)
-    monkeypatch.setattr(bsv, "_write_cache", lambda p, r: None)
+    # Point the vendor at an empty cache dir so the shared disk cache misses
+    # and _cached_daily actually reaches the (blocked) login path.
+    monkeypatch.setattr(bsv, "_cache_dir", lambda: str(tmp_path))
     from yiagents.dataflows import config as cfgmod
     from yiagents.dataflows.interface import route_to_vendor
 

@@ -53,6 +53,7 @@ from yiagents.reporting import write_report_tree
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
 from .conditional_logic import ConditionalLogic
+from .overlay_fields import OVERLAY_MARKER
 from .propagation import Propagator
 from .reflection import Reflector
 from .setup import GraphSetup
@@ -528,7 +529,7 @@ class YiAgentsGraph:
             return final_state
 
         overlay = (
-            "\n\n---\n\n## Quantitative Risk Overlay\n\n"
+            f"\n\n---\n\n{OVERLAY_MARKER}\n\n"
             f"- **Action**: {decision.action}\n"
             f"- **Target Weight**: {decision.target_weight:.1%}"
             + (f" of equity ({decision.position_value:,.0f})" if decision.position_value else "")
@@ -966,7 +967,20 @@ class YiAgentsGraph:
             set_analysis_date(None)
 
     def _log_state(self, trade_date, final_state):
-        """Log the final state to a JSON file."""
+        """Log the final state to a JSON file.
+
+        Includes the structured evidence block the self-improvement loop
+        consumes: ``pm_rating`` (the Portfolio Manager's structured rating,
+        previously flattened into markdown only) and ``data_quality`` (the
+        router's sentinel events for this run, so a degraded report is
+        machine-distinguishable from a fully-fed one). Both are additive —
+        older readers ignore unknown keys.
+        """
+        from yiagents.dataflows import quality
+
+        quality_block = quality.summarize_quality(quality.snapshot_quality())
+        quality.reset_quality()
+
         self.log_states_dict[str(trade_date)] = {
             "company_of_interest": final_state["company_of_interest"],
             "trade_date": final_state["trade_date"],
@@ -995,6 +1009,12 @@ class YiAgentsGraph:
             },
             "investment_plan": final_state["investment_plan"],
             "final_trade_decision": final_state["final_trade_decision"],
+            # Structured decision + data-quality evidence (self-improvement):
+            # pm_rating is the PM's typed rating (empty string when absent,
+            # e.g. a state produced without the PM node); data_quality carries
+            # the router's sentinel events accumulated during this run.
+            "pm_rating": final_state.get("pm_rating", ""),
+            "data_quality": quality_block,
         }
 
         # Save to file. Reject ticker values that would escape the

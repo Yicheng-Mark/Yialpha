@@ -135,8 +135,11 @@ def _parse_french_zip(raw: bytes, model: str) -> pd.DataFrame:
 # Network fetcher with on-disk caching. Fail-open: returns None on any error.
 # ---------------------------------------------------------------------------
 def _default_cache_dir() -> Path:
-    base = os.getenv("YIAGENTS_CACHE_DIR", os.path.join(os.path.expanduser("~"), ".yiagents", "cache"))
-    return Path(base) / "factors"
+    # Resolve through the config layer (data_cache_dir / YIAGENTS_CACHE_DIR),
+    # fixing the old direct env read that ignored a config-set cache dir.
+    from yiagents.dataflows.disk_cache import vendor_cache_dir
+
+    return Path(vendor_cache_dir("factors"))
 
 
 def _cached_or_download(path: Path, url: str, ttl_days: float = 1.0) -> bytes | None:

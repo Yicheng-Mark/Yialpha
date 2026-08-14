@@ -95,3 +95,36 @@ class TestPruneIndicatorsCLI:
         assert result.returncode == 0
         assert out_path.exists()
         assert "IC Indicator Pruning Report" in out_path.read_text(encoding="utf-8")
+
+    def test_json_out_writes_structured_verdict(self, tmp_path):
+        """--json-out writes params + keep/prune + per-indicator stats."""
+        import json as _json
+
+        csv = self._make_csv(tmp_path)
+        json_path = tmp_path / "verdict.json"
+        result = subprocess.run(
+            [sys.executable, str(_SCRIPT), str(csv), "--window", "20",
+             "--min-consecutive", "10", "--min-observations", "10",
+             "--json-out", str(json_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        verdict = _json.loads(json_path.read_text(encoding="utf-8"))
+
+        assert set(verdict["params"]) == {
+            "window", "min_abs_ic", "min_consecutive", "min_observations",
+        }
+        assert verdict["params"]["window"] == 20
+        assert set(verdict) == {
+            "generated_at", "params", "keep", "prune", "per_indicator",
+        }
+        assert set(verdict["per_indicator"]) == {"good_indicator", "bad_indicator"}
+        for stats in verdict["per_indicator"].values():
+            assert set(stats) == {
+                "verdict", "mean_abs_ic", "finite_windows", "longest_low_run",
+            }
+            assert stats["verdict"] in ("keep", "prune")
+            assert isinstance(stats["finite_windows"], int)
+        # keep/prune lists stay consistent with the per-indicator verdicts.
+        for name, stats in verdict["per_indicator"].items():
+            assert name in verdict[stats["verdict"]]

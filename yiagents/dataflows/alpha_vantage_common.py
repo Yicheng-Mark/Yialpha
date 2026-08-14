@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -7,7 +8,9 @@ from io import StringIO
 import pandas as pd
 import requests
 
+from .disk_cache import cached_or_fetch, vendor_cache_dir
 from .errors import VendorNotConfiguredError, VendorRateLimitError
+from .netretry import with_transient_retry
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +65,9 @@ class AlphaVantageRateLimitError(VendorRateLimitError):
     """Raised when the Alpha Vantage API rate limit is exceeded."""
     pass
 
-def _make_api_request(function_name: str, params: dict) -> dict | str:
-    """Helper function to make API requests and handle responses.
+def _raw_api_request(function_name: str, params: dict) -> dict | str:
+    """Raw (uncached) API call + response classification. Internal: use
+    :func:`_make_api_request`, which caches around this.
 
     Raises:
         AlphaVantageRateLimitError: When API rate limit is exceeded
@@ -114,6 +118,50 @@ def _make_api_request(function_name: str, params: dict) -> dict | str:
 
     return response_text
 
+
+def _make_api_request(function_name: str, params: dict) -> dict | str:
+    """Cached + retried Alpha Vantage request (the vendor entry point).
+
+    Wraps :func:`_raw_api_request` with a 15-minute on-disk cache keyed by
+    function + params (sans API key): the free tier updates at most daily,
+    and a batch run over N tickers re-requests the *same* symbol data per
+    ticker — the cache collapses that to one network call. Rate-limit /
+    bad-key classification still happens inside the raw call on every actual
+    fetch. Transport hiccups (connection reset, timeout) get one retry.
+    """
+    current_entitlement = globals().get("_current_entitlement")
+    # Cache key excludes the API key but includes the entitlement (it selects
+    # a different data tier, i.e. different bytes for the same query).
+    key_blob = json.dumps(
+        {"function": function_name, "params": params,
+         "entitlement": current_entitlement},
+        sort_keys=True, default=str,
+    ).encode("utf-8")
+    digest = hashlib.sha256(key_blob).hexdigest()[:12]
+    filename = f"{function_name}_{digest}.txt"
+
+    def _fetch() -> bytes:
+        text = with_transient_retry(
+            lambda: _raw_api_request(function_name, params),
+            vendor="alphavantage",
+            retry_on=(
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+            ),
+        )
+        # _raw_api_request's declared type is dict | str (its legacy contract);
+        # in practice it always returns the response text. Serialize the
+        # unlikely dict so the cache stores bytes either way.
+        if not isinstance(text, str):
+            text = json.dumps(text)
+        return text.encode("utf-8")
+
+    raw = cached_or_fetch(
+        vendor_cache_dir("alphavantage"), filename, _fetch,
+        ttl_days=15.0 / (24.0 * 60.0), vendor="alphavantage",
+    )
+    assert raw is not None  # fail_open never set: raw errors re-raise
+    return raw.decode("utf-8", errors="replace")
 
 
 def _filter_csv_by_date_range(csv_data: str, start_date: str, end_date: str) -> str:

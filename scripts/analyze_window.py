@@ -11,7 +11,6 @@
 """
 import argparse
 import json
-import re
 import sys
 
 # Windows 控制台默认 GBK，打印 ❌/✅ 会触发 UnicodeEncodeError；强制 utf-8。
@@ -26,27 +25,8 @@ for _stream in (sys.stdout, sys.stderr):
 from pathlib import Path  # noqa: E402
 
 from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
+from yiagents.graph.overlay_fields import parse_overlay  # noqa: E402
 from yiagents.graph.trading_graph import YiAgentsGraph  # noqa: E402
-
-# overlay 段落里要抽取的字段
-_FIELDS = {
-    "action": r"\*\*Action\*\*:\s*(.+)",
-    "target_weight": r"\*\*Target Weight\*\*:\s*([0-9.]+%)",
-    "position_value": r"\*\*Target Weight\*\*:.*?\(([-0-9,]+)\)",
-    "stop_loss": r"\*\*Stop Loss\*\*:\s*([-0-9.]+)",
-    "entry": r"\*\*Entry Reference\*\*:\s*([-0-9.]+)",
-    "regime": r"\*\*Drawdown Regime\*\*:\s*(\S+)",
-}
-
-
-def parse_overlay(decision_md: str) -> dict:
-    """从 PM 最终决策（含追加的 overlay 段）抽取风控层数值。"""
-    out = {}
-    for key, pat in _FIELDS.items():
-        m = re.search(pat, decision_md)
-        if m:
-            out[key] = m.group(1).strip()
-    return out
 
 
 def run_one(ticker: str, date: str, equity: float, risk: bool) -> dict:
@@ -57,7 +37,7 @@ def run_one(ticker: str, date: str, equity: float, risk: bool) -> dict:
                        "sectors": {}, "returns_history": [], "trade_history": []}
     final_state, rating = ta.propagate(ticker, date, portfolio_state=portfolio_state)
     decision = (final_state or {}).get("final_trade_decision", "")
-    overlay = parse_overlay(decision)
+    overlay = parse_overlay(decision) or {}
     return {
         "date": date, "rating": rating,
         "price": overlay.get("entry"),

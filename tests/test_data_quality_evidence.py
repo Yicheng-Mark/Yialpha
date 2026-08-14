@@ -1,0 +1,135 @@
+"""Tests for the run-level data-quality evidence (dataflows/quality).
+
+Covers the recorder primitives and the router integration: every sentinel a
+vendor chain degrades to must land in the context's event list, and the
+``_log_state`` write must carry ``pm_rating`` + a ``data_quality`` block.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from yiagents.dataflows import quality
+from yiagents.dataflows.errors import NoMarketDataError
+from yiagents.dataflows.interface import route_to_vendor
+
+
+@pytest.fixture(autouse=True)
+def _clean_quality():
+    quality.reset_quality()
+    yield
+    quality.reset_quality()
+
+
+# --------------------------------------------------------------------------- #
+# Recorder primitives
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_record_snapshot_reset_roundtrip():
+    quality.record_sentinel("get_stock_data", quality.KIND_NO_DATA, "no rows")
+    quality.record_sentinel("get_macro_data", quality.KIND_OPTIONAL_UNAVAILABLE, "net")
+    events = quality.snapshot_quality()
+    assert [e["method"] for e in events] == ["get_stock_data", "get_macro_data"]
+    summary = quality.summarize_quality(events)
+    assert summary["core_sentinel_count"] == 1
+    assert summary["optional_sentinel_count"] == 1
+    assert summary["sentinels"] == events
+
+    quality.reset_quality()
+    assert quality.snapshot_quality() == []
+    assert quality.summarize_quality(None) == {
+        "sentinels": [], "core_sentinel_count": 0, "optional_sentinel_count": 0,
+    }
+
+
+@pytest.mark.unit
+def test_record_never_raises():
+    # A recorder failure must not be able to break the data call it describes.
+    quality.record_sentinel(None, None, None)  # type: ignore[arg-type]
+    events = quality.snapshot_quality()
+    assert events[0]["method"] == "None"
+
+
+# --------------------------------------------------------------------------- #
+# Router integration
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_no_data_sentinel_is_recorded(monkeypatch):
+    from yiagents.dataflows import interface as iface
+
+    def no_data(*a, **k):
+        raise NoMarketDataError("ZZZZ", "ZZZZ", "no rows anywhere")
+
+    monkeypatch.setattr(
+        iface, "get_vendor", lambda category, method: "default"
+    )
+    # Route a core category whose every vendor fails with NoMarketDataError:
+    # monkeypatch the whole chain via VENDOR_METHODS.
+    method = "get_stock_data"
+    saved = dict(iface.VENDOR_METHODS[method])
+    try:
+        iface.VENDOR_METHODS[method] = dict.fromkeys(saved, no_data)
+        out = route_to_vendor(method, "ZZZZ", "2026-01-01", "2026-01-31")
+    finally:
+        iface.VENDOR_METHODS[method] = saved
+
+    assert out.startswith("NO_DATA_AVAILABLE")
+    events = quality.snapshot_quality()
+    assert len(events) == 1
+    assert events[0]["method"] == method
+    assert events[0]["kind"] == quality.KIND_NO_DATA
+    assert "no rows anywhere" in events[0]["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# _log_state integration (graph)
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_log_state_writes_pm_rating_and_data_quality(tmp_path, monkeypatch):
+    from yiagents.graph.trading_graph import YiAgentsGraph
+
+    quality.record_sentinel("get_stock_data", quality.KIND_NO_DATA, "stale")
+    quality.record_sentinel("get_macro_data", quality.KIND_OPTIONAL_UNAVAILABLE, "x")
+
+    graph = YiAgentsGraph.__new__(YiAgentsGraph)  # skip __init__: only attrs below used
+    graph.ticker = "NVDA"
+    graph.log_states_dict = {}
+    monkeypatch.setattr(
+        graph, "propagate", None, raising=False
+    )
+
+    debate = {"bull_history": "", "bear_history": "", "history": "",
+              "current_response": "", "judge_decision": ""}
+    risk_debate = dict.fromkeys(("aggressive_history", "conservative_history", "neutral_history", "history", "judge_decision"), "")
+    final_state = {
+        "company_of_interest": "NVDA",
+        "trade_date": "2026-06-10",
+        "market_report": "m", "sentiment_report": "s", "news_report": "n",
+        "fundamentals_report": "f",
+        "investment_debate_state": debate,
+        "trader_investment_plan": "t",
+        "risk_debate_state": risk_debate,
+        "investment_plan": "i",
+        "final_trade_decision": "d",
+        "pm_rating": "Rating: BUY",
+    }
+
+
+    results_dir = tmp_path / "results"
+    object.__setattr__(graph, "config", {"results_dir": str(results_dir)})
+    graph._log_state("2026-06-10", final_state)
+
+    log_path = (
+        results_dir / "NVDA" / "YiAgentsStrategy_logs" / "full_states_log_2026-06-10.json"
+    )
+    assert log_path.exists()
+    data = json.loads(log_path.read_text(encoding="utf-8"))
+    assert data["pm_rating"] == "Rating: BUY"
+    assert data["data_quality"]["core_sentinel_count"] == 1
+    assert data["data_quality"]["optional_sentinel_count"] == 1
+    assert data["data_quality"]["sentinels"][0]["method"] == "get_stock_data"
+
+    # Consuming the snapshot resets the accumulator for the next run.
+    assert quality.snapshot_quality() == []

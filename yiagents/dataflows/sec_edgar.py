@@ -36,11 +36,9 @@ import io
 import json
 import logging
 import os
-import threading
-import time
 from typing import Any
 
-from .config import get_config
+from .disk_cache import MinIntervalThrottle, cached_or_fetch, vendor_cache_dir
 from .errors import NoMarketDataError, VendorRateLimitError
 from .utils import is_filing_public, proxy_map
 
@@ -51,9 +49,7 @@ _FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 _TIMEOUT = 30
 # SEC fair-access guidance is ~10 requests/sec; stay comfortably under it with a
 # small serial throttle (+ jitter) so concurrent analyst calls don't trip a 429.
-_MIN_INTERVAL = 0.12
-_last_request = [0.0]
-_throttle_lock = threading.Lock()
+_throttler = MinIntervalThrottle(0.12)
 
 
 def _user_agent() -> str:
@@ -61,20 +57,12 @@ def _user_agent() -> str:
 
 
 def _cache_dir() -> str:
-    cfg = get_config()
-    base = cfg.get("data_cache_dir") or os.path.join(os.path.expanduser("~"), ".yiagents", "cache")
-    path = os.path.join(base, "sec")
-    os.makedirs(path, exist_ok=True)
-    return path
+    return vendor_cache_dir("sec")
 
 
 def _throttle() -> None:
     """Enforce a minimum spacing between SEC requests (thread-safe)."""
-    with _throttle_lock:
-        elapsed = time.time() - _last_request[0]
-        if elapsed < _MIN_INTERVAL:
-            time.sleep(_MIN_INTERVAL - elapsed)
-        _last_request[0] = time.time()
+    _throttler.wait()
 
 
 def _sec_get(url: str) -> bytes:
@@ -102,48 +90,27 @@ def _sec_get(url: str) -> bytes:
 
 
 def _cached_or_fetch(path: str, url: str, ttl_days: float) -> bytes:
-    """Serve from a fresh on-disk cache, else fetch + cache. Falls back to a stale
-    cache on network failure (a slightly-old filing beats no data).
+    """Serve from a fresh on-disk cache, else fetch + cache.
+
+    Thin adapter over the shared :func:`disk_cache.cached_or_fetch`: the
+    signature keeps a full ``path`` (sibling vendors like sec_ownership import
+    and call this name; tests patch it); it is split into base dir + filename
+    for the containment-checked shared implementation.
 
     .. note:: Stale-on-failure is a deliberate fail-open trade-off. For
         read-only market data this is reasonable, but a backtest may see a
         slightly-old filing rather than no data when the network is down.
-        The staleness is bounded by the cache's mtime (visible on disk). When
-        a stale cache IS served after a fetch failure, it is now logged at
-        WARNING level with the cache age — consistent with baostock and
-        eastmoney, so all three read-only vendors are equally observable.
+        The staleness is bounded by the cache's mtime and the stale serve is
+        logged at WARNING with the cache age — the same observable contract
+        as every other read-only vendor via the shared helper.
     """
-    if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < ttl_days * 86_400.0:
-        try:
-            with open(path, "rb") as fh:
-                return fh.read()
-        except OSError:
-            pass
-    try:
-        raw = _sec_get(url)
-    except (NoMarketDataError, VendorRateLimitError) as exc:
-        # Network failure — fall back to the stale cache if it exists, mirroring
-        # baostock_vendor / eastmoney. Unlike those two, this path previously
-        # had NO warning; now it logs at WARNING with the cache age so the
-        # silent-degradation is observable.
-        if os.path.exists(path):
-            age_days = (time.time() - os.path.getmtime(path)) / 86_400.0
-            logger.warning(
-                "sec_edgar: serving STALE cache for %s (age %.1f days) after "
-                "fetch failure: %s",
-                path, age_days, exc,
-            )
-            try:
-                with open(path, "rb") as fh:
-                    return fh.read()
-            except OSError:
-                pass  # cache unreadable — fall through to re-raise
-        raise
-    try:
-        with open(path, "wb") as fh:
-            fh.write(raw)
-    except OSError as exc:  # noqa: BLE001 -- caching is best-effort
-        logger.warning("sec_edgar: could not write cache %s: %s", path, exc)
+    raw = cached_or_fetch(
+        os.path.dirname(path), os.path.basename(path),
+        lambda: _sec_get(url),
+        ttl_days=ttl_days, vendor="sec_edgar",
+    )
+    if raw is None:  # unreachable: fail_open is never set for this vendor
+        raise NoMarketDataError(url, detail="cache helper returned None")
     return raw
 
 

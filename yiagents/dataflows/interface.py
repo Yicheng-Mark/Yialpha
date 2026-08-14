@@ -2,6 +2,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from . import quality
 from .akshare_vendor import (
     get_a_share_dragon_tiger_native as get_akshare_a_share_dragon_tiger,
     get_a_share_market_breadth_native as get_akshare_a_share_market_breadth,
@@ -515,6 +516,12 @@ def route_to_vendor(method: str, *args: Any, **kwargs: Any) -> str:
         # stale") so the agent sees the specific reason — invalid symbol, no
         # coverage, or stale data — not just a generic "unavailable".
         reason = f" ({last_no_data.detail})" if last_no_data.detail else ""
+        # Structured evidence for the run's data_quality block in
+        # full_states_log, so a degraded report is machine-distinguishable
+        # from a fully-fed one.
+        quality.record_sentinel(
+            method, quality.KIND_NO_DATA, last_no_data.detail or "no usable data"
+        )
         return (
             f"NO_DATA_AVAILABLE: No usable market data for '{sym}'{resolved} from "
             f"any configured vendor{reason}. The symbol may be invalid, delisted, "
@@ -529,6 +536,9 @@ def route_to_vendor(method: str, *args: Any, **kwargs: Any) -> str:
     if first_error is not None:
         if category in OPTIONAL_CATEGORIES:
             logger.warning("Optional %s unavailable for %s: %s", category, method, first_error)
+            quality.record_sentinel(
+                method, quality.KIND_OPTIONAL_UNAVAILABLE, str(first_error)
+            )
             return (
                 f"DATA_UNAVAILABLE: optional {category} could not be retrieved "
                 f"({first_error}). Proceed without it; do not fabricate values."

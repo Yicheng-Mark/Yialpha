@@ -1,6 +1,8 @@
 """yfinance-based news data fetching functions."""
 
 import contextlib
+import hashlib
+import json
 import logging
 from datetime import datetime
 
@@ -8,10 +10,45 @@ import yfinance as yf
 from dateutil.relativedelta import relativedelta
 
 from .config import get_config
+from .disk_cache import cached_or_fetch, vendor_cache_dir
 from .stockstats_utils import yf_retry
 from .symbol_utils import normalize_symbol
 
 logger = logging.getLogger(__name__)
+
+#: TTL for cached yfinance Search results (minutes -> fractional days below).
+#: Global-news queries are identical across every ticker in a batch run; a
+#: 30-minute window collapses that to one network call per query while news
+#: stays fresh enough for an intraday analysis.
+_SEARCH_CACHE_TTL_DAYS = 30.0 / (24.0 * 60.0)
+
+
+def _cached_search_news(query: str, news_count: int) -> list[dict]:
+    """Run one yfinance Search with a short on-disk cache.
+
+    Batch runs re-issue the exact same global-news queries for every ticker;
+    the cache (keyed by query + count) serves repeats from disk. The raw
+    article dicts round-trip through JSON; downstream dedup + window
+    filtering run on every call regardless of cache origin.
+    """
+    key_blob = json.dumps({"q": query, "n": news_count}, sort_keys=True).encode("utf-8")
+    digest = hashlib.sha256(key_blob).hexdigest()[:12]
+    filename = f"search_{digest}.json"
+
+    def _fetch() -> bytes:
+        search = yf_retry(
+            lambda: yf.Search(
+                query, news_count=news_count, enable_fuzzy_query=True,
+            )
+        )
+        return json.dumps(search.news, default=str).encode("utf-8")
+
+    raw = cached_or_fetch(
+        vendor_cache_dir("yfnews"), filename, _fetch,
+        ttl_days=_SEARCH_CACHE_TTL_DAYS, vendor="yfnews",
+    )
+    assert raw is not None  # fail_open never set: fetch errors re-raise
+    return json.loads(raw)
 
 
 def _extract_article_data(article: dict) -> dict:
@@ -170,25 +207,18 @@ def get_global_news_yfinance(
 
     try:
         for query in search_queries:
-            search = yf_retry(lambda q=query: yf.Search(
-                query=q,
-                news_count=limit,
-                enable_fuzzy_query=True,
-            ))
+            for article in _cached_search_news(query, limit):
+                # Handle both flat and nested structures
+                if "content" in article:
+                    data = _extract_article_data(article)
+                    title = data["title"]
+                else:
+                    title = article.get("title", "")
 
-            if search.news:
-                for article in search.news:
-                    # Handle both flat and nested structures
-                    if "content" in article:
-                        data = _extract_article_data(article)
-                        title = data["title"]
-                    else:
-                        title = article.get("title", "")
-
-                    # Deduplicate by title
-                    if title and title not in seen_titles:
-                        seen_titles.add(title)
-                        all_news.append(article)
+                # Deduplicate by title
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    all_news.append(article)
 
             if len(all_news) >= limit:
                 break

@@ -18,7 +18,9 @@ project's ``.env`` injects for US/quote traffic. So unlike the HTTP-based
 domestic vendors (eastmoney / akshare — see :func:`eastmoney._session` for the
 proxy-bypass reasoning those need), **no proxy bypass is required here**: the
 domestic socket connects directly and cannot hang on the SOCKS5 VPN tunnel the
-way an HTTP request to a domestic host would.
+way an HTTP request to a domestic host would. The requests-level timeout shim
+(:mod:`yiagents.dataflows.timeout_shim`) also cannot reach a raw socket — a
+hung BaoStock connection is bounded only by run_robust's OS-level watchdog.
 
 Free, keyless (anonymous ``bs.login()``). ``baostock`` is an **optional
 dependency**: it is imported lazily inside each public function, so a
@@ -47,13 +49,11 @@ to the fundamentals analyst when ``YIAGENTS_A_SHARE_NATIVE`` is on **and**
 from __future__ import annotations
 
 import io
+import json
 import logging
-import os
-import threading
-import time
 from datetime import date, timedelta
 
-from .config import get_config
+from .disk_cache import MinIntervalThrottle, cached_or_fetch, vendor_cache_dir
 from .errors import NoMarketDataError
 
 logger = logging.getLogger(__name__)
@@ -62,11 +62,7 @@ logger = logging.getLogger(__name__)
 # hot path by caching the full daily series per ticker (PIT-filtered per call),
 # mirroring how eastmoney caches the raw JSON once and filters per call.
 _CACHE_TTL_S = 86_400.0  # 1 day
-_login_lock = threading.Lock()
-_last_login = [0.0]
-# A modest serial spacing between BaoStock logins (the public service asks
-# callers not to reconnect aggressively). Per-call queries share one login.
-_MIN_LOGIN_INTERVAL = 0.5
+_login_throttle = MinIntervalThrottle(0.5)
 
 # Valuation/OHLC fields requested in one ``query_history_k_data_plus`` call so
 # both the OHLC and fundamentals views are served from a single fetch. adjustflag
@@ -120,12 +116,7 @@ def _to_baostock_code(ticker: str) -> str:
 
 
 def _cache_dir() -> str:
-    cfg = get_config()
-    base = cfg.get("data_cache_dir") or os.path.join(
-        os.path.expanduser("~"), ".yiagents", "cache")
-    path = os.path.join(base, "baostock")
-    os.makedirs(path, exist_ok=True)
-    return path
+    return vendor_cache_dir("baostock")
 
 
 class _BaostockSession:
@@ -139,11 +130,9 @@ class _BaostockSession:
         self.bs = _require_baostock()
 
     def __enter__(self):
-        with _login_lock:
-            elapsed = time.time() - _last_login[0]
-            if elapsed < _MIN_LOGIN_INTERVAL:
-                time.sleep(_MIN_LOGIN_INTERVAL - elapsed)
-            _last_login[0] = time.time()
+        # A modest serial spacing between BaoStock logins; per-call queries
+        # share one login.
+        _login_throttle.wait()
         # login() returns a result object with .error_code / .error_msg; a
         # non-zero code means the TCP handshake to baostock.com:9001 failed.
         lg = self.bs.login()
@@ -188,50 +177,32 @@ def _query_daily(bs, code: str) -> list[dict]:
 def _cached_daily(code: str) -> list[dict]:
     """Serve the daily series from a fresh on-disk cache, else login + fetch.
 
-    Falls back to a stale cache on a fetch failure (a slightly-old daily
-    series beats no data), matching eastmoney's stale-on-failure contract.
+    Thin adapter over the shared :func:`disk_cache.cached_or_fetch` (bytes on
+    disk; the row dicts round-trip through JSON). Falls back to a stale cache
+    on a fetch failure (a slightly-old daily series beats no data), matching
+    every other read-only vendor's stale-on-failure contract.
 
     .. warning:: Stale-on-failure is a deliberate fail-open trade-off. For
         read-only market data this is reasonable, but a backtest may see a
         slightly-old daily series rather than no data when the BaoStock socket
-        is unreachable. The stale-serve IS logged at WARNING level (below) so
-        the staleness is observable; callers needing strict freshness can
-        suppress it by ensuring the socket is reachable before backtest.
+        is unreachable. The stale serve IS logged at WARNING level (with the
+        cache age, by the shared helper) so the staleness is observable;
+        callers needing strict freshness can suppress it by ensuring the
+        socket is reachable before backtest.
     """
-    cache_path = os.path.join(_cache_dir(), f"daily_{code.replace('.', '_')}.json")
-    stale = _read_cache(cache_path)
-    if stale is not None and (time.time() - os.path.getmtime(cache_path)) < _CACHE_TTL_S:
-        return stale
-    try:
+
+    def _fetch() -> bytes:
         with _BaostockSession() as bs:
             rows = _query_daily(bs, code)
-    except NoMarketDataError:
-        if stale is not None:
-            logger.warning("baostock: fetch failed; serving stale cache for %s", code)
-            return stale
-        raise
-    _write_cache(cache_path, rows)
-    return rows
+        return json.dumps(rows, ensure_ascii=False).encode("utf-8")
 
-
-def _read_cache(path: str) -> list[dict] | None:
-    import json
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, "rb") as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return None
-
-
-def _write_cache(path: str, rows: list[dict]) -> None:
-    import json
-    try:
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(rows, fh, ensure_ascii=False)
-    except OSError as exc:  # noqa: BLE001 -- caching is best-effort
-        logger.warning("baostock: could not write cache %s: %s", path, exc)
+    filename = f"daily_{code.replace('.', '_')}.json"
+    raw = cached_or_fetch(
+        _cache_dir(), filename, _fetch,
+        ttl_days=_CACHE_TTL_S / 86_400.0, vendor="baostock",
+    )
+    assert raw is not None  # fail_open is never set: fetch errors re-raise
+    return json.loads(raw)
 
 
 # --------------------------------------------------------------------------- #

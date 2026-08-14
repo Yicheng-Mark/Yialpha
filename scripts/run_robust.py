@@ -40,6 +40,7 @@ setup_logging()  # noqa: E402 — centralised logging before any other import fi
 # re-introduce UnicodeEncodeError when printing ❌/✅/中文 on a GBK Windows console.
 import argparse  # noqa: E402
 import contextlib  # noqa: E402
+import json  # noqa: E402
 import os  # noqa: E402
 import subprocess  # noqa: E402
 import threading  # noqa: E402
@@ -121,6 +122,13 @@ def _parse_args() -> argparse.Namespace:
         ),
         help="报告根目录（默认 $YIAGENTS_RESULTS_DIR/reports，回退 ~/.yiagents/logs/reports）",
     )
+    p.add_argument(
+        "--require-data-quality",
+        action="store_true",
+        help="把「核心数据类目降级（NO_DATA）的报告」当失败重跑，而不是接受为 "
+        "DEGRADED 成功。默认关闭：退出码语义保持「有新报告即成功」，降级 run "
+        "只在汇总里打 DEGRADED 标记（full_states_log 的 data_quality 块是证据）。",
+    )
     return p.parse_args()
 
 
@@ -158,6 +166,30 @@ def _find_new_report(reports_root: Path, ticker: str, pre_mtime: float) -> Path 
             if m > best_mtime:
                 best_mtime, best = m, cr
     return best
+
+
+def _core_sentinel_count(reports_root: Path, ticker: str, date: str) -> int | None:
+    """Read the finished run's data_quality block; None when unavailable.
+
+    ``full_states_log_<date>.json`` (written atomically by the graph before
+    complete_report.md) carries ``data_quality.core_sentinel_count`` — how
+    many CORE categories degraded to NO_DATA_AVAILABLE during the run. This
+    distinguishes a fully-fed report from a data-vacuum HOLD: a brand-new
+    complete_report.md alone no longer proves the run actually had data.
+    Returns None when the log is missing/unreadable or predates the
+    data_quality field (older runs) — unknown, not zero.
+    """
+    log = (
+        reports_root.parent / ticker / "YiAgentsStrategy_logs"
+        / f"full_states_log_{date}.json"
+    )
+    try:
+        data = json.loads(log.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    block = data.get("data_quality") or {}
+    count = block.get("core_sentinel_count")
+    return count if isinstance(count, int) else None
 
 
 def _kill_tree(pid: int) -> None:
@@ -435,14 +467,45 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         elif rc == 0:
             new_report = _find_new_report(reports_root, ticker, pre_mtime)
             if new_report:
-                result["ok"] = True
-                result["report_path"] = new_report
-                result["reason"] = f"ok (wall {wall:.0f}s)"
-                print(
-                    f"[{ticker}] ✅ attempt {attempt} done in {wall:.0f}s → {new_report}",
-                    flush=True,
-                )
-                break
+                # A new report exists — but did the run actually HAVE data?
+                # core_sentinel_count > 0 means core categories degraded to
+                # NO_DATA_AVAILABLE (a data-vacuum HOLD). Default semantics
+                # stay "ok" (exit-code contract unchanged); the run is marked
+                # DEGRADED so the summary shows it. --require-data-quality
+                # escalates it to a failure + retry for operators who would
+                # rather re-pull than keep an empty report.
+                sentinels = _core_sentinel_count(reports_root, ticker, opts.date)
+                if sentinels:
+                    result["degraded"] = True
+                    result["reason"] = (
+                        f"DEGRADED: {sentinels} core data sentinel(s) "
+                        f"(wall {wall:.0f}s)"
+                    )
+                    if opts.require_data_quality:
+                        result["reason"] += " → retry (--require-data-quality)"
+                        print(
+                            f"[{ticker}] ⚠️ attempt {attempt}: {result['reason']}",
+                            flush=True,
+                        )
+                    else:
+                        result["ok"] = True
+                        result["report_path"] = new_report
+                        print(
+                            f"[{ticker}] ⚠️ DEGRADED done in {wall:.0f}s → "
+                            f"{new_report} — {sentinels} core category(ies) had "
+                            f"NO data (see data_quality in full_states_log)",
+                            flush=True,
+                        )
+                        break
+                else:
+                    result["ok"] = True
+                    result["report_path"] = new_report
+                    result["reason"] = f"ok (wall {wall:.0f}s)"
+                    print(
+                        f"[{ticker}] ✅ attempt {attempt} done in {wall:.0f}s → {new_report}",
+                        flush=True,
+                    )
+                    break
             # 退出码 0 但没产出新报告：视为失败重跑。
             result["reason"] = "exit 0 but no new complete_report.md"
             print(f"[{ticker}] ⚠️ {result['reason']} → retry", flush=True)
