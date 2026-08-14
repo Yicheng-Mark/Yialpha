@@ -422,8 +422,14 @@ def _query_statement(bs, code: str, query_fn_name: str) -> list[dict]:
                     while (rs2.error_code == "0") and rs2.next():
                         rows.append(dict(zip(rs2.fields, rs2.get_row_data(),
                                              strict=False)))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001 -- one bad quarter must not
+                # sink the whole statement, but silently missing quarters make
+                # the trend table incomplete with no way to tell "no data"
+                # apart from "fetch failed" — so the gap stays visible.
+                logger.warning(
+                    "baostock: %s fetch failed for %s %sQ%s: %s",
+                    query_fn_name, code, year, quarter, exc,
+                )
     # Deduplicate by (pubDate, statDate).
     seen = set()
     unique = []

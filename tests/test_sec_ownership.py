@@ -476,6 +476,27 @@ def test_13f_row_pit_filing_date_gate(monkeypatch, tmp_path):
 
 
 @pytest.mark.unit
+def test_13f_row_malformed_filing_date_fail_closed(monkeypatch, tmp_path, caplog):
+    # A malformed FILING_DATE cannot prove the row was filed on time, so the
+    # holding is dropped (fail-closed, same contract as the CUSIP record gate)
+    # instead of bypassing the PIT check.
+    cover = COVER_HEADER + "\n" + (
+        "00006A\t0001\t2024-05-15\tEARLY CAPITAL\t2024-03-31\n"
+        "00006B\t0002\tnot-a-date\tGARBLED DATE CAPITAL\t2024-03-31"
+    )
+    holding = HOLDING_HEADER + "\n" + (
+        "00006A\tAPPLE INC\t037833100\tCOM\t10000\t100\tSH\t\tSOLE\t100\t0\t0\n"
+        "00006B\tAPPLE INC\t037833100\tCOM\t99999\t999\tSH\t\tSOLE\t999\t0\t0"
+    )
+    _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
+    with caplog.at_level("DEBUG", logger="yiagents.dataflows.sec_ownership"):
+        out = sec_ownership.get_institutional_holdings("AAPL", "2024-06-15", 180)
+    assert "EARLY CAPITAL" in out
+    assert "GARBLED DATE CAPITAL" not in out   # PIT gate cannot be bypassed
+    assert any("malformed filing_date" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
 def test_13f_no_holders_honest_empty(monkeypatch, tmp_path):
     holding = HOLDING_HEADER + "\n" + (
         "00004A\tMICROSOFT CORP\t594918104\tCOM\t9999\t10\tSH\t\tSOLE\t10\t0\t0"

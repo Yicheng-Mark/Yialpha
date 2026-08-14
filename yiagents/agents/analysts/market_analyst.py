@@ -1,3 +1,5 @@
+import logging
+
 from yiagents.agents.utils.agent_utils import (
     get_a_share_market_breadth_native,
     get_a_share_northbound_native,
@@ -22,6 +24,8 @@ from yiagents.agents.utils.prompt_builder import build_collaborator_prompt, buil
 from yiagents.dataflows.config import get_config
 from yiagents.dataflows.symbol_utils import is_a_stock
 from yiagents.dataflows.utils import is_historical_date
+
+logger = logging.getLogger(__name__)
 
 # Appended to the system message ONLY for crypto_perp runs. Nudges the analyst
 # to use the perp-native OHLCV and to treat funding/OI + positioning/order-flow
@@ -105,27 +109,174 @@ _A_SHARE_MARKET_NUDGE = (
 
 # The indicator catalog the analyst selects from. Shared by both prompt forms so
 # the available tool vocabulary never depends on which framing is active.
-INDICATOR_CATALOG = """Moving Averages:
-- close_50_sma: 50 SMA: A medium-term trend indicator. Usage: Identify trend direction and serve as dynamic support/resistance. Tips: It lags price; combine with faster indicators for timely signals.
-- close_200_sma: 200 SMA: A long-term trend benchmark. Usage: Confirm overall market trend and identify golden/death cross setups. Tips: It reacts slowly; best for strategic trend confirmation rather than frequent trading entries.
-- close_10_ema: 10 EMA: A responsive short-term average. Usage: Capture quick shifts in momentum and potential entry points. Tips: Prone to noise in choppy markets; use alongside longer averages for filtering false signals.
+#
+# Structured source of truth: (section header, [(indicator, description), ...]).
+# INDICATOR_CATALOG below is rendered from it, and the ``indicator_battery``
+# config key prunes the same rendering — that gives the IC-pruning loop
+# (scripts/prune_indicators_cli.py) a real config landing point. With the
+# battery unset (the default) the render is byte-identical to the original
+# hand-written catalog literal (pinned by tests/test_market_analyst_prompts.py).
+_INDICATOR_SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
+    (
+        "Moving Averages",
+        [
+            (
+                "close_50_sma",
+                "50 SMA: A medium-term trend indicator. Usage: Identify trend "
+                "direction and serve as dynamic support/resistance. Tips: It "
+                "lags price; combine with faster indicators for timely signals.",
+            ),
+            (
+                "close_200_sma",
+                "200 SMA: A long-term trend benchmark. Usage: Confirm overall "
+                "market trend and identify golden/death cross setups. Tips: It "
+                "reacts slowly; best for strategic trend confirmation rather "
+                "than frequent trading entries.",
+            ),
+            (
+                "close_10_ema",
+                "10 EMA: A responsive short-term average. Usage: Capture quick "
+                "shifts in momentum and potential entry points. Tips: Prone to "
+                "noise in choppy markets; use alongside longer averages for "
+                "filtering false signals.",
+            ),
+        ],
+    ),
+    (
+        "MACD Related",
+        [
+            (
+                "macd",
+                "MACD: Computes momentum via differences of EMAs. Usage: Look "
+                "for crossovers and divergence as signals of trend changes. "
+                "Tips: Confirm with other indicators in low-volatility or "
+                "sideways markets.",
+            ),
+            (
+                "macds",
+                "MACD Signal: An EMA smoothing of the MACD line. Usage: Use "
+                "crossovers with the MACD line to trigger trades. Tips: Should "
+                "be part of a broader strategy to avoid false positives.",
+            ),
+            (
+                "macdh",
+                "MACD Histogram: Shows the gap between the MACD line and its "
+                "signal. Usage: Visualize momentum strength and spot divergence "
+                "early. Tips: Can be volatile; complement with additional "
+                "filters in fast-moving markets.",
+            ),
+        ],
+    ),
+    (
+        "Momentum Indicators",
+        [
+            (
+                "rsi",
+                "RSI: Measures momentum to flag overbought/oversold "
+                "conditions. Usage: Apply 70/30 thresholds and watch for "
+                "divergence to signal reversals. Tips: In strong trends, RSI "
+                "may remain extreme; always cross-check with trend analysis.",
+            ),
+        ],
+    ),
+    (
+        "Volatility Indicators",
+        [
+            (
+                "boll",
+                "Bollinger Middle: A 20 SMA serving as the basis for Bollinger "
+                "Bands. Usage: Acts as a dynamic benchmark for price movement. "
+                "Tips: Combine with the upper and lower bands to effectively "
+                "spot breakouts or reversals.",
+            ),
+            (
+                "boll_ub",
+                "Bollinger Upper Band: Typically 2 standard deviations above "
+                "the middle line. Usage: Signals potential overbought "
+                "conditions and breakout zones. Tips: Confirm signals with "
+                "other tools; prices may ride the band in strong trends.",
+            ),
+            (
+                "boll_lb",
+                "Bollinger Lower Band: Typically 2 standard deviations below "
+                "the middle line. Usage: Indicates potential oversold "
+                "conditions. Tips: Use additional analysis to avoid false "
+                "reversal signals.",
+            ),
+            (
+                "atr",
+                "ATR: Averages true range to measure volatility. Usage: Set "
+                "stop-loss levels and adjust position sizes based on current "
+                "market volatility. Tips: It's a reactive measure, so use it "
+                "as part of a broader risk management strategy.",
+            ),
+        ],
+    ),
+    (
+        "Volume-Based Indicators",
+        [
+            (
+                "vwma",
+                "VWMA: A moving average weighted by volume. Usage: Confirm "
+                "trends by integrating price action with volume data. Tips: "
+                "Watch for skewed results from volume spikes; use in "
+                "combination with other volume analyses.",
+            ),
+        ],
+    ),
+]
 
-MACD Related:
-- macd: MACD: Computes momentum via differences of EMAs. Usage: Look for crossovers and divergence as signals of trend changes. Tips: Confirm with other indicators in low-volatility or sideways markets.
-- macds: MACD Signal: An EMA smoothing of the MACD line. Usage: Use crossovers with the MACD line to trigger trades. Tips: Should be part of a broader strategy to avoid false positives.
-- macdh: MACD Histogram: Shows the gap between the MACD line and its signal. Usage: Visualize momentum strength and spot divergence early. Tips: Can be volatile; complement with additional filters in fast-moving markets.
+# Known indicator names — the validation set for ``indicator_battery``.
+INDICATOR_NAMES = frozenset(
+    name for _, entries in _INDICATOR_SECTIONS for name, _ in entries
+)
 
-Momentum Indicators:
-- rsi: RSI: Measures momentum to flag overbought/oversold conditions. Usage: Apply 70/30 thresholds and watch for divergence to signal reversals. Tips: In strong trends, RSI may remain extreme; always cross-check with trend analysis.
 
-Volatility Indicators:
-- boll: Bollinger Middle: A 20 SMA serving as the basis for Bollinger Bands. Usage: Acts as a dynamic benchmark for price movement. Tips: Combine with the upper and lower bands to effectively spot breakouts or reversals.
-- boll_ub: Bollinger Upper Band: Typically 2 standard deviations above the middle line. Usage: Signals potential overbought conditions and breakout zones. Tips: Confirm signals with other tools; prices may ride the band in strong trends.
-- boll_lb: Bollinger Lower Band: Typically 2 standard deviations below the middle line. Usage: Indicates potential oversold conditions. Tips: Use additional analysis to avoid false reversal signals.
-- atr: ATR: Averages true range to measure volatility. Usage: Set stop-loss levels and adjust position sizes based on current market volatility. Tips: It's a reactive measure, so use it as part of a broader risk management strategy.
+def _render_indicator_catalog(battery: "list[str] | None" = None) -> str:
+    """Render the catalog prose; ``battery`` keeps only the named indicators.
 
-Volume-Based Indicators:
-- vwma: VWMA: A moving average weighted by volume. Usage: Confirm trends by integrating price action with volume data. Tips: Watch for skewed results from volume spikes; use in combination with other volume analyses."""
+    Sections whose indicators are all pruned disappear entirely. ``None``
+    renders the full catalog (the default, byte-identical baseline).
+    """
+    keep = set(battery) if battery is not None else None
+    blocks: list[str] = []
+    for header, entries in _INDICATOR_SECTIONS:
+        selected = [e for e in entries if keep is None or e[0] in keep]
+        if not selected:
+            continue
+        lines = [f"{header}:"]
+        lines.extend(f"- {name}: {desc}" for name, desc in selected)
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+INDICATOR_CATALOG = _render_indicator_catalog()
+
+
+def _catalog_for_run() -> str:
+    """Battery-aware catalog for prompt building (``indicator_battery`` config).
+
+    Fail-visible, never tool-less: an empty/unknown-only battery warns and
+    falls back to the full catalog rather than leaving the analyst with no
+    indicator vocabulary.
+    """
+    battery = get_config().get("indicator_battery")
+    if battery is None:
+        return INDICATOR_CATALOG
+    names = list(dict.fromkeys(battery))  # dedupe, keep order
+    unknown = [n for n in names if n not in INDICATOR_NAMES]
+    if unknown:
+        logger.warning(
+            "indicator_battery contains unknown indicators (ignored): %s — "
+            "known names: %s", unknown, sorted(INDICATOR_NAMES),
+        )
+    keep = [n for n in names if n in INDICATOR_NAMES]
+    if not keep:
+        logger.warning(
+            "indicator_battery has no known indicators; using the full catalog"
+        )
+        return INDICATOR_CATALOG
+    return _render_indicator_catalog(keep)
 
 
 def _legacy_system_message() -> str:
@@ -134,7 +285,7 @@ def _legacy_system_message() -> str:
         """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
 
 """
-        + INDICATOR_CATALOG
+        + _catalog_for_run()
         + """
 
 - Select indicators that provide diverse and complementary information. Avoid redundancy (e.g., do not select both rsi and stochrsi). Also briefly explain why they are suitable for the given market context. When you tool call, please use the exact name of the indicators provided above as they are defined parameters, otherwise your call will fail. Please make sure to call get_stock_data first to retrieve the CSV that is needed to generate indicators. Then use get_indicators with the specific indicator names.
@@ -156,7 +307,7 @@ def _fincot_system_message() -> str:
         context=(
             "Select up to 8 complementary technical indicators for the requested "
             "market condition, then write an evidence-grounded trend report. "
-            "Available indicators:\n\n" + INDICATOR_CATALOG
+            "Available indicators:\n\n" + _catalog_for_run()
         ),
         task=(
             "Pick the most relevant, non-redundant indicators (use their exact "
@@ -189,7 +340,14 @@ def _system_message() -> str:
         if get_config().get("fin_cot_prompts"):
             return _fincot_system_message() + get_language_instruction()
     except Exception:  # noqa: BLE001 -- prompt selection must never block a run
-        pass
+        # The run continues on the legacy prompt, but the whole-run analysis
+        # framing silently changes vs what the user configured — visible, not
+        # silent.
+        logger.warning(
+            "fin_cot prompt selection failed; falling back to the legacy "
+            "market-analyst prompt",
+            exc_info=True,
+        )
     return _legacy_system_message() + get_language_instruction()
 
 

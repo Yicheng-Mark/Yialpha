@@ -297,6 +297,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "pot_enabled": False,
     # Phase 2b: FinCoT de-persona structured prompts for analysts.
     "fin_cot_prompts": False,
+    # Market-analyst indicator battery (self-improvement landing point).
+    # None (default) = full catalog, byte-identical to the baseline prompt.
+    # A list of indicator names prunes the catalog the market analyst selects
+    # from — apply the output of scripts/prune_indicators_cli.py here after
+    # human review (never auto-edited). Valid names are pinned by
+    # INDICATOR_NAMES in agents/analysts/market_analyst.py and validated by
+    # `yiagents config-check`.
+    "indicator_battery": None,
     # Deterministic valuation tool (env: YIAGENTS_VALUATION_TOOLS). Off by
     # default = the fundamentals analyst's tool list is unchanged (byte-
     # equivalent). When on, a get_valuation_metrics PoT tool is appended so the

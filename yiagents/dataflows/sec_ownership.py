@@ -712,7 +712,15 @@ def get_institutional_holdings(
                 if date.fromisoformat(fd) > upper_d:
                     continue
             except ValueError:
-                pass
+                # Fail-closed like the CUSIP record gate above: a malformed
+                # filing date cannot prove the row was filed on time, so the
+                # holding is dropped instead of bypassing the PIT check
+                # (a `pass` here would leak future 13F holdings).
+                logger.debug(
+                    "sec_ownership: dropping 13F row with malformed "
+                    "filing_date %r (PIT gate) for %s", fd, ticker,
+                )
+                continue
         name = cov.get("manager") or cov.get("filer_cik") or h["accession"]
         slot = agg.setdefault(name, {"shares": 0.0, "value": 0.0, "filing_date": ""})
         slot["shares"] += _num(h["shares"]) or 0.0

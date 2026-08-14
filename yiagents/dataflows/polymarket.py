@@ -59,7 +59,10 @@ def _is_forward_looking(market: dict, now: datetime) -> bool:
             if datetime.fromisoformat(end_date.replace("Z", "+00:00")) < now:
                 return False
         except ValueError:
-            pass
+            # Kept as forward-looking (docstring contract), but observable: a
+            # malformed endDate may hide an already-settled market.
+            logger.debug("polymarket: unparseable endDate %r treated as forward-looking",
+                         end_date)
     return bool(_parse_json_list(market.get("outcomePrices"))) and bool(
         _parse_json_list(market.get("outcomes"))
     )

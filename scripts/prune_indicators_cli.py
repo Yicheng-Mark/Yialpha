@@ -24,9 +24,10 @@ analyst is trying to predict. Then run::
         --min-abs-ic 0.03 --min-consecutive 30
 
 The script prints a markdown report to stdout and, with ``--output``, writes it
-to a file. With ``--suggest-config``, it additionally prints a YAML snippet
-showing which indicators would be removed from ``indicator_battery`` — for
-manual review only, never auto-applied.
+to a file. With ``--suggest-config``, it additionally prints a Python config
+snippet showing the kept ``indicator_battery`` list (the real config key the
+market analyst reads its catalog from) — for manual review only, never
+auto-applied.
 """
 
 from __future__ import annotations
@@ -136,13 +137,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nReport written to {args.output}", file=sys.stderr)
 
     if args.suggest_config and result["prune"]:
+        # Suggest the kept names in the CSV's own column order — only the
+        # indicators that were actually evaluated belong in the suggestion.
+        kept = [name for name in indicators if name not in set(result["prune"])]
         print("\n## Config suggestion (REVIEW BEFORE APPLYING)\n")
-        print("The following indicators are candidates for removal from")
-        print("`indicator_battery` in default_config.py:\n")
-        print("```yaml")
-        print("# Remove from indicator_battery:")
-        for name in result["prune"]:
-            print(f"#   - {name}")
+        print("The following indicators are candidates for removal from the")
+        print("market analyst's catalog. After review, set `indicator_battery`")
+        print("(in default_config.py or via set_config) to the kept names:\n")
+        print("```python")
+        print("# default_config.py")
+        print(f'"indicator_battery": {kept},')
         print("```")
         print(
             "\n⚠️ This is a suggestion only. Verify against out-of-sample data"
