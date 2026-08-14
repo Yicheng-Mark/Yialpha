@@ -186,7 +186,10 @@ def get_a_share_fundamentals_native(
         try:
             d = date(int(td[:4]), int(td[4:6]), int(td[6:8]))
         except (ValueError, TypeError):
-            return True  # unparseable -> keep (let the LLM judge)
+            # Intentional fail-open (comment above), but observable: in a
+            # backtest a malformed date could be future data entering the prompt.
+            logger.debug("tushare: unparseable trade_date %r kept by PIT window filter", td)
+            return True
         return lower_d <= d <= upper_d
 
     df = df[df["trade_date"].astype(str).map(_td_in_window)]

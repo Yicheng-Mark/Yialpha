@@ -65,8 +65,8 @@ class TestPruneIndicatorsCLI:
         assert result.returncode == 1
         assert "not found" in result.stderr
 
-    def test_suggest_config_flag_outputs_yaml(self, tmp_path):
-        """--suggest-config adds a YAML suggestion section (never auto-applies)."""
+    def test_suggest_config_flag_outputs_python_snippet(self, tmp_path):
+        """--suggest-config adds a Python snippet pointing at the real key."""
         csv = self._make_csv(tmp_path)
         result = subprocess.run(
             [sys.executable, str(_SCRIPT), str(csv), "--window", "20",
@@ -75,8 +75,12 @@ class TestPruneIndicatorsCLI:
             capture_output=True, text=True, timeout=30,
         )
         assert result.returncode == 0
-        # Either a suggestion block (if something was pruned) or just the report.
         assert "IC Indicator Pruning Report" in result.stdout
+        if "Config suggestion" in result.stdout:
+            # The suggestion must land on the real config key the market
+            # analyst reads (indicator_battery), not a phantom key.
+            assert '"indicator_battery"' in result.stdout
+            assert "good_indicator" in result.stdout  # kept names suggested
 
     def test_output_flag_writes_file(self, tmp_path):
         """--output writes the report to a file."""

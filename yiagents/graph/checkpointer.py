@@ -6,6 +6,7 @@ Per-ticker SQLite databases so concurrent tickers don't contend.
 from __future__ import annotations
 
 import hashlib
+import logging
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -15,6 +16,8 @@ from langchain_core.runnables.config import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from yiagents.dataflows.utils import safe_ticker_component
+
+logger = logging.getLogger(__name__)
 
 
 def _db_path(data_dir: str | Path, ticker: str) -> Path:
@@ -93,7 +96,14 @@ def clear_checkpoint(data_dir: str | Path, ticker: str, date: str, signature: st
         for table in ("writes", "checkpoints"):
             conn.execute(f"DELETE FROM {table} WHERE thread_id = ?", (tid,))
         conn.commit()
-    except sqlite3.OperationalError:
-        pass
+    except sqlite3.OperationalError as exc:
+        # Benign on a freshly-created empty DB (no tables yet), but a locked
+        # or corrupt DB means the thread's rows survive — a later resume would
+        # silently continue from a stale checkpoint.
+        logger.warning(
+            "checkpoint cleanup failed for %s (thread %s): %s — a later "
+            "resume may continue from stale graph state",
+            db.name, tid, exc,
+        )
     finally:
         conn.close()

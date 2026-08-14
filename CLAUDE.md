@@ -81,6 +81,14 @@ DeepSeek 两档分工（2026-07-05 起，原「一律 v4-pro」已废弃——�
   - `event_study`（参数默认 `False` = 跳过）：市场模型事件研究，对每个决策日用决策前 250 天估计窗拟合 `R_asset = a + b*R_benchmark`，检验持仓窗 CAR 是否显著非零（mean CAR + Brown&Warner cross-sectional t + bootstrap 95% CI），填 `metrics.event_study_*`。是对朴素 `alpha_vs_index`（无 β 控制、无显著性）的统计强化。需决策日前 ~250 天数据，故 opt-in 时额外 wide-window 重拉 asset+benchmark（`first_event - 400d`）。实现 `backtest/engine.py:_run_event_study` + `backtest/event_study.py`；report opt-in 渲染段。
   - 二者 fail-open：因子文件缺失 / 估计窗不足 / benchmark 拉不到 → 字段留默认 None，不中断回测。
 
+## 自我改进闭环（light wiring，2026-08-14）
+
+IC 剪枝结论的**真实落地路径**（此前 `prune_indicators_cli.py --suggest-config` 指向不存在的 `indicator_battery` 幻影键，指标清单只能手改 prompt 常量）：
+
+- **`indicator_battery` 配置键**（`default_config.py`，默认 `None` = 全目录字节等价）：market analyst 的指标目录现由结构化 `_INDICATOR_SECTIONS` 渲染（`agents/analysts/market_analyst.py`），list 值只保留所指指标、空节整节消失；未知名 warning + 忽略，全未知/空列表 warning + 回退全目录（分析师永远有工具词汇）；`yiagents config-check` 校验名单（❌ 标记但不阻断 exit code）。默认渲染与重构前 hand-written 字面量**字节等价**（`tests/test_indicator_battery.py` 固化 git HEAD 快照）。
+- **`yiagents snapshot record/diff/list`**：`config_snapshot.py`（机制完整但此前运行时零调用）的 CLI 入口。人工流程（fail-closed，永不自动改 live config）：`scripts/prune_indicators_cli.py --suggest-config` 产出证据 → 人工审查 → 人工改 `indicator_battery` → `yiagents snapshot record --reason ... --evidence ...` 落 append-only 快照（`<data_cache_dir>/config_history/`，带 git commit + 指纹）→ `run_analyst_parallel_ab.py` A/B 对比 → `snapshot diff` 检测漂移。
+- 13 处残留静默退化已收口（2026-08-14 审计）：`yfinance_news.py` 两处错误字符串改 re-raise（news 是 core 类别，fail-closed 契约自此完整）；13F 畸形 filing_date 由 fail-open `pass` 改 fail-closed `continue`（对齐 CUSIP 门）；baostock 季报失败 / 回测基准 SPY 回退 / checkpoint 清理失败 / fin_cot prompt 降级 / memory 畸形日期 / Binance 恢复查询失败全部补日志。
+
 ## Binance 资产类型（crypto_perp / crypto_spot）
 
 两条 Binance 分析轨道，均为**只读公共行情、无鉴权、无下单**（Track A，分析专用）。手写 `requests`（**非官方 SDK**），复用已验证的 SOCKS5 代理（`_proxies()`）+ 产品线独立限流（`get_binance_weight_limiter("fapi"|"spot")`）+ 反应式 429/418 兜底 + 可选类目降级。

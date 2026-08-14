@@ -1,6 +1,7 @@
 """yfinance-based news data fetching functions."""
 
 import contextlib
+import logging
 from datetime import datetime
 
 import yfinance as yf
@@ -9,6 +10,8 @@ from dateutil.relativedelta import relativedelta
 from .config import get_config
 from .stockstats_utils import yf_retry
 from .symbol_utils import normalize_symbol
+
+logger = logging.getLogger(__name__)
 
 
 def _extract_article_data(article: dict) -> dict:
@@ -127,8 +130,14 @@ def get_news_yfinance(
 
         return f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n{news_str}"
 
-    except Exception as e:
-        return f"Error fetching news for {ticker}: {str(e)}"
+    except Exception:
+        # Raise instead of returning an "Error fetching news…" string: news_data
+        # is a core category, so the router (route_to_vendor) must see the
+        # failure to either fall through to the next vendor or let the
+        # all-vendors-failed error propagate. Returning prose here made the
+        # router treat the error message as successfully fetched news data.
+        logger.exception("news retrieval failed for %s", ticker)
+        raise
 
 
 def get_global_news_yfinance(
@@ -215,5 +224,9 @@ def get_global_news_yfinance(
 
         return f"## Global Market News, from {start_date} to {curr_date}:\n\n{news_str}"
 
-    except Exception as e:
-        return f"Error fetching global news: {str(e)}"
+    except Exception:
+        # Same contract as get_news_yfinance above: global_news is a core
+        # category, so failures must reach the router rather than masquerade
+        # as a news payload.
+        logger.exception("global news retrieval failed")
+        raise

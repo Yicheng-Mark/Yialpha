@@ -1577,6 +1577,32 @@ def config_check():
     else:
         console.print("  [dim]• No proxy configured (direct connection)[/dim]")
 
+    # -- Indicator battery ----------------------------------------------------
+    # The self-improvement landing point: a typo'd indicator_battery would
+    # silently prune the market analyst's catalog, so validate against the
+    # known names. Surfaced as ❌ but not gating the exit code (the core LLM
+    # path is what "ready" means; the run itself also warns + ignores unknowns).
+    from yiagents.agents.analysts.market_analyst import INDICATOR_NAMES
+    from yiagents.dataflows.config import get_config
+
+    battery = get_config().get("indicator_battery")
+    console.print("\n[dim]Indicator battery:[/dim]")
+    if battery is None:
+        console.print("  [dim]• indicator_battery unset — full catalog (default)[/dim]")
+    else:
+        unknown = [n for n in battery if n not in INDICATOR_NAMES]
+        if unknown:
+            console.print(
+                f"  [red]❌[/red] indicator_battery has unknown indicator(s): "
+                f"{', '.join(unknown)} "
+                f"[dim]({len(INDICATOR_NAMES)} known names)[/dim]"
+            )
+        else:
+            console.print(
+                f"  [green]✅[/green] indicator_battery: "
+                f"{len(set(battery))}/{len(INDICATOR_NAMES)} indicator(s), all known"
+            )
+
     # -- Verdict --------------------------------------------------------------
     ready = key_env is None or key_set
     console.print()
@@ -1588,6 +1614,95 @@ def config_check():
             f"set {key_env} or change YIAGENTS_LLM_PROVIDER.[/bold red]"
         )
         raise typer.Exit(code=1)
+
+
+# --------------------------------------------------------------------------- #
+# snapshot — self-improvement config-change audit trail
+# --------------------------------------------------------------------------- #
+# Runtime wiring for yiagents/config_snapshot.py (the mechanism existed but had
+# no entry point). The pipeline stays human-driven and fail-closed: record
+# AFTER you apply a reviewed config change, then A/B compare.
+snapshot_app = typer.Typer(
+    help="Record / diff / list config snapshots (self-improvement audit trail).",
+    no_args_is_help=True,
+)
+app.add_typer(snapshot_app, name="snapshot")
+
+
+@snapshot_app.command("record")
+def snapshot_record(
+    reason: str = typer.Option(
+        ..., "--reason", "-r",
+        help="Why this snapshot exists (e.g. 'Pruned low-IC indicators').",
+    ),
+    evidence: str = typer.Option(
+        "", "--evidence", "-e",
+        help="Path to / description of the supporting evidence (e.g. an IC report).",
+    ),
+) -> None:
+    """Record the active config as an append-only snapshot.
+
+    Snapshots carry provenance (timestamp, reason, evidence, git commit) and
+    are written atomically to <data_cache_dir>/config_history/. Recording a
+    snapshot never edits the live config.
+    """
+    from yiagents.config_snapshot import record_config_snapshot
+    from yiagents.dataflows.config import get_config
+
+    path = record_config_snapshot(get_config(), reason=reason, evidence=evidence)
+    console.print(f"[green]✅[/green] Snapshot recorded: {path}")
+    console.print("[dim]Append-only audit trail; the live config is never modified.[/dim]")
+
+
+@snapshot_app.command("diff")
+def snapshot_diff() -> None:
+    """Diff the active config against the last recorded snapshot."""
+    from yiagents.config_snapshot import diff_against_last_snapshot
+    from yiagents.dataflows.config import get_config
+
+    diffs = diff_against_last_snapshot(get_config())
+    if not diffs:
+        console.print(
+            "[green]✅[/green] Active config matches the last snapshot "
+            "(or no snapshot exists yet)."
+        )
+        return
+    console.print("[yellow]Config has drifted from the last snapshot:[/yellow]")
+    table = Table(box=box.SIMPLE)
+    table.add_column("key", style="bold")
+    table.add_column("snapshot value")
+    table.add_column("active value")
+    for key, (old, new) in diffs.items():
+        table.add_row(key, repr(old), repr(new))
+    console.print(table)
+
+
+@snapshot_app.command("list")
+def snapshot_list(
+    limit: int = typer.Option(
+        20, "--limit", "-n", help="Show the N most recent snapshots.",
+    ),
+) -> None:
+    """List recorded config snapshots (oldest first, capped at --limit)."""
+    from yiagents.config_snapshot import list_snapshots
+    from yiagents.dataflows.config import get_config
+
+    snapshots = list_snapshots(get_config())
+    if not snapshots:
+        console.print("[yellow]No config snapshots recorded yet.[/yellow]")
+        console.print('[dim]Record one with: yiagents snapshot record --reason "..."[/dim]')
+        return
+    table = Table(box=box.SIMPLE)
+    table.add_column("timestamp")
+    table.add_column("fingerprint")
+    table.add_column("git")
+    table.add_column("reason")
+    for s in snapshots[-limit:]:
+        table.add_row(
+            str(s["timestamp"]), str(s["fingerprint"]),
+            str(s["git_commit"] or "-"), str(s["reason"]),
+        )
+    console.print(table)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 """Append-only markdown decision log for YiAgents."""
 
+import logging
 import re
 from contextlib import nullcontext
 from datetime import date
@@ -8,6 +9,8 @@ from typing import Any
 
 from yiagents.agents.utils.rating import parse_rating
 from yiagents.batch.locks import FileLock
+
+logger = logging.getLogger(__name__)
 
 
 class TradingMemoryLog:
@@ -110,6 +113,14 @@ class TradingMemoryLog:
             try:
                 cutoff = date.fromisoformat(str(as_of_date)[:10])
             except (TypeError, ValueError):
+                # Fail closed (no history injected), but the whole accumulated
+                # lesson history being dropped is a major degradation — the
+                # caller should find out their date format is wrong.
+                logger.warning(
+                    "memory: unparseable as_of_date %r — injecting no past "
+                    "context instead of risking a look-ahead leak",
+                    as_of_date,
+                )
                 return ""
 
             causal_entries = []

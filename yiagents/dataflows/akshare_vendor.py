@@ -166,6 +166,9 @@ def _in_window(d_str: str, upper_d: date, upper_set: bool) -> bool:
     try:
         d = date.fromisoformat(d_str[:10])
     except ValueError:
+        # Intentional fail-open (docstring above), but observable: in a
+        # backtest a malformed date could be future data entering the prompt.
+        logger.debug("akshare: unparseable date %r kept by PIT window filter", d_str)
         return True
     return not (upper_set and d > upper_d)
 
@@ -421,6 +424,9 @@ def get_a_share_money_flow_native(
         try:
             return float(_cell(r, col_main))
         except (TypeError, ValueError):
+            # Unparseable cells count as 0.0 in win_sum/streak below — a small
+            # distortion, so keep a debug trace rather than nothing.
+            logger.debug("akshare: unparseable 主力净额 cell counted as 0.0")
             return 0.0
 
     latest_d, latest_r = rows[0]
@@ -666,7 +672,10 @@ def _stock_industry(ak, code: str) -> str | None:
     try:
         with _direct_connect():
             df = ak.stock_board_industry_name_ths(symbol="所属行业")
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 -- best-effort lookup
+        # The sector-flow report just loses this stock's industry marker, but
+        # that loss should be observable rather than invisible.
+        logger.warning("akshare: industry lookup failed for %s: %s", code, exc)
         return None
     if df is None or getattr(df, "empty", True):
         return None
@@ -754,6 +763,7 @@ def get_a_share_sector_flow_native(
         try:
             return float(_cell(r, col_main)) if col_main else 0.0
         except (TypeError, ValueError):
+            logger.debug("akshare: unparseable sector 主力净额 cell counted as 0.0")
             return 0.0
 
     rows.sort(key=lambda x: _main_val(x[1]), reverse=True)

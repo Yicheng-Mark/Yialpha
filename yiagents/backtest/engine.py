@@ -162,7 +162,14 @@ def _resolve_index_benchmark(graph: Any | None, ticker: str) -> str:
         try:
             return graph._resolve_benchmark(ticker)
         except Exception:  # noqa: BLE001 -- benchmark resolution must never break a backtest
-            pass
+            # The fallback keeps the backtest alive, but alpha/beta vs SPY are
+            # plain wrong for A-share/crypto tickers — the substitution must
+            # be observable, not silent.
+            logger.warning(
+                "benchmark resolution failed for %s; falling back to SPY "
+                "(alpha/beta will be computed against the wrong index)",
+                ticker, exc_info=True,
+            )
     return "SPY"
 
 

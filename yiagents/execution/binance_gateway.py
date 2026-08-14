@@ -682,7 +682,12 @@ class BinanceGateway(BaseGateway):
             if orderid is None:
                 return None
             return self._order_from_response(req, data, client_order_id)
-        except Exception:  # noqa: BLE001 - recovery must never raise
+        except Exception as exc:  # noqa: BLE001 - recovery must never raise
+            # None -> the caller treats the submit as ambiguous (-> REJECTED),
+            # which is fail-closed for trading, but the recovery failure itself
+            # should be observable for post-mortem.
+            logger.warning("order recovery lookup failed for %s (client id %s): %s",
+                           req.symbol, client_order_id, exc)
             return None
 
     def _order_from_response(
