@@ -99,6 +99,31 @@ _INDICATOR_LIST: list[IndicatorSpec] = [
         av_function="EMA",
         av_column="EMA",
     ),
+    # Trend Strength
+    IndicatorSpec(
+        name="adx",
+        label="ADX",
+        section="Trend Strength",
+        description=(
+            "ADX: Measures trend strength from directional movement regardless of direction. "
+            "Usage: ADX above 25 suggests a trending market worth trend-following; below 20 favors range strategies. "
+            "Tips: This build smooths with a short EMA rather than Wilder's RMA, so use it to rank trend strength, not for exact threshold crosses."
+        ),
+        av_function=None,  # not directly available from Alpha Vantage
+        av_column="",
+    ),
+    IndicatorSpec(
+        name="supertrend",
+        label="SuperTrend",
+        section="Trend Strength",
+        description=(
+            "SuperTrend: A volatility-banded trend-following overlay built on ATR. "
+            "Usage: Price above the line = uptrend; line flips mark regime changes and trailing-stop levels. "
+            "Tips: Whipsaws in choppy ranges; confirm flips with ADX trend strength."
+        ),
+        av_function=None,  # not directly available from Alpha Vantage
+        av_column="",
+    ),
     # MACD Related
     IndicatorSpec(
         name="macd",
@@ -148,6 +173,114 @@ _INDICATOR_LIST: list[IndicatorSpec] = [
         ),
         av_function="RSI",
         av_column="RSI",
+    ),
+    IndicatorSpec(
+        name="kdjk",
+        label="KDJ K",
+        section="Momentum Indicators",
+        description=(
+            "KDJ K: The %K line of the 9-period KDJ stochastic, an A-share favourite. "
+            "Usage: K crossing above D from the low zone (below 20) is a classic buy trigger; above 80 is overbought. "
+            "Tips: KDJ whipsaws in strong trends; require a D-line cross, not just the level."
+        ),
+        av_function=None,  # not directly available from Alpha Vantage
+        av_column="",
+    ),
+    IndicatorSpec(
+        name="kdjd",
+        label="KDJ D",
+        section="Momentum Indicators",
+        description=(
+            "KDJ D: The %D line of the 9-period KDJ stochastic — the smoothed K signal line. "
+            "Usage: K/D crosses are the signal; D's own slope gauges momentum persistence. "
+            "Tips: Use together with kdjk, never alone."
+        ),
+        av_function=None,  # not directly available from Alpha Vantage
+        av_column="",
+    ),
+    IndicatorSpec(
+        name="kdjj",
+        label="KDJ J",
+        section="Momentum Indicators",
+        description=(
+            "KDJ J: The J line (3K - 2D) of the KDJ stochastic — its overextended wing. "
+            "Usage: J above 100 flags short-term overbought extremes; below 0 marks oversold snapback candidates. "
+            "Tips: The noisiest of the three; trade its extremes only, not its crosses."
+        ),
+        av_function=None,  # not directly available from Alpha Vantage
+        av_column="",
+    ),
+    IndicatorSpec(
+        name="cci",
+        label="CCI",
+        section="Momentum Indicators",
+        description=(
+            "CCI: Commodity Channel Index (14) measures deviation of typical price from its mean. "
+            "Usage: The +100/-100 bands flag strong momentum; zero-line crosses confirm direction. "
+            "Tips: Choppy near zero in ranges; trust extremes more than mid-band wiggles."
+        ),
+        av_function=None,  # not directly available from Alpha Vantage
+        av_column="",
+    ),
+    IndicatorSpec(
+        name="wr",
+        label="Williams %R",
+        section="Momentum Indicators",
+        description=(
+            "Williams %R: A 14-period overbought/oversold oscillator on a 0 to -100 scale. "
+            "Usage: Above -20 is overbought, below -80 oversold; watch for divergence with price. "
+            "Tips: Redundant with KDJ/StochRSI — pick one oscillator family per report."
+        ),
+        av_function=None,  # not directly available from Alpha Vantage
+        av_column="",
+    ),
+    IndicatorSpec(
+        name="stochrsi",
+        label="StochRSI",
+        section="Momentum Indicators",
+        description=(
+            "StochRSI: RSI run through a 14-period stochastic — a faster, more sensitive RSI. "
+            "Usage: Catches short-term RSI extremes earlier than raw RSI. "
+            "Tips: Noisy; use for timing inside a trend already confirmed by moving averages, and do not pair with raw rsi."
+        ),
+        av_function=None,  # not directly available from Alpha Vantage
+        av_column="",
+    ),
+    IndicatorSpec(
+        name="close_12_roc",
+        label="12-day ROC",
+        section="Momentum Indicators",
+        description=(
+            "12-day ROC: Rate of change of the close over 12 sessions, in percent. "
+            "Usage: Positive = upward momentum; zero-line crossings mark momentum shifts. "
+            "Tips: Raw price momentum — scale by volatility (ATR) when comparing across regimes."
+        ),
+        av_function=None,  # not directly available from Alpha Vantage
+        av_column="",
+    ),
+    IndicatorSpec(
+        name="cmo",
+        label="CMO",
+        section="Momentum Indicators",
+        description=(
+            "CMO: Chandra Momentum Oscillator (14) — net up-move vs down-move intensity on a -100 to +100 scale. "
+            "Usage: Beyond +/-50 flags strong directional momentum; zero-line crosses confirm shifts. "
+            "Tips: Overlaps the RSI family; choose either CMO or RSI, not both."
+        ),
+        av_function=None,  # not directly available from Alpha Vantage
+        av_column="",
+    ),
+    IndicatorSpec(
+        name="trix",
+        label="TRIX",
+        section="Momentum Indicators",
+        description=(
+            "TRIX: Rate of change of a triple-smoothed EMA (12). "
+            "Usage: TRIX sign = trend direction; its signal-line crosses time entries with very low noise. "
+            "Tips: Very laggy; best as a regime filter, not an entry trigger."
+        ),
+        av_function=None,  # not directly available from Alpha Vantage
+        av_column="",
     ),
     # Volatility Indicators
     IndicatorSpec(
@@ -199,6 +332,30 @@ _INDICATOR_LIST: list[IndicatorSpec] = [
         av_series_type=None,
         av_column="ATR",
     ),
+    IndicatorSpec(
+        name="rvol_20",
+        label="Realized Vol 20d",
+        section="Volatility Indicators",
+        description=(
+            "Realized Vol 20d: Annualized standard deviation of daily log returns over 20 sessions. "
+            "Usage: Compare volatility regimes and scale position sizes (vol targeting). "
+            "Tips: Backward-looking and flat-weighted; pair with ewma_vol for the slow/fast combination."
+        ),
+        av_function=None,  # derived feature, computed from OHLCV locally
+        av_column="",
+    ),
+    IndicatorSpec(
+        name="ewma_vol",
+        label="EWMA Vol",
+        section="Volatility Indicators",
+        description=(
+            "EWMA Vol: RiskMetrics exponentially-weighted volatility (lambda 0.94), annualized. "
+            "Usage: Reacts faster than rvol_20 after shocks; the ewma_vol-above-rvol_20 gap marks vol-regime transitions. "
+            "Tips: The early tail is seed-biased; trust it after the first few dozen sessions."
+        ),
+        av_function=None,  # derived feature, computed from OHLCV locally
+        av_column="",
+    ),
     # Volume-Based Indicators
     IndicatorSpec(
         name="vwma",
@@ -210,6 +367,42 @@ _INDICATOR_LIST: list[IndicatorSpec] = [
             "Tips: Watch for skewed results from volume spikes; use in combination with other volume analyses."
         ),
         av_function=None,  # not directly available from Alpha Vantage
+        av_column="",
+    ),
+    IndicatorSpec(
+        name="vr",
+        label="Volume Ratio",
+        section="Volume-Based Indicators",
+        description=(
+            "Volume Ratio: Today's volume against its 26-period moving average — a volume-momentum gauge. "
+            "Usage: VR above 1.5 flags unusual participation behind a move; below 0.7 is apathy. "
+            "Tips: High VR at price extremes signals climax or breakout conviction; read it together with price direction."
+        ),
+        av_function=None,  # not directly available from Alpha Vantage
+        av_column="",
+    ),
+    IndicatorSpec(
+        name="obv",
+        label="OBV",
+        section="Volume-Based Indicators",
+        description=(
+            "OBV: On-Balance Volume — cumulative volume signed by daily close direction. "
+            "Usage: Rising OBV confirms an uptrend; OBV flat or falling while price prints new highs is a bearish divergence. "
+            "Tips: Cumulative and unbounded — read its slope against price, never its level."
+        ),
+        av_function=None,  # derived feature, computed from OHLCV locally
+        av_column="",
+    ),
+    IndicatorSpec(
+        name="rel_vol_20",
+        label="Relative Volume 20d",
+        section="Volume-Based Indicators",
+        description=(
+            "Relative Volume 20d: Today's volume vs its 20-session average. "
+            "Usage: Above 1.5 flags unusual participation (breakout conviction or climax); below 0.7 is apathy. "
+            "Tips: Read together with price direction and the day's range."
+        ),
+        av_function=None,  # derived feature, computed from OHLCV locally
         av_column="",
     ),
     IndicatorSpec(
@@ -246,9 +439,17 @@ ANALYST_SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
             if spec.section == header and spec.in_analyst_prompt
         ],
     )
-    for header in ("Moving Averages", "MACD Related", "Momentum Indicators",
-                   "Volatility Indicators", "Volume-Based Indicators")
+    for header in ("Moving Averages", "Trend Strength", "MACD Related",
+                   "Momentum Indicators", "Volatility Indicators",
+                   "Volume-Based Indicators")
 ]
+
+#: Entries Alpha Vantage cannot serve (``av_function is None``): the AV vendor
+#: raises NoMarketDataError for these so the router falls through to the
+#: yfinance/stockstats implementation, exactly like the original vwma case.
+YFINANCE_ONLY = frozenset(
+    spec.name for spec in _INDICATOR_LIST if spec.av_function is None
+)
 
 #: Known indicator names for the analyst prompt — the ``indicator_battery``
 #: validation set (market_analyst.INDICATOR_NAMES renders from this).

@@ -1318,16 +1318,24 @@ class MarketAnalystAShareWiringTests(unittest.TestCase):
         finally:
             cfgmod.set_config(orig)
 
+    # The market analyst's baseline list carries the 2026-08-15 technical-
+    # analysis expansion (weekly context, S/R, volume, patterns, relative
+    # strength) on top of the original trio — identical whether the A-share
+    # flag is off or the ticker is non-A-share (the double gate).
+    _EXPANDED_BASELINE = [
+        "get_stock_data", "get_indicators", "get_verified_market_snapshot",
+        "get_indicators_weekly", "get_support_resistance",
+        "get_volume_features", "get_candlestick_patterns",
+        "get_relative_strength",
+    ]
+
     def test_default_off_byte_equivalent_baseline(self):
         names = self._tool_names({"a_share_native": False})
-        self.assertEqual(
-            names,
-            ["get_stock_data", "get_indicators", "get_verified_market_snapshot"],
-        )
+        self.assertEqual(names, self._EXPANDED_BASELINE)
 
     def test_on_with_a_share_appends_northbound_and_sector(self):
         names = self._tool_names({"a_share_native": True}, ticker="600519.SS")
-        # Baseline 3 tools + 4 new A-share market tools.
+        # Baseline tools + 4 new A-share market tools.
         self.assertIn("get_stock_data", names)
         self.assertIn("get_indicators", names)
         self.assertIn("get_verified_market_snapshot", names)
@@ -1338,10 +1346,7 @@ class MarketAnalystAShareWiringTests(unittest.TestCase):
 
     def test_on_with_non_a_share_is_byte_equivalent(self):
         names = self._tool_names({"a_share_native": True}, ticker="AAPL")
-        self.assertEqual(
-            names,
-            ["get_stock_data", "get_indicators", "get_verified_market_snapshot"],
-        )
+        self.assertEqual(names, self._EXPANDED_BASELINE)
 
 
 # --------------------------------------------------------------------------- #

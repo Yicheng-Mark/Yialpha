@@ -4,7 +4,7 @@ from yiagents.agents.utils.agent_utils import (
     get_language_instruction,
 )
 from yiagents.dataflows.config import get_config
-from yiagents.dataflows.market_regime import format_market_regime
+from yiagents.dataflows.market_regime import format_regime_context
 
 
 def create_conservative_debator(llm):
@@ -21,18 +21,23 @@ def create_conservative_debator(llm):
         fundamentals_report = state["fundamentals_report"]
         instrument_context = get_instrument_context_from_state(state)
 
-        # Opt-in market-stress reading (env: YIAGENTS_MARKET_REGIME, default
+        # Opt-in market-regime reading (env: YIAGENTS_MARKET_REGIME, default
         # off). When off this stays "" and the prompt below is byte-identical
-        # to the baseline. When on, a fail-soft benchmark turbulence line is
-        # appended — a market-level ex-ante cue complementary to the
-        # portfolio-level reactive DrawdownBreaker.
+        # to the baseline. When on, the 2026-08-15 composite regime line is
+        # appended (trend + volatility state + benchmark turbulence +, on
+        # A-share live runs, market breadth — a superset of the old
+        # turbulence-only reading), a market-level ex-ante cue complementary
+        # to the portfolio-level reactive DrawdownBreaker.
         market_regime_line = ""
         if get_config().get("market_regime"):
             trade_date = state.get("trade_date")
             if trade_date:
-                reading = format_market_regime(
-                    state["company_of_interest"], trade_date
-                )
+                try:
+                    reading = format_regime_context(
+                        state["company_of_interest"], trade_date
+                    )
+                except Exception:  # noqa: BLE001 — fail-soft advisory cue
+                    reading = None
                 if reading:
                     market_regime_line = f"Market Regime: {reading}\n"
                 else:
@@ -41,7 +46,7 @@ def create_conservative_debator(llm):
                     # the cue the operator opted into.
                     market_regime_line = (
                         "Market Regime: unavailable (fetch failed or "
-                        "insufficient benchmark history)\n"
+                        "insufficient history)\n"
                     )
 
         trader_decision = state["trader_investment_plan"]

@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
@@ -41,6 +42,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from yiagents.agents.analysts.market_analyst import INDICATOR_NAMES  # noqa: E402
+from yiagents.dataflows.feature_registry import compute_derived  # noqa: E402
 from yiagents.dataflows.stockstats_utils import load_ohlcv  # noqa: E402
 
 
@@ -49,6 +51,7 @@ def build_ic_frame(
     horizon: int,
     indicators: list[str],
     as_of: str,
+    extra_horizons: Sequence[int] = (),
 ) -> tuple[pd.DataFrame, list[str]]:
     """Compute the IC table for one ticker.
 
@@ -56,6 +59,12 @@ def build_ic_frame(
     ``forward_return`` (Close.shift(-horizon)/Close - 1) and one column per
     computable indicator; tail rows without a realizable forward return are
     dropped.
+
+    ``extra_horizons`` adds one ``fwd_ret_<h>d`` column per additional
+    forward horizon (for the IC-decay analysis in prune_indicators_cli).
+    Each extra column keeps its own honest NaN tail — rows realizable at the
+    primary horizon but not at 20d stay, with the 20d cell NaN; the IC math
+    drops non-finite pairs per horizon, so nothing is ever fabricated.
     """
     data = load_ohlcv(ticker, as_of)
 
@@ -72,9 +81,21 @@ def build_ic_frame(
     # happened yet, and fabricating it would poison the IC tail windows.
     out["forward_return"] = closes.shift(-horizon) / closes - 1.0
 
+    for h in sorted({int(h) for h in extra_horizons if int(h) != horizon}):
+        if h <= 0:
+            raise ValueError(f"extra horizons must be positive; got {h}")
+        out[f"fwd_ret_{h}d"] = closes.shift(-h) / closes - 1.0
+
     skipped: list[str] = []
     for ind in indicators:
+        # Derived features (vol estimators, OBV, ...) compute on the raw
+        # frame; stockstats names on the wrapped one. Same skip-and-report
+        # contract either way — never zero-fill.
         try:
+            derived = compute_derived(data, ind)
+            if derived is not None:
+                out[ind] = pd.to_numeric(derived, errors="coerce")
+                continue
             series = wrapped[ind]
         except Exception as exc:  # noqa: BLE001 -- skip-and-report, never zero-fill
             logger.warning("indicator %s failed to compute for %s: %s", ind, ticker, exc)
@@ -97,6 +118,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Forward-return horizon in trading rows (default: 5)",
     )
     parser.add_argument(
+        "--extra-horizons", type=str, default="",
+        help="Comma-separated additional forward horizons emitted as "
+        "fwd_ret_<h>d columns for IC-decay analysis, e.g. '1,10,20' "
+        "(default: none). The primary --horizon column stays 'forward_return'.",
+    )
+    parser.add_argument(
         "--indicators", nargs="*", default=None,
         help="Indicator names (default: the market analyst's full battery). "
         "Valid names are pinned by INDICATOR_NAMES in market_analyst.py.",
@@ -115,6 +142,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.horizon <= 0:
         parser.error("--horizon must be a positive number of trading days")
 
+    try:
+        extra = [int(x) for x in args.extra_horizons.split(",") if x.strip()]
+    except ValueError:
+        parser.error(f"--extra-horizons must be comma-separated integers; got {args.extra_horizons!r}")
+    bad = [h for h in extra if h <= 0]
+    if bad:
+        parser.error(f"--extra-horizons must be positive; got {bad}")
+
     indicators = args.indicators or sorted(INDICATOR_NAMES)
     unknown = [n for n in indicators if n not in INDICATOR_NAMES]
     if unknown:
@@ -129,7 +164,10 @@ def main(argv: list[str] | None = None) -> int:
     failures = 0
     for ticker in args.tickers:
         try:
-            frame, skipped = build_ic_frame(ticker, args.horizon, indicators, args.as_of)
+            frame, skipped = build_ic_frame(
+                ticker, args.horizon, indicators, args.as_of,
+                extra_horizons=extra,
+            )
         except Exception as exc:  # noqa: BLE001 -- one bad ticker must not kill the batch
             logger.error("export failed for %s: %s", ticker, exc)
             failures += 1
@@ -140,8 +178,10 @@ def main(argv: list[str] | None = None) -> int:
             failures += 1
             continue
 
-        if len(frame.columns) == 2:
-            # date + forward_return only: every indicator was skipped. The
+        n_extra_fwd = sum(1 for c in frame.columns if c.startswith("fwd_ret_"))
+        n_indicator_cols = len(frame.columns) - 2 - n_extra_fwd
+        if n_indicator_cols == 0:
+            # date + forward_return(s) only: every indicator was skipped. The
             # prune CLI rejects this CSV ("at least one indicator column"), so
             # writing it with a success verdict and a "next:" hint would send
             # the operator into a guaranteed failure.
@@ -156,7 +196,8 @@ def main(argv: list[str] | None = None) -> int:
         frame.to_csv(out_path, index=False)
         print(
             f"[{ticker}] wrote {out_path}: {len(frame)} rows, "
-            f"{len(frame.columns) - 2} indicator column(s)"
+            f"{n_indicator_cols} indicator column(s)"
+            + (f", {n_extra_fwd} extra forward-horizon column(s)" if n_extra_fwd else "")
             + (f" (skipped: {', '.join(skipped)})" if skipped else "")
         )
         print(

@@ -168,16 +168,38 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
         node(self._state(asset_type, trade_date))
         return [t.name for t in llm.bound_tools]
 
-    def test_stock_binds_three_baseline_tools(self):
+    def test_stock_binds_baseline_plus_expansion_tools(self):
+        # 2026-08-15 technical-analysis expansion: the baseline trio gains the
+        # weekly-timeframe context, the three price-structure evidence tools
+        # (S/R levels, volume confirmation/divergence, candlestick patterns),
+        # and benchmark relative strength.
         self.assertEqual(
             self._tool_names("stock"),
-            ["get_stock_data", "get_indicators", "get_verified_market_snapshot"],
+            [
+                "get_stock_data",
+                "get_indicators",
+                "get_verified_market_snapshot",
+                "get_indicators_weekly",
+                "get_support_resistance",
+                "get_volume_features",
+                "get_candlestick_patterns",
+                "get_relative_strength",
+            ],
         )
 
-    def test_crypto_binds_three_baseline_tools(self):
+    def test_crypto_binds_baseline_plus_expansion_tools(self):
         self.assertEqual(
             self._tool_names("crypto"),
-            ["get_stock_data", "get_indicators", "get_verified_market_snapshot"],
+            [
+                "get_stock_data",
+                "get_indicators",
+                "get_verified_market_snapshot",
+                "get_indicators_weekly",
+                "get_support_resistance",
+                "get_volume_features",
+                "get_candlestick_patterns",
+                "get_relative_strength",
+            ],
         )
 
     def test_perp_hides_spot_tools_binds_only_binance(self):
@@ -188,16 +210,18 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
         self.assertNotIn("get_stock_data", names)
         self.assertNotIn("get_indicators", names)
         self.assertNotIn("get_verified_market_snapshot", names)
-        # The 6 perp-native Binance tools: OHLCV/funding/OI (the original cost-
-        # of-carry & crowding trio) plus the positioning/order-flow/basis trio
-        # (long_short_ratio, taker_buy_sell, basis) that supplies the perp-native
-        # "sentiment" signal social sources can't provide for a *USDT contract.
-        self.assertEqual(len(names), 6)
+        # The 7 perp-native Binance tools: OHLCV/funding/OI (the original
+        # cost-of-carry & crowding trio) plus the positioning/order-flow/basis
+        # trio, plus get_binance_indicators (2026-08-15) which computes the
+        # classic stockstats battery on the actual perp klines — the indicator
+        # capability perp runs previously lacked entirely.
+        self.assertEqual(len(names), 7)
         self.assertEqual(
             sorted(names),
             [
                 "get_binance_basis",
                 "get_binance_funding_rate",
+                "get_binance_indicators",
                 "get_binance_klines",
                 "get_binance_long_short_ratio",
                 "get_binance_open_interest",
@@ -208,7 +232,11 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
     def test_historical_perp_omits_current_positioning_and_order_flow(self):
         self.assertEqual(
             sorted(self._tool_names("crypto_perp", "2020-01-02")),
-            ["get_binance_funding_rate", "get_binance_klines"],
+            [
+                "get_binance_funding_rate",
+                "get_binance_indicators",
+                "get_binance_klines",
+            ],
         )
 
 

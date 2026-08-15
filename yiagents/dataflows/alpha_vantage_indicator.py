@@ -6,6 +6,7 @@ from .indicator_catalog import (
     AV_COLUMNS,
     AV_DESCRIPTIONS,
     AV_SUPPORTED,
+    YFINANCE_ONLY,
 )
 
 logger = logging.getLogger(__name__)
@@ -127,16 +128,18 @@ def get_indicator(
                 "time_period": str(time_period),
                 "datatype": "csv"
             })
-        elif indicator == "vwma":
-            # Alpha Vantage has no VWMA endpoint. RAISE (do not return prose):
-            # a returned message is a SUCCESS to the router, which then never
-            # falls through to the yfinance vendor — the one that CAN compute
-            # vwma from OHLCV via stockstats. NoMarketDataError routes to the
-            # next vendor in the chain and, if none serves, to the sentinel.
+        elif indicator in YFINANCE_ONLY:
+            # Alpha Vantage has no endpoint for this indicator (kdj family, adx,
+            # supertrend, cci, wr, stochrsi, roc, cmo, trix, vr — same shape as
+            # the original vwma case). RAISE (do not return prose): a returned
+            # message is a SUCCESS to the router, which then never falls through
+            # to the yfinance vendor — the one that CAN compute it from OHLCV
+            # via stockstats. NoMarketDataError routes to the next vendor in
+            # the chain and, if none serves, to the sentinel.
             raise NoMarketDataError(
                 symbol, symbol,
-                "Alpha Vantage has no VWMA endpoint (compute from OHLCV "
-                "via the yfinance indicator vendor instead)",
+                f"Alpha Vantage has no {indicator} endpoint (compute from "
+                f"OHLCV via the yfinance indicator vendor instead)",
             )
         else:
             # Unreachable behind the supported_indicators gate above; kept as a

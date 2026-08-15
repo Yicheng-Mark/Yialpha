@@ -123,8 +123,40 @@ def test_cli_writes_csv_per_ticker(tmp_path, patched_ohlcv):
     assert out1.exists() and out2.exists()
     df = pd.read_csv(out1)
     assert list(df.columns)[:2] == ["date", "forward_return"]
-    # Full default battery = 12 indicators.
-    assert len(df.columns) == 2 + 12
+    # Full default battery (24 indicators after the 2026-08-15 expansion).
+    assert len(df.columns) == 2 + len(exporter.INDICATOR_NAMES)
+
+
+@pytest.mark.unit
+def test_cli_extra_horizons_add_decay_columns(tmp_path, patched_ohlcv):
+    rc = exporter.main(
+        ["NVDA", "--horizon", "5", "--extra-horizons", "1,10,20",
+         "--output-dir", str(tmp_path)]
+    )
+    assert rc == 0
+    df = pd.read_csv(tmp_path / "NVDA_5d.csv")
+    for col in ("fwd_ret_1d", "fwd_ret_10d", "fwd_ret_20d"):
+        assert col in df.columns
+    # 40 rows, primary horizon 5 -> 35 kept rows; the 20d column keeps its
+    # own honest NaN tail (rows realizable at 5d but not at 20d stay, with
+    # NaN cells — never fabricated).
+    assert len(df) == 35
+    assert df["fwd_ret_1d"].notna().all()      # 1d realizable wherever 5d is
+    assert int(df["fwd_ret_20d"].notna().sum()) == 20  # 40 - 20 tail rows
+
+
+@pytest.mark.unit
+def test_build_ic_frame_extra_horizon_math(patched_ohlcv):
+    frame, _ = exporter.build_ic_frame(
+        "X", horizon=1, indicators=["rsi"], as_of="2026-06-10",
+        extra_horizons=[3],
+    )
+    closes = pd.Series([100.0 + 0.5 * i for i in range(40)])
+    expected_3d = closes.shift(-3) / closes - 1.0
+    actual = frame["fwd_ret_3d"].reset_index(drop=True)
+    pd.testing.assert_series_equal(
+        actual, expected_3d.iloc[:39].reset_index(drop=True), check_names=False
+    )
 
 
 @pytest.mark.unit
@@ -138,7 +170,14 @@ def test_cli_all_indicators_skipped_is_a_failure(tmp_path, monkeypatch, capsys):
         def __getitem__(self, item):
             raise RuntimeError("stockstats exploded")
 
+    def _all_derived_broken(data, name):
+        raise RuntimeError("derived feature exploded")
+
     monkeypatch.setattr(exporter, "load_ohlcv", lambda t, d: _ohlcv())
+    # Break BOTH compute paths: stockstats wrap (classic indicators) and the
+    # derived-feature registry (rvol_20/ewma_vol/obv/rel_vol_20 don't use
+    # wrap, so a broken wrap alone no longer skips the whole battery).
+    monkeypatch.setattr(exporter, "compute_derived", _all_derived_broken)
     with mock.patch("stockstats.wrap", lambda df: _AllBrokenWrap()):
         rc = exporter.main(["NVDA", "--output-dir", str(tmp_path)])
     assert rc == 1

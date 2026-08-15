@@ -8,6 +8,7 @@ from yiagents.agents.utils.agent_utils import (
     get_a_share_sector_flow_native,
     get_binance_basis,
     get_binance_funding_rate,
+    get_binance_indicators,
     get_binance_klines,
     get_binance_long_short_ratio,
     get_binance_open_interest,
@@ -15,15 +16,21 @@ from yiagents.agents.utils.agent_utils import (
     get_binance_spot_perp_basis,
     get_binance_spot_ticker24,
     get_binance_taker_buy_sell,
+    get_candlestick_patterns,
     get_indicators,
+    get_indicators_weekly,
     get_instrument_context_from_state,
     get_language_instruction,
+    get_relative_strength,
     get_stock_data,
+    get_support_resistance,
     get_verified_market_snapshot,
+    get_volume_features,
 )
 from yiagents.agents.utils.prompt_builder import build_collaborator_prompt, build_fincot_prompt
 from yiagents.dataflows import indicator_catalog
 from yiagents.dataflows.config import get_config
+from yiagents.dataflows.market_regime import format_regime_context
 from yiagents.dataflows.symbol_utils import is_a_stock
 from yiagents.dataflows.utils import is_historical_date
 
@@ -38,18 +45,20 @@ _PERP_NUDGE = (
     "(get_stock_data, get_indicators, get_verified_market_snapshot) are NOT "
     "available for this instrument — they would resolve the symbol to a "
     "different spot pair and return the wrong market. Use get_binance_klines "
-    "for OHLCV (you may compute trend/volatility observations directly from "
-    "those candles). You MUST call get_binance_funding_rate and "
-    "get_binance_open_interest and discuss funding-rate direction, open-interest "
-    "crowding, and liquidation risk in your report. You MUST ALSO call "
-    "get_binance_long_short_ratio and discuss how the leveraged crowd is "
-    "positioned (longShortRatio > 1 = longs dominate; top-trader vs global "
-    "divergence is a contrary signal) — this is the perp-native sentiment signal "
-    "and it frequently contradicts funding/OI inferences, so reconcile them "
-    "explicitly. Call get_binance_taker_buy_sell (order-flow aggression) and, "
-    "where available, get_binance_basis (perp-vs-index premium/discount) to "
-    "round out the positioning picture; if a tool returns a sentinel/unavailable "
-    "marker, say so plainly rather than inventing values."
+    "for OHLCV and get_binance_indicators (venue='perp') for computed classic "
+    "indicators (SMA/MACD/RSI/KDJ/ADX/SuperTrend/ATR/realized vol) on the "
+    "actual perp candles — cite it for any exact indicator claim. You MUST "
+    "call get_binance_funding_rate and get_binance_open_interest and discuss "
+    "funding-rate direction, open-interest crowding, and liquidation risk in "
+    "your report. You MUST ALSO call get_binance_long_short_ratio and discuss "
+    "how the leveraged crowd is positioned (longShortRatio > 1 = longs "
+    "dominate; top-trader vs global divergence is a contrary signal) — this is "
+    "the perp-native sentiment signal and it frequently contradicts funding/OI "
+    "inferences, so reconcile them explicitly. Call get_binance_taker_buy_sell "
+    "(order-flow aggression) and, where available, get_binance_basis "
+    "(perp-vs-index premium/discount) to round out the positioning picture; if "
+    "a tool returns a sentinel/unavailable marker, say so plainly rather than "
+    "inventing values."
 )
 
 _PERP_HISTORICAL_NUDGE = (
@@ -70,14 +79,17 @@ _SPOT_NUDGE = (
     " This is a Binance SPOT pair (crypto_spot), not a perpetual and not a "
     "Yahoo pair. Use get_binance_spot_klines for the spot OHLCV (the actual "
     "Binance spot book) and get_binance_spot_ticker24 for the 24h snapshot. "
-    "There is no funding rate, open interest, leverage, or liquidation for a "
-    "spot pair — do not discuss them. Call get_binance_spot_perp_basis to show "
-    "where the USDT-M perpetual trades relative to this spot price (positive "
-    "basis = perp rich / long premium; negative = discount / short pressure) "
-    "and reconcile it with the spot trend. The get_indicators / "
-    "get_verified_market_snapshot tools are available and resolve correctly for "
-    "this symbol — use them as usual. If a tool returns a sentinel/unavailable "
-    "marker, say so plainly rather than inventing values."
+    "get_binance_indicators (venue='spot') computes the classic indicator "
+    "battery on those same Binance candles — prefer it for exact indicator "
+    "claims on this pair. There is no funding rate, open interest, leverage, "
+    "or liquidation for a spot pair — do not discuss them. Call "
+    "get_binance_spot_perp_basis to show where the USDT-M perpetual trades "
+    "relative to this spot price (positive basis = perp rich / long premium; "
+    "negative = discount / short pressure) and reconcile it with the spot "
+    "trend. The get_indicators / get_verified_market_snapshot tools are "
+    "available and resolve correctly for this symbol — use them as usual. If "
+    "a tool returns a sentinel/unavailable marker, say so plainly rather than "
+    "inventing values."
 )
 
 _SPOT_HISTORICAL_NUDGE = (
@@ -187,7 +199,9 @@ def _legacy_system_message() -> str:
 
 - Select indicators that provide diverse and complementary information. Avoid redundancy (e.g., do not select both rsi and stochrsi). Also briefly explain why they are suitable for the given market context. When you tool call, please use the exact name of the indicators provided above as they are defined parameters, otherwise your call will fail. Please make sure to call get_stock_data first to retrieve the CSV that is needed to generate indicators. Then use get_indicators with the specific indicator names.
 
-Before writing the final report, call get_verified_market_snapshot for this ticker and the current date, and treat it as the source of truth for any exact OHLCV, price-level, or indicator-value claim. If another tool's output conflicts with the verified snapshot, flag the discrepancy rather than inventing a reconciled number. Do not claim historical validation, support/resistance bounces, or exact percentage moves unless they are directly supported by tool output with concrete dates and prices.
+Before writing the final report, call get_verified_market_snapshot for this ticker and the current date, and treat it as the source of truth for any exact OHLCV, price-level, or indicator-value claim. If another tool's output conflicts with the verified snapshot, flag the discrepancy rather than inventing a reconciled number. Do not claim historical validation or exact percentage moves unless they are directly supported by tool output with concrete dates and prices. Support/resistance and breakout-level claims must come from get_support_resistance output; volume-confirmation or divergence claims must come from get_volume_features; candlestick and chart-pattern claims must come from get_candlestick_patterns (cite the pattern name and its date); outperformance/underperformance vs the benchmark must come from get_relative_strength.
+
+You also have get_indicators_weekly (weekly timeframe resampled from the same data, trailing incomplete week excluded): call it once to frame the higher-timeframe trend (weekly 10/30 SMA, weekly RSI/MACD) before concluding. When the weekly trend conflicts with the daily indicators, state the conflict explicitly and justify which timeframe the decision should follow.
 
 Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
         + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
@@ -216,15 +230,19 @@ def _fincot_system_message() -> str:
             "Call get_stock_data to load the OHLCV CSV for the ticker and date.",
             "Choose up to 8 complementary indicators; avoid redundancy.",
             "Call get_indicators with the exact indicator names.",
+            "Call get_indicators_weekly once to frame the higher-timeframe trend.",
             "Call get_verified_market_snapshot and treat it as ground truth for OHLCV/levels.",
             "Flag any conflict between tools instead of inventing a number.",
+            "State weekly-vs-daily timeframe conflicts explicitly.",
             "Write the trend report with specific, dated, price-backed evidence.",
             "Append a Markdown table summarizing the key points.",
         ],
         output_constraints=[
             "Use exact indicator parameter names in every tool call.",
-            "Do not assert support/resistance bounces, historical validation, or exact percentage moves unless a tool result with concrete dates/prices supports it.",
+            "Do not assert historical validation or exact percentage moves unless a tool result with concrete dates/prices supports it.",
+            "Support/resistance and breakout-level claims must cite get_support_resistance; volume/divergence claims must cite get_volume_features; candlestick and chart-pattern claims must cite get_candlestick_patterns with the pattern's date; benchmark out/under-performance claims must cite get_relative_strength.",
             "If a tool conflicts with the verified snapshot, flag the discrepancy.",
+            "Weekly-trend claims must come from get_indicators_weekly output.",
         ],
         include_workflow=True,
     )
@@ -255,26 +273,38 @@ def create_market_analyst(llm):
         instrument_context = get_instrument_context_from_state(state)
         historical = is_historical_date(current_date)
 
-        # Baseline stock tools. Non-perp runs bind exactly this 3-element list
-        # (same objects, same order) so the baseline path is byte-identical.
+        # Baseline stock tools: daily OHLCV + indicators, the anti-hallucination
+        # snapshot, the higher-timeframe weekly context, the price-structure
+        # evidence tools (S/R levels, volume confirmation/divergence,
+        # candlestick patterns), and benchmark relative strength — the
+        # 2026-08-15 technical-analysis expansion. Crypto branches replace
+        # this list below.
         tools = [
             get_stock_data,
             get_indicators,
             get_verified_market_snapshot,
+            get_indicators_weekly,
+            get_support_resistance,
+            get_volume_features,
+            get_candlestick_patterns,
+            get_relative_strength,
         ]
 
         if state.get("asset_type") == "crypto_perp":
             # Spot tools resolve a perp symbol to a *different* Yahoo spot pair
             # (normalize_symbol("BTCUSDT") -> "BTC-USD"), so get_stock_data /
-            # get_indicators / get_verified_market_snapshot would silently return
-            # spot OHLCV/indicators while the analyst's primary data is the
-            # Binance USDT-M perp. The spot-vs-perp basis would corrupt the
-            # "ground truth" snapshot the anti-hallucination layer relies on, so
-            # hide them for perp runs and bind only the perp-native tools. RSI/
-            # MACD-style indicators are therefore not computed for perp (the
-            # analyst reads the klines CSV directly) — an accepted trade-off.
-            # The non-perp branch is untouched, so stock runs are unaffected.
-            tools = [get_binance_klines, get_binance_funding_rate]
+            # get_verified_market_snapshot would silently return spot
+            # OHLCV/indicators while the analyst's primary data is the Binance
+            # USDT-M perp. The spot-vs-perp basis would corrupt the
+            # "ground truth" snapshot the anti-hallucination layer relies on,
+            # so they stay hidden for perp runs. Classic indicators are NOT
+            # lost though: get_binance_indicators (2026-08-15) computes the
+            # stockstats battery on the actual perp klines.
+            tools = [
+                get_binance_klines,
+                get_binance_funding_rate,
+                get_binance_indicators,
+            ]
             if not historical:
                 tools.extend(
                     [
@@ -289,11 +319,13 @@ def create_market_analyst(llm):
             # via Yahoo (BTCUSDT -> BTC-USD), so get_indicators /
             # get_verified_market_snapshot are kept — they price the same spot
             # market. The spot-native klines + 24h ticker are bound to the
-            # actual Binance spot book, and the cross-venue spot-perp basis
+            # actual Binance spot book, get_binance_indicators computes on
+            # those same Binance candles, and the cross-venue spot-perp basis
             # tool exposes the perpetual's premium/discount vs this spot
             # reference. Stock/crypto/perp branches are untouched.
             tools = [
                 get_binance_spot_klines,
+                get_binance_indicators,
                 get_indicators,
                 get_verified_market_snapshot,
             ]
@@ -320,6 +352,24 @@ def create_market_analyst(llm):
             ])
 
         system_message = _system_message()
+
+        # Composite regime context (config: regime_context, default ON;
+        # env YIAGENTS_REGIME_CONTEXT=false restores the bare prompt). The
+        # line is deterministic and fail-soft — omitted entirely when neither
+        # trend nor volatility state has enough history.
+        if get_config().get("regime_context", True):
+            try:
+                regime_line = format_regime_context(ticker, current_date)
+            except Exception:  # noqa: BLE001 — advisory, never block the node
+                regime_line = None
+            if regime_line:
+                system_message += (
+                    f"\n\n{regime_line}\n"
+                    "(Advisory regime context — deterministic computation. "
+                    "Weigh it in your read and say so when your conclusion "
+                    "disagrees with it.)"
+                )
+
         # Perp/spot-only system-message append; other asset types leave
         # system_message unchanged (byte-identical to the baseline).
         if state.get("asset_type") == "crypto_perp":

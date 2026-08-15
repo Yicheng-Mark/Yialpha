@@ -7,6 +7,7 @@ risk). The shared ``_make_api_request`` is mocked so no network/API key is neede
 import pytest
 
 import yiagents.dataflows.alpha_vantage_indicator as avi
+import yiagents.dataflows.indicator_catalog as ic
 from yiagents.dataflows.alpha_vantage_common import AlphaVantageNotConfiguredError
 from yiagents.dataflows.errors import NoMarketDataError
 
@@ -48,18 +49,23 @@ def test_unsupported_indicator_raises_valueerror(monkeypatch):
 
 
 @pytest.mark.unit
-def test_vwma_raises_typed_no_data_for_router_fallback(monkeypatch):
-    """VWMA raises NoMarketDataError so the router falls through to yfinance.
+@pytest.mark.parametrize("indicator", ["vwma", "kdjk", "adx", "supertrend", "cci", "vr"])
+def test_yfinance_only_indicators_raise_typed_no_data(monkeypatch, indicator):
+    """yfinance-only indicators raise NoMarketDataError so the router falls
+    through to the yfinance/stockstats vendor.
 
-    AV has no VWMA endpoint. Returning prose here made the router treat the
+    AV has no endpoint for the catalog's YFINANCE_ONLY set (vwma plus the
+    2026-08-15 expansion: KDJ family, adx, supertrend, cci, wr, stochrsi,
+    roc, cmo, trix, vr). Returning prose here made the router treat the
     message as a successful result, so it NEVER tried the yfinance indicator
-    vendor — the one that can compute vwma from OHLCV. The typed error takes
+    vendor — the one that can compute these from OHLCV. The typed error takes
     the router's try-next-vendor path instead.
     """
+    assert indicator in ic.YFINANCE_ONLY  # keeps the parametrize list honest
     called = []
     monkeypatch.setattr(avi, "_make_api_request", lambda *a, **kw: called.append(1))
-    with pytest.raises(NoMarketDataError, match="VWMA"):
-        avi.get_indicator("AAPL", "vwma", "2025-03-01", 30)
+    with pytest.raises(NoMarketDataError, match=indicator):
+        avi.get_indicator("AAPL", indicator, "2025-03-01", 30)
     assert called == []  # no network call was made
 
 

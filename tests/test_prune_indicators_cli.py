@@ -120,9 +120,18 @@ class TestPruneIndicatorsCLI:
         }
         assert set(verdict["per_indicator"]) == {"good_indicator", "bad_indicator"}
         for stats in verdict["per_indicator"].values():
-            assert set(stats) == {
+            # Core pruning evidence, always present...
+            assert {
                 "verdict", "mean_abs_ic", "finite_windows", "longest_low_run",
-            }
+            } <= set(stats)
+            # ...plus the 2026-08-15 diagnostics, present whenever the math
+            # yields a value on this CSV (no fwd_ret_*d columns here, so
+            # ic_by_horizon stays absent).
+            assert "quantile_means" in stats
+            assert "quantile_spread" in stats
+            assert "monotonic" in stats
+            assert "turnover" in stats
+            assert "ic_by_horizon" not in stats
             assert stats["verdict"] in ("keep", "prune")
             assert isinstance(stats["finite_windows"], int)
         # keep/prune lists stay consistent with the per-indicator verdicts.

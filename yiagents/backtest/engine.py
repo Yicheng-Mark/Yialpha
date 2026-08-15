@@ -34,7 +34,12 @@ import numpy as np
 import pandas as pd
 
 from yiagents.backtest.cache import DecisionCache
-from yiagents.backtest.metrics import BacktestMetrics, compute_metrics, returns_from_equity
+from yiagents.backtest.metrics import (
+    BacktestMetrics,
+    compute_metrics,
+    returns_from_equity,
+    trade_quality_stats,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -573,7 +578,7 @@ def run_backtest(
     # (win-rate, annualized turnover, max-drawdown date) that the equity-only
     # ``compute_metrics`` cannot. Deterministic, no I/O, no agent interaction.
     _augment_metrics(metrics, trades, equity_curve, equity_dates,
-                     total_traded_notional, periods_per_year)
+                     total_traded_notional, periods_per_year, ticker)
 
     # Optional Fama-French factor attribution. Advisory only, fail-open: a
     # missing factor file / failed fit leaves the metrics fields at None and
@@ -632,6 +637,7 @@ def _augment_metrics(
     equity_dates: list[str],
     total_traded_notional: float,
     periods_per_year: int,
+    ticker: str = "",
 ) -> None:
     """Fill the trade-/equity-derived metric fields in place.
 
@@ -653,6 +659,18 @@ def _augment_metrics(
     if position_returns:
         metrics.win_rate = sum(ret > 0.0 for ret in position_returns) / len(position_returns)
     metrics.num_trades = len(position_returns)
+
+    # Trade-quality battery over the same closed episodes (profit factor,
+    # average win/loss, payoff). Same fail-open contract: no closed trades
+    # leaves the fields at None.
+    quality = trade_quality_stats(position_returns)
+    metrics.profit_factor = quality["profit_factor"]
+    metrics.avg_win = quality["avg_win"]
+    metrics.avg_loss = quality["avg_loss"]
+    metrics.payoff_ratio = quality["payoff_ratio"]
+    # compute_metrics filled IR/TE against the buy-and-hold curve; name that
+    # benchmark explicitly so the report can say what it was measured against.
+    metrics.benchmark_name = f"{ticker} buy-and-hold"
 
     # Annualized turnover: traded notional per unit of average equity, per year.
     if equity and len(equity) >= 2 and periods_per_year > 0:

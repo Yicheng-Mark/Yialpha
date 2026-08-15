@@ -670,8 +670,11 @@ class TestDeferredReflection:
         mock_graph = MagicMock(spec=YiAgentsGraph)
         mock_graph.config = {"benchmark_ticker": None,
                              "benchmark_map": DEFAULT_CONFIG["benchmark_map"]}
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "600519.SS") == "000001.SS"
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "000001.SZ") == "399001.SZ"
+        # 2026-08-15: A-share benchmarks are CSI 300 (000300.SS) on both
+        # .SS and .SZ — the investable cross-market index — instead of the
+        # old SSE Composite / SZSE Component pair.
+        assert YiAgentsGraph._resolve_benchmark(mock_graph, "600519.SS") == "000300.SS"
+        assert YiAgentsGraph._resolve_benchmark(mock_graph, "000001.SZ") == "000300.SS"
 
     def test_resolve_benchmark_us_ticker_defaults_to_spy(self):
         """US tickers (no dotted suffix) take the empty-suffix entry."""

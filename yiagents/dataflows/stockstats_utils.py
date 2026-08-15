@@ -452,6 +452,31 @@ def read_cached_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame | None:
     return data
 
 
+# Vendor-scale fixes: stockstats computes some indicators on a different scale
+# than the other vendors serving the same name. mfi is the known case —
+# stockstats returns 0–1 (pos_flow/total_flow) while Alpha Vantage returns the
+# conventional 0–100 that the catalog's description (">80 overbought / <20
+# oversold") and every prompt threshold assume. Centralized here so every
+# consumer (the y_finance indicator window, the verified-snapshot validator,
+# the IC dataset exporter) emits the same scale instead of each patching it.
+_INDICATOR_SCALE_FIX: dict[str, float] = {"mfi": 100.0}
+
+
+def compute_indicator(stock_df, name: str) -> pd.Series:
+    """Trigger stockstats computation for ``name`` and apply vendor-scale fixes.
+
+    Reading ``stock_df[name]`` on a wrapped StockDataFrame lazily computes the
+    column; when the catalog marks the indicator as scale-divergent, the column
+    is rescaled in place so every later read of the same frame is consistent.
+    """
+    col = stock_df[name]
+    scale = _INDICATOR_SCALE_FIX.get(name)
+    if scale is not None:
+        col = col.astype(float) * scale
+        stock_df[name] = col
+    return col
+
+
 def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.DataFrame:
     """Drop financial-statement columns that were not yet public on ``curr_date``.
 
