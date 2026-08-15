@@ -50,10 +50,15 @@ from __future__ import annotations
 import io
 import logging
 import os
+import threading
 from datetime import date, timedelta
+from typing import Any
+
+import pandas as pd
 
 from .akshare_vendor import _direct_connect  # lightweight: os/threading only
 from .config import get_config
+from .disk_cache import cached_or_fetch, vendor_cache_dir
 from .errors import (
     NoMarketDataError,
     VendorError,
@@ -68,6 +73,23 @@ _TOKEN_ENV = "TUSHARE_TOKEN"
 # _direct_connect window, which applies that module's _TIMEOUT_S as the
 # default requests read timeout (tushare's SDK exposes no timeout param).
 
+# News queries are cached on disk like the other news vendors (yfinance news
+# Search uses ~30 min): a batch run re-issues the same window per ticker, and
+# headlines go stale fast, so the TTL stays short.
+_NEWS_CACHE_TTL_DAYS = 30.0 / (24.0 * 60.0)
+# Upper bound on the news API query window. The window itself is derived from
+# the caller's (curr_date, look_back_days); the cap only stops a runaway
+# look-back from pulling months of headlines the client-side filter discards.
+_NEWS_WINDOW_CAP_DAYS = 90
+
+# Module-level lazy cache of the pro_api handle, keyed by token. Every vendor
+# call previously re-ran ts.set_token + ts.pro_api(); pro_api() builds a fresh
+# client (token check + session setup) on each call. The token IS the cache
+# key, so switching TUSHARE_TOKEN picks up the new handle immediately. Guarded
+# by a lock because batch workers are threads.
+_PRO_HANDLE_LOCK = threading.Lock()
+_PRO_HANDLE_CACHE: dict[str, Any] = {}
+
 
 def _require_tushare():
     """Lazy-import tushare AND verify a token is present.
@@ -75,6 +97,8 @@ def _require_tushare():
     Raises :class:`VendorNotConfiguredError` when the token is missing (the
     router skips this vendor) and :class:`NoMarketDataError` when the optional
     ``tushare`` package is not installed (the router degrades to a sentinel).
+    The pro handle is cached per token (see ``_PRO_HANDLE_CACHE``), so repeat
+    calls skip the redundant ``ts.set_token`` + ``ts.pro_api()`` round of work.
     """
     token = os.environ.get(_TOKEN_ENV) or get_config().get("tushare_token")
     if not token:
@@ -82,6 +106,10 @@ def _require_tushare():
             "Tushare selected but TUSHARE_TOKEN is not set (a_share_native is "
             "keyless via BaoStock/AKShare by default; Tushare is an opt-in "
             "quality tier).")
+    with _PRO_HANDLE_LOCK:
+        cached = _PRO_HANDLE_CACHE.get(token)
+    if cached is not None:
+        return cached
     try:
         import tushare as ts  # type: ignore
     except ImportError as exc:
@@ -91,7 +119,10 @@ def _require_tushare():
                    "a_share_native Tushare tier). Install with the 'a-share' extra.",
         ) from exc
     ts.set_token(token)
-    return ts.pro_api()
+    pro = ts.pro_api()
+    with _PRO_HANDLE_LOCK:
+        _PRO_HANDLE_CACHE[token] = pro
+    return pro
 
 
 def _to_tushare_code(ticker: str) -> str:
@@ -161,11 +192,14 @@ def _query(pro, api_name: str, **fields):
     """Call a Tushare pro API under the direct-connect proxy bypass; map errors.
 
     Tushare returns a DataFrame on success or raises on a transport/permission
-    fault. A rate-limit / permission signal maps to :class:`VendorRateLimitError`
-    (router skips to next vendor); transport failures surface as a plain
-    :class:`VendorError` (a network outage is NOT "no data for this symbol" —
-    mapping it to NoMarketDataError made the router blame the ticker during an
-    outage); other faults to :class:`NoMarketDataError`.
+    fault. A rate-limit signal maps to :class:`VendorRateLimitError`
+    (router skips to next vendor); a PERMISSION denial (the token's tier does
+    not include this API — a forbidden, not a throttle) maps to the
+    :class:`VendorError` base so it neither pretends to be transient nor
+    blames the ticker like NoMarketDataError would; transport failures surface
+    as a plain :class:`VendorError` (a network outage is NOT "no data for this
+    symbol" — mapping it to NoMarketDataError made the router blame the ticker
+    during an outage); other faults to :class:`NoMarketDataError`.
     """
     try:
         with _direct_connect():
@@ -173,8 +207,14 @@ def _query(pro, api_name: str, **fields):
     except Exception as exc:  # noqa: BLE001 -- tushare raises bare Exceptions
         msg = str(exc)
         low = msg.lower()
-        if any(k in low for k in ("每分钟", "次数", "限频", "429", "rate", "权限", "permission")):
-            raise VendorRateLimitError(f"Tushare {api_name} throttled/forbidden: {msg}") from exc
+        if any(k in low for k in ("每分钟", "次数", "限频", "429", "rate")):
+            raise VendorRateLimitError(f"Tushare {api_name} throttled: {msg}") from exc
+        if any(k in low for k in ("权限", "permission", "forbidden", "403")):
+            # Forbidden, not throttled: this token may never call this API, so
+            # "skip and retry later" (rate limit) or "bad ticker" (no data)
+            # are both wrong. The base class surfaces a real, non-transient
+            # vendor error the router logs and degrades around.
+            raise VendorError(f"Tushare {api_name} permission denied: {msg}") from exc
         if _is_transport_error(exc):
             raise VendorError(
                 f"Tushare {api_name} transport failure: {msg}") from exc
@@ -265,6 +305,13 @@ def get_a_share_news_native(
     filtered by ``datetime <= curr_date``. A config-selectable alternative to the
     AKShare news vendor. Non-A-share ticker -> :class:`NoMarketDataError`;
     missing token -> :class:`VendorNotConfiguredError`.
+
+    The API query window is derived from the caller's (curr_date,
+    look_back_days) and capped at ``_NEWS_WINDOW_CAP_DAYS``, so a backtest for
+    a pre-2024 date no longer queries a fixed ``20240101`` start (which pulled
+    the whole table live and returned nothing for earlier dates) and a live run
+    fetches only its window. Queries ride the shared on-disk cache with a
+    short (~30 min) TTL, like the other news vendors.
     """
     pro = _require_tushare()
     # The Tushare news API is keyword-based (no per-stock ts_code); use the bare
@@ -275,8 +322,35 @@ def get_a_share_news_native(
     upper_d = date.fromisoformat(upper) if upper else date.today()
     upper_set = bool(upper)
 
-    df = _query(pro, "news", src="sina", start_date="20240101",
-                end_date=_ts_date(upper_d))
+    lower_d = upper_d - timedelta(days=int(look_back_days))
+    # Query window: dynamic from the request, clamped to the cap so a runaway
+    # look-back cannot pull months of rows the window filter discards anyway.
+    query_lower_d = max(lower_d, upper_d - timedelta(days=_NEWS_WINDOW_CAP_DAYS))
+
+    def _fetch() -> bytes:
+        df = _query(
+            pro, "news", src="sina",
+            start_date=_ts_date(query_lower_d), end_date=_ts_date(upper_d),
+        )
+        if df is None or getattr(df, "empty", True):
+            # An empty frame round-trips as empty bytes; the caller's honest
+            # empty handling takes over (never cache a fabricated empty CSV).
+            return b""
+        return df.to_csv(index=False).encode("utf-8")
+
+    # Cache key: the query window (start/end/src). The API call itself is not
+    # ticker-specific (keyword filtering is client-side), so one window is
+    # shared by every ticker in a batch run.
+    filename = f"news_sina_{_ts_date(query_lower_d)}_{_ts_date(upper_d)}.csv"
+    raw = cached_or_fetch(
+        vendor_cache_dir("tushare"), filename, _fetch,
+        ttl_days=_NEWS_CACHE_TTL_DAYS, vendor="tushare",
+    )
+    if not raw or not raw.strip():
+        df = pd.DataFrame()
+    else:
+        df = pd.read_csv(io.StringIO(raw.decode("utf-8", errors="replace")))
+
     out = io.StringIO()
     out.write(f"# A-share News (Tushare multi-source) for {ticker} "
               f"(as of {curr_date or 'now'}, last {look_back_days}d)\n")

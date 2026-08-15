@@ -1,3 +1,4 @@
+import glob
 import logging
 import os
 import socket
@@ -124,7 +125,16 @@ def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
-    """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows, fill price gaps."""
+    """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows, fill price gaps.
+
+    Gap filling is forward-only (``ffill``). The previous ``.ffill().bfill()``
+    filled LEADING NaNs with the next row's value — when the caller's
+    ``curr_date`` filter lands at the head of the 5y window that next row is
+    dated AFTER curr_date, i.e. a look-ahead: the "current" price at the
+    decision date was actually tomorrow's. Leading NaNs now stay NaN (honest
+    missing data; indicators report N/A during warm-up instead of borrowing
+    the future).
+    """
     data = _ensure_date_column(data)
     data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
     data = data.dropna(subset=["Date"])
@@ -132,7 +142,7 @@ def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     price_cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in data.columns]
     data[price_cols] = data[price_cols].apply(pd.to_numeric, errors="coerce")
     data = data.dropna(subset=["Close"])
-    data[price_cols] = data[price_cols].ffill().bfill()
+    data[price_cols] = data[price_cols].ffill()
 
     return data
 
@@ -194,10 +204,11 @@ def _assert_ohlcv_not_stale(
 def _needs_same_day_refresh(data_file, curr_date_dt, today_date) -> bool:
     """Whether a cached frame must be refetched to reflect the requested day.
 
-    The cache file is keyed per day, so without this a run started before the
-    day's bar was final keeps serving that snapshot to every later run (#1150).
-    Only the current day is affected: a historical date's rows are immutable,
-    so the cache is reused unconditionally (byte-equivalent to the old path).
+    The cache is now ONE fixed-name file per symbol (see ``_ohlcv_cache_path``),
+    so without this a run started before the day's bar was final would keep
+    serving that snapshot to every later run (#1150). Only the current day is
+    affected: a historical date's rows are immutable, so the cache is reused
+    unconditionally.
     """
     if curr_date_dt.date() < today_date.date():
         return False
@@ -205,11 +216,13 @@ def _needs_same_day_refresh(data_file, curr_date_dt, today_date) -> bool:
 
 
 def _ohlcv_cache_window() -> tuple[str, str]:
-    """The fixed download window anchoring every OHLCV cache filename.
+    """The download window for every OHLCV fetch (NOT part of the cache filename).
 
     yfinance ``end`` is EXCLUSIVE; request tomorrow so today's row is included
     when curr_date is the current day (#986). Look-ahead is still prevented by
-    the caller's curr_date filter.
+    the caller's curr_date filter. The window shifts daily but the cache file
+    name is fixed; freshness of the reused file is governed by its mtime via
+    ``_needs_same_day_refresh``.
     """
     today_date = pd.Timestamp.today()
     start_str = (today_date - pd.DateOffset(years=5)).strftime("%Y-%m-%d")
@@ -218,13 +231,39 @@ def _ohlcv_cache_window() -> tuple[str, str]:
 
 
 def _ohlcv_cache_path(config: dict, safe_symbol: str) -> str:
-    """Per-symbol cache file: one file over the fixed 5y-to-today window."""
+    """Per-symbol cache file: ONE fixed name over the rolling 5y window.
+
+    The name deliberately embeds no dates. The previous
+    ``{symbol}-YFin-data-{start}-{end}.csv`` scheme re-derived the window every
+    call (``end`` is always tomorrow), so each symbol minted a NEW ~1250-row
+    CSV every day and nothing ever deleted the old ones — unbounded cache
+    growth per symbol per day. With a fixed name the file is simply rewritten
+    on every refresh and its mtime drives freshness; the leftover dated files
+    from the old scheme are removed by :func:`_purge_legacy_ohlcv_caches`.
+    """
     os.makedirs(config["data_cache_dir"], exist_ok=True)
-    start_str, end_str = _ohlcv_cache_window()
     return os.path.join(
-        config["data_cache_dir"],
-        f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv",
+        config["data_cache_dir"], f"{safe_symbol}-YFin-data.csv",
     )
+
+
+def _purge_legacy_ohlcv_caches(config: dict, safe_symbol: str) -> None:
+    """Best-effort removal of this symbol's legacy date-stamped cache files.
+
+    Called right after a fresh cache write, so a one-time upgrade cleans up the
+    per-day files the old filename scheme accumulated. ``safe_symbol`` is
+    already path-validated (``safe_ticker_component``), so the glob cannot
+    escape the cache directory; failures to delete are logged, never raised —
+    cache hygiene must not fail a data call that already succeeded.
+    """
+    pattern = os.path.join(
+        config["data_cache_dir"], f"{safe_symbol}-YFin-data-*.csv",
+    )
+    for legacy in glob.glob(pattern):
+        try:
+            os.remove(legacy)
+        except OSError as exc:
+            logger.warning("could not remove legacy OHLCV cache %s: %s", legacy, exc)
 
 
 # In-process memo of CLEANED OHLCV frames, keyed by the cache-file path and
@@ -342,6 +381,9 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
                     symbol, canonical, "Yahoo Finance returned no rows"
                 )
             downloaded.to_csv(data_file, index=False, encoding="utf-8")
+            # The cache name is now fixed; drop this symbol's legacy dated
+            # files (one per day under the old scheme) so they cannot pile up.
+            _purge_legacy_ohlcv_caches(config, safe_symbol)
             data = downloaded
 
         if not from_memo:
@@ -368,6 +410,13 @@ def read_cached_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame | None:
     returns ``None`` instead of downloading — so callers (the stock-data
     tool) can opportunistically reuse the cache and only hit Yahoo when it
     cannot serve the request. The frame is PIT-filtered to ``curr_date``.
+
+    Serves from the in-process memo (``_OHLCV_MEMO``) when it is keyed to the
+    cache file's current mtime — a run that already cleaned this frame via
+    ``load_ohlcv`` skips the full CSV re-read + re-clean on every call. The
+    mtime keying means any cache rewrite invalidates the memo, and the
+    same-day-refresh rule above already rejected over-age files, so a memo hit
+    is exactly as fresh as the CSV read it replaces.
     """
     canonical = normalize_symbol(symbol)
     safe_symbol = safe_ticker_component(canonical)
@@ -381,14 +430,18 @@ def read_cached_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame | None:
         return None
     if _needs_same_day_refresh(data_file, curr_date_dt, today_date):
         return None
-    try:
-        cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
-    except (OSError, ValueError):
-        return None
-    if cached.empty or "Close" not in cached.columns:
-        return None
+    mtime = os.path.getmtime(data_file)
+    data = _ohlcv_memo_get(data_file, mtime)
+    if data is None:
+        try:
+            cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
+        except (OSError, ValueError):
+            return None
+        if cached.empty or "Close" not in cached.columns:
+            return None
+        data = _clean_dataframe(cached)
+        _ohlcv_memo_set(data_file, mtime, data)
 
-    data = _clean_dataframe(cached)
     data = data[data["Date"] <= curr_date_dt]
     if data.empty:
         return None

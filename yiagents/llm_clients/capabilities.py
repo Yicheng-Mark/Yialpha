@@ -107,10 +107,20 @@ _BY_ID: dict[str, ModelCapabilities] = {
     "MiniMax-M2": _MINIMAX_THINKING,
 }
 
-# Forward-compat patterns. New ``deepseek-v5-*`` / ``deepseek-reasoner-*``
+# Forward-compat patterns. New ``deepseek-v5+`` / ``deepseek-reasoner-*``
 # or ``MiniMax-M3*`` variants inherit the thinking-mode quirks automatically.
+#
+# Version floor matters: the DeepSeek v3 line (``deepseek-v3``, ``v3.1``,
+# ``v3.2-exp``, ...) is NON-thinking chat. The former ``^deepseek-v\d``
+# pattern misclassified it as thinking — wrongly rejecting ``tool_choice``
+# and forcing the ``reasoning_content`` roundtrip on models that do not
+# need it. v1-v3 map to the chat profile (tool_choice OK; no json_schema —
+# DeepSeek's API only accepts ``json_object``), v4+ stay thinking.
 _BY_PATTERN: list[tuple[re.Pattern[str], ModelCapabilities]] = [
-    (re.compile(r"^deepseek-v\d"), _DEEPSEEK_THINKING),
+    (re.compile(r"^deepseek-v[1-3](?:\.|$|-)"), _DEEPSEEK_CHAT),
+    # ``\d{2,}`` keeps two-digit future versions (v10+) on the thinking
+    # profile instead of letting them fall through to the default row.
+    (re.compile(r"^deepseek-v(?:[4-9]|\d{2,})"), _DEEPSEEK_THINKING),
     (re.compile(r"^deepseek-reasoner"), _DEEPSEEK_THINKING),
     (re.compile(r"^MiniMax-M\d"), _MINIMAX_THINKING),
 ]

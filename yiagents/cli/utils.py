@@ -5,6 +5,7 @@ import questionary
 from dotenv import find_dotenv, set_key
 from rich.console import Console
 
+from yiagents.dataflows.utils import safe_ticker_component
 from yiagents.llm_clients.api_key_env import get_api_key_env
 from yiagents.llm_clients.model_catalog import get_model_options
 
@@ -29,10 +30,16 @@ def is_valid_ticker_input(value: str) -> bool:
 
     Allows the characters Yahoo symbols use, including ``=`` for futures/forex
     like ``GC=F`` and ``EURUSD=X`` (#980), and ``^`` for indices. Empty input is
-    allowed (it defaults to SPY downstream).
+    allowed (it defaults to SPY downstream). Values made of dots only are
+    rejected: they pass the charset check but are path components that traverse
+    out of the results/cache directories (``..``).
     """
     v = value.strip()
-    return not v or (all(ch.isalnum() or ch in "._-^=" for ch in v) and len(v) <= 32)
+    return not v or (
+        all(ch.isalnum() or ch in "._-^=" for ch in v)
+        and len(v) <= 32
+        and set(v) != {"."}
+    )
 
 
 def get_ticker() -> str:
@@ -40,7 +47,9 @@ def get_ticker() -> str:
 
     Uses questionary.text (not typer.prompt, which strips trailing dot-suffixes
     like ``000404.SH`` on some shells) and validates the symbol charset so an
-    obvious typo is caught before the run starts.
+    obvious typo is caught before the run starts. The resolved symbol is
+    re-checked with the data layer's ``safe_ticker_component`` as the last line
+    of defense: every path the CLI builds (results dir, locks) interpolates it.
     """
     ticker = questionary.text(
         f"Enter ticker symbol (e.g. {TICKER_INPUT_EXAMPLES}):",
@@ -60,7 +69,13 @@ def get_ticker() -> str:
         console.print("\n[red]No ticker symbol provided. Exiting...[/red]")
         exit(1)
 
-    return normalize_ticker_symbol(ticker) if ticker.strip() else "SPY"
+    resolved = normalize_ticker_symbol(ticker) if ticker.strip() else "SPY"
+    try:
+        safe_ticker_component(resolved)
+    except ValueError as exc:
+        console.print(f"\n[red]Invalid ticker symbol ({exc}). Exiting...[/red]")
+        exit(1)
+    return resolved
 
 
 def normalize_ticker_symbol(ticker: str) -> str:
@@ -504,8 +519,10 @@ def ask_glm_region() -> tuple[str, str]:
 
     Zhipu serves the same GLM models under two brands with separate
     accounts; keys aren't interchangeable. Returns (provider_key, backend_url).
+    A cancelled prompt (Esc/Ctrl-C returns None) exits cleanly instead of
+    blowing up on the tuple unpack at the call site.
     """
-    return questionary.select(
+    choice = questionary.select(
         "Select GLM platform:",
         choices=[
             questionary.Choice(
@@ -523,6 +540,10 @@ def ask_glm_region() -> tuple[str, str]:
             ("pointer", "fg:cyan noinherit"),
         ]),
     ).ask()
+    if choice is None:
+        console.print("\n[red]No GLM platform selected. Exiting...[/red]")
+        exit(1)
+    return choice
 
 
 def ask_qwen_region() -> tuple[str, str]:
@@ -530,9 +551,11 @@ def ask_qwen_region() -> tuple[str, str]:
 
     Alibaba DashScope exposes two endpoints with separate accounts —
     a key from one region does NOT authenticate against the other
-    (fixes #758). Returns (provider_key, backend_url).
+    (fixes #758). Returns (provider_key, backend_url). A cancelled prompt
+    (Esc/Ctrl-C returns None) exits cleanly instead of blowing up on the
+    tuple unpack at the call site.
     """
-    return questionary.select(
+    choice = questionary.select(
         "Select Qwen region:",
         choices=[
             questionary.Choice(
@@ -550,6 +573,10 @@ def ask_qwen_region() -> tuple[str, str]:
             ("pointer", "fg:cyan noinherit"),
         ]),
     ).ask()
+    if choice is None:
+        console.print("\n[red]No Qwen region selected. Exiting...[/red]")
+        exit(1)
+    return choice
 
 
 def ask_minimax_region() -> tuple[str, str]:
@@ -557,9 +584,11 @@ def ask_minimax_region() -> tuple[str, str]:
 
     MiniMax exposes two endpoints with separate accounts — a key from
     one region does NOT authenticate against the other. Returns
-    (provider_key, backend_url).
+    (provider_key, backend_url). A cancelled prompt (Esc/Ctrl-C returns
+    None) exits cleanly instead of blowing up on the tuple unpack at the
+    call site.
     """
-    return questionary.select(
+    choice = questionary.select(
         "Select MiniMax region:",
         choices=[
             questionary.Choice(
@@ -577,6 +606,10 @@ def ask_minimax_region() -> tuple[str, str]:
             ("pointer", "fg:cyan noinherit"),
         ]),
     ).ask()
+    if choice is None:
+        console.print("\n[red]No MiniMax region selected. Exiting...[/red]")
+        exit(1)
+    return choice
 
 
 def confirm_ollama_endpoint(url: str) -> None:

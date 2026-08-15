@@ -226,23 +226,27 @@ class TestPlaceOrderGates:
         assert result.submitted is False
 
     def test_size_exceeds_equity_cap_blocks(self, monkeypatch):
-        # size/equity = 1000/10000 = 0.10 > 0.01 cap.
+        # notional = 1000 shares * $100 = 100,000 on 10,000 equity
+        # = 1000% > 1% cap.
         monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
         broker = BrowserBroker(max_order_pct_of_equity=0.01)
         result = broker.place_order(
-            "AAPL", "buy", size=1000.0, equity_value=10000.0
+            "AAPL", "buy", size=1000.0, equity_value=10000.0,
+            reference_price=100.0,
         )
         assert result.status is OrderStatus.BLOCKED_VALIDATION
         assert result.submitted is False
         assert "exceeding" in result.message.lower()
 
     def test_size_within_equity_cap_passes_to_next_gate(self, monkeypatch):
-        # 50/100000 = 0.05% <= 1% cap => passes validation; dry-run default
-        # => DRY_RUN_PREVIEW (proves we got past the equity gate).
+        # notional = 50 shares * $10 = 500 on 100,000 equity = 0.5% <= 1%
+        # cap => passes validation; dry-run default => DRY_RUN_PREVIEW
+        # (proves we got past the equity gate).
         monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
         broker = BrowserBroker(max_order_pct_of_equity=0.01, order_page_url="https://b.example/o")
         result = broker.place_order(
-            "AAPL", "buy", size=50.0, equity_value=100000.0
+            "AAPL", "buy", size=50.0, equity_value=100000.0,
+            reference_price=10.0,
         )
         assert result.status is OrderStatus.DRY_RUN_PREVIEW
         assert result.submitted is False
@@ -264,6 +268,58 @@ class TestPlaceOrderGates:
         )
         assert result.status is OrderStatus.BLOCKED_VALIDATION
         assert result.submitted is False
+
+    # -- notional-exposure cap (dimension fix) ------------------------------
+
+    def test_high_price_notional_blocked(self, monkeypatch):
+        """The audited bug: 100 shares of a $500 stock on $100k equity.
+
+        The old shares/equity heuristic (100/100000 = 0.1%) let this pass a
+        1% cap while the true notional exposure is 50%.
+        """
+        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        broker = BrowserBroker(max_order_pct_of_equity=0.01)
+        result = broker.place_order(
+            "AAPL", "buy", size=100.0, equity_value=100_000.0,
+            reference_price=500.0,
+        )
+        assert result.status is OrderStatus.BLOCKED_VALIDATION
+        assert result.submitted is False
+        assert "notional" in result.message
+
+    def test_missing_reference_price_fails_closed(self, monkeypatch):
+        # equity_value without reference_price => notional unverifiable => block.
+        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        broker = BrowserBroker(max_order_pct_of_equity=0.01,
+                               order_page_url="https://b.example/o")
+        result = broker.place_order(
+            "AAPL", "buy", size=1.0, equity_value=1_000_000.0,
+        )
+        assert result.status is OrderStatus.BLOCKED_VALIDATION
+        assert result.submitted is False
+        assert "reference_price" in result.message
+
+    def test_no_equity_value_skips_cap_entirely(self, monkeypatch):
+        # Without equity_value the cap is not requested; the order proceeds
+        # to the next gate (dry-run preview).
+        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        broker = BrowserBroker(order_page_url="https://b.example/o")
+        result = broker.place_order(
+            "AAPL", "buy", size=1_000_000.0,
+        )
+        assert result.status is OrderStatus.DRY_RUN_PREVIEW
+        assert result.submitted is False
+
+    def test_invalid_reference_price_blocks(self, monkeypatch):
+        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        broker = BrowserBroker()
+        for bad_price in ("oops", 0.0, -5.0, float("nan"), float("inf")):
+            result = broker.place_order(
+                "AAPL", "buy", size=10.0, equity_value=100_000.0,
+                reference_price=bad_price,
+            )
+            assert result.status is OrderStatus.BLOCKED_VALIDATION, bad_price
+            assert result.submitted is False, bad_price
 
     def test_pre_submit_validator_false_blocks(self, monkeypatch):
         monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)

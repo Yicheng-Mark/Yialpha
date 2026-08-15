@@ -22,11 +22,12 @@ Point-in-time
   ``filingDate <= curr_date`` (ground truth — the market learns the trade when
   the Form 4 is filed, ~2 days after the trade date). Empty ``curr_date`` means
   live mode (no as-of constraint, look-back from today).
-* **FTD**: a semi-monthly file with cutoff date ``D`` is published several days
-  after ``D``; it is treated as visible at ``curr_date`` iff
+* **FTD**: the data is published as semi-monthly ZIP files
+  (``cnsfails{YYYYMM}{a|b}.zip``); a file covering the half-month ending on
+  ``D`` is treated as visible at ``curr_date`` iff
   ``D + ftd_pub_lag_days <= curr_date`` (conservative; configurable via
-  ``YIAGENTS_FTD_PUB_LAG_DAYS``, default 10). Row-level ``Date <= curr_date`` is
-  also enforced. Empty ``curr_date`` means live mode.
+  ``YIAGENTS_FTD_PUB_LAG_DAYS``, default 10). Row-level ``Date <= curr_date``
+  is also enforced. Empty ``curr_date`` means live mode.
 
 US-only
 -------
@@ -68,14 +69,20 @@ logger = logging.getLogger(__name__)
 
 _SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 _ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc_nodash}/{doc}"
-_FTD_URL = "https://www.sec.gov/files/data/fails-deliver-data/cnbs{yyyymmdd}.txt"
+# FTD dissemination files are published as semi-monthly ZIPs:
+# ``cnsfails{YYYYMM}{a|b}.zip`` where a = settlement dates 1-15 and
+# b = 16-end-of-month (https://www.sec.gov/foia/docs/failsdata.htm). The member
+# inside is a pipe-delimited text (header: SETTLEMENT DATE|CUSIP|SYMBOL|
+# QUANTITY (FAILS)|DESCRIPTION|PRICE; dates as YYYYMMDD). The previous
+# ".../cnbs{yyyymmdd}.txt" scheme 404'd for every date, and those 404s were
+# swallowed as "normal missing file" — fabricating "No fails-to-deliver
+# reported" for every ticker.
+_FTD_URL = "https://www.sec.gov/files/data/fails-deliver-data/cnsfails{yyyymm}{half}.zip"
 
 # Cap Form 4 filings fetched per call (each is one throttled GET). 25 recent
 # insider filings is far more than a 180-day window normally accumulates and
 # keeps a single analysis under ~30 SEC requests.
 _MAX_FORM4 = 25
-# SEC publishes FTD data semi-monthly; the two cutoff dates per month.
-_FTD_CUTOFF_DAYS = (15,)  # plus the last calendar day, handled separately
 
 
 def _ftd_pub_lag_days() -> int:
@@ -293,17 +300,27 @@ def _last_day_of_month(y: int, m: int) -> int:
     return (nxt - timedelta(days=1)).day
 
 
-def _enumerate_ftd_cutoffs(start_d: date, end_d: date) -> list[str]:
-    """Candidate FTD cutoff dates (mid-month 15th + last day) in [start, end],
-    returned as ``YYYYMMDD`` strings most-recent-first. The caller tries each;
-    a missing file (404) is normal and skipped."""
-    out: list[str] = []
+def _half_month_end(y: int, m: int, half: str) -> date:
+    """The last settlement date covered by a semi-monthly FTD file (a=1-15)."""
+    return date(y, m, 15) if half == "a" else date(y, m, _last_day_of_month(y, m))
+
+
+def _enumerate_ftd_files(start_d: date, visible_end: date) -> list[tuple[str, str]]:
+    """Candidate semi-monthly FTD files ``(yyyymm, 'a'|'b')``, newest first.
+
+    A file is a candidate when its data intersects the look-back window
+    (``half_end >= start_d`` — every row in the file is dated on/before its
+    half-month end) and it is already public (``half_end <= visible_end``, the
+    caller's curr_date minus the publication lag). The caller fetches each; a
+    genuine 404 for a file that should exist (recent half not yet posted) is
+    normal and skipped."""
+    out: list[tuple[str, str]] = []
     y, m = start_d.year, start_d.month
-    while (y, m) <= (end_d.year, end_d.month):
-        for d in (_FTD_CUTOFF_DAYS[0], _last_day_of_month(y, m)):
-            cand = date(y, m, d)
-            if start_d <= cand <= end_d:
-                out.append(f"{cand:%Y%m%d}")
+    while (y, m) <= (visible_end.year, visible_end.month):
+        for half in ("a", "b"):
+            if _half_month_end(y, m, half) >= start_d \
+                    and _half_month_end(y, m, half) <= visible_end:
+                out.append((f"{y:04d}{m:02d}", half))
         m += 1
         if m > 12:
             m = 1
@@ -346,9 +363,31 @@ def _ftd_column_map(header: str) -> dict[str, int]:
     return m
 
 
+def _unzip_ftd_member(zip_bytes: bytes) -> bytes:
+    """Extract the pipe-delimited text member from a cnsfails FTD ZIP.
+
+    The ZIP holds a single member (e.g. ``cnsfails202406b``, no extension).
+    Raises :class:`NoMarketDataError` on a corrupt/empty ZIP — that is a data
+    problem, not a "no fails reported" verdict.
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+        names = zf.namelist()
+        if not names:
+            raise NoMarketDataError("ftd", detail="FTD ZIP has no members")
+        return zf.read(names[0])
+    except NoMarketDataError:
+        raise
+    except (zipfile.BadZipFile, OSError, RuntimeError) as exc:
+        raise NoMarketDataError("ftd", detail=f"could not open FTD ZIP: {exc}") from exc
+
+
 def _parse_ftd_text(raw: bytes, ticker: str) -> list[dict]:
-    """Parse a cnbs FTD file, returning rows matching ``ticker`` (case-insensitive
-    on the symbol column). Header-driven; tolerates ``|`` / tab / comma."""
+    """Parse a cnsfails FTD text member, returning rows matching ``ticker``
+    (case-insensitive on the symbol column). Header-driven; tolerates ``|`` /
+    tab / comma. Real member header (verified against the live file):
+    ``SETTLEMENT DATE|CUSIP|SYMBOL|QUANTITY (FAILS)|DESCRIPTION|PRICE`` with
+    YYYYMMDD dates."""
     text = raw.decode("utf-8", errors="replace")
     lines = [ln for ln in text.splitlines() if ln.strip()]
     if not lines:
@@ -376,11 +415,14 @@ def get_ftd_data(
 ) -> str:
     """Recent SEC fails-to-deliver balances for a ticker, PIT-aware.
 
-    Enumerates the semi-monthly FTD cutoff files within the look-back window that
-    are already public by ``curr_date`` (cutoff + ``YIAGENTS_FTD_PUB_LAG_DAYS``,
-    default 10), fetches each (a genuine 404 for a cutoff is normal and skipped;
-    transport failures propagate instead of faking "no fails"), and filters rows
-    by ticker + ``Date <= curr_date``. Renders a per-fail-day table
+    Enumerates the semi-monthly FTD ZIP files (``cnsfails{YYYYMM}{a|b}.zip``,
+    a = settlement dates 1-15, b = 16-month-end) whose half-month intersects
+    the look-back window and that are already public by ``curr_date``
+    (half-month end + ``YIAGENTS_FTD_PUB_LAG_DAYS``, default 10), fetches each
+    (immutable ZIP, cached long; a genuine 404 — the most recent half not yet
+    posted — is normal and skipped; transport failures propagate instead of
+    faking "no fails"), unzips the pipe-delimited member in memory, and filters
+    rows by ticker + ``Date <= curr_date``. Renders a per-fail-day table
     plus a window summary (peak fail-day, total fail-days).
 
     FTD is CNS settlement data keyed by ticker; a non-US ticker simply matches
@@ -392,23 +434,27 @@ def get_ftd_data(
     start_d = upper_d - timedelta(days=int(look_back_days))
     lag = _ftd_pub_lag_days()
 
-    # Only files whose cutoff + publication lag has elapsed by curr_date are
-    # PIT-visible. The cutoff itself must also be within the look-back window.
+    # Only files whose half-month end + publication lag has elapsed by
+    # curr_date are PIT-visible. The half-month's data must also intersect the
+    # look-back window.
     visible_end = upper_d - timedelta(days=lag)
-    cutoffs = _enumerate_ftd_cutoffs(max(start_d, date(2009, 9, 1)), visible_end)
+    files = _enumerate_ftd_files(max(start_d, date(2009, 9, 1)), visible_end)
 
     rows: list[dict] = []
-    for yyyymmdd in cutoffs:
-        url = _FTD_URL.format(yyyymmdd=yyyymmdd)
-        path = os.path.join(_cache_dir(), f"ftd_{yyyymmdd}.txt")
+    for yyyymm, half in files:
+        url = _FTD_URL.format(yyyymm=yyyymm, half=half)
+        path = os.path.join(_cache_dir(), f"ftd_{yyyymm}{half}.zip")
         try:
-            raw = _cached_or_fetch(path, url, ttl_days=30.0)
+            zip_bytes = _cached_or_fetch(path, url, ttl_days=90.0)
+            raw = _unzip_ftd_member(zip_bytes)
         except SecNoFileError:
-            # No file for this cutoff (SEC only publishes periods with fails;
-            # and the exact cutoff calendar day can shift) -> normal, skip.
+            # No ZIP for this half (SEC posts the newest halves a few days
+            # after the half closes; older halves are always present) ->
+            # normal, skip.
             continue
-        # Any other failure (timeout / proxy / 5xx) propagates: claiming "no
-        # fails reported" while SEC is unreachable would be a false zero.
+        # Any other failure (timeout / proxy / 5xx / corrupt zip) propagates:
+        # claiming "no fails reported" while SEC is unreachable (or the file
+        # is corrupt) would be a false zero.
         for r in _parse_ftd_text(raw, ticker):
             # Row-level PIT: settlement date must be <= curr_date.
             d = r["date"]
@@ -423,8 +469,8 @@ def get_ftd_data(
     out = io.StringIO()
     out.write(f"# Fails-to-Deliver for {ticker} (last {look_back_days} days, "
               f"as of {curr_date or 'now'})\n")
-    out.write(f"# Source: SEC CNS FTD data (PIT: file cutoff + {lag}d pub lag <= "
-              f"{curr_date or 'now'})\n")
+    out.write(f"# Source: SEC CNS FTD semi-monthly ZIPs (PIT: file half-month end "
+              f"+ {lag}d pub lag <= {curr_date or 'now'})\n")
 
     if not rows:
         out.write(f"\nNo fails-to-deliver reported for {ticker} in the last "

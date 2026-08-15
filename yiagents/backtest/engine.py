@@ -33,7 +33,6 @@ from typing import Any, Protocol
 import numpy as np
 import pandas as pd
 
-from yiagents.agents.utils.rating import parse_rating
 from yiagents.backtest.cache import DecisionCache
 from yiagents.backtest.metrics import BacktestMetrics, compute_metrics, returns_from_equity
 
@@ -817,8 +816,18 @@ def _resolve_decision(
     genuine agent output — ``propagate`` raised (rating forced to Hold) or the
     rating was not a parseable string. This lets the backtest engine count
     degraded decisions separately so they are not silently confused with real
-    "Hold" calls. (``parse_rating`` fallback also emits its own warning via
-    ``warn_on_default=True``.)
+    "Hold" calls.
+
+    Cache policy (fail-closed on infrastructure faults):
+
+    * A degraded-but-genuine decision (propagate succeeded, rating text was
+      unparseable) IS cached — the decision markdown is real agent output, so
+      a replay must not re-bill the LLM for it.
+    * A ``propagate`` failure is NOT cached. The fake Hold exists only because
+      one node raised (e.g. a transient network fault); caching it would make
+      every later replay return the fake Hold as ``was_degraded=False`` and
+      permanently distort win-rate / DSR. A replay instead retries the graph,
+      which is the honest measurement.
     """
     if cache is not None:
         cached = cache.get(ticker, trade_date, run_tag)
@@ -826,19 +835,19 @@ def _resolve_decision(
             return cached.rating, cached.final_decision, True, False
 
     final_state, rating, propagate_failed = _call_graph(graph, ticker, trade_date, asset_type)
-    was_degraded = propagate_failed or not isinstance(rating, str)
-    if propagate_failed or not isinstance(rating, str):
+    # ``propagate`` already returns a canonical 5-tier rating (it runs
+    # ``parse_rating`` on the PM's markdown via ``process_signal``), so re-
+    # parsing here would only duplicate the default-fallback warning. Trust
+    # the contract; anything that is not a non-empty string is degraded.
+    was_degraded = propagate_failed or not isinstance(rating, str) or not rating
+    if was_degraded:
         rating = "Hold"
-    else:
-        rating = parse_rating(rating, warn_on_default=True)
 
     decision_md = ""
     if isinstance(final_state, Mapping):
-        decision_md = str(final_state.get("final_trade_decision", ""))  # type: ignore[union-attr]
-    elif isinstance(final_state, dict):
         decision_md = str(final_state.get("final_trade_decision", ""))
 
-    if cache is not None:
+    if cache is not None and not propagate_failed:
         cache.remember(ticker, trade_date, rating, decision_md, run_tag)
     return rating, decision_md, False, was_degraded
 

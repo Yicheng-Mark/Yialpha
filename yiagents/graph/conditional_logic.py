@@ -7,7 +7,25 @@ class ConditionalLogic:
     """Handles conditional logic for determining graph flow."""
 
     def __init__(self, max_debate_rounds: int = 1, max_risk_discuss_rounds: int = 1):
-        """Initialize with configuration parameters."""
+        """Initialize with configuration parameters.
+
+        Validation layer for the debate-depth config: both round counts must
+        be integers >= 1. A value of 0 does NOT mean "skip the debate" — the
+        graph topology unconditionally runs Bull Researcher / Aggressive
+        Analyst once before the router ever fires, so 0 would silently waste
+        one LLM call per run while pretending to disable the stage. Rejecting
+        0 here (fail-closed) makes the misconfiguration loud instead.
+        """
+        for name, value in (
+            ("max_debate_rounds", max_debate_rounds),
+            ("max_risk_discuss_rounds", max_risk_discuss_rounds),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(
+                    f"ConditionalLogic: {name} must be an integer >= 1 "
+                    f"(got {value!r}); 0 would not skip the debate — the "
+                    "graph still runs the first debator unconditionally"
+                )
         self.max_debate_rounds = max_debate_rounds
         self.max_risk_discuss_rounds = max_risk_discuss_rounds
 

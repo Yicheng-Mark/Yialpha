@@ -113,18 +113,22 @@ def get_prediction_markets(topic: str, limit: int | None = None) -> str:
         A markdown report of the most-traded open markets matching the topic,
         each with its implied probability, traded volume, resolution date, and
         recent (1-week) move.
+
+    Raises:
+        requests.RequestException: The Gamma API (or the fresh-cache fetch)
+            failed and no cache existed to serve. Transport errors must reach
+            the router so the optional ``prediction_markets`` category records
+            its KIND_OPTIONAL_UNAVAILABLE sentinel and returns the
+            DATA_UNAVAILABLE message — swallowing them here returned a prose
+            "unavailable" string as if it were data, dropping the run's
+            data-quality evidence for this degradation. (A recent cache is
+            still served stale by ``cached_or_fetch`` with a stale-cache
+            sentinel before this ever propagates.)
     """
     if limit is None:
         limit = DEFAULT_LIMIT
 
-    try:
-        data = _request("public-search", {"q": topic, "limit_per_type": 20})
-    except requests.RequestException as e:
-        logger.warning("Polymarket search failed for %r: %s", topic, e)
-        return (
-            f"Polymarket data is currently unavailable (network error: {e}). "
-            f"Proceed without prediction-market signal for '{topic}'."
-        )
+    data = _request("public-search", {"q": topic, "limit_per_type": 20})
 
     now = datetime.now(timezone.utc)
     candidates = [

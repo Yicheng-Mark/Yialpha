@@ -76,20 +76,33 @@ XML_BY_DOC = {
                          "2024-06-28", "80000"),        # SELL (not-yet-public)
 }
 
-# FTD file content (pipe-delimited, with a parenthesized fails column to prove
-# header-driven parsing tolerates the SEC's label variants).
+# FTD ZIP member content — REAL header layout and column order per the SEC's
+# failsdata docs (SETTLEMENT DATE|CUSIP|SYMBOL|QUANTITY (FAILS)|DESCRIPTION|
+# PRICE; dates as YYYYMMDD). The mock ZIPs use the REAL cnsfails{yyyymm}{a|b}
+# naming so a URL-scheme regression (the old cnbs{yyyymmdd}.txt scheme 404'd
+# for every date and every "No fails reported" verdict was fabricated) cannot
+# hide behind a mock that mirrors the same wrong URL.
 FTD_PIPE = (
-    b"Date|CUSIP|Issuer Name|Symbol|Total Fails (To Deliver)|Price\n"
-    b"20240610|037833100|APPLE INC|AAPL|1234567|195.20\n"
-    b"20240612|037833100|APPLE INC|AAPL|2345678|196.10\n"
-    b"20240611|594918104|MICROSOFT CORP|MSFT|999999|420.00\n"
+    b"SETTLEMENT DATE|CUSIP|SYMBOL|QUANTITY (FAILS)|DESCRIPTION|PRICE\n"
+    b"20240520|037833100|AAPL|1234567|APPLE INC|195.20\n"
+    b"20240522|037833100|AAPL|2345678|APPLE INC|196.10\n"
+    b"20240521|594918104|MSFT|999999|MICROSOFT CORP|420.00\n"
 )
 
-# Same data, tab-delimited — proves the delimiter auto-detection.
+# Same layout, tab-delimited — proves the delimiter auto-detection.
 FTD_TAB = (
-    b"Date\tCUSIP\tIssuer Name\tSymbol\tTotal Fails\tPrice\n"
-    b"20240610\t037833100\tAPPLE INC\tAAPL\t1234567\t195.20\n"
+    b"SETTLEMENT DATE\tCUSIP\tSYMBOL\tQUANTITY (FAILS)\tDESCRIPTION\tPRICE\n"
+    b"20240520\t037833100\tAAPL\t1234567\tAPPLE INC\t195.20\n"
 )
+
+
+def _ftd_zip(member_name: str, content: bytes) -> bytes:
+    """Build a synthetic cnsfails ZIP (member named like the real files, no
+    extension) holding the pipe/tab-delimited text."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(member_name, content)
+    return buf.getvalue()
 
 
 def _patch_form4(monkeypatch, tmp_path):
@@ -205,20 +218,25 @@ def test_form4_primary_document_with_path_prefix_caches_correctly(monkeypatch, t
 # --------------------------------------------------------------------------- #
 # FTD
 # --------------------------------------------------------------------------- #
-def _patch_ftd(monkeypatch, tmp_path, content=FTD_PIPE):
-    """Serve `content` only for the cnbs20240531 file; 404 everything else.
+def _patch_ftd(monkeypatch, tmp_path, content=FTD_PIPE, member_ym="202405",
+               member_half="b", serve_as_zip=True):
+    """Serve `content` (as a real-named cnsfails ZIP member) for the
+    ``cnsfails{member_ym}{member_half}.zip`` file; 404 everything else.
 
     Records requested URLs so a test can assert the PIT gate kept not-yet-public
-    cutoff files from even being requested.
+    half-month files from even being requested. ``serve_as_zip=False`` serves
+    the raw bytes without wrapping (corrupt-ZIP regression).
     """
     monkeypatch.setattr(sec_ownership, "_cache_dir", lambda: str(tmp_path))
     requested = []
-    monkeypatch.setattr(sec_ownership, "_requested_ftd_urls", requested, raising=False)
+    key = f"cnsfails{member_ym}{member_half}.zip"
+    payload = (_ftd_zip(f"cnsfails{member_ym}{member_half}", content)
+               if serve_as_zip else content)
 
     def fake_fetch(_path, url, ttl_days):
         requested.append(url)
-        if "cnbs20240531" in url:
-            return content
+        if key in url:
+            return payload
         raise SecNoFileError(url, detail="404")
 
     monkeypatch.setattr(sec_ownership, "_cached_or_fetch", fake_fetch)
@@ -228,13 +246,13 @@ def _patch_ftd(monkeypatch, tmp_path, content=FTD_PIPE):
 @pytest.mark.unit
 def test_ftd_pit_skips_not_yet_public_file(monkeypatch, tmp_path):
     requested = _patch_ftd(monkeypatch, tmp_path)
-    # curr_date 2024-06-20, lag 10 -> visible cutoffs must satisfy
-    # cutoff + 10 <= 2024-06-20 (cutoff <= 2024-06-10). The 2024-06-15 cutoff
-    # file is therefore NOT public yet and must never be requested.
+    # curr_date 2024-06-20, lag 10 -> visible_end 2024-06-10. A half-month file
+    # is PIT-visible only when its half END + lag <= curr_date: the June files
+    # (202406a ends 6/15, 202406b ends 6/30) are NOT public yet and must never
+    # be requested; the May-b file (ends 5/31) is public and served.
     out = sec_ownership.get_ftd_data("AAPL", "2024-06-20", 90)
-    assert not any("cnbs20240615" in u for u in requested)
-    # The public 2024-05-31 file was served with AAPL rows.
-    assert any("cnbs20240531" in u for u in requested)
+    assert not any("cnsfails202406" in u for u in requested)
+    assert any("cnsfails202405b.zip" in u for u in requested)
     assert "# Fails-to-Deliver for AAPL" in out
     assert "1234567" in out
     assert "2345678" in out
@@ -260,6 +278,16 @@ def test_ftd_transport_failure_propagates_not_fake_zero(monkeypatch, tmp_path):
 
     monkeypatch.setattr(sec_ownership, "_cached_or_fetch", dead_vendor)
     with pytest.raises(NoMarketDataError, match="timeout"):
+        sec_ownership.get_ftd_data("AAPL", "2024-06-20", 90)
+
+
+@pytest.mark.unit
+def test_ftd_corrupt_zip_fails_not_fake_zero(monkeypatch, tmp_path):
+    """A corrupt ZIP under a REAL file name is a data problem, not a 404 — it
+    must raise, never degrade to 'No fails-to-deliver reported'."""
+    _patch_ftd(monkeypatch, tmp_path, content=b"not a zip at all",
+               serve_as_zip=False)
+    with pytest.raises(NoMarketDataError, match="could not open FTD ZIP"):
         sec_ownership.get_ftd_data("AAPL", "2024-06-20", 90)
 
 
@@ -309,15 +337,22 @@ def test_ftd_no_rows_returns_honest_empty(monkeypatch, tmp_path):
 
 @pytest.mark.unit
 def test_ftd_row_date_gate(monkeypatch, tmp_path):
-    # curr_date 2024-06-11: the 2024-05-31 file is public (cutoff 5/31 + 10d =
-    # 6/10 <= 6/11), but the 20240612 row postdates curr_date -> dropped, while
-    # the 20240610 row is kept. Isolates the row-level Date <= curr_date gate
-    # from the file-level publication-lag gate.
-    _patch_ftd(monkeypatch, tmp_path)
+    # curr_date 2024-06-11: the May-b file is public (half end 5/31 + 10d =
+    # 6/10 <= 6/11). A row inside that file whose settlement date postdates
+    # curr_date (defensive: rows should never exceed their half-month end, but
+    # a malformed file must not leak them) is dropped, while the on-date row
+    # is kept. Isolates the row-level Date <= curr_date gate from the
+    # file-level publication-lag gate.
+    content = (
+        b"SETTLEMENT DATE|CUSIP|SYMBOL|QUANTITY (FAILS)|DESCRIPTION|PRICE\n"
+        b"20240510|037833100|AAPL|1234567|APPLE INC|193.10\n"
+        b"20240620|037833100|AAPL|2345678|APPLE INC|196.10\n"
+    )
+    _patch_ftd(monkeypatch, tmp_path, content=content)
     out = sec_ownership.get_ftd_data("AAPL", "2024-06-11", 90)
     assert "# Fails-to-Deliver for AAPL" in out
-    assert "1234567" in out          # 20240610 <= 2024-06-11 -> kept
-    assert "2345678" not in out      # 20240612 > 2024-06-11 -> dropped
+    assert "1234567" in out          # 20240510 <= 2024-06-11 -> kept
+    assert "2345678" not in out      # 20240620 > 2024-06-11 -> dropped
 
 
 # --------------------------------------------------------------------------- #

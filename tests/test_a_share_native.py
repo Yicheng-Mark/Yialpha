@@ -63,7 +63,7 @@ SYNTH_ROWS = [
 
 def _patch_daily(monkeypatch, rows=SYNTH_ROWS):
     """Serve synthetic rows without touching the network or baostock."""
-    monkeypatch.setattr(bsv, "_cached_daily", lambda code: list(rows))
+    monkeypatch.setattr(bsv, "_cached_daily", lambda code, curr_date=None: list(rows))
 
 
 # --------------------------------------------------------------------------- #
@@ -108,7 +108,7 @@ def test_missing_dependency_raises_no_market_data(monkeypatch):
             raise ImportError("no baostock")
         return real_import(name, *a, **k)
     monkeypatch.setattr(builtins, "__import__", _block)
-    monkeypatch.setattr(bsv, "_cached_daily", lambda code: [])  # short-circuit cache
+    monkeypatch.setattr(bsv, "_cached_daily", lambda code, curr_date=None: [])  # short-circuit cache
     with pytest.raises(NoMarketDataError):
         # Force the lazy import path: clear any cache, call the public function.
         bsv._require_baostock()
@@ -165,6 +165,55 @@ def test_ohlc_no_rows_in_window_honest_empty(monkeypatch):
     out = bsv.get_a_share_ohlc_native("600519.SS", "2020-01-01", 10)
     assert out.startswith("# A-share OHLC")
     assert "No daily OHLC rows" in out
+
+
+# --------------------------------------------------------------------------- #
+# A7 — same-day cache refresh + session-level statement cache
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_daily_cache_ttl_same_day_refresh():
+    """curr_date = today (or live mode) must NOT pin the daily cache for a
+    full day — the day's post-close bar lands later, so the entry refreshes
+    every _SAME_DAY_REFRESH_S (900s, mirroring stockstats_utils). A historical
+    date is immutable and keeps the 1-day TTL."""
+    today_ttl = bsv._daily_cache_ttl_days(date.today().isoformat())
+    live_ttl = bsv._daily_cache_ttl_days(None)
+    hist_ttl = bsv._daily_cache_ttl_days("2024-06-15")
+    assert today_ttl == pytest.approx(bsv._SAME_DAY_REFRESH_S / 86_400.0)
+    assert live_ttl == pytest.approx(bsv._SAME_DAY_REFRESH_S / 86_400.0)
+    assert hist_ttl == pytest.approx(bsv._CACHE_TTL_S / 86_400.0)
+    assert today_ttl < hist_ttl  # same-day refreshes strictly faster
+
+
+@pytest.mark.unit
+def test_statement_rows_cached_per_code_fn_anchor(monkeypatch):
+    """One statement fetch costs a TCP login + up to 12 quarter queries; the
+    session cache must collapse repeat calls for the same (code, fn, anchor)
+    and key on the anchor (a different analysis year re-fetches)."""
+    logins = []
+
+    class _FakeSession:
+        def __enter__(self):
+            logins.append(1)
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(bsv, "_BaostockSession", _FakeSession)
+    monkeypatch.setattr(
+        bsv, "_query_statement",
+        lambda bs, code, fn, anchor=None: bsv.StatementFetch(_profit_rows(), []))
+    bsv._statement_rows_cached.cache_clear()
+
+    r1 = bsv._statement_rows("sh.600519", "query_profit_data",
+                             date(2024, 6, 15))
+    r2 = bsv._statement_rows("sh.600519", "query_profit_data",
+                             date(2024, 6, 15))
+    assert r1 is r2                     # served from the cache
+    assert len(logins) == 1
+    bsv._statement_rows("sh.600519", "query_profit_data", date(2022, 6, 15))
+    assert len(logins) == 2              # different anchor -> re-fetch
 
 
 # --------------------------------------------------------------------------- #
@@ -875,7 +924,7 @@ def test_router_falls_back_from_tushare_to_baostock(monkeypatch, tmp_path):
     from yiagents.dataflows import config as cfgmod
     from yiagents.dataflows.interface import route_to_vendor
     # BaoStock path: serve synthetic daily rows.
-    monkeypatch.setattr(bsv, "_cached_daily", lambda code: list(SYNTH_ROWS))
+    monkeypatch.setattr(bsv, "_cached_daily", lambda code, curr_date=None: list(SYNTH_ROWS))
 
     orig = cfgmod.get_config()
     try:
@@ -912,7 +961,7 @@ def _northbound_df():
 # --- northbound ---
 @pytest.mark.unit
 def test_northbound_pit_drops_future_and_window(monkeypatch):
-    _patch_ak(monkeypatch, stock_hsgt_individual_em=lambda stock: _northbound_df())
+    _patch_ak(monkeypatch, stock_hsgt_individual_em=lambda symbol: _northbound_df())
     out = akv.get_a_share_northbound_native("600519.SS", "2024-06-15", 30)
     assert "# A-share Northbound" in out
     assert "2024-06-14" in out
@@ -924,7 +973,7 @@ def test_northbound_pit_drops_future_and_window(monkeypatch):
 
 @pytest.mark.unit
 def test_northbound_summary(monkeypatch):
-    _patch_ak(monkeypatch, stock_hsgt_individual_em=lambda stock: _northbound_df())
+    _patch_ak(monkeypatch, stock_hsgt_individual_em=lambda symbol: _northbound_df())
     out = akv.get_a_share_northbound_native("600519.SS", "2024-06-15", 30)
     # window summary should show 增持 (1.2e8 > 1.0e8 from first in window)
     assert "增持" in out
@@ -933,7 +982,7 @@ def test_northbound_summary(monkeypatch):
 
 @pytest.mark.unit
 def test_northbound_empty_honest(monkeypatch):
-    _patch_ak(monkeypatch, stock_hsgt_individual_em=lambda stock: pd.DataFrame())
+    _patch_ak(monkeypatch, stock_hsgt_individual_em=lambda symbol: pd.DataFrame())
     out = akv.get_a_share_northbound_native("600519.SS", "2024-06-15", 30)
     assert "No northbound holding rows" in out
 
@@ -954,7 +1003,7 @@ def test_northbound_rate_limit_typed(monkeypatch):
 
 @pytest.mark.unit
 def test_router_routes_northbound_via_akshare(monkeypatch):
-    _patch_ak(monkeypatch, stock_hsgt_individual_em=lambda stock: _northbound_df())
+    _patch_ak(monkeypatch, stock_hsgt_individual_em=lambda symbol: _northbound_df())
     from yiagents.dataflows import config as cfgmod
     from yiagents.dataflows.interface import route_to_vendor
     orig = cfgmod.get_config()
@@ -998,18 +1047,34 @@ def _sector_flow_df():
 
 @pytest.mark.unit
 def test_sector_flow_with_industry(monkeypatch):
-    _patch_ak(
-        monkeypatch,
-        stock_sector_fund_flow_rank=lambda **kw: _sector_flow_df(),
-        stock_board_industry_name_ths=lambda symbol: pd.DataFrame([
-            {"代码": "600519", "所属行业": "白酒"},
-        ]),
-    )
+    """Industry resolved via BaoStock's per-stock mapping (the marker appears).
+
+    The old test mocked ``stock_board_industry_name_ths`` — an interface the
+    vendor can no longer call (it takes no kwargs and returns a board catalog,
+    not a stock->industry map), so the mock mirrored the very bug being fixed.
+    The industry lookup is now mocked at its own seam (``_baostock_industry``).
+    """
+    _patch_ak(monkeypatch, stock_sector_fund_flow_rank=lambda **kw: _sector_flow_df())
+    monkeypatch.setattr(akv, "_baostock_industry", lambda ticker: "白酒")
     out = akv.get_a_share_sector_flow_native("600519.SS", None, 1)
     assert "# A-share Sector Fund Flow" in out
     assert "白酒" in out
     assert "本股所属" in out         # stock's sector highlighted
     assert "房地产" in out           # other sector present
+    assert "no identically-named row" not in out  # exact match -> no caveat
+
+
+@pytest.mark.unit
+def test_sector_flow_industry_no_exact_sector_match_notes_it(monkeypatch):
+    """A resolved industry with no identically-named sector row (BaoStock's
+    classification differs from the Eastmoney sector table) must be disclosed,
+    not silently dropped or force-matched."""
+    _patch_ak(monkeypatch, stock_sector_fund_flow_rank=lambda **kw: _sector_flow_df())
+    monkeypatch.setattr(akv, "_baostock_industry", lambda ticker: "酒、饮料和精制茶制造业")
+    out = akv.get_a_share_sector_flow_native("600519.SS", None, 1)
+    assert "酒、饮料和精制茶制造业" in out       # resolved industry still shown
+    assert "本股所属" not in out                # no fabricated marker
+    assert "no identically-named row" in out    # the mismatch is disclosed
 
 
 @pytest.mark.unit
@@ -1019,6 +1084,7 @@ def test_sector_flow_without_industry(monkeypatch):
         monkeypatch,
         stock_sector_fund_flow_rank=lambda **kw: _sector_flow_df(),
     )
+    monkeypatch.setattr(akv, "_baostock_industry", lambda ticker: None)
     out = akv.get_a_share_sector_flow_native("600519.SS", None, 1)
     assert "# A-share Sector Fund Flow" in out
     assert "could not be resolved" in out
@@ -1047,13 +1113,8 @@ def test_sector_flow_transport_error_degrades(monkeypatch):
 
 @pytest.mark.unit
 def test_router_routes_sector_flow_via_akshare(monkeypatch):
-    _patch_ak(
-        monkeypatch,
-        stock_sector_fund_flow_rank=lambda **kw: _sector_flow_df(),
-        stock_board_industry_name_ths=lambda symbol: pd.DataFrame([
-            {"代码": "600519", "所属行业": "白酒"},
-        ]),
-    )
+    _patch_ak(monkeypatch, stock_sector_fund_flow_rank=lambda **kw: _sector_flow_df())
+    monkeypatch.setattr(akv, "_baostock_industry", lambda ticker: "白酒")
     from yiagents.dataflows import config as cfgmod
     from yiagents.dataflows.interface import route_to_vendor
     orig = cfgmod.get_config()
@@ -1098,6 +1159,18 @@ def test_realtime_quote_historical_sentinel(monkeypatch):
     out = akv.get_a_share_realtime_quote_native("600519.SS", "2024-06-15")
     assert "REAL_TIME_UNAVAILABLE" in out
     assert "historical" in out.lower()
+
+
+@pytest.mark.unit
+def test_realtime_quote_today_is_live_not_sentinel(monkeypatch):
+    """curr_date = exactly today is LIVE mode (utils.is_historical_date) — the
+    old gate treated any explicit curr_date as historical and misrouted today's
+    live run (the framework default) to the sentinel."""
+    _patch_ak(monkeypatch, stock_zh_a_spot_em=lambda: _spot_em_df())
+    out = akv.get_a_share_realtime_quote_native("600519.SS",
+                                                date.today().isoformat())
+    assert "REAL_TIME_UNAVAILABLE" not in out
+    assert "贵州茅台" in out
 
 
 @pytest.mark.unit
@@ -1157,6 +1230,51 @@ def test_market_breadth_historical_sentinel(monkeypatch):
     _patch_ak(monkeypatch, stock_zh_a_spot=lambda: _breadth_df())
     out = akv.get_a_share_market_breadth_native("2024-06-15")
     assert "REAL_TIME_UNAVAILABLE" in out
+
+
+@pytest.mark.unit
+def test_market_breadth_today_is_live_not_sentinel(monkeypatch):
+    """curr_date = exactly today is LIVE mode (utils.is_historical_date:
+    today = live; any other explicit date = backtest) — the old gate treated
+    any explicit curr_date as historical and misrouted today's live run to the
+    sentinel."""
+    _patch_ak(monkeypatch, stock_zh_a_spot=lambda: _breadth_df())
+    out = akv.get_a_share_market_breadth_native(date.today().isoformat())
+    assert "REAL_TIME_UNAVAILABLE" not in out
+    assert "# A-share Market Breadth" in out
+
+
+@pytest.mark.unit
+def test_limit_thresholds_tiered_by_board_and_st():
+    """A7: limit-up/down tiers — 创业板 (300/301) and 科创板 (688/681) move
+    +/-20%, ST stocks +/-5%, main board +/-10% (counted at 19.9/4.9/9.9 to
+    absorb 2-decimal rounding). The old flat >=9.9 mislabeled every such move."""
+    assert akv._limit_thresholds("600519", "贵州茅台") == (9.9, -9.9)
+    assert akv._limit_thresholds("000001", "平安银行") == (9.9, -9.9)
+    assert akv._limit_thresholds("300750", "宁德时代") == (19.9, -19.9)
+    assert akv._limit_thresholds("301001", None) == (19.9, -19.9)
+    assert akv._limit_thresholds("688001", None) == (19.9, -19.9)
+    assert akv._limit_thresholds("681001", None) == (19.9, -19.9)
+    assert akv._limit_thresholds("600000", "ST浦发") == (4.9, -4.9)
+    assert akv._limit_thresholds("600000", "*ST新海") == (4.9, -4.9)
+    # Sina's positional 代码 (e.g. "sz300750") still tiers by the 6 digits.
+    assert akv._limit_thresholds("sz300750", None) == (19.9, -19.9)
+
+
+@pytest.mark.unit
+def test_market_breadth_limit_counts_tiered(monkeypatch):
+    """A ChiNext stock at +19.95% and an ST stock at +4.95% are limit-ups under
+    their tiers; the old flat 9.9 threshold counted neither."""
+    df = pd.DataFrame([
+        {"代码": "300750", "名称": "宁德时代", "涨跌幅": 19.95},  # ChiNext limit-up
+        {"代码": "600000", "名称": "ST浦发", "涨跌幅": 4.95},     # ST limit-up
+        {"代码": "600519", "名称": "贵州茅台", "涨跌幅": 9.95},   # main-board limit-up
+        {"代码": "000001", "名称": "平安银行", "涨跌幅": 5.0},     # ordinary advance
+    ])
+    _patch_ak(monkeypatch, stock_zh_a_spot=lambda: df)
+    out = akv.get_a_share_market_breadth_native()
+    assert "涨停: 3" in out               # all three tiered limit-ups counted
+    assert "跌停: 0" in out
 
 
 @pytest.mark.unit
@@ -1229,41 +1347,86 @@ class MarketAnalystAShareWiringTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # BaoStock quarterly statements (Phase 6 — income / balance / cashflow)
 # --------------------------------------------------------------------------- #
+# Rows use the REAL server-delivered field names (pinned in
+# yiagents.dataflows.baostock_fields against the official docs) — the previous
+# fixtures invented npParentCompanyOwners/totalAssets/netCFOperate fields the
+# endpoints never return, so the mocks mirrored the renderers' bug and the
+# all-n/a tables looked "tested". Ratio fields are decimal fractions per the
+# official samples (roeAvg 0.074617 == 7.46%).
+from yiagents.dataflows import baostock_fields as bsf  # noqa: E402
+
+
+@pytest.mark.unit
+def test_statement_columns_subset_of_official_field_tables():
+    """A6 regression: every rendered column field must exist in its endpoint's
+    official field table. A renderer reading a field BaoStock never returns
+    silently renders all-n/a — the exact bug class behind the three statement
+    tables (totalShare-as-Revenue, totalAssets, netCFOperate)."""
+    for columns, fields in (
+        (bsf.PROFIT_COLUMNS, bsf.PROFIT_DATA_FIELDS),
+        (bsf.BALANCE_COLUMNS, bsf.BALANCE_DATA_FIELDS),
+        (bsf.CASH_FLOW_COLUMNS, bsf.CASH_FLOW_DATA_FIELDS),
+    ):
+        for col in columns:
+            assert col.field in fields, (
+                f"rendered field {col.field!r} is not in the endpoint's "
+                f"official field table {fields}")
+    # The fabricated fields that caused the all-n/a tables must stay absent.
+    for banned in ("totalAssets", "totalLiab", "totalShareholdersEquity",
+                   "liabilityRate", "netCFOperate", "netCFInvest", "netCFFinance",
+                   "npParentCompanyOwners", "operateProfit"):
+        for fields in (bsf.PROFIT_DATA_FIELDS, bsf.BALANCE_DATA_FIELDS,
+                       bsf.CASH_FLOW_DATA_FIELDS):
+            assert banned not in fields
+    # Format kinds are constrained to what _fmt_cell implements.
+    for columns in (bsf.PROFIT_COLUMNS, bsf.BALANCE_COLUMNS, bsf.CASH_FLOW_COLUMNS):
+        for col in columns:
+            assert col.kind in ("cny", "pct", "x", "num"), col
+
 
 def _profit_rows():
-    """Synthetic BaoStock query_profit_data result rows."""
+    """Synthetic BaoStock query_profit_data rows (real field names)."""
     return [
         {"code": "sh.600519", "pubDate": "2024-10-30", "statDate": "2024-09-30",
-         "totalShare": 1.256e9, "npParentCompanyOwners": 6.08e10,
-         "operateProfit": 7.5e10, "roeAvg": 15.2, "epsTTM": 48.42},
+         "roeAvg": 0.152, "npMargin": 0.50, "gpMargin": 0.91,
+         "netProfit": 6.08e10, "epsTTM": 48.42, "MBRevenue": 1.21e11,
+         "totalShare": 1.256e9, "liqaShare": 1.256e9},
         {"code": "sh.600519", "pubDate": "2024-08-29", "statDate": "2024-06-30",
-         "totalShare": 1.256e9, "npParentCompanyOwners": 4.17e10,
-         "operateProfit": 5.2e10, "roeAvg": 14.8, "epsTTM": 33.19},
+         "roeAvg": 0.148, "npMargin": 0.49, "gpMargin": 0.91,
+         "netProfit": 4.17e10, "epsTTM": 33.19, "MBRevenue": 8.6e10,
+         "totalShare": 1.256e9, "liqaShare": 1.256e9},
         {"code": "sh.600519", "pubDate": "2025-04-15", "statDate": "2024-12-31",
-         "totalShare": 1.256e9, "npParentCompanyOwners": 8.6e10,
-         "operateProfit": 1.05e11, "roeAvg": 16.1, "epsTTM": 68.47},  # future
+         "roeAvg": 0.161, "npMargin": 0.52, "gpMargin": 0.92,
+         "netProfit": 8.6e10, "epsTTM": 68.47, "MBRevenue": 1.7e11,
+         "totalShare": 1.256e9, "liqaShare": 1.256e9},  # future pubDate
     ]
 
 
 def _balance_rows():
-    """Synthetic BaoStock query_balance_data result rows."""
+    """Synthetic BaoStock query_balance_data rows (real field names)."""
     return [
         {"code": "sh.600519", "pubDate": "2024-10-30", "statDate": "2024-09-30",
-         "totalAssets": 4.5e11, "totalLiab": 1.2e11,
-         "totalShareholdersEquity": 3.3e11, "liabilityRate": 26.7},
+         "currentRatio": 3.81, "quickRatio": 2.75, "cashRatio": 1.93,
+         "YOYLiability": -0.04, "liabilityToAsset": 0.2192,
+         "assetToEquity": 1.28},
         {"code": "sh.600519", "pubDate": "2024-08-29", "statDate": "2024-06-30",
-         "totalAssets": 4.4e11, "totalLiab": 1.1e11,
-         "totalShareholdersEquity": 3.3e11, "liabilityRate": 25.0},
+         "currentRatio": 3.91, "quickRatio": 2.86, "cashRatio": 2.05,
+         "YOYLiability": -0.02, "liabilityToAsset": 0.2121,
+         "assetToEquity": 1.27},
     ]
 
 
 def _cashflow_rows():
-    """Synthetic BaoStock query_cash_flow_data result rows."""
+    """Synthetic BaoStock query_cash_flow_data rows (real field names)."""
     return [
         {"code": "sh.600519", "pubDate": "2024-10-30", "statDate": "2024-09-30",
-         "netCFOperate": 5.0e10, "netCFInvest": -2.0e10, "netCFFinance": -1.0e10},
+         "CAToAsset": 0.72, "NCAToAsset": 0.28, "tangibleAssetToAsset": 0.99,
+         "ebitToInterest": 78.5, "CFOToOR": 0.51, "CFOToNP": 1.02,
+         "CFOToGr": 0.51},
         {"code": "sh.600519", "pubDate": "2024-08-29", "statDate": "2024-06-30",
-         "netCFOperate": 3.5e10, "netCFInvest": -1.5e10, "netCFFinance": -0.8e10},
+         "CAToAsset": 0.73, "NCAToAsset": 0.27, "tangibleAssetToAsset": 0.99,
+         "ebitToInterest": 80.1, "CFOToOR": 0.48, "CFOToNP": 0.99,
+         "CFOToGr": 0.48},
     ]
 
 
@@ -1275,6 +1438,13 @@ def test_income_statement_pit_drops_future(monkeypatch):
     assert "2024-10-30" in out         # published before curr_date -> kept
     assert "2024-08-29" in out         # kept
     assert "2025-04-15" not in out     # future pubDate -> PIT drop
+    # Real fields only: revenue=MBRevenue, profit=netProfit; roeAvg is a
+    # fraction (0.152) rendered as 15.20%; epsTTM as-is.
+    assert "1210.00亿" in out          # MBRevenue 1.21e11 -> 1210.00亿
+    assert "608.00亿" in out           # netProfit 6.08e10 -> 608.00亿
+    assert "15.20%" in out             # roeAvg 0.152 x100
+    assert "48.42" in out              # epsTTM
+    assert "OpProfit" not in out       # no operating-profit field exists
 
 
 @pytest.mark.unit
@@ -1304,7 +1474,12 @@ def test_balance_sheet_pit(monkeypatch):
     out = bsv.get_a_share_balance_sheet_native("600519.SS", "2024-11-01", 540)
     assert "# A-share Balance Sheet" in out
     assert "2024-10-30" in out
-    assert "debt ratio" in out.lower() or "liabilityRate" in out or "26.70" in out
+    # Real fields only (solvency ratios; the endpoint has NO total-assets
+    # levels): liabilityToAsset 0.2192 is a fraction rendered as 21.92%.
+    assert "21.92%" in out            # liabilityToAsset 0.2192 x100
+    assert "3.81x" in out             # currentRatio as a multiple
+    assert "totalAssets" not in out   # fabricated stock levels must be gone
+    assert "RATIOS ONLY" in out       # the capability caveat is in-band
 
 
 @pytest.mark.unit
@@ -1313,6 +1488,11 @@ def test_cashflow_statement_pit(monkeypatch):
     out = bsv.get_a_share_cashflow_statement_native("600519.SS", "2024-11-01", 540)
     assert "# A-share Cashflow Statement" in out
     assert "2024-10-30" in out
+    # Real fields only (quality ratios; no absolute CFO amounts exist).
+    assert "51.00%" in out            # CFOToOR 0.51 x100
+    assert "1.02x" in out             # CFOToNP multiple
+    assert "netCFOperate" not in out  # fabricated absolute-flow fields gone
+    assert "RATIOS ONLY" in out
 
 
 @pytest.mark.unit

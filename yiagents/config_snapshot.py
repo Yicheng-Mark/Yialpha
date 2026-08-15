@@ -54,14 +54,21 @@ logger = logging.getLogger(__name__)
 _HISTORY_SUBDIR = "config_history"
 
 
-def _history_dir(config: dict[str, Any] | None = None) -> Path:
-    """Resolve the config history directory, creating it if missing."""
+def _history_dir(config: dict[str, Any] | None = None, *, create: bool = True) -> Path:
+    """Resolve the config history directory, creating it only when *create*.
+
+    Read paths (``load_last_snapshot`` / ``list_snapshots``) pass
+    ``create=False`` so merely *checking* history — e.g. the CLI's startup
+    drift warning — never touches the filesystem on a machine that has never
+    recorded a snapshot. Write paths keep the create-on-resolve behaviour.
+    """
     cache_dir = (
         (config or {}).get("data_cache_dir")
         or os.path.join(os.path.expanduser("~"), ".yiagents", "cache")
     )
     path = Path(cache_dir) / _HISTORY_SUBDIR
-    path.mkdir(parents=True, exist_ok=True)
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
     return path
 
 
@@ -146,7 +153,9 @@ def load_last_snapshot(
     history_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     """Load the most recent snapshot from the history dir, or ``None`` if empty."""
-    target_dir = history_dir or _history_dir(config)
+    target_dir = history_dir or _history_dir(config, create=False)
+    if not target_dir.is_dir():
+        return None
     snapshots = sorted(target_dir.glob("config_*.json"))
     if not snapshots:
         return None
@@ -188,7 +197,9 @@ def list_snapshots(
     history_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Return a summary list of all snapshots (timestamp, reason, fingerprint)."""
-    target_dir = history_dir or _history_dir(config)
+    target_dir = history_dir or _history_dir(config, create=False)
+    if not target_dir.is_dir():
+        return []
     summaries: list[dict[str, Any]] = []
     for path in sorted(target_dir.glob("config_*.json")):
         try:

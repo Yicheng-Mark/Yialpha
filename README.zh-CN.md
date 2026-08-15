@@ -205,7 +205,7 @@ yiagents batch -t BTCUSDT -t ETHUSDT -d 2026-06-30 --asset-type crypto_spot
 | `-t / --ticker` | 标的代码，重复 `-t` 指定多个；**一个批次只能同一资产类别**（全股票或全加密） |
 | `-d / --date` | 分析日期 `YYYY-MM-DD` |
 | `--asset-type` | `stock` / `crypto` / `crypto_spot` / `crypto_perp` / `auto`（auto = 按首个 ticker 推断，混类会报错） |
-| `-w / --workers` | 并发池大小 K，默认 `YIAGENTS_BATCH_WORKERS=3` |
+| `-w / --workers` | 并发池大小 K。**默认严格串行（K=1）**；仅当设置 `YIAGENTS_BATCH_CONCURRENCY=true` 或显式传 `-w K>1` 时才启用并发池（此时 `YIAGENTS_BATCH_WORKERS` 决定池大小）；`-w 1` 为显式串行 |
 
 **并发是安全的**：每个 worker 线程独占一个图实例（无竞态），记忆日志与 OHLCV 缓存用 filelock 序列化，单票失败不连累整批，且每只标的的分析与串行跑**字节等价**——并发层叠在 `propagate()` 之上，不改任何 agent 输入 / 深度 / 推理参数。详见 [yiagents/batch/runner.py](yiagents/batch/runner.py)。
 

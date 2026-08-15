@@ -185,8 +185,15 @@ _OPENAI_REASONING_MODEL = re.compile(r"^(gpt-5|o[1-9])")
 
 
 def _supports_reasoning_effort(model: str) -> bool:
-    """Whether the (native OpenAI) model accepts ``reasoning_effort``."""
-    return bool(_OPENAI_REASONING_MODEL.match(model.lower().strip()))
+    """Whether the (native OpenAI) model accepts ``reasoning_effort``.
+
+    Matches the MODEL SEGMENT after the last ``/`` so OpenRouter-style
+    namespaced IDs (``openai/gpt-5.5``, ``openai/o3-mini``) resolve too —
+    the former whole-string match silently dropped an explicitly configured
+    ``reasoning_effort`` for them.
+    """
+    segment = model.lower().strip().rsplit("/", 1)[-1]
+    return bool(_OPENAI_REASONING_MODEL.match(segment))
 
 
 @dataclass(frozen=True)

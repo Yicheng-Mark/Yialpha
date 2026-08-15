@@ -11,6 +11,7 @@ Pure: no global state, no config reads. The caller owns the equity stream.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,13 @@ class DrawdownBreaker:
 
         self.peak: float | None = None
         self.cooldown_remaining: int = 0
+        # Last VALID drawdown magnitude (positive) and regime, from the most
+        # recent update() that accepted its input. Used to keep the breaker's
+        # reported state stable across a bad equity tick (None / NaN / <= 0):
+        # one corrupt data point must not reset a deep-drawdown regime back to
+        # "normal" — that would whitelist re-opening positions for a beat.
+        self._last_drawdown: float | None = None
+        self._last_regime: str | None = None
 
     # ------------------------------------------------------------------
     # Regime logic
@@ -73,22 +81,42 @@ class DrawdownBreaker:
     def update(self, equity_value: float) -> BreakerState:
         """Advance the breaker with a new equity value, returning the state.
 
-        ``equity_value`` must be a positive finite number; non-finite or
-        non-positive input leaves the prior state untouched (defensive —
-        the live equity feed should never produce NaN, but a stray NaN
-        must not corrupt the breaker).
+        ``equity_value`` must be a positive finite number; ``None``, NaN, inf,
+        or non-positive input leaves the accumulated state untouched and
+        returns the LAST VALID regime with ``can_open_new=False`` (defensive
+        — the live equity feed should never produce NaN, but a stray bad tick
+        must neither crash the breaker nor launder a deep-drawdown regime back
+        to "normal"). With no valid history at all, the neutral start state is
+        returned unchanged.
         """
-        ev = float(equity_value)
-        if equity_value is None or ev <= 0.0 or ev != ev:  # NaN check
-            # NaN-safe early out: preserve last state shape.
-            if self.peak is None:
+        # Guard BEFORE float(): float(None) raises TypeError, which would make
+        # the docstring's defensive path dead code for the None case.
+        if equity_value is not None:
+            try:
+                ev = float(equity_value)
+            except (TypeError, ValueError):
+                ev = None
+        else:
+            ev = None
+        if ev is None or not (ev > 0.0) or not isfinite(ev):
+            # NaN / inf / non-positive: bad tick. Do NOT touch peak/cooldown,
+            # do NOT re-derive the regime from garbage. Replay the last valid
+            # drawdown + regime (fail-closed: new positions blocked this beat
+            # because the true regime is unknown).
+            if self._last_regime is None or self._last_drawdown is None:
                 return BreakerState(
                     can_open_new=True,
                     position_multiplier=1.0,
                     current_drawdown=0.0,
                     regime="normal",
                 )
-            return self._state(0.0, "normal")
+            state = self._state(self._last_drawdown, self._last_regime)
+            return BreakerState(
+                can_open_new=False,
+                position_multiplier=state.position_multiplier,
+                current_drawdown=state.current_drawdown,
+                regime=state.regime,
+            )
 
         if self.peak is None or ev > self.peak:
             self.peak = ev
@@ -116,6 +144,8 @@ class DrawdownBreaker:
         if regime != "hard_stop" and self.cooldown_remaining > 0:
             self.cooldown_remaining -= 1
 
+        self._last_drawdown = drawdown
+        self._last_regime = regime
         return self._state(drawdown, regime)
 
     def _state(self, drawdown: float, regime: str) -> BreakerState:
@@ -162,8 +192,15 @@ class DrawdownBreaker:
         Rejects when the position (or, if given, the sector aggregate)
         exceeds its cap as a fraction of equity.
         """
-        eq = float(equity_value)
-        if equity_value is None or eq <= 0.0 or eq != eq:
+        # Guard BEFORE float(): float(None) raises TypeError, which would make
+        # this rejection path unreachable for the None case.
+        if equity_value is None:
+            return False, "equity_value must be a positive finite number"
+        try:
+            eq = float(equity_value)
+        except (TypeError, ValueError):
+            return False, "equity_value must be a positive finite number"
+        if eq <= 0.0 or not isfinite(eq):  # non-positive, NaN, or inf
             return False, "equity_value must be a positive finite number"
 
         pv = float(position_value) if position_value is not None else 0.0
@@ -193,3 +230,5 @@ class DrawdownBreaker:
         """Forget the running peak and any cooldown, returning to neutral."""
         self.peak = None
         self.cooldown_remaining = 0
+        self._last_drawdown = None
+        self._last_regime = None

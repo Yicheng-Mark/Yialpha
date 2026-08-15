@@ -12,6 +12,7 @@ from dateutil.relativedelta import relativedelta
 from .disk_cache import cached_or_fetch, safe_cache_component, vendor_cache_dir
 from .indicator_catalog import TOOL_DESCRIPTIONS
 from .stockstats_utils import (
+    OHLCV_CACHE_TTL_SECONDS,
     _assert_ohlcv_not_stale,
     filter_financials_by_date,
     load_ohlcv,
@@ -33,9 +34,31 @@ best_ind_params = TOOL_DESCRIPTIONS
 #: Statements / snapshot payloads change at most daily (filings and Yahoo's
 #: refresh cadence), so a ~24h on-disk cache collapses the 3-4 yfinance
 #: round trips per statement per ticker per run into one. Windows of daily
-#: history fetched by the reflection layer are immutable once in the past,
-#: so the same TTL bounds them too.
+#: history that end STRICTLY IN THE PAST are immutable once written, so the
+#: same TTL bounds them too.
 _STATEMENT_CACHE_TTL_DAYS = 1.0
+
+
+def _history_cache_ttl_days(end_date: str) -> float:
+    """TTL for a cached daily-history window, keyed on whether it reaches today.
+
+    A window whose ``end_date`` is today or later can still gain rows — the
+    current day's bar appears only after the close, so a snapshot taken in the
+    morning would be served for a full 24h and miss today's close. Such windows
+    reuse the OHLCV pipeline's same-day refresh TTL (:data:
+    `OHLCV_CACHE_TTL_SECONDS`, 15 minutes): recent enough that an intraday run
+    picks up today's close soon after it publishes, long enough that a day
+    with no bar at all (weekend, holiday) cannot trigger a download on every
+    call. Windows entirely in the past are immutable and keep the ~24h TTL.
+    Unparseable dates fall back to the daily TTL (statements-grade caching).
+    """
+    try:
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return _STATEMENT_CACHE_TTL_DAYS
+    if end_dt >= datetime.now().date():
+        return OHLCV_CACHE_TTL_SECONDS / 86400.0
+    return _STATEMENT_CACHE_TTL_DAYS
 
 
 class _EmptyVendorPayload(Exception):
@@ -121,15 +144,19 @@ def _cached_yf_frame(
 
 
 def get_YFin_history_cached(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """``yf.Ticker(symbol).history(start, end)`` behind the ~24h cache.
+    """``yf.Ticker(symbol).history(start, end)`` behind the TTL cache.
 
     Same frame, same window (inclusive start, exclusive end), same retry
     policy as the direct call — used by the reflection layer, where a batch
     run over N tickers re-downloads the SAME benchmark window once per
-    ticker. The index is restored as a DatetimeIndex when it round-tripped
-    as date strings (yfinance daily history), so downstream ``index.date``
-    slicing keeps working; other index shapes are returned exactly as the
-    CSV round-trip produced them. Empty vendor frames return uncached (see
+    ticker. Windows that end in the past are immutable and cached ~24h;
+    windows reaching today are cached only :data:`OHLCV_CACHE_TTL_SECONDS`
+    (15 min) so today's close is picked up minutes after it publishes
+    instead of the next day (see :func:`_history_cache_ttl_days`). The index
+    is restored as a DatetimeIndex when it round-tripped as date strings
+    (yfinance daily history), so downstream ``index.date`` slicing keeps
+    working; other index shapes are returned exactly as the CSV round-trip
+    produced them. Empty vendor frames return uncached (see
     :class:`_EmptyVendorPayload`).
     """
     filename = (
@@ -148,7 +175,7 @@ def get_YFin_history_cached(symbol: str, start_date: str, end_date: str) -> pd.D
     try:
         raw = cached_or_fetch(
             vendor_cache_dir("yfinance"), filename, _fetch,
-            ttl_days=_STATEMENT_CACHE_TTL_DAYS, vendor="yfinance",
+            ttl_days=_history_cache_ttl_days(end_date), vendor="yfinance",
         )
     except _EmptyVendorPayload:
         return pd.DataFrame()

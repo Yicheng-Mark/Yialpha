@@ -12,7 +12,8 @@ at all, all reached directly (proxy bypassed) and PIT-filtered:
 * northbound (Stock Connect / 沪深港通) individual holding
   via ``stock_hsgt_individual_em``;
 * sector/industry fund-flow ranking via ``stock_sector_fund_flow_rank``
-  (with the stock's own industry resolved via ``stock_board_industry_name_ths``);
+  (with the stock's own industry resolved via BaoStock's
+  ``query_stock_industry`` — a true per-stock mapping);
 * real-time spot quote via ``stock_zh_a_spot_em`` (live mode only);
 * market breadth (advance-decline) via ``stock_zh_a_spot`` (live mode only).
 
@@ -61,7 +62,6 @@ only advertised to the news analyst when ``YIAGENTS_A_SHARE_NATIVE`` is on
 
 from __future__ import annotations
 
-import contextlib
 import io
 import logging
 import math
@@ -70,12 +70,25 @@ import threading
 from datetime import date, timedelta
 
 from .errors import NoMarketDataError, VendorRateLimitError
+from .utils import is_historical_date
 
 logger = logging.getLogger(__name__)
 
 # AKShare calls are serialized so the proxy-env pop/restore in _direct_connect
 # cannot interleave under analyst-parallel mode (one call's "popped" window must
 # not overlap another's). Serial mode (the default) is unaffected.
+#
+# Scope of this lock (kept honest after audit): it serializes every
+# _direct_connect user in THIS process — all the AKShare calls above, plus the
+# tushare_vendor, which borrows _direct_connect for its own domestic HTTP calls
+# and therefore also contends here. It is NOT split per-endpoint: the protected
+# critical section is the process-wide os.environ mutation (a few dict ops
+# around the network call), whose cost is negligible next to the HTTP round
+# trip itself, so per-endpoint locks would add complexity without reducing
+# any real contention. Serializing unrelated domestic calls costs at most one
+# call's latency under analyst-parallel mode (they are already throttled
+# upstream); splitting would only matter with many concurrent domestic vendors,
+# which this project does not have.
 _call_lock = threading.Lock()
 _PROXY_ENV_KEYS = (
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
@@ -588,7 +601,7 @@ def get_a_share_northbound_native(
 
     try:
         with _direct_connect():
-            df = ak.stock_hsgt_individual_em(stock=code)
+            df = ak.stock_hsgt_individual_em(symbol=code)
     except Exception as exc:
         raise _akshare_failure(exc, ticker, "stock_hsgt_individual_em") from exc
 
@@ -683,26 +696,53 @@ def _fmt_shares(v) -> str:
 # --------------------------------------------------------------------------- #
 # Sector / industry fund-flow (板块/行业资金流)
 # --------------------------------------------------------------------------- #
-def _stock_industry(ak, code: str) -> str | None:
-    """Best-effort look up the THS industry (同花顺行业) for a stock code."""
+def _baostock_industry(ticker: str) -> str | None:
+    """Resolve a stock's industry via BaoStock's per-stock industry mapping.
+
+    ``bs.query_stock_industry(code=...)`` (fields delivered server-side:
+    updateDate / code / code_name / industry / industryClassification, per the
+    official docs) is a true stock -> industry mapping. The previous attempt
+    used ``ak.stock_board_industry_name_ths(symbol=...)`` — that function
+    takes **no** parameters and returns the industry-board *catalog*
+    (name/code), not a per-stock mapping, so the TypeError was swallowed and
+    the stock's industry marker never resolved.
+
+    BaoStock is a plain TCP service (no proxy bypass needed) and is already a
+    dependency of the ``a_share_native`` category; the login/throttle
+    infrastructure is reused from :mod:`yiagents.dataflows.baostock_vendor`.
+    Returns ``None`` on any failure or missing row — the caller must then say
+    the industry could not be resolved (fail-honest, never fabricate).
+    """
+    # Ticker-contract errors (non-A-share input) are raised OUTSIDE the
+    # best-effort try: they are the caller's contract. Once the ticker is
+    # validated, EVERY failure below — including baostock not being installed
+    # (NoMarketDataError from _require_baostock, which must NOT be conflated
+    # with the ticker contract) — is an industry-lookup miss -> None.
+    from .baostock_vendor import _BaostockSession
+
+    bs_code = f"{_market_for(ticker)}.{_to_akshare_code(ticker)}"
     try:
-        with _direct_connect():
-            df = ak.stock_board_industry_name_ths(symbol="所属行业")
+        with _BaostockSession() as bs:
+            rs = bs.query_stock_industry(code=bs_code)
+        if getattr(rs, "error_code", "0") != "0":
+            logger.warning(
+                "akshare: baostock query_stock_industry failed for %s: %s",
+                bs_code, getattr(rs, "error_msg", "?"),
+            )
+            return None
+        while (rs.error_code == "0") and rs.next():
+            row = dict(zip(rs.fields, rs.get_row_data(), strict=False))
+            industry = str(row.get("industry", "") or "").strip()
+            return industry or None
     except Exception as exc:  # noqa: BLE001 -- best-effort lookup
-        # The sector-flow report just loses this stock's industry marker, but
-        # that loss should be observable rather than invisible.
-        logger.warning("akshare: industry lookup failed for %s: %s", code, exc)
+        logger.warning("akshare: industry lookup failed for %s: %s", ticker, exc)
         return None
-    if df is None or getattr(df, "empty", True):
-        return None
-    col_code = _pick(df.columns, ("代码",))
-    col_name = _pick(df.columns, ("所属行业", "行业", "概念"))
-    if not col_code or not col_name:
-        return None
-    for _, r in df.iterrows():
-        if str(r[col_code]).strip() == code:
-            return str(r[col_name]).strip()
     return None
+
+
+def _stock_industry(ticker: str) -> str | None:
+    """Best-effort resolve the stock's industry name (BaoStock mapping)."""
+    return _baostock_industry(ticker)
 
 
 def get_a_share_sector_flow_native(
@@ -712,13 +752,16 @@ def get_a_share_sector_flow_native(
     """Industry/sector fund-flow ranking with this stock's sector highlighted.
 
     Pulls AKShare's ``stock_sector_fund_flow_rank`` (Eastmoney 行业资金流),
-    reached **directly** (proxy env popped), plus ``stock_board_industry_name_ths``
-    to resolve the stock's own industry. Shows where capital is rotating across
-    industries and whether this stock's sector is gaining or losing institutional
-    money. The endpoint returns the latest snapshot (no historical date param),
-    so rows are not date-filtered — for a historical ``curr_date`` this honestly
-    returns the current snapshot with an explicit caveat (the sector-flow signal
-    is a real-time/live-mode indicator, not reconstructable for backtests).
+    reached **directly** (proxy env popped), plus BaoStock's
+    ``query_stock_industry`` to resolve the stock's own industry (a true
+    per-stock mapping — see :func:`_baostock_industry` for why the previous
+    AKShare board-catalog call never worked). Shows where capital is rotating
+    across industries and whether this stock's sector is gaining or losing
+    institutional money. The endpoint returns the latest snapshot (no
+    historical date param), so rows are not date-filtered — for a historical
+    ``curr_date`` this honestly returns the current snapshot with an explicit
+    caveat (the sector-flow signal is a real-time/live-mode indicator, not
+    reconstructable for backtests).
 
     Non-A-share ticker -> :class:`NoMarketDataError`.
     """
@@ -733,17 +776,15 @@ def get_a_share_sector_flow_native(
         raise _akshare_failure(exc, ticker, "stock_sector_fund_flow_rank") from exc
 
     # Resolve the stock's own industry (best-effort; not critical).
-    my_sector = None
-    with contextlib.suppress(Exception):
-        my_sector = _stock_industry(ak, code)
+    my_sector = _stock_industry(ticker)
 
     out = io.StringIO()
     out.write(f"# A-share Sector Fund Flow (AKShare / Eastmoney) — {ticker}'s sector\n")
     out.write(f"(snapshot as of {curr_date or 'now'}, stock code {code})\n")
     if my_sector:
-        out.write(f"# Stock's industry: **{my_sector}**\n")
+        out.write(f"# Stock's industry (BaoStock query_stock_industry): **{my_sector}**\n")
     else:
-        out.write("# Stock's industry: could not be resolved\n")
+        out.write("# Stock's industry: could not be resolved — do not guess it\n")
     out.write("# Source: AKShare stock_sector_fund_flow_rank (东财 行业资金流). Reached "
               "directly (proxy bypassed). Positive 主力净流入 = net institutional inflow.\n")
     if curr_date:
@@ -788,13 +829,25 @@ def get_a_share_sector_flow_native(
     out.write(f"\n# Top {len(rows)} industries by main net inflow\n\n")
     out.write("| 行业 | 主力净额 | 主力占比 | 超大单 | 大单 |\n")
     out.write("|---|---|---|---|---|\n")
+    matched = False
     for sector_name, r in rows:
-        marker = " ← **本股所属**" if my_sector and sector_name == my_sector else ""
+        marker = ""
+        if my_sector and sector_name == my_sector:
+            marker = " ← **本股所属**"
+            matched = True
         out.write(
             f"| {sector_name}{marker} | {_fmt_yuan(_cell(r, col_main))} | "
             f"{_fmt_pct(_cell(r, col_main_pct))} | "
             f"{_fmt_yuan(_cell(r, col_super))} | "
             f"{_fmt_yuan(_cell(r, col_large))} |\n"
+        )
+    if my_sector and not matched:
+        # The two classifications differ (BaoStock industry vs the table's
+        # Eastmoney sectors) — say so instead of silently dropping the marker.
+        out.write(
+            f"\nNOTE: the stock's industry ({my_sector}) has no identically-named "
+            "row in the sector table above (industry classification systems "
+            "differ); do not force-match it to one of the listed sectors.\n"
         )
     return out.getvalue().rstrip("\n")
 
@@ -812,16 +865,19 @@ def get_a_share_realtime_quote_native(
     latest price, change %, volume, amount, turnover rate, PE (dynamic), etc.
     This is a live snapshot — for a historical ``curr_date`` the function
     honestly returns a sentinel explaining that real-time data is not available
-    for past dates (preventing lookahead bias in backtests).
+    for past dates (preventing lookahead bias in backtests). ``curr_date`` =
+    today (or empty) IS live mode — the framework gate is
+    :func:`utils.is_historical_date` (today = live, any other explicit date =
+    backtest), so an explicit today no longer misroutes to the sentinel.
 
     Non-A-share ticker -> :class:`NoMarketDataError`.
     """
     ak = _require_akshare()
     code = _to_akshare_code(ticker)
-    upper = (curr_date or "")[:10]
 
-    # Historical mode: real-time data would leak the future.
-    if upper:
+    # Historical mode (a past/future analysis date): real-time data would leak
+    # the future. Today itself is live and allowed.
+    if is_historical_date(curr_date):
         out = io.StringIO()
         out.write(f"# A-share Real-Time Quote for {ticker}\n")
         out.write(f"(requested as of {curr_date})\n\n")
@@ -906,6 +962,36 @@ def _fmt_num(v) -> str:
 # --------------------------------------------------------------------------- #
 # Market breadth (市场宽度 / 涨跌家数)
 # --------------------------------------------------------------------------- #
+# Daily price-limit (涨停/跌停) thresholds by board, in percent. The old flat
+# >=9.9% counting mislabeled every 创业板/科创板 limit move (their limit is
+# +/-20%) and every ST move (+/-5%). Kept slightly inside the real limits
+# (9.9/19.9/4.9) because the spot 涨跌幅 is rounded to 2 decimals.
+_MAIN_LIMIT_PCT = 9.9      # 主板 (Shanghai/Shenzhen main boards)
+_GEM_STAR_LIMIT_PCT = 19.9  # 创业板 (300/301) + 科创板 (688/681)
+_ST_LIMIT_PCT = 4.9        # ST / *ST special-treatment stocks (name contains "ST")
+
+
+def _limit_thresholds(code: str | None, name: str | None) -> tuple[float, float]:
+    """(limit-up, limit-down) threshold pair in percent for one stock row.
+
+    Tiered by board prefix (300/301 ChiNext, 688/681 STAR -> +/-19.9%) and by
+    ST-in-name (+/-4.9%) when the spot table carries a 名称 column; everything
+    else defaults to the +/-9.9% main-board tier. Beijing Exchange codes
+    (8xx/43x/92x, +/-30%) are not part of the ``is_a_stock`` gate and keep the
+    main-board tier — noted in the breadth output's threshold legend.
+
+    ``code`` tolerates both the bare 6-digit form (``"300750"``, Eastmoney
+    spot) and the exchange-prefixed form (``"sz300750"`` — Sina's 代码 column
+    is a positional rename of ``symbol``); only the trailing 6 digits decide.
+    """
+    digits = "".join(ch for ch in (code or "") if ch.isdigit())[-6:]
+    if digits.startswith(("300", "301", "688", "681")):
+        return (_GEM_STAR_LIMIT_PCT, -_GEM_STAR_LIMIT_PCT)
+    if "ST" in (name or "").upper():
+        return (_ST_LIMIT_PCT, -_ST_LIMIT_PCT)
+    return (_MAIN_LIMIT_PCT, -_MAIN_LIMIT_PCT)
+
+
 def get_a_share_market_breadth_native(
     curr_date: str | None = None,
 ) -> str:
@@ -917,14 +1003,16 @@ def get_a_share_market_breadth_native(
     counts. This is a market-level (not per-stock) signal — the breadth of
     participation behind a move.
 
-    Live mode only: for a historical ``curr_date`` the function honestly
-    returns a sentinel explaining that real-time breadth cannot be reconstructed
-    for a past date (preventing lookahead bias in backtests).
+    Live mode only (``curr_date`` empty or exactly today, per
+    :func:`utils.is_historical_date`): for a historical ``curr_date`` the
+    function honestly returns a sentinel explaining that real-time breadth
+    cannot be reconstructed for a past date (preventing lookahead bias in
+    backtests). Limit-up/down counting is tiered by the stock's board and ST
+    status (see :func:`_limit_thresholds`), not a one-size 9.9%.
     """
     ak = _require_akshare()
-    upper = (curr_date or "")[:10]
 
-    if upper:
+    if is_historical_date(curr_date):
         out = io.StringIO()
         out.write("# A-share Market Breadth\n")
         out.write(f"(requested as of {curr_date})\n\n")
@@ -950,6 +1038,8 @@ def get_a_share_market_breadth_native(
         return out.getvalue().rstrip("\n")
 
     col_pct = _pick(df.columns, ("涨跌幅", "changepercent"))
+    col_code = _pick(df.columns, ("代码", "code", "symbol"))
+    col_name = _pick(df.columns, ("名称", "name"))
     adv = dec = flat = limit_up = limit_down = 0
     total_pct = 0.0
     counted = 0
@@ -966,9 +1056,12 @@ def get_a_share_market_breadth_native(
             dec += 1
         else:
             flat += 1
-        if pct >= 9.9:
+        code = str(_cell(r, col_code) or "").strip()
+        name = str(_cell(r, col_name) or "").strip()
+        up_thr, down_thr = _limit_thresholds(code, name)
+        if pct >= up_thr:
             limit_up += 1
-        elif pct <= -9.9:
+        elif pct <= down_thr:
             limit_down += 1
 
     if counted == 0:
@@ -980,7 +1073,14 @@ def get_a_share_market_breadth_native(
     out.write(f"\n# Market Breadth ({counted} stocks)\n\n")
     out.write(f"- 上涨: {adv}  |  下跌: {dec}  |  平盘: {flat}\n")
     out.write(f"- 平均涨跌幅: {avg_pct:+.2f}%\n")
-    out.write(f"- 涨停 (≥9.9%): {limit_up}  |  跌停 (≤-9.9%): {limit_down}\n")
+    out.write(f"- 涨停: {limit_up}  |  跌停: {limit_down} "
+              f"(tiered thresholds: 主板 ±{_MAIN_LIMIT_PCT}% / 创业板·科创板 "
+              f"±{_GEM_STAR_LIMIT_PCT}% / ST ±{_ST_LIMIT_PCT}%; 300/301/688/681 "
+              "prefixes and ST-in-name detected per row")
+    if col_name is None:
+        out.write("; NOTE: no 名称 column returned — the ST tier could not be "
+                  "applied, so ST stocks near ±5% are NOT counted as limit moves")
+    out.write(")\n")
     ad_ratio = adv / dec if dec > 0 else float("inf")
     if dec > 0:
         out.write(f"- 涨跌比 (A/D ratio): {ad_ratio:.2f}\n")

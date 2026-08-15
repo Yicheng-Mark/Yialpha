@@ -1,6 +1,7 @@
 import logging
 
 from .alpha_vantage_common import AlphaVantageNotConfiguredError, _make_api_request
+from .errors import NoMarketDataError
 from .indicator_catalog import (
     AV_COLUMNS,
     AV_DESCRIPTIONS,
@@ -127,25 +128,45 @@ def get_indicator(
                 "datatype": "csv"
             })
         elif indicator == "vwma":
-            # Alpha Vantage doesn't have direct VWMA, so we'll return an informative message
-            # In a real implementation, this would need to be calculated from OHLCV data
-            return f"## VWMA (Volume Weighted Moving Average) for {symbol}:\n\nVWMA calculation requires OHLCV data and is not directly available from Alpha Vantage API.\nThis indicator would need to be calculated from the raw stock data using volume-weighted price averaging.\n\n{indicator_descriptions.get('vwma', 'No description available.')}"
+            # Alpha Vantage has no VWMA endpoint. RAISE (do not return prose):
+            # a returned message is a SUCCESS to the router, which then never
+            # falls through to the yfinance vendor — the one that CAN compute
+            # vwma from OHLCV via stockstats. NoMarketDataError routes to the
+            # next vendor in the chain and, if none serves, to the sentinel.
+            raise NoMarketDataError(
+                symbol, symbol,
+                "Alpha Vantage has no VWMA endpoint (compute from OHLCV "
+                "via the yfinance indicator vendor instead)",
+            )
         else:
-            return f"Error: Indicator {indicator} not implemented yet."
+            # Unreachable behind the supported_indicators gate above; kept as a
+            # typed raise (never a returned "Error:" string) for defence.
+            raise NoMarketDataError(
+                symbol, symbol, f"indicator {indicator} not implemented yet"
+            )
 
         # Parse CSV data and extract values for the date range
         if not isinstance(data, str):
-            return f"Error: No CSV data returned for {indicator}"
+            raise NoMarketDataError(
+                symbol, symbol,
+                f"no CSV data returned for {indicator} (got {type(data).__name__})",
+            )
         lines = data.strip().split('\n')
         if len(lines) < 2:
-            return f"Error: No data returned for {indicator}"
+            raise NoMarketDataError(
+                symbol, symbol, f"no data rows returned for {indicator}"
+            )
 
         # Parse header and data
         header = [col.strip() for col in lines[0].split(',')]
         try:
             date_col_idx = header.index('time')
         except ValueError:
-            return f"Error: 'time' column not found in data for {indicator}. Available columns: {header}"
+            raise NoMarketDataError(
+                symbol, symbol,
+                f"'time' column not found for {indicator}; "
+                f"available columns: {header}",
+            ) from None
 
         # Map internal indicator names to expected CSV column names from Alpha
         # Vantage (rendered from the shared catalog as ``col_name_map``).
@@ -158,7 +179,11 @@ def get_indicator(
             try:
                 value_col_idx = header.index(target_col_name)
             except ValueError:
-                return f"Error: Column '{target_col_name}' not found for indicator '{indicator}'. Available columns: {header}"
+                raise NoMarketDataError(
+                    symbol, symbol,
+                    f"column {target_col_name!r} not found for indicator "
+                    f"{indicator!r}; available columns: {header}",
+                ) from None
 
         result_data = []
         for line in lines[1:]:
@@ -201,6 +226,11 @@ def get_indicator(
         # Vendor unavailable (no API key). Let it propagate so the router can
         # fall back / emit the no-data sentinel instead of returning this as a
         # successful-looking error string.
+        raise
+    except NoMarketDataError:
+        # Typed no-data (including the vwma hand-off above): re-raise untouched
+        # so the router tries the next vendor / emits its sentinel. Not logged
+        # as an exception — this is the expected degradation path, not a fault.
         raise
     except Exception:
         # Raise instead of returning an "Error retrieving …" string: returning

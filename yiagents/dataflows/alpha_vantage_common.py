@@ -9,7 +9,11 @@ import pandas as pd
 import requests
 
 from .disk_cache import cached_or_fetch, vendor_cache_dir
-from .errors import VendorNotConfiguredError, VendorRateLimitError
+from .errors import (
+    NoMarketDataError,
+    VendorNotConfiguredError,
+    VendorRateLimitError,
+)
 from .netretry import with_transient_retry
 
 logger = logging.getLogger(__name__)
@@ -116,6 +120,18 @@ def _raw_api_request(function_name: str, params: dict) -> dict | str:
             # Reuse the existing "not configured" error so a bad key surfaces as
             # a real, actionable failure rather than a mislabeled rate limit (#991).
             raise AlphaVantageNotConfiguredError(f"Alpha Vantage API key invalid or missing: {notice}")
+
+    # "Error Message" is AV's hard-failure body (e.g. "Invalid API call" for an
+    # unknown/invalid symbol or parameter). Returning it as text made every
+    # caller treat the error prose as a successful payload; classify it as the
+    # taxonomy's no-data error so the router falls through to the next vendor
+    # or emits its sentinel instead.
+    error_message = response_json.get("Error Message")
+    if error_message:
+        symbol = params.get("symbol") or params.get("tickers") or function_name
+        raise NoMarketDataError(
+            str(symbol), detail=f"Alpha Vantage error: {error_message}"
+        )
 
     return response_text
 

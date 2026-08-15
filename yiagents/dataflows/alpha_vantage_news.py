@@ -1,4 +1,5 @@
 from .alpha_vantage_common import _make_api_request, format_datetime_for_api
+from .utils import current_pit_end
 
 
 def get_news(ticker, start_date, end_date) -> dict[str, str] | str:
@@ -14,6 +15,11 @@ def get_news(ticker, start_date, end_date) -> dict[str, str] | str:
     Returns:
         Dictionary containing news sentiment data or JSON string.
     """
+    # PIT guard: the tool carries no analysis-date argument (the LLM picks
+    # end_date from its prompt context), so clamp the query window against the
+    # run's pinned analysis date — otherwise future headlines enter a backtest
+    # prompt. Live mode (no analysis date pinned) is a no-op pass-through.
+    end_date = current_pit_end(end_date) or end_date
 
     params = {
         "tickers": ticker,
@@ -37,6 +43,10 @@ def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict
         Dictionary containing global news sentiment data or JSON string.
     """
     from datetime import datetime, timedelta
+
+    # PIT guard: clamp the window to the run's pinned analysis date (see
+    # get_news above); no-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
 
     # Calculate start date
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")

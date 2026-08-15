@@ -126,6 +126,12 @@ class GraphSetup:
                 self.tool_nodes,
                 self.conditional_logic,
                 max_threads=self.analyst_parallel_max_threads,
+                # Per-analyst LLM-token attribution for the parallel leg: the
+                # worker threads set their thread-local active_node to the
+                # analyst's serial node name, so node_perf telemetry stays
+                # comparable with the serial leg instead of collapsing into
+                # ``_unattributed_``. Inert when telemetry is off (None).
+                perf_tracker=self.perf_tracker,
             )
 
         # Create researcher and manager nodes. Bull/bear researchers do

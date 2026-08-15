@@ -48,6 +48,34 @@ class TestPatternMatches:
         caps = get_capabilities("deepseek-reasoner-pro")
         assert caps.supports_tool_choice is False
 
+    def test_future_deepseek_v10_inherits_thinking_quirks(self):
+        # Two-digit versions must not fall through to the default row.
+        caps = get_capabilities("deepseek-v10-chat")
+        assert caps.supports_tool_choice is False
+        assert caps.requires_reasoning_content_roundtrip is True
+
+
+@pytest.mark.unit
+class TestDeepseekV3IsChat:
+    """C12 regression: the DeepSeek v3 line is NON-thinking chat.
+
+    The former ``^deepseek-v\\d`` pattern misclassified ``deepseek-v3*`` as a
+    thinking model — wrongly rejecting ``tool_choice`` and forcing the
+    ``reasoning_content`` roundtrip on models that do not need either.
+    """
+
+    @pytest.mark.parametrize("model", [
+        "deepseek-v3", "deepseek-v3.1", "deepseek-v3.2", "deepseek-v3.2-exp",
+        "deepseek-v2-chat", "deepseek-v2.5", "deepseek-v1-chat",
+    ])
+    def test_v1_to_v3_get_chat_profile(self, model):
+        caps = get_capabilities(model)
+        assert caps.supports_tool_choice is True
+        assert caps.requires_reasoning_content_roundtrip is False
+        # DeepSeek's API accepts json_object but not json_schema.
+        assert caps.supports_json_mode is True
+        assert caps.supports_json_schema is False
+
     def test_minimax_m3_inherits_thinking_quirks(self):
         caps = get_capabilities("MiniMax-M3")
         assert caps.supports_tool_choice is False

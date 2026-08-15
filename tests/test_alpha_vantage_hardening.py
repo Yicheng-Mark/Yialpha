@@ -71,6 +71,57 @@ def test_invalid_key_not_mislabeled_as_rate_limit(monkeypatch):
 
 
 @pytest.mark.unit
+def test_error_message_json_raises_no_market_data(monkeypatch):
+    """AV's hard-failure body ({"Error Message": ...}, e.g. an invalid symbol)
+    is classified as NoMarketDataError — not returned as text for callers to
+    read as a successful payload, and not mislabeled as a rate limit."""
+    from yiagents.dataflows.errors import NoMarketDataError, VendorRateLimitError
+
+    body = ('{"Error Message": "Invalid API call. Please retry or visit the '
+            'documentation."}')
+    monkeypatch.setattr(av.requests, "get", _patched_get(body))
+    with pytest.raises(NoMarketDataError) as ei:
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "NOSUCH"})
+    assert not isinstance(ei.value, VendorRateLimitError)
+    assert "Invalid API call" in ei.value.detail
+    assert ei.value.symbol == "NOSUCH"  # the queried symbol is carried for the router
+
+
+@pytest.mark.unit
+def test_error_message_uses_function_name_when_no_symbol(monkeypatch):
+    """Endpoints without a ``symbol`` param (e.g. NEWS_SENTIMENT's ``tickers``)
+    still classify; the symbol field falls back to the function name."""
+    from yiagents.dataflows.errors import NoMarketDataError
+
+    monkeypatch.setattr(
+        av.requests, "get", _patched_get('{"Error Message": "Invalid API call."}')
+    )
+    with pytest.raises(NoMarketDataError) as ei:
+        av._make_api_request("NEWS_SENTIMENT", {"tickers": "AAPL"})
+    assert ei.value.symbol == "AAPL"  # tickers is also considered
+
+
+@pytest.mark.unit
+def test_error_message_is_not_cached_as_a_success(monkeypatch, tmp_path):
+    """A raised classification must not poison the cache: the next call
+    re-fetches instead of being served the stored error body."""
+    calls = {"n": 0}
+
+    def counting_get(url, params=None, **kwargs):
+        calls["n"] += 1
+        return _FakeResponse('{"Error Message": "Invalid API call."}')
+
+    monkeypatch.setattr(av.requests, "get", counting_get)
+    from yiagents.dataflows.errors import NoMarketDataError
+
+    with pytest.raises(NoMarketDataError):
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+    with pytest.raises(NoMarketDataError):
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+    assert calls["n"] == 2  # nothing was cached; both calls hit the transport
+
+
+@pytest.mark.unit
 def test_second_identical_request_served_from_cache(monkeypatch):
     """The disk cache collapses N identical batch-run calls to one HTTP hit."""
     calls = {"n": 0}

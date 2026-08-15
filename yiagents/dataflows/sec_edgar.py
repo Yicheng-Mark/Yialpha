@@ -36,6 +36,7 @@ import io
 import json
 import logging
 import os
+from datetime import date
 from typing import Any
 
 from .disk_cache import MinIntervalThrottle, cached_or_fetch, vendor_cache_dir
@@ -260,6 +261,61 @@ def _fmt(val: Any, unit_kind: str) -> str:
     return f"{f:.0f}"
 
 
+def _duration_days(rec: dict[str, Any]) -> int | None:
+    """A duration fact's length in days (``end - start``); None for instants.
+
+    Balance-sheet concepts (Assets, ...) are instant facts with no ``start``;
+    income/cashflow concepts carry an explicit ``start``. A 10-Q reports BOTH
+    the 3-month quarter and the year-to-date cumulative under the SAME
+    ``end`` date, which is exactly why duration matters (see
+    :func:`_pick_period_record`).
+    """
+    start, end = rec.get("start"), rec.get("end")
+    if not start or not end:
+        return None
+    try:
+        return (
+            date.fromisoformat(str(end)[:10]) - date.fromisoformat(str(start)[:10])
+        ).days
+    except ValueError:
+        return None
+
+
+def _pick_period_record(
+    recs: list[dict[str, Any]], end: str, target_days: int,
+) -> dict[str, Any] | None:
+    """Choose THE record for a period-``end`` among same-ended candidates.
+
+    XBRL facts sharing one ``end`` can have different durations: a Q3 10-Q
+    carries the 3-month quarter AND the 9-month YTD figure, and filings order
+    in the units array is arbitrary — the previous last-write-wins made the
+    rendered "quarterly" revenue silently flip to a YTD value depending on
+    filing order. Selection is now duration-aware:
+
+      * duration facts are ranked by |duration - target_days| — quarterly
+        reports target ~90 days, annual ~365 (53-week years and quarter
+        boundaries stay within a few days of the target);
+      * instant facts (no ``start``) are treated as perfect matches — a
+        concept is either instant or duration, so they never actually
+        compete with a duration fact;
+      * ties (same distance) break to the latest ``start``, then the latest
+        ``filed`` (a restated repeat of the same period wins).
+    """
+    candidates = [r for r in recs if r.get("end") == end]
+    if not candidates:
+        return None
+
+    def sort_key(r: dict[str, Any]) -> tuple[int, str, str]:
+        # Ascending sort, last element wins: -distance sorts BEST (smallest)
+        # duration match LAST, so [-1] is the closest to the target period —
+        # and among equally-close candidates the latest start/filed wins.
+        dur = _duration_days(r)
+        distance = 0 if dur is None else abs(dur - target_days)
+        return (-distance, r.get("start") or "", r.get("filed") or "")
+
+    return sorted(candidates, key=sort_key)[-1]
+
+
 def _render_statement(
     title: str,
     ticker: str,
@@ -269,6 +325,11 @@ def _render_statement(
     curr_date: str | None,
 ) -> str:
     """Build a transposed-CSV statement string from companyfacts, PIT-filtered."""
+    # The target reporting period for duration disambiguation: a quarterly
+    # statement wants the ~90-day standalone quarter (NOT the YTD cumulative
+    # that shares its end date); an annual statement wants ~365 days.
+    target_days = 365 if freq == "annual" else 90
+
     # Resolve the column set: union of period-end dates across all line items,
     # PIT + freq filtered, most-recent-first, capped to keep the report readable.
     all_ends: set[str] = set()
@@ -303,12 +364,13 @@ def _render_statement(
               + (f", latest filing {latest_filed}" if latest_filed else "") + ")\n\n")
     out.write("," + ",".join(columns) + "\n")
     for display, unit_kind, recs in per_item:
-        # Index period-end -> value (last write wins; durations share an end).
+        # One value per period-end, chosen by reporting duration (quarter vs
+        # YTD share an end; see _pick_period_record).
         by_end: dict[str, str] = {}
-        for r in recs:
-            end = r.get("end")
-            if end:
-                by_end[end] = _fmt(r.get("val"), unit_kind)
+        for c in columns:
+            chosen = _pick_period_record(recs, c, target_days)
+            if chosen is not None:
+                by_end[c] = _fmt(chosen.get("val"), unit_kind)
         cells = [by_end.get(c, "") for c in columns]
         out.write(display + "," + ",".join(cells) + "\n")
     return out.getvalue().rstrip("\n")

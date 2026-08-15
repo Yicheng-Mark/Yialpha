@@ -8,6 +8,7 @@ import pytest
 
 import yiagents.dataflows.alpha_vantage_indicator as avi
 from yiagents.dataflows.alpha_vantage_common import AlphaVantageNotConfiguredError
+from yiagents.dataflows.errors import NoMarketDataError
 
 # A representative CSV with rows before / inside / after the window.
 # Default test window: curr_date=2025-03-01, look_back_days=30  => [2025-01-30, 2025-03-01]
@@ -47,14 +48,19 @@ def test_unsupported_indicator_raises_valueerror(monkeypatch):
 
 
 @pytest.mark.unit
-def test_vwma_returns_prose_without_network_call(monkeypatch):
-    """VWMA short-circuits with a prose message; no API request is made."""
+def test_vwma_raises_typed_no_data_for_router_fallback(monkeypatch):
+    """VWMA raises NoMarketDataError so the router falls through to yfinance.
+
+    AV has no VWMA endpoint. Returning prose here made the router treat the
+    message as a successful result, so it NEVER tried the yfinance indicator
+    vendor — the one that can compute vwma from OHLCV. The typed error takes
+    the router's try-next-vendor path instead.
+    """
     called = []
     monkeypatch.setattr(avi, "_make_api_request", lambda *a, **kw: called.append(1))
-    result = avi.get_indicator("AAPL", "vwma", "2025-03-01", 30)
-    assert called == []  # no network call
-    assert "VWMA" in result
-    assert "not directly available" in result
+    with pytest.raises(NoMarketDataError, match="VWMA"):
+        avi.get_indicator("AAPL", "vwma", "2025-03-01", 30)
+    assert called == []  # no network call was made
 
 
 # ---------------------------------------------------------------------------
@@ -185,43 +191,44 @@ def test_rsi_filters_by_date_range_and_sorts(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# D. Error paths (fail-open contract — errors must surface, not be swallowed)
+# D. Error paths (fail-closed contract — errors must surface as typed errors,
+#    never be returned as "Error: ..." strings that the router reads as data)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
-def test_non_csv_data_returns_error_string(monkeypatch):
-    """A dict (not str) response returns a clear error string."""
+def test_non_csv_data_raises_no_market_data(monkeypatch):
+    """A non-str (dict) response raises NoMarketDataError (not prose)."""
     monkeypatch.setattr(avi, "_make_api_request", _mock_api_request({"not": "csv"}))
-    result = avi.get_indicator("AAPL", "rsi", "2025-03-01", 30)
-    assert "Error: No CSV data" in result
+    with pytest.raises(NoMarketDataError, match="no CSV data"):
+        avi.get_indicator("AAPL", "rsi", "2025-03-01", 30)
 
 
 @pytest.mark.unit
-def test_single_line_csv_returns_error(monkeypatch):
-    """Header-only CSV (no data rows) returns an error string."""
+def test_single_line_csv_raises_no_market_data(monkeypatch):
+    """Header-only CSV (no data rows) raises NoMarketDataError."""
     monkeypatch.setattr(avi, "_make_api_request", _mock_api_request("time,RSI\n"))
-    result = avi.get_indicator("AAPL", "rsi", "2025-03-01", 30)
-    assert "Error: No data returned" in result
+    with pytest.raises(NoMarketDataError, match="no data rows"):
+        avi.get_indicator("AAPL", "rsi", "2025-03-01", 30)
 
 
 @pytest.mark.unit
-def test_missing_time_column_returns_error(monkeypatch):
-    """CSV without a 'time' column returns an error listing available columns."""
+def test_missing_time_column_raises_no_market_data(monkeypatch):
+    """CSV without a 'time' column raises with the available columns listed."""
     monkeypatch.setattr(avi, "_make_api_request", _mock_api_request(
         "date,RSI\n2025-02-01,60.0\n",
     ))
-    result = avi.get_indicator("AAPL", "rsi", "2025-03-01", 30)
-    assert "'time' column not found" in result
+    with pytest.raises(NoMarketDataError, match="'time' column not found"):
+        avi.get_indicator("AAPL", "rsi", "2025-03-01", 30)
 
 
 @pytest.mark.unit
-def test_missing_value_column_returns_error(monkeypatch):
-    """CSV with 'time' but missing the expected value column returns an error."""
+def test_missing_value_column_raises_no_market_data(monkeypatch):
+    """CSV with 'time' but missing the expected value column raises."""
     monkeypatch.setattr(avi, "_make_api_request", _mock_api_request(
         "time,SMA\n2025-02-01,100.0\n",  # request macd but only SMA column present
     ))
-    result = avi.get_indicator("AAPL", "macd", "2025-03-01", 30)
-    assert "not found" in result
+    with pytest.raises(NoMarketDataError, match="not found"):
+        avi.get_indicator("AAPL", "macd", "2025-03-01", 30)
 
 
 @pytest.mark.unit
@@ -257,3 +264,41 @@ def test_generic_exception_propagates_and_logs(monkeypatch, caplog):
         "failed" in record.message and "rsi" in record.message
         for record in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# E. Router integration: the typed vwma error must FALL THROUGH to yfinance
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_router_falls_back_to_yfinance_on_vwma(monkeypatch):
+    """AV's vwma NoMarketDataError routes to the yfinance indicator vendor.
+
+    With the old returned-prose behaviour the chain stopped at Alpha Vantage
+    with a message the agent read as data; the typed error keeps the chain
+    moving to the vendor that can actually compute vwma. The AV side is the
+    REAL implementation (vwma raises before any API call — no network); the
+    yfinance side is stubbed at the router table.
+    """
+    from unittest import mock
+
+    from yiagents.dataflows import config as cfgmod, interface
+
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({
+            **orig,
+            "data_vendors": {"technical_indicators": "alpha_vantage,yfinance"},
+        })
+        with mock.patch.dict(
+            interface.VENDOR_METHODS,
+            {"get_indicators": {"alpha_vantage": avi.get_indicator,
+                                "yfinance": lambda *a, **k: "YFINANCE_VWMA_OK"}},
+            clear=False,
+        ):
+            out = interface.route_to_vendor(
+                "get_indicators", "AAPL", "vwma", "2025-03-01", 30,
+            )
+    finally:
+        cfgmod.set_config(orig)
+    assert "YFINANCE_VWMA_OK" in out

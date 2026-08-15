@@ -22,6 +22,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          # Hash BOTH dependency surfaces: every job here installs from
+          # pyproject (editable / extras) or from requirements.lock, so a
+          # change to either must invalidate the shared pip cache.
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.lock
       - name: Install (with dev + web extras)
         # [web] is required, not optional, here: tests/test_web_*.py import
         # fastapi.testclient at module scope, so a [dev]-only install fails at
@@ -35,6 +42,37 @@ jobs:
         # without a third-party badge service.
         run: pytest -q --cov=yiagents --cov-report=term-missing
 
+  test-windows:
+    # The project is developed on Windows (Git Bash), yet the suite only ever
+    # ran on ubuntu — Windows-specific semantics (backslash paths, os.replace,
+    # MSVCRT localtime/TZ handling, file locking) were never CI-verified.
+    # Mirrors the ubuntu `test` job exactly (same install, same full suite) on
+    # windows-latest + py3.12. No deselect list: verified locally that the full
+    # suite passes on Windows when the clock timezone is UTC (GitHub-hosted
+    # runners, both OSes, run UTC); date-window tests that fail on a non-UTC
+    # dev machine pass under TZ=UTC.
+    name: tests (windows, py3.12)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.lock
+      - name: Install (with dev + web extras)
+        # bash (preinstalled on windows runners) for exact shell parity with
+        # the ubuntu job — same quoting rules, same multi-line run blocks.
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,web]"
+      - name: Run test suite with coverage
+        shell: bash
+        run: pytest -q --cov=yiagents --cov-report=term-missing
+
   typecheck:
     # Gradual typing: mypy is scoped to the money path (execution), risk overlay,
     # backtest engine, graph, agents, dataflows, and CLI. Widen the scope as
@@ -46,6 +84,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.lock
       - name: Install (with dev extras)
         run: |
           python -m pip install --upgrade pip
@@ -72,6 +114,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.lock
       - name: Fresh install (no dev extras) and import
         run: |
           python -m pip install --upgrade pip
@@ -93,6 +139,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          # This job installs exclusively from the lock — pyproject.toml is
+          # hashed too so editing dependencies (the usual reason the lock is
+          # regenerated) still rotates the cache key.
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.lock
       - name: Install from the lockfile and import
         run: |
           python -m pip install --upgrade pip
@@ -133,6 +186,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.lock
       - name: Install with optional extras and import key modules
         run: |
           python -m pip install --upgrade pip
@@ -147,6 +204,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.lock
       - name: Install ruff
         run: pip install "ruff>=0.15"
       - name: Lint the repository

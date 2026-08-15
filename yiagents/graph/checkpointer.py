@@ -35,11 +35,17 @@ def thread_id(ticker: str, date: str, signature: str = "") -> str:
     ``signature`` folds in graph-shape-affecting run choices (analysts selected,
     debate/risk depth, asset type, parallel mode) so a resume under a different
     graph can't reuse a stale checkpoint. Omitting it keeps the legacy ID.
+
+    The ID is the first 32 hex chars of a SHA-256 (128 bits — collision-free
+    for any realistic number of ticker/date/signature rows). It was previously
+    truncated to 16 hex chars (64 bits); widening costs nothing and removes
+    the residual cross-run collision risk of two different runs hashing to
+    the same thread (which would silently resume the wrong graph state).
     """
     base = f"{ticker.upper()}:{date}"
     if signature:
         base = f"{base}:{signature}"
-    return hashlib.sha256(base.encode()).hexdigest()[:16]
+    return hashlib.sha256(base.encode()).hexdigest()[:32]
 
 
 @contextmanager

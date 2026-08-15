@@ -20,6 +20,15 @@ from yiagents.llm_clients.openai_client import (
         ("gpt-5.5-pro", True), ("o1", True), ("o3-mini", True),
         ("gpt-4.1", False), ("gpt-4o", False), ("gpt-4o-mini", False),
         ("gpt-3.5-turbo", False),
+        # OpenRouter-style namespaced IDs: the model family lives after the
+        # LAST "/" and must still gate correctly (formerly the whole-string
+        # match silently dropped an explicitly configured reasoning_effort).
+        ("openai/gpt-5.5", True), ("openai/o3-mini-high", True),
+        ("openai/gpt-5.4-mini", True), ("openai/gpt-4.1", False),
+        ("openai/gpt-4o", False), (" GPT-5.5 ", True),
+        # A vendor prefix that itself starts with a model-family token must
+        # not trick the gate ("notgpt-5/gpt-4.1" -> gpt-4.1 -> False).
+        ("notgpt-5/gpt-4.1", False),
     ],
 )
 def test_supports_reasoning_effort(model, expected):

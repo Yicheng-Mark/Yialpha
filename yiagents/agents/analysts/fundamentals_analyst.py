@@ -1,4 +1,5 @@
 from yiagents.agents.utils.agent_utils import (
+    final_analyst_report,
     get_a_share_balance_sheet_native,
     get_a_share_cashflow_statement_native,
     get_a_share_dragon_tiger_native,
@@ -177,10 +178,12 @@ def create_fundamentals_analyst(llm):
 
         result = chain.invoke(state["messages"])
 
-        report = ""
-
-        if len(result.tool_calls) == 0:
-            report = result.content
+        # Shared final-report extraction: "" while tool calls are pending,
+        # content on the final answer, and a visible sentinel (plus WARNING)
+        # when the final message carried malformed tool calls.
+        report = final_analyst_report(
+            result, agent_name="Fundamentals Analyst", ticker=ticker,
+        )
 
         return {
             "messages": [result],

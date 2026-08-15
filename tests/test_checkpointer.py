@@ -44,9 +44,11 @@ class TestThreadId:
         b = thread_id("AAPL", "2026-01-01", signature="debate=2")
         assert a != b
 
-    def test_id_is_hex_and_short(self):
+    def test_id_is_hex_and_128_bit(self):
+        # 32 hex chars = 128 bits of SHA-256. Was 16 hex chars (64 bits);
+        # widened to remove the residual cross-run collision risk at zero cost.
         tid = thread_id("AAPL", "2026-01-01")
-        assert len(tid) == 16
+        assert len(tid) == 32
         int(tid, 16)  # raises ValueError if not hex
 
 
