@@ -186,16 +186,24 @@ class TestConservativeDebaterWiring:
         # The ONLY difference between off and on is the injected line.
         assert on_prompt.replace("Market Regime: SENTINEL_READING\n", "") == off_prompt
 
-    def test_on_but_reading_none_stays_byte_equivalent(self, monkeypatch):
-        # Fail-soft: even with the flag on, if format returns None (no data),
-        # the prompt must equal the off prompt exactly.
+    def test_on_but_reading_none_marks_unavailable(self, monkeypatch):
+        # Fail-soft but VISIBLE: with the flag on and format returning None
+        # (no data), the prompt must say the reading is unavailable — silently
+        # omitting the cue the operator opted into made "configured but
+        # broken" indistinguishable from "configured and calm".
         monkeypatch.setattr(cd, "get_config", lambda: {"market_regime": True})
         monkeypatch.setattr(cd, "format_market_regime", lambda *a, **k: None)
         llm = _RecordingLLM()
         cd.create_conservative_debator(llm)(_state())
         on_none_prompt = llm.prompts[0]
+        assert "Market Regime: unavailable" in on_none_prompt
+        assert "fetch failed" in on_none_prompt
 
         monkeypatch.setattr(cd, "get_config", lambda: {"market_regime": False})
         cd.create_conservative_debator(llm)(_state())
         off_prompt = llm.prompts[1]
-        assert on_none_prompt == off_prompt
+        # The unavailable line is the ONLY difference from the off prompt.
+        assert on_none_prompt.replace(
+            "Market Regime: unavailable (fetch failed or insufficient "
+            "benchmark history)\n", ""
+        ) == off_prompt

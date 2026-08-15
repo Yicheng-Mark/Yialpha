@@ -52,10 +52,12 @@ import zipfile
 from datetime import date, timedelta
 
 from .config import get_config
+from .disk_cache import safe_cache_component
 from .errors import NoMarketDataError
 
 # Reuse sec_edgar's transport verbatim (CIK resolution, GET, cache, throttle).
 from .sec_edgar import (
+    SecNoFileError,
     _cache_dir,
     _cached_or_fetch,
     _cik_for_ticker,
@@ -100,7 +102,13 @@ def _fetch_form4_xml(cik: int, accession: str, doc: str) -> bytes:
     """Fetch (cached 90 days; accession docs are immutable) a Form 4 XML."""
     acc_nodash = accession.replace("-", "")
     url = _ARCHIVES_URL.format(cik=cik, acc_nodash=acc_nodash, doc=doc)
-    path = os.path.join(_cache_dir(), f"form4_{cik}_{acc_nodash}_{doc}")
+    # EDGAR primaryDocument often carries a rendering prefix with a path
+    # separator ("xslF345X05/wk-form4_20250130.xml"). The URL needs the raw
+    # value; the cache filename must be a single safe component, so flatten
+    # it for the cache key — otherwise the path splits into a nonexistent
+    # subdirectory and the entry never caches.
+    cache_doc = safe_cache_component(doc)
+    path = os.path.join(_cache_dir(), f"form4_{cik}_{acc_nodash}_{cache_doc}")
     return _cached_or_fetch(path, url, ttl_days=90.0)
 
 
@@ -184,6 +192,7 @@ def get_form4_insider_trading(
 
     rows = []
     fetched = 0
+    skipped: list[str] = []
     # Parallel arrays, most-recent-first in submissions; take the first N that
     # match the PIT window (filingDate within [lower_d, upper_d]).
     for i, form in enumerate(forms):
@@ -209,8 +218,17 @@ def get_form4_insider_trading(
             )
             parsed = _parse_form4(xml_bytes)
         except NoMarketDataError as exc:
-            logger.debug("sec_ownership: skipping Form 4 %s: %s", accessions[i], exc)
-            continue
+            # A filing that is genuinely gone (404) or unparseable skips that
+            # one filing — but a transport failure (SEC unreachable) must
+            # fail the tool: "no insider activity" during an outage would be
+            # a fabricated zero signal.
+            if isinstance(exc, SecNoFileError) or "could not parse" in (exc.detail or ""):
+                skipped.append(accessions[i])
+                logger.debug(
+                    "sec_ownership: skipping Form 4 %s: %s", accessions[i], exc
+                )
+                continue
+            raise
         for t in parsed["trades"]:
             rows.append({
                 "date": t["date"], "owner": parsed["owner"], "title": parsed["title"],
@@ -227,10 +245,15 @@ def get_form4_insider_trading(
     if not rows:
         out.write(f"\nNo Form 4 transactions for {ticker} in the last "
                   f"{look_back_days} days (as of {curr_date or 'now'}).")
+        if skipped:
+            out.write(f"\n(Note: {len(skipped)} filing(s) in the window could not "
+                      "be retrieved (no longer available) and were skipped.)")
         return out.getvalue().rstrip("\n")
 
     rows.sort(key=lambda r: r["date"], reverse=True)
     out.write(f"# {len(rows)} non-derivative trade(s) across {fetched} filing(s)\n\n")
+    if skipped:
+        out.write(f"# ({len(skipped)} filing(s) skipped: no longer available)\n\n")
     out.write("Date       | Insider          | Title        | Action | Shares     "
               "| Price  | Post-Hold\n")
     out.write("-" * 88 + "\n")
@@ -355,8 +378,9 @@ def get_ftd_data(
 
     Enumerates the semi-monthly FTD cutoff files within the look-back window that
     are already public by ``curr_date`` (cutoff + ``YIAGENTS_FTD_PUB_LAG_DAYS``,
-    default 10), fetches each (404 / missing file is normal and skipped), and
-    filters rows by ticker + ``Date <= curr_date``. Renders a per-fail-day table
+    default 10), fetches each (a genuine 404 for a cutoff is normal and skipped;
+    transport failures propagate instead of faking "no fails"), and filters rows
+    by ticker + ``Date <= curr_date``. Renders a per-fail-day table
     plus a window summary (peak fail-day, total fail-days).
 
     FTD is CNS settlement data keyed by ticker; a non-US ticker simply matches
@@ -379,10 +403,12 @@ def get_ftd_data(
         path = os.path.join(_cache_dir(), f"ftd_{yyyymmdd}.txt")
         try:
             raw = _cached_or_fetch(path, url, ttl_days=30.0)
-        except NoMarketDataError:
+        except SecNoFileError:
             # No file for this cutoff (SEC only publishes periods with fails;
             # and the exact cutoff calendar day can shift) -> normal, skip.
             continue
+        # Any other failure (timeout / proxy / 5xx) propagates: claiming "no
+        # fails reported" while SEC is unreachable would be a false zero.
         for r in _parse_ftd_text(raw, ticker):
             # Row-level PIT: settlement date must be <= curr_date.
             d = r["date"]
@@ -440,15 +466,15 @@ _MON_ABBR = ("jan", "feb", "mar", "apr", "may", "jun",
 def _sec_13f_pub_lag_days() -> int:
     """Days after a bulk 13F dataset's period-end before it is treated as public.
 
-    SEC releases each quarterly ZIP a few days after the window closes;
-    configurable via ``YIAGENTS_SEC_13F_PUB_LAG_DAYS`` (default 5). The lag gates
-    the ~45-day window between quarter-end and ZIP publication honestly — no
-    EFTS fallback fills it (by design)."""
-    raw = get_config().get("sec_13f_pub_lag_days", 5)
+    SEC releases each quarterly ZIP ~45 days after the window closes (the
+    statutory deadline); configurable via ``YIAGENTS_SEC_13F_PUB_LAG_DAYS``
+    (default 45, mirroring that). The lag gates the publication gap honestly —
+    no EFTS fallback fills it (by design)."""
+    raw = get_config().get("sec_13f_pub_lag_days", 45)
     try:
         n = int(raw)
     except (TypeError, ValueError):
-        return 5
+        return 45
     return n if n >= 0 else 0
 
 

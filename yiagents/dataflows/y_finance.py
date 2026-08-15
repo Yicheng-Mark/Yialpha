@@ -1,13 +1,17 @@
+import json
 import logging
+from collections.abc import Callable
 from datetime import datetime
+from io import StringIO
 from typing import Annotated
 
 import pandas as pd
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
 
+from .disk_cache import cached_or_fetch, safe_cache_component, vendor_cache_dir
+from .indicator_catalog import TOOL_DESCRIPTIONS
 from .stockstats_utils import (
-    StockstatsUtils,
     _assert_ohlcv_not_stale,
     filter_financials_by_date,
     load_ohlcv,
@@ -18,6 +22,149 @@ from .symbol_utils import NoMarketDataError, normalize_symbol
 from .utils import current_pit_end, overview_would_leak_future
 
 logger = logging.getLogger(__name__)
+
+#: The indicator-window tools' gate + report trailer, rendered from the
+#: shared catalog (yiagents/dataflows/indicator_catalog.py — the single
+#: source of truth this dict used to be a drifted copy of). Kept as a named
+#: module attribute so cross-file consistency tests assert against exactly
+#: what ``get_stock_stats_indicators_window`` uses.
+best_ind_params = TOOL_DESCRIPTIONS
+
+#: Statements / snapshot payloads change at most daily (filings and Yahoo's
+#: refresh cadence), so a ~24h on-disk cache collapses the 3-4 yfinance
+#: round trips per statement per ticker per run into one. Windows of daily
+#: history fetched by the reflection layer are immutable once in the past,
+#: so the same TTL bounds them too.
+_STATEMENT_CACHE_TTL_DAYS = 1.0
+
+
+class _EmptyVendorPayload(Exception):
+    """Internal marker: the vendor returned an empty payload.
+
+    Raised from inside a ``cached_or_fetch`` fetch callable so an empty
+    result is NOT persisted for the TTL — an empty frame cached for 24h
+    would stop a later retry from seeing data that has since appeared
+    (e.g. a reflection entry whose outcome rows were not published yet).
+    When a *stale* cache exists, ``cached_or_fetch`` serves it with the
+    usual stale-serve warning before this marker ever propagates, which is
+    the right precedence: old statements beat no statements. Callers catch
+    the marker and take their existing empty-path handling.
+    """
+
+
+def _cached_ticker_info(ticker: str, canonical: str) -> dict:
+    """``yf.Ticker(canonical).info`` behind the ~24h statements cache.
+
+    The raw dict round-trips through JSON (``default=str`` mirrors the
+    yfnews payload wrapping). A corrupt cache raises the vendor's typed
+    error rather than returning stale garbage.
+    """
+    filename = f"stmt_{safe_cache_component(canonical)}_fundamentals.json"
+
+    def _fetch() -> bytes:
+        ticker_obj = yf.Ticker(canonical)
+        info = yf_retry(lambda: ticker_obj.info)
+        if not info:
+            raise _EmptyVendorPayload(f"{canonical}: empty info")
+        return json.dumps(info, default=str).encode("utf-8")
+
+    try:
+        raw = cached_or_fetch(
+            vendor_cache_dir("yfinance"), filename, _fetch,
+            ttl_days=_STATEMENT_CACHE_TTL_DAYS, vendor="yfinance",
+        )
+    except _EmptyVendorPayload:
+        return {}
+    assert raw is not None  # fail_open never set: fetch errors re-raise
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as err:
+        raise NoMarketDataError(
+            ticker, canonical,
+            f"cached fundamentals payload for {canonical} is corrupt",
+        ) from err
+    if not isinstance(payload, dict):
+        raise NoMarketDataError(
+            ticker, canonical,
+            f"cached fundamentals payload for {canonical} is not an object",
+        )
+    return payload
+
+
+def _cached_yf_frame(
+    canonical: str,
+    filename: str,
+    loader: Callable[[], pd.DataFrame],
+) -> pd.DataFrame:
+    """Serve a yfinance statement/insider frame behind the ~24h cache.
+
+    The RAW vendor frame is cached (CSV bytes); PIT filtering by
+    ``curr_date`` stays at the call site, so a cached serve is filtered per
+    request exactly like fresh data. Empty vendor frames return uncached
+    via :class:`_EmptyVendorPayload` (see its docstring).
+    """
+    def _fetch() -> bytes:
+        frame = yf_retry(loader)
+        if frame is None or frame.empty:
+            raise _EmptyVendorPayload(f"{canonical}: empty frame for {filename}")
+        return frame.to_csv().encode("utf-8")
+
+    try:
+        raw = cached_or_fetch(
+            vendor_cache_dir("yfinance"), filename, _fetch,
+            ttl_days=_STATEMENT_CACHE_TTL_DAYS, vendor="yfinance",
+        )
+    except _EmptyVendorPayload:
+        return pd.DataFrame()
+    assert raw is not None  # fail_open never set: fetch errors re-raise
+    return pd.read_csv(StringIO(raw.decode("utf-8")), index_col=0)
+
+
+def get_YFin_history_cached(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """``yf.Ticker(symbol).history(start, end)`` behind the ~24h cache.
+
+    Same frame, same window (inclusive start, exclusive end), same retry
+    policy as the direct call — used by the reflection layer, where a batch
+    run over N tickers re-downloads the SAME benchmark window once per
+    ticker. The index is restored as a DatetimeIndex when it round-tripped
+    as date strings (yfinance daily history), so downstream ``index.date``
+    slicing keeps working; other index shapes are returned exactly as the
+    CSV round-trip produced them. Empty vendor frames return uncached (see
+    :class:`_EmptyVendorPayload`).
+    """
+    filename = (
+        f"hist_{safe_cache_component(symbol)}_{start_date}_{end_date}.csv"
+    )
+
+    def _fetch() -> bytes:
+        ticker = yf.Ticker(symbol)
+        frame = yf_retry(lambda: ticker.history(start=start_date, end=end_date))
+        if frame is None or frame.empty:
+            raise _EmptyVendorPayload(
+                f"{symbol}: empty history {start_date}..{end_date}"
+            )
+        return frame.to_csv().encode("utf-8")
+
+    try:
+        raw = cached_or_fetch(
+            vendor_cache_dir("yfinance"), filename, _fetch,
+            ttl_days=_STATEMENT_CACHE_TTL_DAYS, vendor="yfinance",
+        )
+    except _EmptyVendorPayload:
+        return pd.DataFrame()
+    assert raw is not None  # fail_open never set: fetch errors re-raise
+    frame = pd.read_csv(StringIO(raw.decode("utf-8")), index_col=0)
+    if not isinstance(frame.index, pd.DatetimeIndex) and not (
+        pd.api.types.is_numeric_dtype(frame.index)
+    ):
+        # Date-string index (yfinance daily history): restore DatetimeIndex
+        # semantics. utc=True tolerates a window straddling a DST change
+        # (mixed UTC offsets) and preserves each bar's calendar date.
+        # Numeric indexes (mocks / odd frames) are left exactly as parsed.
+        parsed = pd.to_datetime(frame.index, utc=True, errors="coerce")
+        if not parsed.isna().any():
+            frame.index = parsed
+    return frame
 
 
 def get_YFin_data_online(
@@ -110,79 +257,6 @@ def get_stock_stats_indicators_window(
     look_back_days: Annotated[int, "how many days to look back"],
 ) -> str:
 
-    best_ind_params = {
-        # Moving Averages
-        "close_50_sma": (
-            "50 SMA: A medium-term trend indicator. "
-            "Usage: Identify trend direction and serve as dynamic support/resistance. "
-            "Tips: It lags price; combine with faster indicators for timely signals."
-        ),
-        "close_200_sma": (
-            "200 SMA: A long-term trend benchmark. "
-            "Usage: Confirm overall market trend and identify golden/death cross setups. "
-            "Tips: It reacts slowly; best for strategic trend confirmation rather than frequent trading entries."
-        ),
-        "close_10_ema": (
-            "10 EMA: A responsive short-term average. "
-            "Usage: Capture quick shifts in momentum and potential entry points. "
-            "Tips: Prone to noise in choppy markets; use alongside longer averages for filtering false signals."
-        ),
-        # MACD Related
-        "macd": (
-            "MACD: Computes momentum via differences of EMAs. "
-            "Usage: Look for crossovers and divergence as signals of trend changes. "
-            "Tips: Confirm with other indicators in low-volatility or sideways markets."
-        ),
-        "macds": (
-            "MACD Signal: An EMA smoothing of the MACD line. "
-            "Usage: Use crossovers with the MACD line to trigger trades. "
-            "Tips: Should be part of a broader strategy to avoid false positives."
-        ),
-        "macdh": (
-            "MACD Histogram: Shows the gap between the MACD line and its signal. "
-            "Usage: Visualize momentum strength and spot divergence early. "
-            "Tips: Can be volatile; complement with additional filters in fast-moving markets."
-        ),
-        # Momentum Indicators
-        "rsi": (
-            "RSI: Measures momentum to flag overbought/oversold conditions. "
-            "Usage: Apply 70/30 thresholds and watch for divergence to signal reversals. "
-            "Tips: In strong trends, RSI may remain extreme; always cross-check with trend analysis."
-        ),
-        # Volatility Indicators
-        "boll": (
-            "Bollinger Middle: A 20 SMA serving as the basis for Bollinger Bands. "
-            "Usage: Acts as a dynamic benchmark for price movement. "
-            "Tips: Combine with the upper and lower bands to effectively spot breakouts or reversals."
-        ),
-        "boll_ub": (
-            "Bollinger Upper Band: Typically 2 standard deviations above the middle line. "
-            "Usage: Signals potential overbought conditions and breakout zones. "
-            "Tips: Confirm signals with other tools; prices may ride the band in strong trends."
-        ),
-        "boll_lb": (
-            "Bollinger Lower Band: Typically 2 standard deviations below the middle line. "
-            "Usage: Indicates potential oversold conditions. "
-            "Tips: Use additional analysis to avoid false reversal signals."
-        ),
-        "atr": (
-            "ATR: Averages true range to measure volatility. "
-            "Usage: Set stop-loss levels and adjust position sizes based on current market volatility. "
-            "Tips: It's a reactive measure, so use it as part of a broader risk management strategy."
-        ),
-        # Volume-Based Indicators
-        "vwma": (
-            "VWMA: A moving average weighted by volume. "
-            "Usage: Confirm trends by integrating price action with volume data. "
-            "Tips: Watch for skewed results from volume spikes; use in combination with other volume analyses."
-        ),
-        "mfi": (
-            "MFI: The Money Flow Index is a momentum indicator that uses both price and volume to measure buying and selling pressure. "
-            "Usage: Identify overbought (>80) or oversold (<20) conditions and confirm the strength of trends or reversals. "
-            "Tips: Use alongside RSI or MACD to confirm signals; divergence between price and MFI can indicate potential reversals."
-        ),
-    }
-
     if indicator not in best_ind_params:
         raise ValueError(
             f"Indicator {indicator} is not supported. Please choose from: {list(best_ind_params.keys())}"
@@ -274,38 +348,6 @@ def _get_stock_stats_bulk(
     return result_dict
 
 
-def get_stockstats_indicator(
-    symbol: Annotated[str, "ticker symbol of the company"],
-    indicator: Annotated[str, "technical indicator to get the analysis and report of"],
-    curr_date: Annotated[
-        str, "The current trading date you are trading on, YYYY-mm-dd"
-    ],
-) -> str:
-
-    curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
-    curr_date = curr_date_dt.strftime("%Y-%m-%d")
-
-    try:
-        indicator_value = StockstatsUtils.get_stock_stats(
-            symbol,
-            indicator,
-            curr_date,
-        )
-    except NoMarketDataError:
-        raise  # Unknown/delisted symbol — let the router emit the sentinel
-    except Exception:
-        # Surfacing the error (rather than returning "") keeps the data
-        # contract honest: the router turns this into an explicit sentinel
-        # instead of the agent treating an empty string as a valid value.
-        logger.exception(
-            "stockstats indicator %s failed for %s @ %s",
-            indicator, symbol, curr_date,
-        )
-        raise
-
-    return str(indicator_value)
-
-
 def get_fundamentals(
     ticker: Annotated[str, "ticker symbol of the company"],
     curr_date: Annotated[str | None, "current date, yyyy-mm-dd"] = None
@@ -327,8 +369,7 @@ def get_fundamentals(
             f"overview snapshot is point-in-time (today only); not valid as of {curr_date}",
         )
     try:
-        ticker_obj = yf.Ticker(canonical)
-        info = yf_retry(lambda: ticker_obj.info)
+        info = _cached_ticker_info(ticker, canonical)
 
         if not info:
             raise NoMarketDataError(ticker, canonical, "no fundamentals returned")
@@ -399,13 +440,17 @@ def get_balance_sheet(
 ):
     """Get balance sheet data from yfinance."""
     canonical = normalize_symbol(ticker)
+    freq_key = "quarterly" if freq.lower() == "quarterly" else "annual"
     try:
-        ticker_obj = yf.Ticker(canonical)
-
-        if freq.lower() == "quarterly":
-            data = yf_retry(lambda: ticker_obj.quarterly_balance_sheet)
+        if freq_key == "quarterly":
+            loader = lambda: yf.Ticker(canonical).quarterly_balance_sheet  # noqa: E731
         else:
-            data = yf_retry(lambda: ticker_obj.balance_sheet)
+            loader = lambda: yf.Ticker(canonical).balance_sheet  # noqa: E731
+        data = _cached_yf_frame(
+            canonical,
+            f"stmt_{safe_cache_component(canonical)}_balance_sheet_{freq_key}.csv",
+            loader,
+        )
 
         data = filter_financials_by_date(data, curr_date)
 
@@ -435,13 +480,17 @@ def get_cashflow(
 ):
     """Get cash flow data from yfinance."""
     canonical = normalize_symbol(ticker)
+    freq_key = "quarterly" if freq.lower() == "quarterly" else "annual"
     try:
-        ticker_obj = yf.Ticker(canonical)
-
-        if freq.lower() == "quarterly":
-            data = yf_retry(lambda: ticker_obj.quarterly_cashflow)
+        if freq_key == "quarterly":
+            loader = lambda: yf.Ticker(canonical).quarterly_cashflow  # noqa: E731
         else:
-            data = yf_retry(lambda: ticker_obj.cashflow)
+            loader = lambda: yf.Ticker(canonical).cashflow  # noqa: E731
+        data = _cached_yf_frame(
+            canonical,
+            f"stmt_{safe_cache_component(canonical)}_cashflow_{freq_key}.csv",
+            loader,
+        )
 
         data = filter_financials_by_date(data, curr_date)
 
@@ -471,13 +520,17 @@ def get_income_statement(
 ):
     """Get income statement data from yfinance."""
     canonical = normalize_symbol(ticker)
+    freq_key = "quarterly" if freq.lower() == "quarterly" else "annual"
     try:
-        ticker_obj = yf.Ticker(canonical)
-
-        if freq.lower() == "quarterly":
-            data = yf_retry(lambda: ticker_obj.quarterly_income_stmt)
+        if freq_key == "quarterly":
+            loader = lambda: yf.Ticker(canonical).quarterly_income_stmt  # noqa: E731
         else:
-            data = yf_retry(lambda: ticker_obj.income_stmt)
+            loader = lambda: yf.Ticker(canonical).income_stmt  # noqa: E731
+        data = _cached_yf_frame(
+            canonical,
+            f"stmt_{safe_cache_component(canonical)}_income_statement_{freq_key}.csv",
+            loader,
+        )
 
         data = filter_financials_by_date(data, curr_date)
 
@@ -506,8 +559,11 @@ def get_insider_transactions(
     """Get insider transactions data from yfinance."""
     canonical = normalize_symbol(ticker)
     try:
-        ticker_obj = yf.Ticker(canonical)
-        data = yf_retry(lambda: ticker_obj.insider_transactions)
+        data = _cached_yf_frame(
+            canonical,
+            f"stmt_{safe_cache_component(canonical)}_insider_transactions.csv",
+            lambda: yf.Ticker(canonical).insider_transactions,
+        )
 
         # Empty is normal here (many valid symbols have no insider filings),
         # so report it plainly rather than treating the symbol as invalid.

@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import yfinance as yf
 from langgraph.prebuilt import ToolNode
 
 # Import the abstract tool methods from agent_utils
@@ -572,6 +571,7 @@ class YiAgentsGraph:
         unavailable (too recent, delisted, or network error).
         """
         from yiagents.dataflows.symbol_utils import normalize_symbol
+        from yiagents.dataflows.y_finance import get_YFin_history_cached
 
         try:
             start = datetime.strptime(trade_date, "%Y-%m-%d")
@@ -589,8 +589,13 @@ class YiAgentsGraph:
             # Normalize so the realized-return lookup hits the same instrument
             # the analysis priced (e.g. XAUUSD -> GC=F) (#984). The benchmark is
             # already a canonical Yahoo symbol from ``_resolve_benchmark``.
-            stock = yf.Ticker(normalize_symbol(ticker)).history(start=trade_date, end=end_str)
-            bench = yf.Ticker(benchmark).history(start=trade_date, end=end_str)
+            # Both legs go through the vendor layer's ~24h cached history
+            # wrapper (same window, same frame as the direct .history call):
+            # a batch run over N tickers would otherwise re-download the SAME
+            # benchmark window once per ticker.
+            stock = get_YFin_history_cached(
+                normalize_symbol(ticker), trade_date, end_str)
+            bench = get_YFin_history_cached(benchmark, trade_date, end_str)
 
             if cutoff is not None:
                 # Belt-and-suspenders PIT guard: vendors and test doubles can
@@ -879,6 +884,16 @@ class YiAgentsGraph:
         # explicit date) leave it unset = no-op pass-through.
         set_analysis_date(str(trade_date)) if str(trade_date) else set_analysis_date(None)
 
+        # Bind the data-quality event accumulator in THIS (parent) context
+        # before the graph runs: langgraph executes node tasks inside copied
+        # contexts, so a list first created inside a node (via record_sentinel)
+        # would never be visible to _log_state afterwards. Bound here, every
+        # node context inherits the same list object and appends to it. Fresh
+        # per run — a crashed prior run in the same context cannot leak events.
+        from yiagents.dataflows import quality
+
+        quality.ensure_run_context()
+
         try:
             # Initialize state — inject memory log context for PM and the
             # deterministically resolved instrument identity for all agents.
@@ -936,8 +951,10 @@ class YiAgentsGraph:
             # Store current state for reflection.
             self.curr_state = final_state
 
-            # Log state to disk.
-            self._log_state(trade_date, final_state)
+            # Log state to disk. The returned quality block rides on
+            # final_state so report writers / the web UI can render the
+            # degraded-run banner from the same evidence the JSON log has.
+            final_state["data_quality"] = self._log_state(trade_date, final_state)
 
             # T0: dump per-node perf telemetry next to full_states_log. No-op when
             # telemetry is off (perf_tracker is None).
@@ -1033,6 +1050,11 @@ class YiAgentsGraph:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(self.log_states_dict[str(trade_date)], f, indent=4)
         os.replace(tmp_path, log_path)
+
+        # Return the consumed quality block so the caller can attach it to
+        # final_state — the report writer and web UI render it as the
+        # human-facing degraded-run banner.
+        return quality_block
 
     def _dump_perf(self, trade_date):
         """Write per-node perf telemetry to node_perf_<trade_date>.json.

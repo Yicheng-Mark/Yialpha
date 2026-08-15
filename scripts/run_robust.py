@@ -474,8 +474,36 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                 # DEGRADED so the summary shows it. --require-data-quality
                 # escalates it to a failure + retry for operators who would
                 # rather re-pull than keep an empty report.
+                # sentinels is None when the evidence itself is unavailable
+                # (missing/unreadable log, or a run predating the
+                # data_quality field) — unknown, not zero. Strict mode cannot
+                # verify quality then, so it retries; default mode stays ok
+                # but says "unknown" instead of silently looking verified.
                 sentinels = _core_sentinel_count(reports_root, ticker, opts.date)
-                if sentinels:
+                if sentinels is None:
+                    if opts.require_data_quality:
+                        result["degraded"] = True
+                        result["reason"] = (
+                            "DEGRADED: data-quality evidence unavailable (no "
+                            "readable data_quality block in full_states_log) "
+                            f"(wall {wall:.0f}s) → retry (--require-data-quality)"
+                        )
+                        print(
+                            f"[{ticker}] ⚠️ attempt {attempt}: {result['reason']}",
+                            flush=True,
+                        )
+                    else:
+                        result["ok"] = True
+                        result["report_path"] = new_report
+                        result["reason"] = f"ok (quality unknown; wall {wall:.0f}s)"
+                        print(
+                            f"[{ticker}] ✅ attempt {attempt} done in {wall:.0f}s → "
+                            f"{new_report} — data-quality evidence unavailable "
+                            "(older run log?)",
+                            flush=True,
+                        )
+                        break
+                elif sentinels:
                     result["degraded"] = True
                     result["reason"] = (
                         f"DEGRADED: {sentinels} core data sentinel(s) "

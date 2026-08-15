@@ -140,6 +140,18 @@ def main(argv: list[str] | None = None) -> int:
             failures += 1
             continue
 
+        if len(frame.columns) == 2:
+            # date + forward_return only: every indicator was skipped. The
+            # prune CLI rejects this CSV ("at least one indicator column"), so
+            # writing it with a success verdict and a "next:" hint would send
+            # the operator into a guaranteed failure.
+            logger.error(
+                "all indicators skipped for %s (%s); not writing an "
+                "indicator-less CSV", ticker, ", ".join(skipped) or "?",
+            )
+            failures += 1
+            continue
+
         out_path = out_dir / f"{ticker.replace('.', '_')}_{args.horizon}d.csv"
         frame.to_csv(out_path, index=False)
         print(

@@ -27,10 +27,30 @@ from typing import Any
 #: Sentinel kinds, mirroring the router's two degradation outcomes.
 KIND_NO_DATA = "no_data"                    # core category: NO_DATA_AVAILABLE
 KIND_OPTIONAL_UNAVAILABLE = "optional_unavailable"  # optional: DATA_UNAVAILABLE
+KIND_STALE_CACHE = "stale_cache"            # vendor failed; stale disk cache served
 
 _events_var: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "yiagents_data_quality_events", default=None
 )
+
+
+def ensure_run_context() -> None:
+    """Bind a fresh event list in the *caller's* context before a graph run.
+
+    LangGraph executes every node task inside ``copy_context().run(...)``.
+    A ContextVar value first bound inside a node is invisible to the caller
+    that later snapshots — without this call, ``record_sentinel`` fires inside
+    node contexts and ``snapshot_quality`` in the parent always sees ``[]``
+    (the entire DEGRADED evidence chain goes dead). Binding the list here,
+    in the context that submits the graph, makes every copied node context
+    inherit the *same list object*; ``list.append`` then mutates the object
+    the parent reads back. Appends are GIL-atomic and recording stays
+    append-only, so concurrent node contexts are safe.
+
+    Always installs a fresh list: a crashed prior run in the same worker
+    context cannot leak its events into this one.
+    """
+    _events_var.set([])
 
 
 def record_sentinel(method: str, kind: str, detail: str = "") -> None:
@@ -76,5 +96,8 @@ def summarize_quality(events: list[dict[str, Any]] | None) -> dict[str, Any]:
         "core_sentinel_count": sum(1 for e in events if e.get("kind") == KIND_NO_DATA),
         "optional_sentinel_count": sum(
             1 for e in events if e.get("kind") == KIND_OPTIONAL_UNAVAILABLE
+        ),
+        "stale_cache_count": sum(
+            1 for e in events if e.get("kind") == KIND_STALE_CACHE
         ),
     }

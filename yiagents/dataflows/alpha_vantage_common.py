@@ -80,9 +80,10 @@ def _raw_api_request(function_name: str, params: dict) -> dict | str:
         "source": "yiagents",
     })
 
-    # Handle entitlement parameter if present in params or global variable
-    current_entitlement = globals().get('_current_entitlement')
-    entitlement = api_params.get("entitlement") or current_entitlement
+    # Handle the entitlement parameter: an explicit per-call params entry
+    # only (it selects a premium data tier). There is no module-level
+    # entitlement state.
+    entitlement = api_params.get("entitlement")
 
     if entitlement:
         api_params["entitlement"] = entitlement
@@ -129,12 +130,12 @@ def _make_api_request(function_name: str, params: dict) -> dict | str:
     bad-key classification still happens inside the raw call on every actual
     fetch. Transport hiccups (connection reset, timeout) get one retry.
     """
-    current_entitlement = globals().get("_current_entitlement")
-    # Cache key excludes the API key but includes the entitlement (it selects
-    # a different data tier, i.e. different bytes for the same query).
+    # Cache key excludes the API key but includes the entitlement (an
+    # explicit params entry selecting a different data tier, i.e. different
+    # bytes for the same query).
     key_blob = json.dumps(
         {"function": function_name, "params": params,
-         "entitlement": current_entitlement},
+         "entitlement": params.get("entitlement")},
         sort_keys=True, default=str,
     ).encode("utf-8")
     digest = hashlib.sha256(key_blob).hexdigest()[:12]
@@ -200,7 +201,7 @@ def _filter_csv_by_date_range(csv_data: str, start_date: str, end_date: str) -> 
         # Do NOT return the unfiltered CSV on filter failure — that would leak
         # future rows into a backtest (lookahead) and over-feed the analyst in
         # live mode. Surface the failure so the router emits its sentinel,
-        # matching the y_finance.py contract (see _get_stock_stats_bulk /
-        # get_stockstats_indicator which also raise on filter failure).
+        # matching the y_finance.py contract (see _get_stock_stats_bulk,
+        # which also raises on calculation failure).
         logger.warning("Failed to filter CSV data by date range", exc_info=True)
         raise

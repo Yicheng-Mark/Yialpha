@@ -10,6 +10,42 @@ from datetime import datetime
 from pathlib import Path
 
 
+def _render_data_quality(quality: dict) -> str:
+    """Render the run's ``data_quality`` evidence block as a report section.
+
+    A degraded run (some categories served NO_DATA sentinels) must be
+    distinguishable from a fully-fed one in the human-facing report — not
+    only in ``full_states_log``. Core degradations get a prominent ⚠ banner;
+    optional enrichments that were simply absent get a soft note. Mirrors the
+    risk overlay's visible-warning convention.
+    """
+    core = int(quality.get("core_sentinel_count") or 0)
+    optional = int(quality.get("optional_sentinel_count") or 0)
+    stale = int(quality.get("stale_cache_count") or 0)
+    if not (core or optional or stale):
+        return ""
+    lines = []
+    if core:
+        lines.append(
+            f"⚠ **DEGRADED RUN**: {core} core data categor"
+            f"{'y' if core == 1 else 'ies'} returned no usable data — the analysis "
+            "decided WITHOUT that data. Weigh the conclusions accordingly."
+        )
+    if stale:
+        lines.append(
+            f"⚠ {stale} data request"
+            f"{'s' if stale != 1 else ''} served STALE cache after a vendor failure."
+        )
+    if optional:
+        lines.append(
+            f"Note: {optional} optional enrichment categor"
+            f"{'y' if optional == 1 else 'ies'} unavailable (analysis proceeded without it)."
+        )
+    for e in quality.get("sentinels") or []:
+        lines.append(f"- `{e.get('method')}` ({e.get('kind')}): {e.get('detail')}")
+    return "## Data Quality\n\n" + "\n\n".join(lines)
+
+
 def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
     """Save a completed run's reports to ``save_path``; return the complete-report path."""
     save_path = Path(save_path)
@@ -103,7 +139,10 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
             f"### Final Decision\n{final_decision}"
         )
 
-    # Write consolidated report
+    # Write consolidated report. The data-quality banner sits directly under
+    # the header so a degraded run cannot be mistaken for a fully-fed one.
     header = f"# Trading Analysis Report: {ticker}\n\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-    (save_path / "complete_report.md").write_text(header + "\n\n".join(sections), encoding="utf-8")
+    quality_section = _render_data_quality(final_state.get("data_quality") or {})
+    body = "\n\n".join([quality_section] + sections) if quality_section else "\n\n".join(sections)
+    (save_path / "complete_report.md").write_text(header + body, encoding="utf-8")
     return save_path / "complete_report.md"

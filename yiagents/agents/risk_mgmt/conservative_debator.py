@@ -35,6 +35,14 @@ def create_conservative_debator(llm):
                 )
                 if reading:
                     market_regime_line = f"Market Regime: {reading}\n"
+                else:
+                    # Configured but unavailable (fetch failed / too little
+                    # history): say so explicitly instead of silently omitting
+                    # the cue the operator opted into.
+                    market_regime_line = (
+                        "Market Regime: unavailable (fetch failed or "
+                        "insufficient benchmark history)\n"
+                    )
 
         trader_decision = state["trader_investment_plan"]
 

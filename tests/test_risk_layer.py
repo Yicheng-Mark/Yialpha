@@ -2,19 +2,20 @@
 
 Covers ``yiagents.risk.{kelly, atr_stop, breaker, cvar}``. All tests
 are unit-level: no network, no global config, deterministic inputs.
-
-The ATR path that fetches via the network loader (``latest_atr(symbol,
-date)``) is intentionally skipped here — it is exercised by integration
-tests against the real dataflow.
+The symbol path of ``latest_atr(symbol, date)`` is covered by mocking the
+``load_ohlcv`` loader with a synthetic frame (the loader's own caching and
+point-in-time truncation have their own tests in the dataflow suite).
 """
 
 from __future__ import annotations
+
+from unittest import mock
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from yiagents.risk.atr_stop import atr_stop, latest_atr_from_frame
+from yiagents.risk.atr_stop import atr_stop, latest_atr, latest_atr_from_frame
 from yiagents.risk.breaker import DrawdownBreaker
 from yiagents.risk.cvar import cvar_position_multiplier, historical_cvar
 from yiagents.risk.kelly import (
@@ -136,13 +137,20 @@ class TestAtrStop:
         with pytest.raises(ValueError):
             latest_atr_from_frame(bad)
 
-    @pytest.mark.skip(
-        reason="latest_atr(symbol, date) hits the network loader; covered by integration tests."
-    )
-    def test_latest_atr_network_path(self):
-        from yiagents.risk.atr_stop import latest_atr
-
-        latest_atr("AAPL", "2026-06-01")
+    def test_latest_atr_symbol_path_delegates_to_loader(self):
+        # The symbol path must fetch via load_ohlcv and run the SAME ATR
+        # computation as the frame path. The loader is mocked with a synthetic
+        # frame so no network is involved; its own caching / point-in-time
+        # truncation behavior is covered by the dataflow tests.
+        df = _synthetic_ohlcv()
+        with mock.patch(
+            "yiagents.risk.atr_stop.load_ohlcv", return_value=df
+        ) as loader:
+            close, atr = latest_atr("AAPL", "2026-06-01")
+        loader.assert_called_once_with("AAPL", "2026-06-01")
+        assert close == pytest.approx(float(df["Close"].iloc[-1]))
+        assert atr > 0.0
+        assert (close, atr) == latest_atr_from_frame(df)
 
 
 # ---------------------------------------------------------------------------

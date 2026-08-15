@@ -63,3 +63,39 @@ def test_save_reports_defaults_under_results_dir(tmp_path):
     assert out.exists()
     assert out.parent.parent.name == "reports"  # results_dir/reports/AAPL_<stamp>/...
     assert out.parent.name.startswith("AAPL_")
+
+
+@pytest.mark.unit
+def test_degraded_run_renders_data_quality_banner(tmp_path):
+    state = _state()
+    state["data_quality"] = {
+        "core_sentinel_count": 2,
+        "optional_sentinel_count": 1,
+        "sentinels": [
+            {"method": "get_stock_data", "kind": "no_data", "detail": "all vendors timed out"},
+            {"method": "get_news", "kind": "no_data", "detail": "yfinance empty"},
+            {"method": "get_form4_insider_trading", "kind": "optional_unavailable",
+             "detail": "US-listed only"},
+        ],
+    }
+    out = write_report_tree(state, "AAPL", tmp_path)
+    complete = out.read_text(encoding="utf-8")
+    # Banner sits between header and section I so a degraded run can't be
+    # mistaken for a fully-fed one.
+    assert complete.index("DEGRADED RUN") < complete.index("## I. Analyst Team Reports")
+    assert "2 core data categories" in complete
+    assert "1 optional enrichment category unavailable" in complete
+    assert "`get_stock_data`" in complete and "all vendors timed out" in complete
+
+
+@pytest.mark.unit
+def test_healthy_run_has_no_data_quality_section(tmp_path):
+    out = write_report_tree(_state(), "AAPL", tmp_path)
+    complete = out.read_text(encoding="utf-8")
+    assert "Data Quality" not in complete
+    # An all-zero block (counts present but nothing degraded) is also silent.
+    state = _state()
+    state["data_quality"] = {"core_sentinel_count": 0, "optional_sentinel_count": 0,
+                             "sentinels": []}
+    out2 = write_report_tree(state, "AAPL", tmp_path / "r2")
+    assert "Data Quality" not in out2.read_text(encoding="utf-8")

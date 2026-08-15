@@ -798,6 +798,21 @@ def test_tushare_symbol_map_ss_to_sh():
 
 
 @pytest.mark.unit
+def test_tushare_transport_error_is_not_no_market_data():
+    """A network outage must surface as VendorError, not NoMarketDataError —
+    mapping it to no-data made the router blame the ticker ('symbol may be
+    invalid, delisted') during an outage."""
+    import requests
+
+    from yiagents.dataflows.errors import NoMarketDataError, VendorError
+
+    pro = _tushare_pro(raises=requests.exceptions.ConnectionError("conn refused"))
+    with pytest.raises(VendorError, match="transport failure") as ei:
+        tv._query(pro, "daily_basic", ts_code="600519.SH")
+    assert not isinstance(ei.value, NoMarketDataError)
+
+
+@pytest.mark.unit
 def test_tushare_symbol_map_sz():
     assert tv._to_tushare_code("000001.SZ") == "000001.SZ"
 
@@ -1254,7 +1269,7 @@ def _cashflow_rows():
 
 @pytest.mark.unit
 def test_income_statement_pit_drops_future(monkeypatch):
-    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn: _profit_rows())
+    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn, anchor=None: bsv.StatementFetch(_profit_rows(), []))
     out = bsv.get_a_share_income_statement_native("600519.SS", "2024-11-01", 540)
     assert "# A-share Income Statement" in out
     assert "2024-10-30" in out         # published before curr_date -> kept
@@ -1264,14 +1279,28 @@ def test_income_statement_pit_drops_future(monkeypatch):
 
 @pytest.mark.unit
 def test_income_statement_empty_honest(monkeypatch):
-    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn: [])
+    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn, anchor=None: bsv.StatementFetch([], []))
     out = bsv.get_a_share_income_statement_native("600519.SS", "2024-06-15", 540)
     assert "No income-statement rows" in out
 
 
 @pytest.mark.unit
+def test_income_statement_failed_quarters_visible_in_band(monkeypatch):
+    """Quarters dropped by fetch failures must be marked in the output — a
+    truncated revenue trend is not a disclosure gap the agent should guess at."""
+    monkeypatch.setattr(
+        bsv, "_statement_rows",
+        lambda code, fn, anchor=None: bsv.StatementFetch(_profit_rows(), ["2023Q4", "2024Q1"]),
+    )
+    out = bsv.get_a_share_income_statement_native("600519.SS", "2024-11-01", 540)
+    assert "⚠ 2 quarter(s) could not be fetched" in out
+    assert "2023Q4" in out and "2024Q1" in out
+    assert "do not read the missing quarters as zero" in out
+
+
+@pytest.mark.unit
 def test_balance_sheet_pit(monkeypatch):
-    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn: _balance_rows())
+    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn, anchor=None: bsv.StatementFetch(_balance_rows(), []))
     out = bsv.get_a_share_balance_sheet_native("600519.SS", "2024-11-01", 540)
     assert "# A-share Balance Sheet" in out
     assert "2024-10-30" in out
@@ -1280,7 +1309,7 @@ def test_balance_sheet_pit(monkeypatch):
 
 @pytest.mark.unit
 def test_cashflow_statement_pit(monkeypatch):
-    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn: _cashflow_rows())
+    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn, anchor=None: bsv.StatementFetch(_cashflow_rows(), []))
     out = bsv.get_a_share_cashflow_statement_native("600519.SS", "2024-11-01", 540)
     assert "# A-share Cashflow Statement" in out
     assert "2024-10-30" in out
@@ -1288,7 +1317,7 @@ def test_cashflow_statement_pit(monkeypatch):
 
 @pytest.mark.unit
 def test_router_routes_income_statement_via_baostock(monkeypatch):
-    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn: _profit_rows())
+    monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn, anchor=None: bsv.StatementFetch(_profit_rows(), []))
     from yiagents.dataflows import config as cfgmod
     from yiagents.dataflows.interface import route_to_vendor
     orig = cfgmod.get_config()

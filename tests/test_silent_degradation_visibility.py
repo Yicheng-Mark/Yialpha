@@ -18,6 +18,7 @@ behavior (a raised error or a logged warning):
 
 from __future__ import annotations
 
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -102,8 +103,11 @@ def test_baostock_quarter_fetch_failure_warns(caplog):
 
     bs = SimpleNamespace(profit=raising_query)
     with caplog.at_level("WARNING", logger="yiagents.dataflows.baostock_vendor"):
-        rows = baostock_vendor._query_statement(bs, "600519.SH", "profit")
-    assert rows == []  # failed quarter skipped, the statement call survives
+        fetch = baostock_vendor._query_statement(
+            bs, "600519.SH", "profit", anchor=date(2025, 6, 1))
+    assert fetch.rows == []  # failed quarter skipped, the statement call survives
+    # The failed quarter is returned to the renderer for an in-band note.
+    assert fetch.failed == ["2024Q1"]
     hits = [r for r in caplog.records if "fetch failed" in r.message]
     assert hits and "600519.SH" in hits[0].message and "2024Q1" in hits[0].message
 

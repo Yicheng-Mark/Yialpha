@@ -316,6 +316,14 @@ a:hover { color: var(--ink-1); }
 .rationale { grid-column: 1 / -1; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px 16px; color: var(--ink-2); font-size: 13px; line-height: 1.65; }
 .rationale b { color: var(--ink-1); font-weight: 600; }
 
+/* data-quality banner (degraded-run evidence from the router's sentinels) */
+.dq-banner { background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 16px; margin: 0 0 16px; color: var(--ink-2); font-size: 13px; line-height: 1.6; }
+.dq-banner.dq-degraded { border-color: var(--st-warn); }
+.dq-banner.dq-degraded .dq-title { color: var(--st-warn); font-weight: 600; }
+.dq-list { margin: 8px 0 0; padding-left: 18px; }
+.dq-list li { margin: 2px 0; }
+.dq-list code { font-family: var(--mono); font-size: 12px; color: var(--ink-1); }
+
 /* ---------- debate balance (Bull ↔ Bear, diverging) ---------- */
 .debate { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 22px; box-shadow: var(--shadow); }
 .balance { display: flex; align-items: center; gap: 10px; margin: 6px 0 4px; }

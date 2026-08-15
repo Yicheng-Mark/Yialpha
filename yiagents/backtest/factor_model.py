@@ -166,10 +166,24 @@ def _cached_or_download(path: Path, url: str, ttl_days: float = 1.0) -> bytes | 
     except Exception as exc:  # noqa: BLE001 -- fail-open, try stale cache
         logger.warning("factor_model: download failed for %s: %s", url, exc)
         if path.exists():
+            # Same age cap as the shared vendor cache: an arbitrarily old
+            # factor file is worse than no attribution.
+            from yiagents.dataflows.disk_cache import max_stale_days
+
             try:
-                return path.read_bytes()
+                age_days = (time.time() - path.stat().st_mtime) / 86_400.0
             except OSError:
-                pass
+                age_days = float("inf")
+            if age_days > max_stale_days():
+                logger.warning(
+                    "factor_model: cache %s is %.1f days old (over the "
+                    "stale-serve cap); refusing to serve stale", path, age_days,
+                )
+            else:
+                try:
+                    return path.read_bytes()
+                except OSError:
+                    pass
         return None
 
     try:

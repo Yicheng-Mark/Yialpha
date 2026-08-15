@@ -52,6 +52,7 @@ import io
 import json
 import logging
 from datetime import date, timedelta
+from typing import NamedTuple
 
 from .disk_cache import MinIntervalThrottle, cached_or_fetch, vendor_cache_dir
 from .errors import NoMarketDataError
@@ -363,44 +364,69 @@ def _f(v) -> str:
 # --------------------------------------------------------------------------- #
 # Quarterly financial statements (利润表 / 资产负债表 / 现金流表)
 # --------------------------------------------------------------------------- #
-def _query_statement(bs, code: str, query_fn_name: str) -> list[dict]:
+class StatementFetch(NamedTuple):
+    """Quarterly statement rows plus the quarters that could NOT be fetched.
+
+    ``failed`` carries ``"YYYYQN"`` labels for per-quarter query errors; the
+    renderer must surface them in-band so a truncated revenue/profit trend is
+    distinguishable from a genuinely sparse disclosure history.
+    """
+
+    rows: list[dict]
+    failed: list[str]
+
+
+def _query_statement(bs, code: str, query_fn_name: str,
+                     anchor: date | None = None) -> StatementFetch:
     """Fetch quarterly statement rows for ``code`` via the given BaoStock query fn.
 
     Each BaoStock statement query returns rows keyed by ``pubDate`` (disclosure
-    date) and ``statDate`` (reporting period). A query error raises
-    :class:`NoMarketDataError`; a genuine no-row result returns ``[]``.
+    date) and ``statDate`` (reporting period). The report years are derived
+    from ``anchor`` (the PIT analysis date; today in live mode) so the fetched
+    window tracks the analysis instead of rotting as calendar years pass —
+    rows after ``curr_date`` are pubDate-filtered by the renderer anyway.
+
+    A failure on the FIRST (most recent) quarter raises
+    :class:`NoMarketDataError` (fail-closed — the tool's primary row is gone);
+    failures on the older trend quarters are logged, collected in
+    ``StatementFetch.failed``, and rendered in-band by the caller.
     """
     query_fn = getattr(bs, query_fn_name, None)
     if query_fn is None:
         raise NoMarketDataError(
             code, detail=f"BaoStock {query_fn_name} not available")
-    rs = query_fn(code=code, year="2025", quarter="3")
-    if getattr(rs, "error_code", "0") != "0":
-        raise NoMarketDataError(
-            code, detail=f"{query_fn_name} failed: "
-            f"{getattr(rs, 'error_msg', '?')}")
+    anchor = anchor or date.today()
+    years = (str(anchor.year - 2), str(anchor.year - 1), str(anchor.year))
+
     rows: list[dict] = []
-    while (rs.error_code == "0") and rs.next():
-        rows.append(dict(zip(rs.fields, rs.get_row_data(), strict=False)))
-    # Also fetch prior periods for trend.
-    for year in ("2025", "2024", "2023"):
-        for quarter in ("1", "2", "3", "4"):
-            if year == "2025" and quarter == "3":
-                continue  # already fetched
+    failed: list[str] = []
+    first = True
+    # Newest quarter first so the fail-closed gate applies to the row the
+    # renderer treats as "latest".
+    for year in reversed(years):
+        for quarter in ("4", "3", "2", "1"):
+            label = f"{year}Q{quarter}"
             try:
-                rs2 = query_fn(code=code, year=year, quarter=quarter)
-                if getattr(rs2, "error_code", "0") == "0":
-                    while (rs2.error_code == "0") and rs2.next():
-                        rows.append(dict(zip(rs2.fields, rs2.get_row_data(),
-                                             strict=False)))
+                rs = query_fn(code=code, year=year, quarter=quarter)
+                if getattr(rs, "error_code", "0") != "0":
+                    raise RuntimeError(
+                        f"{getattr(rs, 'error_msg', '?')} "
+                        f"(error_code {getattr(rs, 'error_code', '?')})")
             except Exception as exc:  # noqa: BLE001 -- one bad quarter must not
-                # sink the whole statement, but silently missing quarters make
-                # the trend table incomplete with no way to tell "no data"
-                # apart from "fetch failed" — so the gap stays visible.
+                # sink the whole statement, but the gap must stay visible to
+                # the agent, not only the log.
+                if first:
+                    raise NoMarketDataError(
+                        code, detail=f"{query_fn_name} failed: {exc}") from exc
                 logger.warning(
-                    "baostock: %s fetch failed for %s %sQ%s: %s",
-                    query_fn_name, code, year, quarter, exc,
+                    "baostock: %s fetch failed for %s %s: %s",
+                    query_fn_name, code, label, exc,
                 )
+                failed.append(label)
+                continue
+            first = False
+            while (rs.error_code == "0") and rs.next():
+                rows.append(dict(zip(rs.fields, rs.get_row_data(), strict=False)))
     # Deduplicate by (pubDate, statDate).
     seen = set()
     unique = []
@@ -409,14 +435,25 @@ def _query_statement(bs, code: str, query_fn_name: str) -> list[dict]:
         if key not in seen:
             seen.add(key)
             unique.append(r)
-    return unique
+    return StatementFetch(unique, failed)
 
 
-def _statement_rows(code: str, query_fn_name: str) -> list[dict]:
+def _failed_quarters_note(failed: list[str]) -> str:
+    """In-band marker for quarters dropped by fetch failures (may be empty)."""
+    if not failed:
+        return ""
+    listed = ", ".join(failed[:8]) + ("…" if len(failed) > 8 else "")
+    return (f"\n⚠ {len(failed)} quarter(s) could not be fetched (data source "
+            f"error): {listed}. The trend may be incomplete — do not read the "
+            "missing quarters as zero or as no disclosure.")
+
+
+def _statement_rows(code: str, query_fn_name: str,
+                    anchor: date | None = None) -> StatementFetch:
     """Login + fetch quarterly statement rows (cached per code+fn for the session)."""
     try:
         with _BaostockSession() as bs:
-            return _query_statement(bs, code, query_fn_name)
+            return _query_statement(bs, code, query_fn_name, anchor)
     except NoMarketDataError:
         raise
 
@@ -446,10 +483,10 @@ def get_a_share_income_statement_native(
     table. Non-A-share ticker -> :class:`NoMarketDataError`.
     """
     code = _to_baostock_code(ticker)
-    rows = _statement_rows(code, "query_profit_data")
-
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
+    rows, failed = _statement_rows(code, "query_profit_data", upper_d)
+
     upper_set = bool(upper)
     lower_d = upper_d - timedelta(days=int(look_back_days))
 
@@ -465,6 +502,7 @@ def get_a_share_income_statement_native(
     if not kept:
         out.write("\nNo income-statement rows published by this date. Report "
                   "'data not available' and do not estimate revenue or profit.")
+        out.write(_failed_quarters_note(failed))
         return out.getvalue().rstrip("\n")
 
     out.write(f"\n# {len(kept)} quarter(s)\n\n")
@@ -488,6 +526,7 @@ def get_a_share_income_statement_native(
         f"net profit {_fmt_cny(latest.get('npParentCompanyOwners'))}, "
         f"ROE {_f(latest.get('roeAvg'))}%, EPS(TTM) {_f(latest.get('epsTTM'))}."
     )
+    out.write(_failed_quarters_note(failed))
     return out.getvalue().rstrip("\n")
 
 
@@ -501,10 +540,10 @@ def get_a_share_balance_sheet_native(
     Non-A-share ticker -> :class:`NoMarketDataError`.
     """
     code = _to_baostock_code(ticker)
-    rows = _statement_rows(code, "query_balance_data")
-
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
+    rows, failed = _statement_rows(code, "query_balance_data", upper_d)
+
     upper_set = bool(upper)
     lower_d = upper_d - timedelta(days=int(look_back_days))
 
@@ -520,6 +559,7 @@ def get_a_share_balance_sheet_native(
     if not kept:
         out.write("\nNo balance-sheet rows published by this date. Report "
                   "'data not available' and do not estimate assets or debt.")
+        out.write(_failed_quarters_note(failed))
         return out.getvalue().rstrip("\n")
 
     out.write(f"\n# {len(kept)} quarter(s)\n\n")
@@ -542,6 +582,7 @@ def get_a_share_balance_sheet_native(
         f"total liabilities {_fmt_cny(latest.get('totalLiab'))}, "
         f"debt ratio {_f(latest.get('liabilityRate'))}%."
     )
+    out.write(_failed_quarters_note(failed))
     return out.getvalue().rstrip("\n")
 
 
@@ -555,10 +596,10 @@ def get_a_share_cashflow_statement_native(
     Non-A-share ticker -> :class:`NoMarketDataError`.
     """
     code = _to_baostock_code(ticker)
-    rows = _statement_rows(code, "query_cash_flow_data")
-
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
+    rows, failed = _statement_rows(code, "query_cash_flow_data", upper_d)
+
     upper_set = bool(upper)
     lower_d = upper_d - timedelta(days=int(look_back_days))
 
@@ -574,6 +615,7 @@ def get_a_share_cashflow_statement_native(
     if not kept:
         out.write("\nNo cashflow-statement rows published by this date. Report "
                   "'data not available' and do not estimate cash flows.")
+        out.write(_failed_quarters_note(failed))
         return out.getvalue().rstrip("\n")
 
     out.write(f"\n# {len(kept)} quarter(s)\n\n")
@@ -597,4 +639,5 @@ def get_a_share_cashflow_statement_native(
         f"investing CF {_fmt_cny(latest.get('netCFInvest'))}, "
         f"financing CF {_fmt_cny(latest.get('netCFFinance'))}."
     )
+    out.write(_failed_quarters_note(failed))
     return out.getvalue().rstrip("\n")

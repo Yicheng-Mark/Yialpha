@@ -148,6 +148,22 @@ def test_atr_routes_to_atr_and_omits_series_type(monkeypatch):
     assert "series_type" not in capture["params"]
 
 
+@pytest.mark.unit
+def test_mfi_routes_to_mfi_and_omits_series_type(monkeypatch):
+    """mfi is in the unified catalog: AV routes it to the MFI function,
+    volume-based like ATR (no series_type), and parses its column."""
+    capture = {}
+    monkeypatch.setattr(avi, "_make_api_request", _mock_api_request(
+        "time,MFI\n2025-02-01,62.5\n", capture,
+    ))
+    result = avi.get_indicator("AAPL", "mfi", "2025-03-01", 30)
+    assert capture["function_name"] == "MFI"
+    assert "series_type" not in capture["params"]
+    assert capture["params"]["time_period"] == "14"  # default
+    assert "62.5" in result
+    assert "MFI:" in result  # catalog description trailer
+
+
 # ---------------------------------------------------------------------------
 # C. CSV parsing — date filtering & output formatting
 # ---------------------------------------------------------------------------
