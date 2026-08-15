@@ -10,7 +10,11 @@ implementation of that contract:
 * **fresh** cache (mtime within ``ttl_days``) is served without a network call;
 * on a miss the caller's ``fetch`` runs and the result is written best-effort;
 * on a fetch failure a **stale** cache is served with a WARNING that includes
-  the cache age (observable degradation, never silent);
+  the cache age, but only up to ``YIAGENTS_DATA_CACHE_MAX_STALE_DAYS`` (default
+  30) — beyond the cap the failure re-raises instead (an arbitrarily old cache
+  is worse than an honest error). Every stale serve also records a
+  ``stale_cache`` data-quality sentinel, because the call "succeeds" and the
+  router would otherwise never see the degradation;
 * if no cache exists either, the failure either re-raises (fail-closed, the
   vendor turns it into its typed error) or returns ``None`` (``fail_open=True``,
   for advisory data whose absence must not abort a run).
@@ -37,6 +41,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from . import quality
 from .config import get_config
 
 logger = logging.getLogger(__name__)
@@ -107,6 +112,23 @@ def cache_file_path(base_dir: str, filename: str) -> Path:
     return Path(base_dir) / clean
 
 
+#: Complement of the allowlist above, for normalizing (not validating).
+_UNSAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._\-()]")
+
+
+def safe_cache_component(value: str) -> str:
+    """Flatten any string into a single safe cache-filename component.
+
+    Unlike :func:`sanitize_cache_filename`, which *validates* and raises,
+    this *normalizes*: every character outside the allowlist becomes ``_``.
+    Use it for filename parts derived from external identifiers — e.g. EDGAR
+    ``primaryDocument`` values carry rendering prefixes with a path separator
+    (``xslF345X05/wk-form4_20250130.xml``) — so the cache key can never fail
+    the data call or silently split into a bogus subdirectory.
+    """
+    return _UNSAFE_FILENAME_RE.sub("_", value)
+
+
 class MinIntervalThrottle:
     """Thread-safe minimum spacing between consecutive calls.
 
@@ -134,6 +156,20 @@ def _mtime_age_days(path: Path) -> float:
         return (time.time() - path.stat().st_mtime) / 86_400.0
     except OSError:
         return float("inf")
+
+
+def max_stale_days() -> float:
+    """Configured cap (days) beyond which a stale cache is refused on failure.
+
+    ``YIAGENTS_DATA_CACHE_MAX_STALE_DAYS`` (default 30). ``0`` is valid and
+    means "never serve stale" (fully fail-closed); negative/garbage values
+    fall back to the default rather than silently disabling the cap.
+    """
+    try:
+        n = float(get_config().get("data_cache_max_stale_days", 30))
+    except (TypeError, ValueError):
+        return 30.0
+    return n if n >= 0 else 30.0
 
 
 def cached_or_fetch(
@@ -167,21 +203,56 @@ def cached_or_fetch(
     validated = cache_file_path(base_dir, filename)
 
     stale: bytes | None = None
+    stale_mtime: float | None = None
     try:
         stale = validated.read_bytes()
+        # Capture the mtime while the bytes are in hand: a separate stat after
+        # the read races with deletion (TOCTOU) and would discard fresh bytes
+        # we already hold.
+        stale_mtime = validated.stat().st_mtime
     except OSError:
         stale = None
 
-    if stale is not None and (time.time() - validated.stat().st_mtime) < ttl_days * 86_400.0:
+    if stale is not None and stale_mtime is not None and (
+        time.time() - stale_mtime
+    ) < ttl_days * 86_400.0:
         return stale
 
     try:
         raw = fetch()
     except Exception:
         if stale is not None:
+            # Age is computed from the captured mtime when possible; a file
+            # that vanished since the read counts as infinitely old.
+            age = (
+                (time.time() - stale_mtime) / 86_400.0
+                if stale_mtime is not None
+                else _mtime_age_days(validated)
+            )
+            cap = max_stale_days()
+            if age > cap:
+                # Fail-closed: an arbitrarily old cache is worse than an
+                # honest error — the vendor layer turns this into its typed
+                # error and the router records a sentinel.
+                logger.warning(
+                    "%s: fetch failed and cache %s is %.1f days old (over the "
+                    "%.0f-day cap); refusing to serve stale data",
+                    vendor, validated, age, cap,
+                )
+                if fail_open:
+                    return None
+                raise
             logger.warning(
                 "%s: fetch failed; serving STALE cache for %s (age %.1f days)",
-                vendor, validated, _mtime_age_days(validated),
+                vendor, validated, age,
+            )
+            # The serve "succeeds", so the router would never see the failure
+            # — record it as data-quality evidence instead so the run's
+            # report/DEGRADED verdict can reflect it.
+            quality.record_sentinel(
+                f"{vendor}/{filename}",
+                quality.KIND_STALE_CACHE,
+                f"served stale cache (age {age:.1f} days) after fetch failure",
             )
             return stale
         if fail_open:

@@ -125,3 +125,23 @@ def test_cli_writes_csv_per_ticker(tmp_path, patched_ohlcv):
     assert list(df.columns)[:2] == ["date", "forward_return"]
     # Full default battery = 12 indicators.
     assert len(df.columns) == 2 + 12
+
+
+@pytest.mark.unit
+def test_cli_all_indicators_skipped_is_a_failure(tmp_path, monkeypatch, capsys):
+    """When every indicator is skipped the CSV has no indicator columns —
+    prune_indicators_cli rejects it. The exporter must count it as a failure
+    (exit 1, no CSV, no misleading 'next:' hint) instead of a success."""
+    import unittest.mock as mock
+
+    class _AllBrokenWrap:
+        def __getitem__(self, item):
+            raise RuntimeError("stockstats exploded")
+
+    monkeypatch.setattr(exporter, "load_ohlcv", lambda t, d: _ohlcv())
+    with mock.patch("stockstats.wrap", lambda df: _AllBrokenWrap()):
+        rc = exporter.main(["NVDA", "--output-dir", str(tmp_path)])
+    assert rc == 1
+    assert not (tmp_path / "NVDA_5d.csv").exists()
+    out = capsys.readouterr().out
+    assert "next:" not in out

@@ -52,6 +52,16 @@ _TIMEOUT = 30
 _throttler = MinIntervalThrottle(0.12)
 
 
+class SecNoFileError(NoMarketDataError):
+    """The requested SEC artifact genuinely does not exist (HTTP 404).
+
+    Subclass of :class:`NoMarketDataError` so existing ``except`` sites keep
+    working, but distinguishable by callers that must NOT treat a transport
+    failure (timeout / proxy / 5xx — also a NoMarketDataError) as "the file
+    simply isn't there". Skipping cutoffs/files on 404 is honest; skipping
+    them on an outage fabricates a false "no data" zero signal."""
+
+
 def _user_agent() -> str:
     return os.environ.get("YIAGENTS_SEC_USER_AGENT") or "YiAgents research (sec-edgar vendor)"
 
@@ -83,7 +93,7 @@ def _sec_get(url: str) -> bytes:
         # 403 from SEC is almost always a missing/abusive User-Agent or a throttle.
         raise VendorRateLimitError(f"SEC returned {resp.status_code} for {url}")
     if resp.status_code == 404:
-        raise NoMarketDataError(url, detail="SEC returned 404 (no such filing/entity)")
+        raise SecNoFileError(url, detail="SEC returned 404 (no such filing/entity)")
     if resp.status_code >= 400:
         raise NoMarketDataError(url, detail=f"SEC HTTP {resp.status_code}")
     return resp.content

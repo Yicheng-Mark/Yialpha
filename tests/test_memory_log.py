@@ -607,6 +607,34 @@ class TestDeferredReflection:
         assert alpha == pytest.approx(0.02)
         assert days == 2
 
+    def test_fetch_returns_benchmark_served_from_cache(self):
+        """Batch reflection: benchmark (and ticker) history hit Yahoo once.
+
+        A batch over N tickers re-resolves pending entries against the SAME
+        benchmark window; with the vendor-layer history cache the second
+        _fetch_returns call must construct no yf.Ticker at all.
+        """
+        calls = []
+        with patch("yfinance.Ticker") as mock_ticker_cls:
+            def _make_ticker(sym):
+                calls.append(sym)
+                m = MagicMock()
+                m.history.return_value = _price_df(
+                    [400.0, 402.0, 404.0, 406.0, 408.0, 410.0]
+                    if sym == "SPY"
+                    else [100.0, 102.0, 104.0, 106.0, 108.0, 110.0]
+                )
+                return m
+            mock_ticker_cls.side_effect = _make_ticker
+            mock_graph = MagicMock(spec=YiAgentsGraph)
+            first = YiAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-01-05")
+            second = YiAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-01-05")
+
+        assert first == second
+        assert first[0] == pytest.approx(0.1)
+        # One vendor construction per leg on the first call only.
+        assert calls == ["NVDA", "SPY"]
+
     # YiAgentsGraph._resolve_benchmark — picks index for alpha calc
 
     def test_resolve_benchmark_explicit_override(self):

@@ -180,7 +180,11 @@ def resolve_instrument_identity(ticker: str, curr_date: str | None = None) -> di
     try:
         info = yf.Ticker(normalize_symbol(ticker)).info or {}
     except Exception as exc:  # noqa: BLE001 — fail open, never block the run
-        logger.debug("Could not resolve instrument identity for %s: %s", ticker, exc)
+        # The anti-hallucination identity anchor disappears with this failure —
+        # WARNING (not DEBUG) so the operator can see the guard went away.
+        logger.warning(
+            "Could not resolve instrument identity for %s: %s", ticker, exc
+        )
         return {}
 
     identity: dict[str, str] = {}

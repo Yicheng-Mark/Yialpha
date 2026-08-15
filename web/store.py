@@ -222,5 +222,9 @@ def load_run(ticker: str, date: str) -> dict | None:
             "final_trade_decision": final,
         },
         "overlay": overlay,
+        # Router's sentinel evidence for this run: rendered as the degraded-run
+        # banner in the report view (None for logs written before the field
+        # existed or for fully-fed runs).
+        "data_quality": state.get("data_quality") or None,
         "node_perf": load_node_perf(ticker, date),
     }

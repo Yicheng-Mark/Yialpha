@@ -30,6 +30,7 @@ all — a silent-degradation fail-open.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 from typing import Any
@@ -77,24 +78,32 @@ def resolve_timeout(
 
     raw = os.environ.get("YIAGENTS_LLM_TIMEOUT_S")
     if raw:
+        parsed: float | None = None
         try:
-            llm_kwargs["timeout"] = float(raw)
+            parsed = float(raw)
         except ValueError:
-            # 2b. Non-numeric env value — must not be silent. The old code did
-            # ``contextlib.suppress(ValueError)`` here, which dropped the bad
-            # value AND then skipped the cloud-default branch (because the
-            # truthy env "looked configured"), leaving the call with no timeout
-            # and no warning. Log it and fall through to the local/cloud logic.
-            logger.warning(
-                "YIAGENTS_LLM_TIMEOUT_S=%r is not a number; ignored for provider "
-                "%r. Falling back to %s.",
-                raw,
-                provider_name or "(unknown)",
-                "no timeout (local provider)" if is_local
-                else f"{_DEFAULT_CLOUD_TIMEOUT}s cloud default",
-            )
-        else:
+            parsed = None
+        # 0 / negative / NaN / inf parse fine but are not usable settings
+        # (0 => every call times out immediately; inf => no ceiling at all).
+        if parsed is not None and not (parsed > 0 and math.isfinite(parsed)):
+            parsed = None
+        if parsed is not None:
+            llm_kwargs["timeout"] = parsed
             return
+        # 2b. Bad env value (non-numeric, or non-positive/non-finite) — must
+        # not be silent. The old code did ``contextlib.suppress(ValueError)``
+        # here, which dropped the bad value AND then skipped the cloud-default
+        # branch (because the truthy env "looked configured"), leaving the call
+        # with no timeout and no warning. Log it and fall through to the
+        # local/cloud logic.
+        logger.warning(
+            "YIAGENTS_LLM_TIMEOUT_S=%r is not a positive finite number; ignored "
+            "for provider %r. Falling back to %s.",
+            raw,
+            provider_name or "(unknown)",
+            "no timeout (local provider)" if is_local
+            else f"{_DEFAULT_CLOUD_TIMEOUT}s cloud default",
+        )
 
     # 3. Local model server: no ceiling (intentional — slow local generation).
     if is_local:

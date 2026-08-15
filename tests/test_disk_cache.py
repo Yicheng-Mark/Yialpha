@@ -8,6 +8,7 @@ the containment check, and the throttle spacing.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -24,6 +25,19 @@ def _fetch_ok(payload: bytes = b"data"):
         return payload
 
     return fetch, calls
+
+
+# --------------------------------------------------------------------------- #
+# safe_cache_component
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_safe_cache_component_flattens_disallowed_chars():
+    # EDGAR primaryDocument values carry rendering prefixes with a path
+    # separator; the flattened result must be a valid single component.
+    flattened = dc.safe_cache_component("xslF345X05/wk-form4_20250130.xml")
+    assert flattened == "xslF345X05_wk-form4_20250130.xml"
+    dc.sanitize_cache_filename(flattened)  # must not raise
+    assert dc.safe_cache_component("a b:c%") == "a_b_c_"
 
 
 # --------------------------------------------------------------------------- #
@@ -93,6 +107,89 @@ def test_failure_without_cache_raises_by_default(tmp_path):
 
     with pytest.raises(RuntimeError, match="network down"):
         dc.cached_or_fetch(str(tmp_path), "f.json", boom, ttl_days=1.0, vendor="t")
+
+
+@pytest.mark.unit
+def test_stale_over_cap_refused_fail_closed(tmp_path, caplog):
+    """A cache older than data_cache_max_stale_days must NOT be served when
+    the vendor fails — an arbitrarily old cache is worse than an honest error."""
+    from yiagents.dataflows import config as cfgmod, quality
+
+    path = tmp_path / "f.json"
+    path.write_bytes(b"ancient")
+    old_mtime = time.time() - 40 * 86_400
+    os.utime(path, (old_mtime, old_mtime))
+
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "data_cache_max_stale_days": 30})
+        quality.ensure_run_context()
+        with caplog.at_level("WARNING"), pytest.raises(RuntimeError, match="network down"):
+            dc.cached_or_fetch(
+                str(tmp_path), "f.json", boom_fn, ttl_days=1.0, vendor="vendorx"
+            )
+        assert any("refusing to serve stale" in r.message for r in caplog.records)
+        # Refused serve records no stale sentinel — the raise propagates to the
+        # vendor's typed-error path instead.
+        assert quality.summarize_quality(quality.snapshot_quality())[
+            "stale_cache_count"
+        ] == 0
+    finally:
+        cfgmod.set_config(orig)
+        quality.reset_quality()
+
+
+def boom_fn() -> bytes:
+    raise RuntimeError("network down")
+
+
+@pytest.mark.unit
+def test_stale_within_cap_served_with_sentinel(tmp_path, caplog):
+    from yiagents.dataflows import config as cfgmod, quality
+
+    path = tmp_path / "f.json"
+    path.write_bytes(b"stale-data")
+    old_mtime = time.time() - 3 * 86_400
+    os.utime(path, (old_mtime, old_mtime))
+
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "data_cache_max_stale_days": 30})
+        quality.ensure_run_context()
+        with caplog.at_level("WARNING"):
+            out = dc.cached_or_fetch(
+                str(tmp_path), "f.json", boom_fn, ttl_days=1.0, vendor="vendorx"
+            )
+        assert out == b"stale-data"
+        events = quality.snapshot_quality()
+        assert len(events) == 1
+        assert events[0]["kind"] == quality.KIND_STALE_CACHE
+        assert events[0]["method"] == "vendorx/f.json"
+        assert "3.0 days" in events[0]["detail"]
+    finally:
+        cfgmod.set_config(orig)
+        quality.reset_quality()
+
+
+@pytest.mark.unit
+def test_cap_zero_never_serves_stale(tmp_path):
+    from yiagents.dataflows import config as cfgmod
+
+    path = tmp_path / "f.json"
+    path.write_bytes(b"stale-data")
+    # 3-day-old mtime so the TTL freshness check misses, but cap 0 means
+    # "never serve stale" regardless of age.
+    old_mtime = time.time() - 3 * 86_400
+    os.utime(path, (old_mtime, old_mtime))
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "data_cache_max_stale_days": 0})
+        with pytest.raises(RuntimeError, match="network down"):
+            dc.cached_or_fetch(
+                str(tmp_path), "f.json", boom_fn, ttl_days=0.001, vendor="t"
+            )
+    finally:
+        cfgmod.set_config(orig)
 
 
 @pytest.mark.unit

@@ -21,6 +21,7 @@ from yiagents.agents.utils.agent_utils import (
     get_verified_market_snapshot,
 )
 from yiagents.agents.utils.prompt_builder import build_collaborator_prompt, build_fincot_prompt
+from yiagents.dataflows import indicator_catalog
 from yiagents.dataflows.config import get_config
 from yiagents.dataflows.symbol_utils import is_a_stock
 from yiagents.dataflows.utils import is_historical_date
@@ -111,125 +112,20 @@ _A_SHARE_MARKET_NUDGE = (
 # the available tool vocabulary never depends on which framing is active.
 #
 # Structured source of truth: (section header, [(indicator, description), ...]).
-# INDICATOR_CATALOG below is rendered from it, and the ``indicator_battery``
-# config key prunes the same rendering — that gives the IC-pruning loop
-# (scripts/prune_indicators_cli.py) a real config landing point. With the
-# battery unset (the default) the render is byte-identical to the original
-# hand-written catalog literal (pinned by tests/test_market_analyst_prompts.py).
-_INDICATOR_SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
-    (
-        "Moving Averages",
-        [
-            (
-                "close_50_sma",
-                "50 SMA: A medium-term trend indicator. Usage: Identify trend "
-                "direction and serve as dynamic support/resistance. Tips: It "
-                "lags price; combine with faster indicators for timely signals.",
-            ),
-            (
-                "close_200_sma",
-                "200 SMA: A long-term trend benchmark. Usage: Confirm overall "
-                "market trend and identify golden/death cross setups. Tips: It "
-                "reacts slowly; best for strategic trend confirmation rather "
-                "than frequent trading entries.",
-            ),
-            (
-                "close_10_ema",
-                "10 EMA: A responsive short-term average. Usage: Capture quick "
-                "shifts in momentum and potential entry points. Tips: Prone to "
-                "noise in choppy markets; use alongside longer averages for "
-                "filtering false signals.",
-            ),
-        ],
-    ),
-    (
-        "MACD Related",
-        [
-            (
-                "macd",
-                "MACD: Computes momentum via differences of EMAs. Usage: Look "
-                "for crossovers and divergence as signals of trend changes. "
-                "Tips: Confirm with other indicators in low-volatility or "
-                "sideways markets.",
-            ),
-            (
-                "macds",
-                "MACD Signal: An EMA smoothing of the MACD line. Usage: Use "
-                "crossovers with the MACD line to trigger trades. Tips: Should "
-                "be part of a broader strategy to avoid false positives.",
-            ),
-            (
-                "macdh",
-                "MACD Histogram: Shows the gap between the MACD line and its "
-                "signal. Usage: Visualize momentum strength and spot divergence "
-                "early. Tips: Can be volatile; complement with additional "
-                "filters in fast-moving markets.",
-            ),
-        ],
-    ),
-    (
-        "Momentum Indicators",
-        [
-            (
-                "rsi",
-                "RSI: Measures momentum to flag overbought/oversold "
-                "conditions. Usage: Apply 70/30 thresholds and watch for "
-                "divergence to signal reversals. Tips: In strong trends, RSI "
-                "may remain extreme; always cross-check with trend analysis.",
-            ),
-        ],
-    ),
-    (
-        "Volatility Indicators",
-        [
-            (
-                "boll",
-                "Bollinger Middle: A 20 SMA serving as the basis for Bollinger "
-                "Bands. Usage: Acts as a dynamic benchmark for price movement. "
-                "Tips: Combine with the upper and lower bands to effectively "
-                "spot breakouts or reversals.",
-            ),
-            (
-                "boll_ub",
-                "Bollinger Upper Band: Typically 2 standard deviations above "
-                "the middle line. Usage: Signals potential overbought "
-                "conditions and breakout zones. Tips: Confirm signals with "
-                "other tools; prices may ride the band in strong trends.",
-            ),
-            (
-                "boll_lb",
-                "Bollinger Lower Band: Typically 2 standard deviations below "
-                "the middle line. Usage: Indicates potential oversold "
-                "conditions. Tips: Use additional analysis to avoid false "
-                "reversal signals.",
-            ),
-            (
-                "atr",
-                "ATR: Averages true range to measure volatility. Usage: Set "
-                "stop-loss levels and adjust position sizes based on current "
-                "market volatility. Tips: It's a reactive measure, so use it "
-                "as part of a broader risk management strategy.",
-            ),
-        ],
-    ),
-    (
-        "Volume-Based Indicators",
-        [
-            (
-                "vwma",
-                "VWMA: A moving average weighted by volume. Usage: Confirm "
-                "trends by integrating price action with volume data. Tips: "
-                "Watch for skewed results from volume spikes; use in "
-                "combination with other volume analyses.",
-            ),
-        ],
-    ),
-]
+# _INDICATOR_SECTIONS below is rendered from the shared catalog module
+# (yiagents/dataflows/indicator_catalog.py — one source for this prompt copy,
+# the y_finance tool gate, and the Alpha Vantage descriptions), and the
+# ``indicator_battery`` config key prunes the same rendering — that gives the
+# IC-pruning loop (scripts/prune_indicators_cli.py) a real config landing
+# point. With the battery unset (the default) the render is byte-identical to
+# the original hand-written catalog literal (pinned by
+# tests/test_market_analyst_prompts.py and tests/test_indicator_battery.py).
+_INDICATOR_SECTIONS: list[tuple[str, list[tuple[str, str]]]] = (
+    indicator_catalog.ANALYST_SECTIONS
+)
 
 # Known indicator names — the validation set for ``indicator_battery``.
-INDICATOR_NAMES = frozenset(
-    name for _, entries in _INDICATOR_SECTIONS for name, _ in entries
-)
+INDICATOR_NAMES = indicator_catalog.ANALYST_NAMES
 
 
 def _render_indicator_catalog(battery: "list[str] | None" = None) -> str:

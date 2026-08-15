@@ -1,13 +1,12 @@
 import logging
 import os
 import socket
+import threading
 import time
 from contextlib import nullcontext
-from typing import Annotated
 
 import pandas as pd
 import yfinance as yf
-from stockstats import wrap
 from yfinance.exceptions import YFRateLimitError
 
 from yiagents.batch.locks import FileLock
@@ -34,10 +33,22 @@ _HTTP_TIMEOUT_ENV = os.environ.get("YIAGENTS_HTTP_TIMEOUT_S")
 YF_HTTP_TIMEOUT: float | None = None
 if _HTTP_TIMEOUT_ENV:
     try:
-        YF_HTTP_TIMEOUT = float(_HTTP_TIMEOUT_ENV)
-        socket.setdefaulttimeout(YF_HTTP_TIMEOUT)
+        parsed = float(_HTTP_TIMEOUT_ENV)
+        if parsed > 0:
+            YF_HTTP_TIMEOUT = parsed
+            socket.setdefaulttimeout(YF_HTTP_TIMEOUT)
+        else:
+            logger.warning(
+                "YIAGENTS_HTTP_TIMEOUT_S=%r is not positive; ignoring it "
+                "(no HTTP timeout will be applied)", _HTTP_TIMEOUT_ENV,
+            )
     except ValueError:
-        YF_HTTP_TIMEOUT = None
+        # Same contract as the LLM timeout (llm_clients/_timeout.py): a bad
+        # value must be visible, never silently swallowed.
+        logger.warning(
+            "YIAGENTS_HTTP_TIMEOUT_S=%r is not a number; ignoring it "
+            "(no HTTP timeout will be applied)", _HTTP_TIMEOUT_ENV,
+        )
 
 # A vendor's latest OHLCV row this many calendar days before the requested date
 # is treated as stale. Generous enough to span long holiday weekends, tight
@@ -216,12 +227,50 @@ def _ohlcv_cache_path(config: dict, safe_symbol: str) -> str:
     )
 
 
+# In-process memo of CLEANED OHLCV frames, keyed by the cache-file path and
+# validated against the file's mtime. A single-ticker run re-enters
+# load_ohlcv 10+ times (indicator windows, market regime, the validator, the
+# risk overlay, bulk stats); the disk cache already dedups the network, but
+# every call still paid config deepcopy + FileLock + a full CSV re-read +
+# re-cleaning. The memo serves the date-INDEPENDENT cleaned frame (per-call
+# curr_date filtering stays at the call site, after the memo), so no call
+# sequence can observe a different result than the disk path alone would
+# produce — the same-day-refresh rule is re-checked on every memo hit, and
+# any cache rewrite (this process or another) bumps the mtime and
+# invalidates the entry. Batch workers are threads, so the dict is guarded.
+_OHLCV_MEMO_LOCK = threading.Lock()
+_OHLCV_MEMO: dict[str, tuple[float, pd.DataFrame]] = {}
+#: Upper bound so a very long-lived batch process over hundreds of tickers
+#: cannot grow the memo without limit (each 5y daily frame is ~1250 rows).
+_OHLCV_MEMO_MAX_ENTRIES = 64
+
+
+def _ohlcv_memo_get(data_file: str, mtime: float) -> pd.DataFrame | None:
+    """The memoized cleaned frame for ``data_file`` iff keyed to ``mtime``."""
+    with _OHLCV_MEMO_LOCK:
+        entry = _OHLCV_MEMO.get(data_file)
+    if entry is None or entry[0] != mtime:
+        return None
+    return entry[1]
+
+
+def _ohlcv_memo_set(data_file: str, mtime: float, frame: pd.DataFrame) -> None:
+    """Remember the cleaned frame under (data_file, mtime)."""
+    with _OHLCV_MEMO_LOCK:
+        if len(_OHLCV_MEMO) >= _OHLCV_MEMO_MAX_ENTRIES and data_file not in _OHLCV_MEMO:
+            _OHLCV_MEMO.pop(next(iter(_OHLCV_MEMO)))  # FIFO eviction
+        _OHLCV_MEMO[data_file] = (mtime, frame)
+
+
 def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     """Fetch OHLCV data with caching, filtered to prevent look-ahead bias.
 
     Downloads 5 years of data up to today and caches per symbol. On
     subsequent calls the cache is reused. Rows after curr_date are
-    filtered out so backtests never see future prices.
+    filtered out so backtests never see future prices. Within one process
+    the CLEANED frame is additionally memoized (keyed by cache-file mtime,
+    see ``_OHLCV_MEMO``); the curr_date filter stays per-call, after the
+    memo, so results are identical to the disk path alone.
     """
     # Resolve broker/forex symbols (XAUUSD+ -> GC=F) to Yahoo's convention,
     # then reject values that would escape the cache directory when
@@ -252,16 +301,25 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     with lock:
         # A cached file may be empty if a prior fetch failed (unknown symbol,
         # transient rate limit). Treat an empty/columnless cache as a miss and
-        # re-fetch rather than serving the poisoned file forever.
+        # re-fetch rather than serving the poisoned file forever. The same-day
+        # refresh rule is checked BEFORE the (memo or CSV) read, exactly like
+        # the original condition ordering: a file that must be refetched is
+        # never served from any cache level.
         data = None
-        if os.path.exists(data_file):
-            cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
-            if (
-                not cached.empty
-                and "Close" in cached.columns
-                and not _needs_same_day_refresh(data_file, curr_date_dt, today_date)
-            ):
-                data = cached
+        from_memo = False
+        if os.path.exists(data_file) and not _needs_same_day_refresh(
+            data_file, curr_date_dt, today_date
+        ):
+            memoized = _ohlcv_memo_get(data_file, os.path.getmtime(data_file))
+            if memoized is not None:
+                data = memoized  # already cleaned
+                from_memo = True
+            else:
+                cached = pd.read_csv(
+                    data_file, on_bad_lines="skip", encoding="utf-8"
+                )
+                if not cached.empty and "Close" in cached.columns:
+                    data = cached
 
         if data is None:
             downloaded = yf_retry(
@@ -286,7 +344,12 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
             downloaded.to_csv(data_file, index=False, encoding="utf-8")
             data = downloaded
 
-    data = _clean_dataframe(data)
+        if not from_memo:
+            data = _clean_dataframe(data)
+            # Key the memo to the cache file's mtime as seen inside the lock:
+            # any later rewrite (this process or another) changes the mtime
+            # and invalidates the entry on the next _ohlcv_memo_get.
+            _ohlcv_memo_set(data_file, os.path.getmtime(data_file), data)
 
     # Filter to curr_date to prevent look-ahead bias in backtesting
     data = data[data["Date"] <= curr_date_dt]
@@ -360,29 +423,3 @@ def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.D
         else:
             keep.append(is_filing_public(str(col), curr_date))
     return data.loc[:, keep]
-
-
-class StockstatsUtils:
-    @staticmethod
-    def get_stock_stats(
-        symbol: Annotated[str, "ticker symbol for the company"],
-        indicator: Annotated[
-            str, "quantitative indicators based off of the stock data for the company"
-        ],
-        curr_date: Annotated[
-            str, "curr date for retrieving stock price data, YYYY-mm-dd"
-        ],
-    ):
-        data = load_ohlcv(symbol, curr_date)
-        df = wrap(data)
-        df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
-        curr_date_str = pd.to_datetime(curr_date).strftime("%Y-%m-%d")
-
-        df[indicator]  # trigger stockstats to calculate the indicator
-        matching_rows = df[df["Date"].str.startswith(curr_date_str)]
-
-        if not matching_rows.empty:
-            indicator_value = matching_rows[indicator].values[0]
-            return indicator_value
-        else:
-            return "N/A: Not a trading day (weekend or holiday)"

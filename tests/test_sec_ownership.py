@@ -26,6 +26,7 @@ from langchain_core.runnables import Runnable
 from yiagents.agents.analysts.fundamentals_analyst import create_fundamentals_analyst
 from yiagents.dataflows import sec_ownership
 from yiagents.dataflows.errors import NoMarketDataError
+from yiagents.dataflows.sec_edgar import SecNoFileError
 
 
 # --------------------------------------------------------------------------- #
@@ -151,6 +152,56 @@ def test_form4_no_filings_in_window(monkeypatch, tmp_path):
     assert "No Form 4 transactions" in out
 
 
+@pytest.mark.unit
+def test_form4_primary_document_with_path_prefix_caches_correctly(monkeypatch, tmp_path):
+    """Regression: EDGAR primaryDocument often carries a rendering prefix
+    ("xslF345X05/wk-form4_*.xml"). The URL must keep the raw value while the
+    cache key flattens it — previously the cache path split into a nonexistent
+    subdirectory, so the 90-day cache never hit and every call re-fetched.
+    Exercises the real cached_or_fetch (only the transport is stubbed).
+    """
+    from yiagents.dataflows import sec_edgar
+
+    subs = (
+        b'{"cik":320193,"filings":{"recent":{'
+        b'"form":["4"],'
+        b'"accessionNumber":["000032019324000003"],'
+        b'"filingDate":["2024-06-10"],'
+        b'"primaryDocument":["xslF345X05/wk-form4_20240605.xml"]'
+        b"}}}"
+    )
+    xml = _form4_xml("LUCA MAESTRI", "CFO", "S", "50000", "195.20",
+                     "2024-06-05", "100000")
+
+    monkeypatch.setattr(sec_ownership, "_cache_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(sec_ownership, "_cik_for_ticker", lambda t: 320193)
+
+    form4_urls = []
+
+    def fake_sec_get(url):
+        if "submissions" in url:
+            return subs
+        assert "xslF345X05/wk-form4_20240605.xml" in url, f"raw doc lost in URL: {url}"
+        form4_urls.append(url)
+        return xml
+
+    monkeypatch.setattr(sec_edgar, "_sec_get", fake_sec_get)
+
+    out1 = sec_ownership.get_form4_insider_trading("AAPL", "2024-06-15", 180)
+    assert "LUCA MAESTRI" in out1
+    out2 = sec_ownership.get_form4_insider_trading("AAPL", "2024-06-15", 180)
+    assert out2 == out1
+
+    # The XML was fetched over the network exactly once (cache hit on retry),
+    # and the cache entry is a single flattened component in the cache dir —
+    # no bogus "xslF345X05" subdirectory.
+    assert len(form4_urls) == 1
+    cached = list(tmp_path.glob("form4_320193_*"))
+    assert len(cached) == 1
+    assert cached[0].parent == tmp_path
+    assert cached[0].name == "form4_320193_000032019324000003_xslF345X05_wk-form4_20240605.xml"
+
+
 # --------------------------------------------------------------------------- #
 # FTD
 # --------------------------------------------------------------------------- #
@@ -168,7 +219,7 @@ def _patch_ftd(monkeypatch, tmp_path, content=FTD_PIPE):
         requested.append(url)
         if "cnbs20240531" in url:
             return content
-        raise NoMarketDataError(url, detail="404")
+        raise SecNoFileError(url, detail="404")
 
     monkeypatch.setattr(sec_ownership, "_cached_or_fetch", fake_fetch)
     return requested
@@ -196,6 +247,56 @@ def test_ftd_tab_delimiter_parsed(monkeypatch, tmp_path):
     out = sec_ownership.get_ftd_data("AAPL", "2024-06-20", 90)
     assert "# Fails-to-Deliver for AAPL" in out
     assert "1234567" in out
+
+
+@pytest.mark.unit
+def test_ftd_transport_failure_propagates_not_fake_zero(monkeypatch, tmp_path):
+    """A SEC outage must NOT render as an affirmative 'No fails-to-deliver
+    reported' — that fabricates a clean settlement-health signal."""
+    monkeypatch.setattr(sec_ownership, "_cache_dir", lambda: str(tmp_path))
+
+    def dead_vendor(_path, url, ttl_days):
+        raise NoMarketDataError(url, detail="SEC request failed: timeout")
+
+    monkeypatch.setattr(sec_ownership, "_cached_or_fetch", dead_vendor)
+    with pytest.raises(NoMarketDataError, match="timeout"):
+        sec_ownership.get_ftd_data("AAPL", "2024-06-20", 90)
+
+
+@pytest.mark.unit
+def test_form4_transport_failure_propagates_not_fake_zero(monkeypatch, tmp_path):
+    _patch_form4(monkeypatch, tmp_path)
+    # First filing's fetch dies with a transport error (not a 404): the tool
+    # must fail rather than claim "No Form 4 transactions".
+    monkeypatch.setattr(
+        sec_ownership, "_cached_or_fetch",
+        lambda _p, url, ttl_days: (_ for _ in ()).throw(
+            NoMarketDataError(url, detail="SEC request failed: proxy refused")),
+    )
+    with pytest.raises(NoMarketDataError, match="proxy refused"):
+        sec_ownership.get_form4_insider_trading("AAPL", "2024-06-15", 180)
+
+
+@pytest.mark.unit
+def test_form4_genuine_404_skipped_with_note(monkeypatch, tmp_path):
+    _patch_form4(monkeypatch, tmp_path)
+    # One filing genuinely gone (404): it is skipped and the note says so,
+    # while the other filings still render.
+    def fetch(_path, url, ttl_days):
+        if "submissions" in url:
+            return SUBMISSIONS_JSON
+        if "f2.xml" in url:
+            raise SecNoFileError(url, detail="SEC returned 404")
+        for doc, payload in XML_BY_DOC.items():
+            if doc in url:
+                return payload
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(sec_ownership, "_cached_or_fetch", fetch)
+    out = sec_ownership.get_form4_insider_trading("AAPL", "2024-06-15", 180)
+    assert "KATHERINE ADAMS" in out       # f1.xml still served
+    assert "LUCA MAESTRI" not in out      # f2.xml gone
+    assert "1 filing(s) skipped" in out
 
 
 @pytest.mark.unit
@@ -403,8 +504,10 @@ def test_13f_basic_aggregation(monkeypatch, tmp_path):
         "00001C\tMICROSOFT CORP\t594918104\tCOM\t9999\t10\tSH\t\tSOLE\t10\t0\t0"
     )
     requested = _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
-    out = sec_ownership.get_institutional_holdings("AAPL", "2024-06-15", 180)
-    # Most-recent PIT-visible dataset is the Mar-May 2024 window (report Q1).
+    # curr_date 2024-07-20: with the 45-day publication lag, visible_end
+    # 2024-06-05 makes the Mar-May 2024 window (report Q1) the most recent
+    # PIT-visible dataset (it became public 2024-05-31 + 45d = 2024-07-15).
+    out = sec_ownership.get_institutional_holdings("AAPL", "2024-07-20", 180)
     assert "01mar2024-31may2024_form13f.zip" in requested[0]
     assert "2024 Q1" in out
     assert "BERKSHIRE HATHAWAY" in out
@@ -414,11 +517,25 @@ def test_13f_basic_aggregation(monkeypatch, tmp_path):
 
 
 @pytest.mark.unit
+def test_13f_publication_gap_falls_back_to_last_published(monkeypatch, tmp_path):
+    """During the ~45-day gap after a quarter-end, the tool must use the last
+    PUBLISHED ZIP (Dec-Feb) instead of 404-fetching the not-yet-released one
+    and blaming the symbol."""
+    requested = _patch_13f(monkeypatch, tmp_path, _13f_zip(COVER_HEADER, HOLDING_HEADER))
+    # curr_date 2024-07-10: Mar-May ZIP not public until 2024-07-15;
+    # visible_end 2024-05-26 -> latest candidate is 2024-02-29.
+    out = sec_ownership.get_institutional_holdings("AAPL", "2024-07-10", 180)
+    assert len(requested) == 1
+    assert "01dec2023-29feb2024_form13f.zip" in requested[0]
+    assert "No bulk 13F data set was public" not in out
+
+
+@pytest.mark.unit
 def test_13f_pit_quarter_not_yet_published(monkeypatch, tmp_path):
     requested = _patch_13f(monkeypatch, tmp_path, _13f_zip(COVER_HEADER, HOLDING_HEADER))
-    # curr_date 2024-03-01, look-back 10d -> visible_end 2024-02-24, lower
-    # 2024-02-20. No Feb/May/Aug/Nov month-end lies in [2024-02-20, 2024-02-24]
-    # (2024-02-29 is after it), so no dataset is PIT-visible.
+    # curr_date 2024-03-01, look-back 10d -> visible_end 2024-01-15 (45-day
+    # lag), lower 2024-02-20. No Feb/May/Aug/Nov month-end lies in
+    # [2024-02-20, 2024-01-15] (empty range), so no dataset is PIT-visible.
     out = sec_ownership.get_institutional_holdings("AAPL", "2024-03-01", 10)
     assert "No bulk 13F data set was public" in out
     assert requested == []                 # the ZIP was never fetched

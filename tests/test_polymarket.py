@@ -1,8 +1,12 @@
 """Polymarket prediction-market vendor: forward-looking filtering, volume
-ranking, formatting, graceful degradation, and router integration.
+ranking, formatting, graceful degradation, router integration, and the
+short-TTL disk cache behind ``_request``.
 
 All API access is mocked, so these run without a network connection.
 """
+import json
+import os
+import time
 import unittest
 from unittest import mock
 
@@ -97,6 +101,68 @@ class PolymarketResilienceTests(unittest.TestCase):
             out = polymarket.get_prediction_markets("Fed rate cut")
         self.assertIn("unavailable", out.lower())
         self.assertIn("Fed rate cut", out)
+
+
+def _gamma_response(payload: dict) -> mock.Mock:
+    """A requests.Response stand-in whose ``.content`` is the JSON payload."""
+    resp = mock.Mock()
+    resp.content = json.dumps(payload).encode("utf-8")
+    resp.raise_for_status.return_value = None
+    return resp
+
+
+@pytest.fixture(autouse=True)
+def _isolated_polymarket_cache(tmp_path, monkeypatch):
+    """Route the Polymarket disk cache behind ``_request`` into a per-test
+    tmp dir, so cache tests never touch the real user cache and repeat calls
+    in other tests cannot bypass their mocked transports."""
+    def _cache_dir(name):
+        d = tmp_path / name
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d)
+
+    monkeypatch.setattr(polymarket, "vendor_cache_dir", _cache_dir)
+
+
+@pytest.mark.unit
+class TestPolymarketDiskCache:
+    def test_repeat_call_within_ttl_hits_transport_once(self):
+        resp = _gamma_response(_SEARCH)
+        with mock.patch.object(
+            polymarket.requests, "get", return_value=resp
+        ) as transport:
+            first = polymarket.get_prediction_markets("fed rate cut", limit=10)
+            second = polymarket.get_prediction_markets("fed rate cut", limit=10)
+        assert transport.call_count == 1
+        assert first == second
+        assert "Open big?" in first
+
+    def test_expired_cache_refetches(self, tmp_path):
+        resp = _gamma_response(_SEARCH)
+        with mock.patch.object(
+            polymarket.requests, "get", return_value=resp
+        ) as transport:
+            polymarket.get_prediction_markets("fed rate cut", limit=10)
+            cache_file = next((tmp_path / "polymarket").glob("search_*.json"))
+            stale = time.time() - 3600.0  # 1h old, far past the 10-minute TTL
+            os.utime(cache_file, (stale, stale))
+            polymarket.get_prediction_markets("fed rate cut", limit=10)
+        assert transport.call_count == 2
+
+    def test_poisoned_cache_entry_raises_typed_error(self, tmp_path):
+        # A corrupt but fresh cache entry is served without a network call and
+        # must fail loudly with the vendor's existing JSON error type — never
+        # degrade into prose or return garbage.
+        resp = _gamma_response(_SEARCH)
+        with mock.patch.object(
+            polymarket.requests, "get", return_value=resp
+        ) as transport:
+            polymarket.get_prediction_markets("fed rate cut", limit=10)
+            cache_file = next((tmp_path / "polymarket").glob("search_*.json"))
+            cache_file.write_bytes(b"<html>definitely not json</html>")
+            with pytest.raises(json.JSONDecodeError):
+                polymarket.get_prediction_markets("fed rate cut", limit=10)
+        assert transport.call_count == 1  # poisoned bytes came from disk
 
 
 @pytest.mark.unit

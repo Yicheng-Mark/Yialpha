@@ -332,6 +332,28 @@
     </div>`;
   }
 
+  // Report: degraded-run banner from the router's data-quality sentinels.
+  // A run where core categories served NO_DATA sentinels must not look
+  // identical to a fully-fed one in the UI (same contract as the ⚠ banner
+  // the risk overlay appends to the decision text).
+  function dataQualityBanner(dq) {
+    if (!dq) return "";
+    const core = dq.core_sentinel_count || 0;
+    const opt = dq.optional_sentinel_count || 0;
+    const stale = dq.stale_cache_count || 0;
+    if (!core && !opt && !stale) return "";
+    const rows = (dq.sentinels || []).map(e =>
+      `<li><code>${esc(e.method || "")}</code> <span class="muted">(${esc(e.kind || "")})</span> ${esc(e.detail || "")}</li>`).join("");
+    const parts = [];
+    if (core) parts.push("⚠ " + t("dq_core").replace("{n}", core));
+    if (stale) parts.push(t("dq_stale").replace("{n}", stale));
+    if (opt) parts.push(t("dq_optional").replace("{n}", opt));
+    return `<div class="dq-banner${core ? " dq-degraded" : ""}">
+      <div class="dq-title">${parts.join("<br>")}</div>
+      ${rows ? `<ul class="dq-list">${rows}</ul>` : ""}
+    </div>`;
+  }
+
   // Report: node-perf chart container (ECharts draws into it after render).
   function perfChartContainer(nodePerf) {
     if (!nodePerf || !nodePerf.nodes) return "";
@@ -404,6 +426,8 @@
         ${ratingBadge(run.rating, "rating-lg")}
         <span class="date-tag">${esc(run.trade_date)}</span>
       </div>
+
+      ${dataQualityBanner(run.data_quality)}
 
       <div class="subhead">${t("report_overlay")}</div>
       ${overlayKPI(run.overlay)}

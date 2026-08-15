@@ -9,11 +9,14 @@ Uses Polymarket's public Gamma API (https://gamma-api.polymarket.com) — no key
 no auth. Each market's ``outcomePrices`` are the implied probabilities of its
 outcomes (a "Yes" at 0.76 means the market prices a 76% chance).
 """
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
 
 import requests
+
+from .disk_cache import cached_or_fetch, safe_cache_component, vendor_cache_dir
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +28,42 @@ REQUEST_TIMEOUT = 30
 # Default number of markets to return, ranked by traded volume.
 DEFAULT_LIMIT = 6
 
+# Odds move continuously but not fast enough to matter for an analyst prompt:
+# a 10-minute disk TTL collapses burst re-asks (batch runs, retries) to one
+# network hit while probabilities stay effectively live.
+_CACHE_TTL_DAYS = 10.0 / 1440.0
 
-def _request(path: str, params: dict) -> dict:
+
+def _fetch_raw(path: str, params: dict) -> bytes:
     response = requests.get(
         f"{GAMMA_BASE}/{path}", params=params, timeout=REQUEST_TIMEOUT
     )
     response.raise_for_status()
-    return response.json()
+    return response.content
+
+
+def _request(path: str, params: dict) -> dict:
+    """One Gamma API call through the shared on-disk cache.
+
+    Identical (path, params) requests within the TTL are served from disk;
+    on a fetch failure a recent cache is served stale (with the data-quality
+    sentinel recorded by the cache helper), and only a cache-less failure
+    reaches the caller as ``requests.RequestException``. A corrupt cached
+    payload raises ``json.JSONDecodeError`` rather than degrading silently.
+    """
+    key_blob = json.dumps({"path": path, "params": params}, sort_keys=True)
+    digest = hashlib.sha256(key_blob.encode("utf-8")).hexdigest()[:12]
+    filename = f"search_{safe_cache_component(path)}_{digest}.json"
+
+    def _fetch() -> bytes:
+        return _fetch_raw(path, params)
+
+    raw = cached_or_fetch(
+        vendor_cache_dir("polymarket"), filename, _fetch,
+        ttl_days=_CACHE_TTL_DAYS, vendor="polymarket",
+    )
+    assert raw is not None  # fail_open never set: fetch errors re-raise
+    return json.loads(raw)
 
 
 def _parse_json_list(value) -> list:

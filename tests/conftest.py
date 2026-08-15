@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Test markers (unit / integration / smoke) are declared in pyproject.toml's
+# Test markers (unit / integration) are declared in pyproject.toml's
 # [tool.pytest.ini_options] alongside --strict-markers, so they don't need to
 # be re-registered here.
 

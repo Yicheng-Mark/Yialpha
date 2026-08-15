@@ -3,13 +3,8 @@ import os
 import re
 from contextvars import ContextVar
 from datetime import date, datetime, timedelta
-from typing import Annotated
-
-import pandas as pd
 
 logger = logging.getLogger(__name__)
-
-SavePathType = Annotated[str, "File path to save data. If None, data is not saved."]
 
 
 # ---------------------------------------------------------------------------
@@ -211,16 +206,6 @@ def safe_ticker_component(value: str, *, max_len: int = 32) -> str:
     return value
 
 
-def save_output(data: pd.DataFrame, tag: str, save_path: SavePathType | None = None) -> None:
-    if save_path:
-        data.to_csv(save_path, encoding="utf-8")
-        logger.info("%s saved to %s", tag, save_path)
-
-
-def get_current_date():
-    return date.today().strftime("%Y-%m-%d")
-
-
 def proxy_map() -> dict[str, str]:
     """requests-style proxy dict for US/quote data sources, read at call time.
 
@@ -241,26 +226,3 @@ def proxy_map() -> dict[str, str]:
         "https": os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY"),
     }
     return {k: v for k, v in raw.items() if v is not None}
-
-
-def decorate_all_methods(decorator):
-    def class_decorator(cls):
-        for attr_name, attr_value in cls.__dict__.items():
-            if callable(attr_value):
-                setattr(cls, attr_name, decorator(attr_value))
-        return cls
-
-    return class_decorator
-
-
-def get_next_weekday(date):
-
-    if not isinstance(date, datetime):
-        date = datetime.strptime(date, "%Y-%m-%d")
-
-    if date.weekday() >= 5:
-        days_to_add = 7 - date.weekday()
-        next_weekday = date + timedelta(days=days_to_add)
-        return next_weekday
-    else:
-        return date

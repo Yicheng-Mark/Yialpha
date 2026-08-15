@@ -8,8 +8,8 @@ hit the right instrument instead of failing/mismatching.
 import pandas as pd
 
 import yiagents.agents.utils.agent_utils as au
+import yiagents.dataflows.y_finance as yfin
 import yiagents.dataflows.yfinance_news as ynews
-import yiagents.graph.trading_graph as tg
 from yiagents.graph.trading_graph import YiAgentsGraph
 
 
@@ -43,7 +43,9 @@ def test_fetch_returns_normalizes_symbol(monkeypatch):
         def history(self, *args, **kwargs):
             return pd.DataFrame({"Close": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0]})
 
-    monkeypatch.setattr(tg.yf, "Ticker", FakeTicker)
+    # _fetch_returns fetches through the vendor layer's cached history
+    # wrapper (y_finance), so that is the yfinance entry point to patch.
+    monkeypatch.setattr(yfin.yf, "Ticker", FakeTicker)
 
     # _fetch_returns does not use ``self``; call unbound to avoid building the graph.
     raw, alpha, days = YiAgentsGraph._fetch_returns(

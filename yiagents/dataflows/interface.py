@@ -518,10 +518,19 @@ def route_to_vendor(method: str, *args: Any, **kwargs: Any) -> str:
         reason = f" ({last_no_data.detail})" if last_no_data.detail else ""
         # Structured evidence for the run's data_quality block in
         # full_states_log, so a degraded report is machine-distinguishable
-        # from a fully-fed one.
-        quality.record_sentinel(
-            method, quality.KIND_NO_DATA, last_no_data.detail or "no usable data"
-        )
+        # from a fully-fed one. Optional categories (e.g. sec_ownership for a
+        # non-US ticker, which raises NoMarketDataError by design) must count
+        # as optional-unavailable, not core — otherwise every non-US/crypto
+        # run querying a US-only tool is flagged "core data degraded".
+        if category in OPTIONAL_CATEGORIES:
+            quality.record_sentinel(
+                method, quality.KIND_OPTIONAL_UNAVAILABLE,
+                last_no_data.detail or "no usable data",
+            )
+        else:
+            quality.record_sentinel(
+                method, quality.KIND_NO_DATA, last_no_data.detail or "no usable data"
+            )
         return (
             f"NO_DATA_AVAILABLE: No usable market data for '{sym}'{resolved} from "
             f"any configured vendor{reason}. The symbol may be invalid, delisted, "

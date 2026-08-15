@@ -143,10 +143,16 @@ _ENV_OVERRIDES = {
     "YIAGENTS_FTD_PUB_LAG_DAYS":             "ftd_pub_lag_days",
     # 13F point-in-time: a bulk Form 13F Data Set ZIP (period-end = last day of
     # Feb/May/Aug/Nov) is treated as public `period-end + sec_13f_pub_lag_days`
-    # days later (conservative; SEC publishes each quarterly ZIP a few days
-    # after the window closes). Default 5 keeps backtests from peeking at a ZIP
-    # that had not yet been released on curr_date.
+    # days later. SEC publishes each quarterly ZIP ~45 days after the window
+    # closes (statutory deadline), so the default mirrors that: during the
+    # publication gap the tool reports the honest "not yet published" message
+    # instead of fetching a 404 and blaming the symbol.
     "YIAGENTS_SEC_13F_PUB_LAG_DAYS":         "sec_13f_pub_lag_days",
+    # Stale-cache age cap for the shared disk cache (disk_cache.cached_or_fetch):
+    # when a vendor fails, a cache older than this many days is refused instead
+    # of served. Default 30 bounds how old "stale fallback" data can get during
+    # an outage; 0 disables stale serving entirely (fully fail-closed).
+    "YIAGENTS_DATA_CACHE_MAX_STALE_DAYS":    "data_cache_max_stale_days",
     # Track A: China A-share margin trading (Eastmoney 融资融券) exposed to the
     # fundamentals analyst as an opt-in tool behind one flag, AND only for A-share
     # tickers (.SS/.SH/.SZ) via the is_a_stock double-gate. Off by default = the
@@ -323,9 +329,13 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "ftd_pub_lag_days": 10,
     # 13F bulk-data-set point-in-time publication lag (env:
     # YIAGENTS_SEC_13F_PUB_LAG_DAYS). A quarterly ZIP is treated as public
-    # `period-end + this` days later; 5 is conservative so a backtest can't
-    # peek at a not-yet-released dataset.
-    "sec_13f_pub_lag_days": 5,
+    # `period-end + this` days later; SEC's statutory deadline is 45 days
+    # after quarter-end, which the default mirrors.
+    "sec_13f_pub_lag_days": 45,
+    # Stale-cache age cap (env: YIAGENTS_DATA_CACHE_MAX_STALE_DAYS). When a
+    # vendor fails, a disk cache older than this many days is refused instead
+    # of served (fail-closed bound on outage staleness). 0 = never serve stale.
+    "data_cache_max_stale_days": 30,
     # Track A: China A-share margin trading (env: YIAGENTS_A_STOCK). Off by
     # default = the fundamentals analyst's tool list is unchanged (byte-
     # equivalent). Double-gated: when on AND the ticker is an A-share

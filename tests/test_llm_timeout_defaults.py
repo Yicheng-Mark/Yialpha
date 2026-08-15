@@ -149,7 +149,27 @@ def test_non_numeric_env_warns_and_falls_back_to_cloud_default(monkeypatch, capl
     )
     assert captured["timeout"] == _DEFAULT_CLOUD_TIMEOUT
     assert any(
-        "not a number" in r.message and "120s" in r.message
+        "not a positive finite number" in r.message and "120s" in r.message
+        for r in caplog.records
+        if r.levelno >= logging.WARNING
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", ["0", "-5", "nan", "inf"])
+def test_non_positive_env_warns_and_falls_back(monkeypatch, caplog, bad):
+    """0/negative/NaN/inf parse fine but are not usable timeouts (0 => every
+    call times out immediately); they must warn and fall back like garbage."""
+    import logging
+
+    captured = _captured_llm(
+        monkeypatch,
+        "deepseek",
+        env={"DEEPSEEK_API_KEY": _DUMMY_KEY, "YIAGENTS_LLM_TIMEOUT_S": bad},
+    )
+    assert captured["timeout"] == _DEFAULT_CLOUD_TIMEOUT
+    assert any(
+        "not a positive finite number" in r.message
         for r in caplog.records
         if r.levelno >= logging.WARNING
     )
@@ -167,7 +187,7 @@ def test_non_numeric_env_warns_and_local_stays_timeoutless(monkeypatch, caplog):
     )
     assert "timeout" not in captured
     assert any(
-        "not a number" in r.message for r in caplog.records
+        "not a positive finite number" in r.message for r in caplog.records
         if r.levelno >= logging.WARNING
     )
 

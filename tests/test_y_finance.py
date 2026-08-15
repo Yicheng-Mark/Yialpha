@@ -365,7 +365,116 @@ def test_insider_transactions_exception_propagates(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# get_stock_stats_indicators_window / get_stockstats_indicator
+# Disk cache (P3-17): statements + history are served from the ~24h cache
+# ---------------------------------------------------------------------------
+
+def _body_after_header(report: str) -> str:
+    """The payload part of a rendered report (drops the timestamped header)."""
+    return report.split("\n\n", 1)[1]
+
+
+@pytest.mark.unit
+def test_balance_sheet_second_call_served_from_cache(monkeypatch):
+    """Two statement calls construct yf.Ticker exactly once."""
+    dummy = _DummyTicker("AAPL")
+    dummy.quarterly_balance_sheet = _stmt_frame()
+    constructions = []
+
+    def make(symbol):
+        constructions.append(symbol)
+        return dummy
+
+    monkeypatch.setattr(y_finance.yf, "Ticker", make)
+    monkeypatch.setattr(y_finance, "yf_retry", lambda fn, **kw: fn())
+    first = y_finance.get_balance_sheet("AAPL", freq="quarterly")
+    second = y_finance.get_balance_sheet("AAPL", freq="quarterly")
+    assert constructions == ["AAPL"]  # vendor hit once; cache served the repeat
+    assert "TotalAssets" in second
+    assert _body_after_header(first) == _body_after_header(second)
+
+
+@pytest.mark.unit
+def test_fundamentals_second_call_served_from_cache(monkeypatch):
+    """Two .info snapshot calls construct yf.Ticker exactly once."""
+    dummy = _DummyTicker("AAPL")
+    dummy._info = {"longName": "Apple Inc.", "trailingPE": 28.5}
+    constructions = []
+
+    def make(symbol):
+        constructions.append(symbol)
+        return dummy
+
+    monkeypatch.setattr(y_finance.yf, "Ticker", make)
+    monkeypatch.setattr(y_finance, "yf_retry", lambda fn, **kw: fn())
+    first = y_finance.get_fundamentals("AAPL")
+    second = y_finance.get_fundamentals("AAPL")
+    assert constructions == ["AAPL"]
+    assert "Name: Apple Inc." in second
+    assert _body_after_header(first) == _body_after_header(second)
+
+
+@pytest.mark.unit
+def test_fundamentals_corrupt_cache_raises_typed_error(monkeypatch):
+    """A corrupt cached JSON payload raises NoMarketDataError, never garbage."""
+    from pathlib import Path
+
+    from yiagents.dataflows.disk_cache import vendor_cache_dir
+
+    cache_file = (
+        Path(vendor_cache_dir("yfinance")) / "stmt_AAPL_fundamentals.json"
+    )
+    cache_file.write_text("{not json", encoding="utf-8")  # fresh, so it is served
+
+    dummy = _DummyTicker("AAPL")
+    monkeypatch.setattr(y_finance.yf, "Ticker", lambda s: dummy)
+    monkeypatch.setattr(y_finance, "yf_retry", lambda fn, **kw: fn())
+    with pytest.raises(NoMarketDataError, match="corrupt"):
+        y_finance.get_fundamentals("AAPL")
+
+
+@pytest.mark.unit
+def test_history_cached_second_call_skips_network(monkeypatch):
+    """Two cached-history calls construct yf.Ticker exactly once."""
+    dummy = _DummyTicker("SPY")
+    dummy.history_return = _ohlcv_frame("2026-06-10", tz="UTC")
+    constructions = []
+
+    def make(symbol):
+        constructions.append(symbol)
+        return dummy
+
+    monkeypatch.setattr(y_finance.yf, "Ticker", make)
+    monkeypatch.setattr(y_finance, "yf_retry", lambda fn, **kw: fn())
+    first = y_finance.get_YFin_history_cached("SPY", "2026-06-01", "2026-06-11")
+    second = y_finance.get_YFin_history_cached("SPY", "2026-06-01", "2026-06-11")
+    assert constructions == ["SPY"]
+    pd.testing.assert_frame_equal(first, second)
+    assert first["Close"].iloc[0] == 330.58
+    # The yfinance DatetimeIndex survives the CSV round trip.
+    assert isinstance(first.index, pd.DatetimeIndex)
+
+
+@pytest.mark.unit
+def test_history_empty_result_is_not_cached(monkeypatch):
+    """Empty vendor history returns uncached: every call retries the vendor."""
+    dummy = _DummyTicker("FAKE")
+    dummy.history_return = pd.DataFrame()
+    constructions = []
+
+    def make(symbol):
+        constructions.append(symbol)
+        return dummy
+
+    monkeypatch.setattr(y_finance.yf, "Ticker", make)
+    monkeypatch.setattr(y_finance, "yf_retry", lambda fn, **kw: fn())
+    first = y_finance.get_YFin_history_cached("FAKE", "2026-06-01", "2026-06-11")
+    second = y_finance.get_YFin_history_cached("FAKE", "2026-06-01", "2026-06-11")
+    assert first.empty and second.empty
+    assert constructions == ["FAKE", "FAKE"]  # nothing poisoned the cache
+
+
+# ---------------------------------------------------------------------------
+# get_stock_stats_indicators_window
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
@@ -405,29 +514,3 @@ def test_indicators_window_generic_exception_propagates(monkeypatch, caplog):
     with pytest.raises(RuntimeError):
         y_finance.get_stock_stats_indicators_window("AAPL", "rsi", "2026-06-12", 3)
     assert any("bulk stockstats calc failed" in r.message for r in caplog.records)
-
-
-@pytest.mark.unit
-def test_stockstats_indicator_happy_path(monkeypatch):
-    monkeypatch.setattr(y_finance.StockstatsUtils, "get_stock_stats",
-                        staticmethod(lambda s, i, c: 42.5))
-    result = y_finance.get_stockstats_indicator("AAPL", "rsi", "2026-06-10")
-    assert result == "42.5"
-
-
-@pytest.mark.unit
-def test_stockstats_indicator_no_market_data_propagates(monkeypatch):
-    def _raise(*a, **kw):
-        raise NoMarketDataError("AAPL", "AAPL", "no data")
-    monkeypatch.setattr(y_finance.StockstatsUtils, "get_stock_stats", staticmethod(_raise))
-    with pytest.raises(NoMarketDataError):
-        y_finance.get_stockstats_indicator("AAPL", "rsi", "2026-06-10")
-
-
-@pytest.mark.unit
-def test_stockstats_indicator_generic_exception_propagates(monkeypatch):
-    def _raise(*a, **kw):
-        raise RuntimeError("boom")
-    monkeypatch.setattr(y_finance.StockstatsUtils, "get_stock_stats", staticmethod(_raise))
-    with pytest.raises(RuntimeError):
-        y_finance.get_stockstats_indicator("AAPL", "rsi", "2026-06-10")

@@ -41,6 +41,7 @@ def test_record_snapshot_reset_roundtrip():
     assert quality.snapshot_quality() == []
     assert quality.summarize_quality(None) == {
         "sentinels": [], "core_sentinel_count": 0, "optional_sentinel_count": 0,
+        "stale_cache_count": 0,
     }
 
 
@@ -83,6 +84,33 @@ def test_no_data_sentinel_is_recorded(monkeypatch):
     assert "no rows anywhere" in events[0]["detail"]
 
 
+@pytest.mark.unit
+def test_optional_no_data_sentinel_counts_as_optional(monkeypatch):
+    """A US-only optional tool raising NoMarketDataError by design (e.g. Form 4
+    for a non-US ticker) must be evidence of *optional* unavailability — not a
+    core-data degradation that would flag every non-US run as DEGRADED."""
+    from yiagents.dataflows import interface as iface
+
+    def no_data(*a, **k):
+        raise NoMarketDataError("0700.HK", "0700.HK", "US-listed only")
+
+    method = "get_form4_insider_trading"
+    monkeypatch.setattr(
+        iface, "get_vendor", lambda category, m: "default"
+    )
+    saved = dict(iface.VENDOR_METHODS[method])
+    try:
+        iface.VENDOR_METHODS[method] = dict.fromkeys(saved, no_data)
+        out = route_to_vendor(method, "0700.HK", "2026-01-01", "2026-01-31")
+    finally:
+        iface.VENDOR_METHODS[method] = saved
+
+    assert out.startswith("NO_DATA_AVAILABLE")
+    summary = quality.summarize_quality(quality.snapshot_quality())
+    assert summary["core_sentinel_count"] == 0
+    assert summary["optional_sentinel_count"] == 1
+
+
 # --------------------------------------------------------------------------- #
 # _log_state integration (graph)
 # --------------------------------------------------------------------------- #
@@ -119,7 +147,7 @@ def test_log_state_writes_pm_rating_and_data_quality(tmp_path, monkeypatch):
 
     results_dir = tmp_path / "results"
     object.__setattr__(graph, "config", {"results_dir": str(results_dir)})
-    graph._log_state("2026-06-10", final_state)
+    returned = graph._log_state("2026-06-10", final_state)
 
     log_path = (
         results_dir / "NVDA" / "YiAgentsStrategy_logs" / "full_states_log_2026-06-10.json"
@@ -133,3 +161,8 @@ def test_log_state_writes_pm_rating_and_data_quality(tmp_path, monkeypatch):
 
     # Consuming the snapshot resets the accumulator for the next run.
     assert quality.snapshot_quality() == []
+
+    # The consumed block is returned so _run_graph can attach it to
+    # final_state for the report writer / web UI degraded-run banner.
+    assert returned["core_sentinel_count"] == 1
+    assert returned["optional_sentinel_count"] == 1

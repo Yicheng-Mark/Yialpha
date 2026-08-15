@@ -54,7 +54,12 @@ from datetime import date, timedelta
 
 from .akshare_vendor import _direct_connect  # lightweight: os/threading only
 from .config import get_config
-from .errors import NoMarketDataError, VendorNotConfiguredError, VendorRateLimitError
+from .errors import (
+    NoMarketDataError,
+    VendorError,
+    VendorNotConfiguredError,
+    VendorRateLimitError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,12 +134,38 @@ def _f(v) -> str:
     return "n/a" if n is None else f"{n:.2f}"
 
 
+def _is_transport_error(exc: BaseException) -> bool:
+    """True for network-level failures (connection/DNS/timeout/SSL)."""
+    try:
+        import requests
+
+        if isinstance(
+            exc,
+            (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+             requests.exceptions.SSLError),
+        ):
+            return True
+    except ImportError:  # pragma: no cover - requests is a hard dep of tushare
+        pass
+    low = str(exc).lower()
+    return any(
+        k in low
+        for k in (
+            "connection", "connect timeout", "read timeout", "socket", "dns",
+            "getaddrinfo", "网络", "连接超时", "连接失败",
+        )
+    )
+
+
 def _query(pro, api_name: str, **fields):
     """Call a Tushare pro API under the direct-connect proxy bypass; map errors.
 
     Tushare returns a DataFrame on success or raises on a transport/permission
     fault. A rate-limit / permission signal maps to :class:`VendorRateLimitError`
-    (router skips to next vendor); other faults to :class:`NoMarketDataError`.
+    (router skips to next vendor); transport failures surface as a plain
+    :class:`VendorError` (a network outage is NOT "no data for this symbol" —
+    mapping it to NoMarketDataError made the router blame the ticker during an
+    outage); other faults to :class:`NoMarketDataError`.
     """
     try:
         with _direct_connect():
@@ -144,6 +175,9 @@ def _query(pro, api_name: str, **fields):
         low = msg.lower()
         if any(k in low for k in ("每分钟", "次数", "限频", "429", "rate", "权限", "permission")):
             raise VendorRateLimitError(f"Tushare {api_name} throttled/forbidden: {msg}") from exc
+        if _is_transport_error(exc):
+            raise VendorError(
+                f"Tushare {api_name} transport failure: {msg}") from exc
         raise NoMarketDataError(fields.get("ts_code", api_name),
                                 detail=f"Tushare {api_name} failed: {msg}") from exc
 

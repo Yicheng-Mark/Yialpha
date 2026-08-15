@@ -558,6 +558,7 @@ def get_binance_open_interest(symbol: str, look_back_days: int = 7) -> str:
             )
 
     # Append the live snapshot so the analyst sees the most current OI too.
+    live_unavailable = False
     try:
         live = _http_get(
             "/fapi/v1/openInterest",
@@ -576,6 +577,9 @@ def get_binance_open_interest(symbol: str, look_back_days: int = 7) -> str:
     except (NoMarketDataError, VendorRateLimitError) as exc:
         # History is the analytically useful part; a missing live snapshot is
         # logged but does not fail the call (the series still carries value).
+        # The header notes it so a missing "latest" row reads as "fetch
+        # failed", not "no current open interest".
+        live_unavailable = True
         logger.info("Binance live openInterest unavailable for %s: %s", canonical, exc)
 
     if not records:
@@ -589,6 +593,8 @@ def get_binance_open_interest(symbol: str, look_back_days: int = 7) -> str:
     header = (
         f"# Perp USDT-M open interest for {label} (last {limit} days + live)\n"
     )
+    if live_unavailable:
+        header += "# ⚠ live openInterest snapshot unavailable (fetch failed) — history only.\n"
     header += f"# Total records: {len(df)}\n"
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     return header + df.to_csv(index=False)
@@ -642,6 +648,7 @@ def get_binance_long_short_ratio(symbol: str, look_back_days: int = 7) -> str:
         ("global_account", "/futures/data/globalLongShortAccountRatio"),
     ]
     records: list[dict] = []
+    unavailable: list[str] = []
     for slabel, path in series_defs:
         try:
             rows = _http_get(
@@ -652,7 +659,10 @@ def get_binance_long_short_ratio(symbol: str, look_back_days: int = 7) -> str:
             )
         except (NoMarketDataError, VendorRateLimitError) as exc:
             # One series 429'd or is unsupported for this contract — log and keep
-            # the others rather than failing the whole call.
+            # the others rather than failing the whole call. The header notes
+            # which are missing so absence reads as "fetch failed", not "no
+            # positioning data".
+            unavailable.append(slabel)
             logger.info("Binance %s L/S ratio unavailable for %s: %s",
                         slabel, canonical, exc)
             continue
@@ -680,6 +690,9 @@ def get_binance_long_short_ratio(symbol: str, look_back_days: int = 7) -> str:
     df = pd.DataFrame.from_records(records)
     vlabel = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
     header = f"# Perp USDT-M long/short ratio for {vlabel} (last {limit} days)\n"
+    if unavailable:
+        header += (f"# ⚠ unavailable series: {', '.join(unavailable)} "
+                   "(fetch failed/unsupported) — absence ≠ no positioning.\n")
     header += f"# Total records: {len(df)}\n"
     header += ("# series: top_account / top_position = 大户 (top traders), "
                "global_account = 全体; longShortRatio>1 = longs dominate; "
