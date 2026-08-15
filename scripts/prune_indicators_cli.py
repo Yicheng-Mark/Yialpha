@@ -109,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--suggest-config", action="store_true",
-        help="Also print a YAML config-diff suggestion (manual review only)",
+        help="Also print a Python config-diff suggestion (an indicator_battery "
+        "snippet for default_config.py; manual review only)",
     )
     args = parser.parse_args(argv)
 

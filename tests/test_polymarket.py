@@ -93,14 +93,38 @@ class PolymarketFormatTests(unittest.TestCase):
 
 @pytest.mark.unit
 class PolymarketResilienceTests(unittest.TestCase):
-    def test_network_error_degrades_gracefully(self):
-        # An external-service hiccup must not raise into the analyst.
+    def test_network_error_propagates_to_router(self):
+        # A transport failure must NOT be swallowed into a returned prose
+        # string: the router needs the exception to record the optional-
+        # category sentinel and return its DATA_UNAVAILABLE message (fail-
+        # closed: the evidence chain must capture the degradation).
         with mock.patch.object(
             polymarket, "_request", side_effect=requests.RequestException("boom")
-        ):
-            out = polymarket.get_prediction_markets("Fed rate cut")
-        self.assertIn("unavailable", out.lower())
-        self.assertIn("Fed rate cut", out)
+        ), self.assertRaises(requests.RequestException):
+            polymarket.get_prediction_markets("Fed rate cut")
+
+    def test_router_records_optional_sentinel_on_transport_error(self):
+        """Through the router, the propagated error becomes the optional-
+        category DATA_UNAVAILABLE sentinel + a KIND_OPTIONAL_UNAVAILABLE
+        data-quality event (previously the swallowed prose lost the evidence)."""
+        from yiagents.dataflows import quality
+
+        quality.ensure_run_context()
+        try:
+            set_config({"data_vendors": {"prediction_markets": "polymarket"}})
+            with mock.patch.object(
+                polymarket, "_request",
+                side_effect=requests.RequestException("boom"),
+            ):
+                out = interface.route_to_vendor("get_prediction_markets", "fed", 5)
+            self.assertTrue(out.startswith("DATA_UNAVAILABLE"))
+            events = quality.snapshot_quality()
+            self.assertTrue(
+                any(e["kind"] == quality.KIND_OPTIONAL_UNAVAILABLE
+                    for e in events)
+            )
+        finally:
+            quality.reset_quality()
 
 
 def _gamma_response(payload: dict) -> mock.Mock:

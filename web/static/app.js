@@ -589,16 +589,22 @@
         draw(st);
         if (st.status === "done") { stopPoll(); /* report_url shown, user clicks */ }
         else if (st.status === "error") { stopPoll(); }
+        return st.status;
       } catch (e) {
         stopPoll();
         view().innerHTML = errorBox(e.message);
+        return "error";
       }
     };
 
     draw({ status: "pending", ticker: "…", date: "…", elapsed_s: 0,
       attempt: 0, max_attempts: 0 });
-    await poll();
-    if (!pollHandle) pollHandle = setInterval(poll, 4000);
+    // Re-arm polling only while the task is still in flight. The old
+    // unconditional `if (!pollHandle)` re-armed even after the first poll
+    // returned done/error (stopPoll had just cleared it), firing one extra
+    // /api/tasks request per finished task.
+    const firstStatus = await poll();
+    if (firstStatus === "running") pollHandle = setInterval(poll, 4000);
   }
 
   // ----------------------------- health -----------------------------------

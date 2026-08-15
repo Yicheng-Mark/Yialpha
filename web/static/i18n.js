@@ -22,7 +22,6 @@
 
       common_loading: "加载中…",
       common_error: "出错了",
-      common_retry: "重试",
       common_back: "← 返回",
 
       // home
@@ -45,7 +44,6 @@
       detail_pick_date: "选择左侧日期查看报告",
 
       // report
-      report_rating: "评级",
       report_company: "标的",
       report_overlay: "量化风控叠加",
       report_overlay_none: "本次分析未开启量化风控层（无 overlay 段）。",
@@ -68,11 +66,8 @@
       sub_conservative: "保守派 Risk Conservator",
       sub_neutral: "中立派 Risk Moderator",
       sub_risk_judge: "风控裁决 Risk Judge",
-      report_download: "下载 complete_report.md",
-      report_perf: "节点墙钟",
       report_perf_total: "总耗时",
       report_rationale: "理由",
-      dist_title: "评级分布",
       dist_tickers: "个标的",
       debate_chars: "字符",
       debate_rounds: "发言段数",
@@ -111,7 +106,6 @@
       task_attempt: "尝试",
       task_view_report: "查看报告 →",
       task_log_tail: "run_robust 日志尾",
-      task_pending: "等待启动…",
 
       // health
       health_title: "环境自检",
@@ -127,8 +121,6 @@
       chart_trend_title: "评级趋势",
       chart_dist_title: "评级分布",
       chart_perf_title: "节点性能",
-      chart_debate_title: "多空力量",
-      chart_risk_title: "三方风险立场",
     },
 
     en: {
@@ -141,7 +133,6 @@
 
       common_loading: "Loading…",
       common_error: "Something went wrong",
-      common_retry: "Retry",
       common_back: "← Back",
 
       home_title: "Past Analyses",
@@ -161,7 +152,6 @@
       detail_no_dates: "No completed analysis on disk for this ticker.",
       detail_pick_date: "Pick a date on the left to view its report",
 
-      report_rating: "Rating",
       report_company: "Ticker",
       report_overlay: "Quantitative Risk Overlay",
       report_overlay_none: "Risk overlay was off for this run (no overlay section).",
@@ -184,11 +174,8 @@
       sub_conservative: "Risk Conservator",
       sub_neutral: "Risk Moderator",
       sub_risk_judge: "Risk Judge Verdict",
-      report_download: "Download complete_report.md",
-      report_perf: "Node wall-clock",
       report_perf_total: "total",
       report_rationale: "Rationale",
-      dist_title: "Rating distribution",
       dist_tickers: "tickers",
       debate_chars: "chars",
       debate_rounds: "segments",
@@ -225,7 +212,6 @@
       task_attempt: "Attempt",
       task_view_report: "View report →",
       task_log_tail: "run_robust log tail",
-      task_pending: "pending start…",
 
       health_title: "Environment Check",
       health_sub: "Replicates the 5 preflight checks (deps / key / proxy / yfinance / DeepSeek). Network probes take a few seconds.",
@@ -240,8 +226,6 @@
       chart_trend_title: "Rating Trend",
       chart_dist_title: "Rating Distribution",
       chart_perf_title: "Node Performance",
-      chart_debate_title: "Bull vs Bear",
-      chart_risk_title: "Risk Stance",
     },
   };
 

@@ -1,5 +1,6 @@
 import contextlib
 import datetime
+import logging
 import os
 import sys
 import time
@@ -35,6 +36,7 @@ from rich.spinner import Spinner  # noqa: E402
 from rich.table import Table  # noqa: E402
 from rich.text import Text  # noqa: E402
 
+from yiagents.dataflows import quality  # noqa: E402
 from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
 from yiagents.graph.analyst_execution import (  # noqa: E402
     AnalystWallTimeTracker,
@@ -68,6 +70,8 @@ from .utils import (  # noqa: E402
 )
 
 console = Console()
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="YiAgents",
@@ -1052,6 +1056,30 @@ def _apply_batch_worker_override(config: dict, workers: int | None) -> dict:
     return config
 
 
+def _store_cli_decision(
+    graph: YiAgentsGraph, ticker: str, trade_date: str, final_state: dict
+) -> None:
+    """Persist the streamed run's decision for deferred reflection.
+
+    Reads ``final_trade_decision`` with ``.get`` (not bare indexing): a
+    streamed state whose PM output never landed would otherwise raise
+    KeyError right before the report is displayed, crashing the UI at the
+    finish line. An absent/empty decision still gets stored (keeps the
+    memory-log contract) but is logged at WARNING so the gap is observable.
+    """
+    decision = final_state.get("final_trade_decision") or ""
+    if not decision:
+        logger.warning(
+            "Streamed run for %s on %s produced no final_trade_decision; "
+            "storing an empty decision.",
+            ticker,
+            trade_date,
+        )
+    graph.memory_log.store_decision(
+        ticker=ticker, trade_date=trade_date, final_trade_decision=decision
+    )
+
+
 def run_analysis(checkpoint: bool | None = None):
     # First get all user selections
     selections = get_user_selections()
@@ -1178,6 +1206,13 @@ def run_analysis(checkpoint: bool | None = None):
         update_display(layout, spinner_text, stats_handler=stats_handler, start_time=start_time)
 
         # Initialize state and get graph args with callbacks.
+        # Bind the data-quality event accumulator in THIS (parent) context
+        # before the graph runs — the same contract as
+        # YiAgentsGraph._run_graph. langgraph executes node tasks inside
+        # copied contexts, so without this pre-bound list the sentinel events
+        # recorded by vendor routers inside nodes would never be visible to
+        # finalize_streamed_run below and the DEGRADED evidence chain goes dead.
+        quality.ensure_run_context()
         # Resolve the instrument identity once here so all agents anchor to
         # the real company (#814); the CLI builds state directly rather than
         # going through propagate(), so this must happen on the CLI path too.
@@ -1326,11 +1361,16 @@ def run_analysis(checkpoint: bool | None = None):
             final_state,
             portfolio_state=None,
         )
+        # Land the same on-disk evidence a propagate() run produces
+        # (full_states_log_<date>.json + the data_quality block on the state)
+        # so the CLI run shows up in the web history and its reports can
+        # render the DEGRADED banner.
+        final_state = graph.finalize_streamed_run(
+            selections["ticker"], selections["analysis_date"], final_state
+        )
         graph.curr_state = final_state
-        graph.memory_log.store_decision(
-            ticker=selections["ticker"],
-            trade_date=selections["analysis_date"],
-            final_trade_decision=final_state["final_trade_decision"],
+        _store_cli_decision(
+            graph, selections["ticker"], selections["analysis_date"], final_state
         )
 
         # Update all agent statuses to completed

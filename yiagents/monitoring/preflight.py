@@ -23,6 +23,34 @@ import os
 import socket
 
 
+def _resolve_proxy_probe() -> tuple[str, int]:
+    """Host/port to TCP-probe, resolved from the project's proxy knobs.
+
+    Priority mirrors the project's first-class configuration surface
+    (``SOCKS5_PROXY`` in .env.example / config-check; ``ALL_PROXY`` as the
+    requests-level fallback in ``proxy_map``): SOCKS5_PROXY, then ALL_PROXY,
+    then the generic HTTPS_PROXY / HTTP_PROXY. Only when none is set does the
+    probe fall back to the historical default (a local V2Ray/Xray SOCKS
+    listener on 127.0.0.1:1080) so an unset knob is still diagnosable.
+    """
+    proxy = ""
+    for var in ("SOCKS5_PROXY", "ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"):
+        proxy = os.environ.get(var, "")
+        if proxy:
+            break
+    host, port = "127.0.0.1", 1080  # legacy default; kept as the unset-knob fallback
+    if proxy:
+        # Strip scheme, path, query, and userinfo (user:pass@) down to host:port.
+        host_port = (
+            proxy.split("://", 1)[-1].split("/", 1)[0].split("?", 1)[0].split("@")[-1]
+        )
+        if ":" in host_port:
+            host = host_port.rsplit(":", 1)[0] or host
+            with contextlib.suppress(ValueError):
+                port = int(host_port.rsplit(":", 1)[1])
+    return host, port
+
+
 def run_health(ticker: str = "SPY") -> dict:
     """Five preflight checks; returns ``{ok, checks: [{name, ok, hint}]}``."""
     checks: list[dict] = []
@@ -54,15 +82,9 @@ def run_health(ticker: str = "SPY") -> dict:
         ".env missing YIAGENTS_LLM_PROVIDER",
     )
 
-    # 3) proxy port reachable (TCP probe of the HTTPS_PROXY host:port)
-    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY", "")
-    host, port = "127.0.0.1", 1080
-    if "://" in proxy:
-        hp = proxy.split("://", 1)[1].split("/", 1)[0]
-        if ":" in hp:
-            host = hp.split(":", 1)[0]
-            with contextlib.suppress(ValueError):
-                port = int(hp.rsplit(":", 1)[1])
+    # 3) proxy port reachable (TCP probe of the resolved proxy host:port —
+    #    SOCKS5_PROXY first, then ALL_PROXY/HTTPS_PROXY/HTTP_PROXY)
+    host, port = _resolve_proxy_probe()
     try:
         socket.create_connection((host, port), timeout=3).close()
         check(f"proxy {host}:{port} reachable", True)

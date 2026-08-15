@@ -1,5 +1,6 @@
 .git
 .venv
+.venv-dev
 .env
 .env.*
 !.env.example
@@ -14,6 +15,7 @@ service-account*.json
 .claude
 .idea
 .vscode
+.zcode
 .DS_Store
 __pycache__
 *.egg-info
@@ -21,5 +23,18 @@ build
 dist
 results
 eval_results
+# Dev-tooling caches and outputs must not enter the build context: the dev venv
+# is .venv-dev (not .venv), and these caches/artifacts ballooned the image.
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.coverage
+.coverage.*
+htmlcov
+.mimosa
+analysis_output
+# tests/ is not needed at runtime (the wheel build only packages yiagents*),
+# and .venv-dev contains a full pytest/dev install.
+tests
 Dockerfile
 docker-compose.yml

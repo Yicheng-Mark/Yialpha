@@ -70,6 +70,15 @@ _throttler = MinIntervalThrottle(_MIN_INTERVAL)
 _MAX_RETRIES = 2
 _RETRY_BACKOFF = 0.8
 
+# Same-day cache freshness for the margin series. 融资融券 rows for day D are
+# published after that day's close (exchange disclosure, typically the evening
+# of D or the morning of D+1). A run with curr_date == today therefore needs the
+# day's fresh rows within minutes of publication, not "tomorrow when the 1-day
+# TTL expires" — same pattern as the OHLCV pipeline's same-day refresh
+# (stockstats_utils.OHLCV_CACHE_TTL_SECONDS). Historical dates are immutable and
+# keep the daily TTL.
+_SAME_DAY_TTL_DAYS = 900.0 / 86400.0
+
 
 def _session() -> requests.Session:
     """A Session that bypasses the environment proxy.
@@ -251,6 +260,11 @@ def get_margin_trading(
 
     Non-A-share ticker -> :class:`NoMarketDataError`. A name not on the margin-
     trading list -> an honest empty string (no fabricated balances).
+
+    Caching: an as-of date in the past is immutable and cached 1 day; an as-of
+    date of TODAY uses a 15-minute TTL (``_SAME_DAY_TTL_DAYS``) so the day's
+    freshly disclosed rows appear in intraday/after-close runs instead of the
+    next day.
     """
     _, scode = _to_em_symbol(ticker)
     params = {
@@ -262,12 +276,13 @@ def get_margin_trading(
     }
     # pageSize 400 (most-recent-first) comfortably covers a 180d look-back plus
     # headroom; margin reports are daily so 400 rows > 1.5 years.
-    cache_path = os.path.join(_cache_dir(), f"margin_{scode}.json")
-    raw = _cached_or_fetch(cache_path, _MARGIN_URL, params, ttl_days=1.0)
-    rows = _parse_margin(raw, scode)
-
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
+    ttl_days = _SAME_DAY_TTL_DAYS if upper_d == date.today() else 1.0
+    cache_path = os.path.join(_cache_dir(), f"margin_{scode}.json")
+    raw = _cached_or_fetch(cache_path, _MARGIN_URL, params, ttl_days=ttl_days)
+    rows = _parse_margin(raw, scode)
+
     lower_d = upper_d - timedelta(days=int(look_back_days))
 
     out = io.StringIO()

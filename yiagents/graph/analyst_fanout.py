@@ -48,14 +48,46 @@ from .analyst_execution import AnalystExecutionPlan, AnalystNodeSpec
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["build_analyst_subgraph", "create_analyst_fanout_node"]
+__all__ = [
+    "build_analyst_subgraph",
+    "create_analyst_fanout_node",
+    "derive_subgraph_recursion_limit",
+]
 
-#: Default per-subgraph recursion limit. ``StateGraph.compile()`` in this
-#: langgraph version does not accept ``recursion_limit`` (verified via
-#: ``inspect.signature``), so the limit is applied at invoke time through
-#: ``config={"recursion_limit": N}`` — the same idiom ``propagation.py`` uses
-#: for the parent graph.
-_DEFAULT_SUBGRAPH_RECURSION_LIMIT = 30
+#: Floor for the derived per-subgraph recursion budget. Protects against a
+#: pathological serial budget (e.g. ``max_recur_limit=4``) producing a
+#: per-analyst budget so small the subgraph cannot even finish one
+#: agent -> tool -> agent -> clear cycle.
+_MIN_SUBGRAPH_RECURSION_LIMIT = 10
+
+
+def derive_subgraph_recursion_limit(max_recur_limit: int, n_specs: int) -> int:
+    """Derive the per-analyst-subgraph recursion budget from the serial budget.
+
+    Accounting note (parallel-vs-serial iron law): in serial mode all analyst
+    clusters share ONE whole-graph recursion pool of ``max_recur_limit``
+    steps (``propagation.py`` passes ``{"recursion_limit": max_recur_limit}``
+    to the parent graph invoke, and every analyst/tool/clear beat consumes
+    from it). In parallel mode each analyst subgraph gets its OWN budget, so
+    the comparable allocation is ``max_recur_limit // n_specs`` per subgraph:
+    the parallel worst case (all N subgraphs exhausting their budget, N *
+    (max_recur_limit // N) ≈ max_recur_limit) matches the serial worst case.
+
+    Residual, deliberate difference: the serial pool also pays for the
+    non-analyst steps downstream of the analysts (debate, trader, risk
+    debate, PM), so the derived parallel budget is if anything slightly MORE
+    generous per analyst than serial. Without a per-analyst budget derived
+    this way, a deep tool loop could trip ``GraphRecursionError`` in serial
+    while succeeding in parallel — breaking the identical-decision-
+    distribution guarantee in the opposite direction.
+
+    A floor of :data:`_MIN_SUBGRAPH_RECURSION_LIMIT` guards against tiny
+    serial budgets (``max_recur_limit < 10 * n_specs``) producing unusable
+    per-analyst budgets.
+    """
+    if n_specs < 1:
+        raise ValueError(f"n_specs must be >= 1, got {n_specs!r}")
+    return max(max_recur_limit // n_specs, _MIN_SUBGRAPH_RECURSION_LIMIT)
 
 
 def build_analyst_subgraph(
@@ -63,7 +95,7 @@ def build_analyst_subgraph(
     agent_factory: Callable[[], Callable[..., Any]],
     tool_node: ToolNode | Callable[..., Any],
     conditional_logic_fn: Callable[..., Any],
-    recursion_limit: int = _DEFAULT_SUBGRAPH_RECURSION_LIMIT,
+    recursion_limit: int = _MIN_SUBGRAPH_RECURSION_LIMIT,
 ):
     """Build and compile a per-analyst ``StateGraph(AgentState)`` cluster.
 
@@ -88,9 +120,12 @@ def build_analyst_subgraph(
         conditional_logic_fn: The bound ``should_continue_<key>`` method used as
             the conditional router (e.g. ``conditional_logic.should_continue_market``).
         recursion_limit: Per-subgraph recursion limit. NOTE: this langgraph
-            version's ``compile()`` does not accept ``recursion_limit``; it is
-            applied at invoke time by :func:`create_analyst_fanout_node`. The
-            parameter is retained for API stability + documentation of intent.
+            version's ``compile()`` does not accept ``recursion_limit``; the
+            effective value is applied at invoke time by
+            :func:`create_analyst_fanout_node`, which derives it from the
+            serial whole-graph budget via
+            :func:`derive_subgraph_recursion_limit`. The parameter is
+            retained for API stability + documentation of intent.
 
     Returns:
         The compiled subgraph (``CompiledStateGraph``).
@@ -121,6 +156,8 @@ def _invoke_analyst_subgraph(
     spec_key: str,
     invoke_config: dict[str, Any],
     wall_time_tracker: Any | None,
+    perf_tracker: Any | None = None,
+    perf_node_name: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Run one subgraph and feed the optional wall-time tracker.
 
@@ -128,13 +165,30 @@ def _invoke_analyst_subgraph(
     closure-over-loop-variable pitfalls. ``mark_started`` / ``mark_completed``
     are only called when a tracker is supplied (duck-typed; no hard dependency
     on :class:`AnalystWallTimeTracker`).
+
+    When ``perf_tracker`` is supplied (duck-typed
+    :class:`~yiagents.graph.perf_telemetry.NodePerfTracker`), the worker
+    thread's thread-local ``active_node`` is set to ``perf_node_name`` around
+    the invoke and restored afterwards. Without this, every analyst LLM token
+    captured inside the worker thread would be attributed to
+    ``_unattributed_`` — ``wrap_node`` only wraps PARENT-graph nodes, and the
+    worker thread's thread-local slot starts empty. Using the analyst's
+    serial node name (``spec.agent_node``) keeps parallel-leg telemetry
+    directly comparable with the serial leg.
     """
     if wall_time_tracker is not None:
         wall_time_tracker.mark_started(spec_key)
+    previous_active_node = (
+        perf_tracker.get_active_node() if perf_tracker is not None else None
+    )
+    if perf_tracker is not None and perf_node_name is not None:
+        perf_tracker.set_active_node(perf_node_name)
     try:
         final_state = subgraph.invoke(clone, config=invoke_config)
         return spec_key, final_state
     finally:
+        if perf_tracker is not None and perf_node_name is not None:
+            perf_tracker.set_active_node(previous_active_node)
         if wall_time_tracker is not None:
             wall_time_tracker.mark_completed(spec_key)
 
@@ -146,7 +200,8 @@ def create_analyst_fanout_node(
     conditional_logic: Any,
     max_threads: int | None = None,
     wall_time_tracker: Any | None = None,
-    recursion_limit: int = _DEFAULT_SUBGRAPH_RECURSION_LIMIT,
+    recursion_limit: int | None = None,
+    perf_tracker: Any | None = None,
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
     """Return a LangGraph node fn that runs all analyst subgraphs in parallel.
 
@@ -176,19 +231,40 @@ def create_analyst_fanout_node(
         tool_nodes: ``spec.key -> ToolNode`` (or compatible callable).
         conditional_logic: Object exposing ``should_continue_<key>`` methods
             (resolved via ``getattr``).
-        max_threads: ``ThreadPoolExecutor`` ``max_workers``. ``None`` (default)
-            means one worker per spec (``len(plan.specs)``).
+        max_threads: :class:`~concurrent.futures.ThreadPoolExecutor`
+            ``max_workers``. ``None`` (default) means one worker per spec
+            (``len(plan.specs)``).
         wall_time_tracker: Optional duck-typed tracker (e.g.
             :class:`~yiagents.graph.analyst_execution.AnalystWallTimeTracker`)
             with ``mark_started(key)`` / ``mark_completed(key)``. If provided,
             each subgraph invoke is timed so ``stream_telemetry=true`` can show
             per-analyst wall time in the parallel leg. Inert when ``None``.
         recursion_limit: Per-subgraph recursion limit, applied at invoke time.
+            ``None`` (default) derives it from the thread-local config's
+            ``max_recur_limit`` (the same serial whole-graph budget
+            ``propagation.py`` uses) via
+            :func:`derive_subgraph_recursion_limit`, so the parallel per-
+            analyst budget stays comparable with the serial shared pool.
+        perf_tracker: Optional duck-typed
+            :class:`~yiagents.graph.perf_telemetry.NodePerfTracker`. When
+            supplied, each worker thread sets its thread-local ``active_node``
+            to the analyst's serial node name for the duration of the subgraph
+            invoke, so LLM tokens spent inside the subgraph are attributed to
+            that analyst instead of ``_unattributed_``. Inert when ``None``.
 
     Returns:
         A node fn ``fanout_node(state) -> dict`` suitable for
         ``workflow.add_node``.
     """
+    if recursion_limit is None:
+        # Read the serial budget from the thread-local config the graph was
+        # built under (``YiAgentsGraph.__init__`` calls ``set_config`` before
+        # building, so this sees the effective per-run value).
+        from yiagents.dataflows.config import get_config
+
+        serial_limit = int(get_config().get("max_recur_limit", 100))
+        recursion_limit = derive_subgraph_recursion_limit(serial_limit, len(plan.specs))
+
     # Cached on the closure: built lazily on the first invoke so we don't pay
     # the build cost (or require factories to be ready) at graph-construction
     # time, and so we never rebuild on subsequent invokes.
@@ -243,7 +319,6 @@ def create_analyst_fanout_node(
         subgraphs = _ensure_subgraphs()
         workers = max_threads if max_threads is not None else len(plan.specs)
         invoke_config = {"recursion_limit": recursion_limit}
-
         # One independent clone per spec, with the placeholder rule applied.
         clones = [
             (spec, _clone_for_spec(index, state))
@@ -264,6 +339,8 @@ def create_analyst_fanout_node(
                     spec.key,
                     invoke_config,
                     wall_time_tracker,
+                    perf_tracker,
+                    spec.agent_node,
                 )
                 future_to_spec_key[future] = spec.key
 
@@ -294,4 +371,9 @@ def create_analyst_fanout_node(
             for spec in plan.specs
         }
 
+    # Introspection hook: exposes the per-subgraph recursion budget the node
+    # applies at invoke time (derived from the serial budget unless given
+    # explicitly), so tests / operators can verify the accounting without
+    # provoking a GraphRecursionError.
+    fanout_node.resolved_recursion_limit = recursion_limit  # type: ignore[attr-defined]
     return fanout_node

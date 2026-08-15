@@ -4,6 +4,10 @@ Each risk debator previously rebuilt the ~13-field ``risk_debate_state`` dict
 inline; ``build_risk_debate_update`` now owns it. These tests pin the EXACT dict
 each debator produced (hand-transcribed from the prior inline code) so the
 centralisation cannot change state-merge behaviour downstream.
+
+The one deliberate deviation: ``judge_decision`` is carried through unchanged
+(was previously dropped by the whole-sub-dict replacement, blanking a judge
+decision the Portfolio Manager had already written until the PM ran again).
 """
 import unittest
 
@@ -35,6 +39,7 @@ class TestBuildRiskDebateUpdate(unittest.TestCase):
             "current_aggressive_response": a,
             "current_conservative_response": "CCR0",
             "current_neutral_response": "CNR0",
+            "judge_decision": "",
             "count": 3,
         }
         self.assertEqual(build_risk_debate_update(_BASE, "aggressive", a), expected)
@@ -50,6 +55,7 @@ class TestBuildRiskDebateUpdate(unittest.TestCase):
             "current_aggressive_response": "CAR0",
             "current_conservative_response": c,
             "current_neutral_response": "CNR0",
+            "judge_decision": "",
             "count": 3,
         }
         self.assertEqual(build_risk_debate_update(_BASE, "conservative", c), expected)
@@ -65,6 +71,7 @@ class TestBuildRiskDebateUpdate(unittest.TestCase):
             "current_aggressive_response": "CAR0",
             "current_conservative_response": "CCR0",
             "current_neutral_response": n,
+            "judge_decision": "",
             "count": 3,
         }
         self.assertEqual(build_risk_debate_update(_BASE, "neutral", n), expected)
@@ -76,6 +83,18 @@ class TestBuildRiskDebateUpdate(unittest.TestCase):
         del base["count"]
         with self.assertRaises(KeyError):
             build_risk_debate_update(base, "aggressive", "x")
+
+    def test_judge_decision_carried_through(self):
+        # A debator turn must NOT blank a judge decision the Portfolio Manager
+        # already wrote (the parent state replaces the whole sub-dict). The
+        # value passes through untouched; debators never write their own.
+        base = dict(_BASE, judge_decision="BUY the dip")
+        result = build_risk_debate_update(base, "aggressive", "a")
+        self.assertEqual(result["judge_decision"], "BUY the dip")
+
+    def test_judge_decision_defaults_to_empty_string(self):
+        result = build_risk_debate_update(_BASE, "neutral", "n")
+        self.assertEqual(result["judge_decision"], "")
 
 
 if __name__ == "__main__":

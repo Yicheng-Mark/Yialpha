@@ -174,10 +174,19 @@ class BatchRunner:
         # Master switch off → strictly serial (K=1), byte-equivalent to today.
         self.workers = max(1, requested) if concurrency else 1
 
-        # Per-thread ticker context for log attribution.
+        # Per-thread ticker context for log attribution. The filter must sit
+        # on the root logger's HANDLERS, not on the root logger itself: a
+        # logger-level filter only sees records emitted directly on that
+        # logger, so records from ``yiagents.*`` child loggers (where all of
+        # our modules log) propagate straight past it — the tagging never
+        # fired. Handler-level filters run for every record the handler
+        # processes, propagated ones included. Requires setup_logging() to
+        # have run first (every entry point does, at import); a handler added
+        # later is picked up by the next BatchRunner construction.
         self._worker_ctx = threading.local()
         self._log_filter: _TickerLogFilter | None = _TickerLogFilter(self._worker_ctx)
-        logging.getLogger().addFilter(self._log_filter)
+        for handler in logging.getLogger().handlers:
+            handler.addFilter(self._log_filter)
 
         # Build the K-graph pool up front. set_config() is idempotent for
         # identical configs, so the last construction leaves the global in the
@@ -209,10 +218,16 @@ class BatchRunner:
         return self._run_concurrent(tickers, trade_date, asset_type)
 
     def close(self) -> None:
-        """Remove the log filter (idempotent). Safe to skip at process exit."""
+        """Remove the log filter from every root handler (idempotent).
+
+        Safe to skip at process exit. Removal scans all current root handlers
+        (not just the ones seen at construction) so a ``setup_logging`` handler
+        swap between construction and close cannot leak the filter.
+        """
         flt = getattr(self, "_log_filter", None)
         if flt is not None:
-            logging.getLogger().removeFilter(flt)
+            for handler in logging.getLogger().handlers:
+                handler.removeFilter(flt)
             self._log_filter = None
 
     def __enter__(self) -> BatchRunner:

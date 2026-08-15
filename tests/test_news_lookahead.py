@@ -2,14 +2,26 @@
 into a historical window.
 
 Regressions for #992 (flat articles bypassed the date filter), #1007 (global
-news injected future articles), #993 (empty-after-filter returned a blank body).
+news injected future articles), #993 (empty-after-filter returned a blank body),
+plus the workflow-B news PIT clamps (B9):
+
+* ``get_news_yfinance`` / ``get_global_news_yfinance`` clamp the LLM-supplied
+  window to the run's PINNED analysis date, so a backtest prompt can never
+  receive headlines published after its decision date.
+* ``_in_news_window`` compares aware pub timestamps on a single calendar
+  standard (naive-UTC) — the old ``replace(tzinfo=None)`` compared the
+  original offset's wall clock, skewing windows by up to the UTC offset.
+* The Alpha Vantage news vendor applies the same pinned-date clamp to its
+  ``time_to`` query parameter.
 """
 import time
 from datetime import datetime
 
 import pytest
 
+import yiagents.dataflows.alpha_vantage_news as av_news
 import yiagents.dataflows.yfinance_news as ynews
+from yiagents.dataflows.utils import set_analysis_date
 
 
 @pytest.fixture(autouse=True)
@@ -93,3 +105,99 @@ def test_global_news_empty_after_filter_is_informative(monkeypatch):
     out = ynews.get_global_news_yfinance("2025-05-09", look_back_days=7, limit=10)
     assert "No global news found" in out
     assert "###" not in out  # no empty article body
+
+
+# --------------------------------------------------------------------------- #
+# B9 — pinned-analysis-date clamps on the news tools
+# --------------------------------------------------------------------------- #
+
+def _content_article(title: str, pub_iso: str) -> dict:
+    """A nested-``content`` yfinance news article (the current get_news shape)."""
+    return {"content": {
+        "title": title, "summary": "", "provider": {"displayName": "P"},
+        "canonicalUrl": {"url": "l"}, "pubDate": pub_iso,
+    }}
+
+
+@pytest.mark.unit
+def test_news_end_date_clamped_to_pinned_analysis_date(monkeypatch):
+    """The stock-news tool carries no analysis date; with one pinned, an
+    LLM-supplied end_date beyond it must be clamped so future headlines never
+    enter the backtest prompt (live mode: no-op)."""
+    set_analysis_date("2025-05-09")
+    try:
+        inside = _content_article("PAST EVENT", "2025-05-05T10:00:00+00:00")
+        future = _content_article("FUTURE EVENT", "2025-05-20T10:00:00+00:00")
+
+        class FakeTicker:
+            def __init__(self, symbol):
+                pass
+
+            def get_news(self, count):
+                return [inside, future]
+
+        monkeypatch.setattr(ynews.yf, "Ticker", FakeTicker)
+        monkeypatch.setattr(ynews, "yf_retry", lambda fn, **kw: fn())
+        out = ynews.get_news_yfinance("AAPL", "2025-05-01", "2030-01-01")
+        assert "PAST EVENT" in out
+        assert "FUTURE EVENT" not in out  # clamped to 2025-05-09, then filtered
+    finally:
+        set_analysis_date(None)
+
+
+@pytest.mark.unit
+def test_global_news_curr_date_clamped_to_pinned_analysis_date(monkeypatch):
+    """Same clamp for the global-news Search path: a curr_date past the pinned
+    analysis date cannot widen the window into the future."""
+    set_analysis_date("2025-05-09")
+    try:
+        past_article = {"title": "PAST EVENT", "publisher": "P", "link": "l",
+                        "providerPublishTime": _epoch("2025-05-05")}
+        future_article = {"title": "FUTURE EVENT", "publisher": "P", "link": "l",
+                          "providerPublishTime": _epoch("2025-06-01")}
+
+        class FakeSearch:
+            def __init__(self, *a, **k):
+                self.news = [past_article, future_article]
+
+        monkeypatch.setattr(ynews.yf, "Search", FakeSearch)
+        out = ynews.get_global_news_yfinance("2030-01-01", look_back_days=7, limit=10)
+        assert "PAST EVENT" in out
+        assert "FUTURE EVENT" not in out
+    finally:
+        set_analysis_date(None)
+
+
+@pytest.mark.unit
+def test_in_news_window_compares_aware_timestamps_in_utc():
+    """An aware pub timestamp must be compared on UTC semantics, not its
+    original offset's wall clock (the old replace(tzinfo=None) skew)."""
+    start, end = datetime(2025, 5, 1), datetime(2025, 5, 9)
+    # 2025-05-10T01:30+08:00 == 2025-05-09 17:30 UTC -> INSIDE a window
+    # ending 2025-05-09; the wall-clock comparison read it as May 10th.
+    plus8 = datetime.fromisoformat("2025-05-10T01:30:00+08:00")
+    assert ynews._in_news_window(plus8, start, end) is True
+    # Mirror case: 2025-05-09T23:30-08:00 == 2025-05-10 07:30 UTC -> OUTSIDE
+    # (the wall-clock comparison read it as May 9th, inside).
+    minus8 = datetime.fromisoformat("2025-05-09T23:30:00-08:00")
+    assert ynews._in_news_window(minus8, start, end) is False
+
+
+@pytest.mark.unit
+def test_av_news_time_to_clamped_to_pinned_analysis_date(monkeypatch):
+    """The Alpha Vantage news vendor applies the same pinned-date clamp to its
+    ``time_to`` query parameter (live mode: unchanged)."""
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(
+        av_news, "_make_api_request",
+        lambda fn, params: captured.update(params) or {},
+    )
+    set_analysis_date("2025-05-09")
+    try:
+        av_news.get_news("AAPL", "2025-05-01", "2030-01-01")
+        assert captured["time_to"] == "20250509T0000"  # clamped, not 2030
+    finally:
+        set_analysis_date(None)
+
+    av_news.get_news("AAPL", "2025-05-01", "2030-01-01")
+    assert captured["time_to"] == "20300101T0000"  # live: no-op pass-through

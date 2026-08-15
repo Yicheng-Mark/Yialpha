@@ -19,8 +19,11 @@ The function is idempotent — calling it more than once (e.g. once from a
 script bootstrap and again from the CLI entry point) will not duplicate
 handlers. It is also compatible with
 :class:`yiagents.batch.runner._TickerLogFilter`, which attaches a *filter*
-(not a handler) to the root logger; filters and handlers coexist without
-conflict.
+(not a handler) to the root logger's handlers; a logger-level filter would
+only see records emitted directly on the root logger and never tag the
+``yiagents.*`` child-logger records that propagate up to it. Because the
+filter rides on handlers, ``setup_logging`` must run before a
+``BatchRunner`` is constructed (every entry point does, at import time).
 """
 
 from __future__ import annotations

@@ -212,7 +212,7 @@ yiagents batch -t BTCUSDT -t ETHUSDT -d 2026-06-30 --asset-type crypto_spot
 | `-t / --ticker` | Ticker; repeat `-t` for several. **One batch = one asset class** (all stocks or all crypto) |
 | `-d / --date` | Analysis date `YYYY-MM-DD` |
 | `--asset-type` | `stock` / `crypto` / `crypto_spot` / `crypto_perp` / `auto` (`auto` infers from the first ticker; mixed classes error out) |
-| `-w / --workers` | Concurrency pool size K, default `YIAGENTS_BATCH_WORKERS=3` |
+| `-w / --workers` | Concurrency pool size K. **Default is strictly serial (K=1)**; the pool only runs when `YIAGENTS_BATCH_CONCURRENCY=true` is set or an explicit `-w K>1` is passed (`YIAGENTS_BATCH_WORKERS` then sizes the pool). `-w 1` is explicit serial |
 
 **Concurrency is safe**: each worker thread owns its own graph instance (no races); the memory log and OHLCV cache are serialized with filelock; one failed ticker does not abort the batch; and each ticker's analysis is **byte-equivalent** to running it serially — the concurrency layer sits above `propagate()` and never touches any agent's input, depth, or reasoning parameters. See [yiagents/batch/runner.py](yiagents/batch/runner.py).
 

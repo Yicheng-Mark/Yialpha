@@ -119,3 +119,34 @@ class TestConfigSnapshot:
         last = load_last_snapshot(history_dir=tmp_path)
         assert last is not None
         assert last["evidence"] == "reports/ic_pruning.md"
+
+    # ------------------------------------------------------------------ #
+    # Read paths must not create the history directory (D13)
+    # ------------------------------------------------------------------ #
+
+    def test_load_last_snapshot_does_not_create_history_dir(self, tmp_path):
+        """Reading from a machine with no recorded snapshots touches no disk.
+
+        The CLI's startup drift warning calls this on every analyze run; it
+        used to mkdir the cache-side config_history tree as a side effect.
+        """
+        cache = tmp_path / "cache"
+        cfg = self._config(data_cache_dir=str(cache))
+        assert load_last_snapshot(cfg) is None
+        assert not (cache / "config_history").exists()
+
+    def test_list_snapshots_does_not_create_history_dir(self, tmp_path):
+        cache = tmp_path / "cache"
+        cfg = self._config(data_cache_dir=str(cache))
+        assert list_snapshots(cfg) == []
+        assert not (cache / "config_history").exists()
+
+    def test_record_snapshot_still_creates_history_dir(self, tmp_path):
+        """The write path keeps create-on-resolve behaviour."""
+        cache = tmp_path / "cache"
+        path = record_config_snapshot(
+            self._config(data_cache_dir=str(cache)), reason="baseline"
+        )
+        assert path.exists()
+        assert (cache / "config_history").is_dir()
+        assert load_last_snapshot(self._config(data_cache_dir=str(cache))) is not None

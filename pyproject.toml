@@ -15,7 +15,6 @@ dependencies = [
     # the project is developed against). Patch-level float is allowed for
     # security updates.
     "langchain-core>=1.5",
-    "backtrader>=1.9.78.123",
     "filelock>=3.13",
     "langchain-anthropic>=1.5",
     "langchain-experimental>=0.4",
@@ -24,16 +23,13 @@ dependencies = [
     "langgraph>=1.2",
     "langgraph-checkpoint-sqlite>=3.1",
     "pandas>=3.0",
-    "parsel>=1.10.0",
     "python-dotenv>=1.0.0",
     # PySocks is load-bearing: yfinance / market data must traverse the SOCKS5
     # proxy (socks5h://127.0.0.1:1080), and the Binance USDT-M vendor reaches
     # fapi.binance.com through the same proxy via `requests`. Declared so a
     # fresh install actually resolves hostnames instead of hanging on DNS.
     "PySocks>=1.7.1",
-    "pytz>=2025.2",
     "questionary>=2.1.0",
-    "redis>=8.1",
     "requests>=2.32.4",
     "rich>=14.0.0",
     "typer>=0.21.0",
@@ -150,7 +146,7 @@ warn_return_any = false
 no_implicit_optional = true
 check_untyped_defs = false
 
-# Third-party libs (langchain, yfinance, binance SDK, backtrader, …) ship no
+# Third-party libs (langchain, yfinance, binance SDK, …) ship no
 # py.typed markers; silence their import errors so real issues stay visible.
 ignore_missing_imports = true
 

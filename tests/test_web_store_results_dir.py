@@ -14,6 +14,25 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _restore_reloaded_modules():
+    """Undo the importlib.reload side effects after every test in this module.
+
+    ``monkeypatch`` restores the *environment*, but nothing restores modules
+    that were re-imported under the patched env — after these tests, web.store
+    (and default_config, reloaded by the third test) kept pointing at the
+    custom root for the rest of the pytest session, silently affecting every
+    later test that imports them. Reload both under the real (restored)
+    environment to put the session back on defaults.
+    """
+    yield
+    import web.store
+    import yiagents.default_config
+
+    importlib.reload(yiagents.default_config)
+    importlib.reload(web.store)
+
+
 @pytest.mark.unit
 class TestResultsDirUnification:
     def test_env_results_dir_is_used(self, monkeypatch):

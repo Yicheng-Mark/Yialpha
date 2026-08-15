@@ -6,7 +6,7 @@ from datetime import date, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from web import runner
+from web import runner, store
 from web.app import app
 
 
@@ -86,3 +86,18 @@ def test_analyze_rejects_future_date_before_spawn(client, monkeypatch):
     )
     assert response.status_code == 400
     assert response.json()["detail"] == "analysis date cannot be in the future"
+
+
+@pytest.mark.unit
+def test_reports_root_created_on_startup_not_import(monkeypatch, tmp_path):
+    """The reports-root mkdir runs at app startup (lifespan), never at import.
+
+    Importing web.app used to create the directory as an import side effect;
+    now only entering the app's lifespan does (and it honors a monkeypatched
+    store.REPORTS_ROOT, proving the call reads the attribute at startup time).
+    """
+    target = tmp_path / "reports-root"
+    monkeypatch.setattr(store, "REPORTS_ROOT", target)
+    assert not target.exists()
+    with TestClient(app):
+        assert target.is_dir()

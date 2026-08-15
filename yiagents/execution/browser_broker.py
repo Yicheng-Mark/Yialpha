@@ -33,6 +33,7 @@ Design invariants (every code path must preserve these):
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -316,6 +317,7 @@ class BrowserBroker:
         equity_value: float | None = None,
         dry_run: bool | None = None,
         pre_submit_validator: PreSubmitValidator | None = None,
+        reference_price: float | None = None,
     ) -> OrderResult:
         """Place (or preview) an order via the broker Web UI.
 
@@ -325,8 +327,13 @@ class BrowserBroker:
         2. ``dry_run`` resolution: ``dry_run_default`` if ``dry_run is None``.
         3. A non-dry-run request requires :class:`LiveExecutionSwitch` to be
            fully armed. Dry-run analysis/preview remains available.
-        4. Size sanity: ``size`` must be ``> 0``; if ``equity_value`` is given,
-           ``size / equity_value`` must be ``<= max_order_pct_of_equity``.
+        4. Size sanity: ``size`` must be ``> 0``. If ``equity_value`` is
+           given, a ``reference_price`` must also be given, and the order's
+           NOTIONAL exposure ``size * reference_price / equity_value`` must be
+           ``<= max_order_pct_of_equity``. (``size`` is shares, ``equity`` is
+           dollars — the former ``size / equity`` heuristic scaled with price
+           and let a 50%-notional order pass a 1% cap. Fail-closed: without a
+           price the notional cap cannot be verified, so the order blocks.)
         5. ``pre_submit_validator(ticker, action, size)`` if provided must
            return ``True`` or ``None`` (ok); ``False`` or raising ->
            ``BLOCKED_VALIDATION``.
@@ -428,7 +435,55 @@ class BrowserBroker:
                     message=f"Order blocked: equity_value must be > 0 (got {equity_f}).",
                     submitted=False,
                 )
-            pct = size_f / equity_f
+            # Notional-exposure cap. ``size`` is SHARES and ``equity_value``
+            # is DOLLARS; a shares/equity ratio is not a fraction of equity
+            # (100 shares of a $500 stock on $100k equity is a 50% notional
+            # position, not 0.1%). Convert with ``reference_price`` and cap
+            # the NOTIONAL. Fail-closed: without a usable price the cap
+            # cannot be verified, so the order is rejected — consistent with
+            # this class's invariant that uncertainty never submits. Callers
+            # that do not want the cap should omit ``equity_value`` entirely.
+            if reference_price is None:
+                return OrderResult(
+                    status=OrderStatus.BLOCKED_VALIDATION,
+                    ticker=ticker,
+                    action=action_enum,
+                    size=size_f,
+                    message=(
+                        "Order blocked: equity_value given without reference_price; "
+                        "notional exposure (size * price / equity) cannot be "
+                        "verified. Pass a positive finite reference_price."
+                    ),
+                    submitted=False,
+                )
+            try:
+                price_f = float(reference_price)
+            except (TypeError, ValueError):
+                return OrderResult(
+                    status=OrderStatus.BLOCKED_VALIDATION,
+                    ticker=ticker,
+                    action=action_enum,
+                    size=size_f,
+                    message=(
+                        f"Order blocked: reference_price {reference_price!r} "
+                        "is not a number."
+                    ),
+                    submitted=False,
+                )
+            if not (price_f > 0.0) or not math.isfinite(price_f):
+                return OrderResult(
+                    status=OrderStatus.BLOCKED_VALIDATION,
+                    ticker=ticker,
+                    action=action_enum,
+                    size=size_f,
+                    message=(
+                        f"Order blocked: reference_price must be a positive "
+                        f"finite number (got {price_f!r})."
+                    ),
+                    submitted=False,
+                )
+            notional = size_f * price_f
+            pct = notional / equity_f
             if pct > self.max_order_pct_of_equity:
                 return OrderResult(
                     status=OrderStatus.BLOCKED_VALIDATION,
@@ -436,8 +491,9 @@ class BrowserBroker:
                     action=action_enum,
                     size=size_f,
                     message=(
-                        f"Order blocked: size {size_f} is {pct:.2%} of equity "
-                        f"{equity_f}, exceeding the {self.max_order_pct_of_equity:.2%} "
+                        f"Order blocked: size {size_f} @ {price_f} is a notional "
+                        f"{notional:,.0f} = {pct:.2%} of equity {equity_f}, "
+                        f"exceeding the {self.max_order_pct_of_equity:.2%} "
                         "single-order cap."
                     ),
                     submitted=False,

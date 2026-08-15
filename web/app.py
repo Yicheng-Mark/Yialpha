@@ -86,6 +86,11 @@ async def _lifespan(_app: FastAPI):
     The orphan writes its result to disk and exits naturally; the freed slot
     makes the UI usable again immediately.
     """
+    # Create the /reports mount root at startup (not import) so importing this
+    # module — e.g. from the test suite — has no filesystem side effect. The
+    # mount below skips StaticFiles' existence check until first request, by
+    # which point this has run (run_robust also creates the dir lazily).
+    store.REPORTS_ROOT.mkdir(parents=True, exist_ok=True)
     runner.registry.reset()
     yield
 
@@ -123,10 +128,14 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 # Serve the on-disk report tree read-only so the detail view's "download
 # complete_report.md" links resolve. StaticFiles rejects ".." traversal, and
 # html=False (default) returns 404 for directory requests — direct file paths
-# only, no directory listing. The dir is created eagerly (harmless; run_robust
-# creates it too) so mounting never fails on a fresh install with no runs yet.
-store.REPORTS_ROOT.mkdir(parents=True, exist_ok=True)
-app.mount("/reports", StaticFiles(directory=str(store.REPORTS_ROOT)), name="reports")
+# only, no directory listing. check_dir=False: the dir may not exist yet on a
+# fresh install with no runs; _lifespan creates it at startup (import must stay
+# side-effect free).
+app.mount(
+    "/reports",
+    StaticFiles(directory=str(store.REPORTS_ROOT), check_dir=False),
+    name="reports",
+)
 
 
 def _validate_path_ticker(ticker: str) -> str:

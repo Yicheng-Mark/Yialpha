@@ -1,4 +1,5 @@
 from yiagents.agents.utils.agent_utils import (
+    final_analyst_report,
     get_a_share_news_native,
     get_global_news,
     get_instrument_context_from_state,
@@ -75,10 +76,12 @@ def create_news_analyst(llm):
         chain = prompt | llm.bind_tools(tools)
         result = chain.invoke(state["messages"])
 
-        report = ""
-
-        if len(result.tool_calls) == 0:
-            report = result.content
+        # Shared final-report extraction: "" while tool calls are pending,
+        # content on the final answer, and a visible sentinel (plus WARNING)
+        # when the final message carried malformed tool calls.
+        report = final_analyst_report(
+            result, agent_name="News Analyst", ticker=ticker,
+        )
 
         return {
             "messages": [result],

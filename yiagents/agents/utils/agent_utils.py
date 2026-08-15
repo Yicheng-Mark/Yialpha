@@ -355,6 +355,49 @@ def create_msg_delete():
     return delete_messages
 
 
+# Sentinel emitted when an analyst's final LLM response contains malformed tool
+# calls (langchain puts them in ``invalid_tool_calls``) and no usable content.
+# Same style as the engine's "[propagate error: ...]" marker: a visible, plain
+# marker in the report slot so downstream nodes (and report readers) can see
+# the analyst degraded, instead of silently receiving an empty string.
+MALFORMED_TOOL_CALLS_SENTINEL = "[analyst produced no report: malformed tool calls]"
+
+
+def final_analyst_report(result: Any, *, agent_name: str, ticker: str) -> Any:
+    """Extract the final report from an analyst node's LLM ``result`` message.
+
+    Reproduces the historical contract exactly — ``""`` while tool calls are
+    pending, ``result.content`` when the model produced its final answer — and
+    adds one guard: when the final message carries ``invalid_tool_calls`` (the
+    model emitted a corrupt tool call; ``tool_calls`` is empty and ``content``
+    is usually empty too), the analyst must not silently write an empty report
+    into state. Instead:
+
+    * a WARNING is logged with the agent / ticker context, and
+    * if there is no usable content, the
+      :data:`MALFORMED_TOOL_CALLS_SENTINEL` marker is returned so every
+      downstream consumer (debate, trader, PM, reports) can see the analyst
+      degraded rather than reading an empty report as "nothing to say".
+
+    Non-empty content alongside invalid tool calls is kept (it is real model
+    text) but still logged, because the response is suspect.
+    """
+    tool_calls = getattr(result, "tool_calls", None) or []
+    if len(tool_calls) == 0:
+        invalid = getattr(result, "invalid_tool_calls", None) or []
+        content = getattr(result, "content", "")
+        if invalid:
+            logger.warning(
+                "%s (%s): final LLM message contained %d malformed tool call(s) "
+                "(invalid_tool_calls non-empty); report may be degraded",
+                agent_name, ticker, len(invalid),
+            )
+            if isinstance(content, str) and not content.strip():
+                return MALFORMED_TOOL_CALLS_SENTINEL
+        return content
+    return ""
+
+
 def build_risk_debate_update(
     risk_debate_state: Mapping[str, Any], speaker: str, argument: str
 ) -> dict:
@@ -384,6 +427,12 @@ def build_risk_debate_update(
             "current_conservative_response", ""
         ),
         "current_neutral_response": risk_debate_state.get("current_neutral_response", ""),
+        # Carry the judge's decision through a debator turn. The parent state
+        # replaces this whole sub-dict (last-write-wins on the field), so a
+        # helper that omitted the key would blank a judge_decision the
+        # Portfolio Manager had already written (e.g. a checkpoint-resumed run
+        # replaying a debator) until the PM ran again.
+        "judge_decision": risk_debate_state.get("judge_decision", ""),
         "count": risk_debate_state["count"] + 1,
     }
     update[f"{speaker}_history"] = (
@@ -406,12 +455,15 @@ def build_investment_debate_update(
     Centralises the 5-field state dict the bull/bear researchers each rebuilt
     inline, so the two cannot drift apart — the same role
     :func:`build_risk_debate_update` plays for the three risk debators.
-    Byte-equivalent to each researcher's prior dict.
+    Byte-equivalent to each researcher's prior dict apart from the carried
+    ``judge_decision`` (see below).
 
-    Note: ``judge_decision`` (present on :class:`InvestDebateState`) is
-    intentionally NOT emitted — neither researcher writes it (it is reserved
-    for the Research Manager's downstream use), and emitting it here would
-    change the dict's key set and break the byte-equivalence contract.
+    ``judge_decision`` (present on :class:`InvestDebateState`) is carried
+    through unchanged from the current sub-state (empty string when unset).
+    The parent state replaces this whole sub-dict on a researcher turn, so a
+    helper that omitted the key would blank a Research Manager decision that
+    a resumed / replayed turn runs after. Neither researcher ever *writes* a
+    judge decision.
     """
     opponent = "bear" if speaker == "bull" else "bull"
     return {
@@ -421,6 +473,7 @@ def build_investment_debate_update(
         ),
         f"{opponent}_history": investment_debate_state.get(f"{opponent}_history", ""),
         "current_response": argument,
+        "judge_decision": investment_debate_state.get("judge_decision", ""),
         "count": investment_debate_state["count"] + 1,
     }
 

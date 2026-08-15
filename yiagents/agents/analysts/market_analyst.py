@@ -1,6 +1,7 @@
 import logging
 
 from yiagents.agents.utils.agent_utils import (
+    final_analyst_report,
     get_a_share_market_breadth_native,
     get_a_share_northbound_native,
     get_a_share_realtime_quote_native,
@@ -347,10 +348,12 @@ def create_market_analyst(llm):
 
         result = chain.invoke(state["messages"])
 
-        report = ""
-
-        if len(result.tool_calls) == 0:
-            report = result.content
+        # Shared final-report extraction: "" while tool calls are pending,
+        # content on the final answer, and a visible sentinel (plus WARNING)
+        # when the final message carried malformed tool calls.
+        report = final_analyst_report(
+            result, agent_name="Market Analyst", ticker=ticker,
+        )
 
         return {
             "messages": [result],

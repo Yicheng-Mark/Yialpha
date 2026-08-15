@@ -4,7 +4,7 @@ import contextlib
 import hashlib
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
@@ -13,6 +13,7 @@ from .config import get_config
 from .disk_cache import cached_or_fetch, vendor_cache_dir
 from .stockstats_utils import yf_retry
 from .symbol_utils import normalize_symbol
+from .utils import current_pit_end
 
 logger = logging.getLogger(__name__)
 
@@ -97,16 +98,34 @@ def _extract_article_data(article: dict) -> dict:
         }
 
 
+def _to_naive_utc(pub_date) -> datetime:
+    """Normalize a pub datetime to naive-UTC for window comparisons.
+
+    ``start_dt``/``end_dt`` are naive date-derived datetimes, so an aware
+    ``pub_date`` must be reduced to a comparable naive value. Merely
+    ``replace(tzinfo=None)`` keeps the ORIGINAL offset's wall clock — an
+    article at ``2025-05-10T01:30+08:00`` (i.e. 2025-05-09 17:30 UTC) was
+    compared as if it were May 10th, skewing the window by up to the offset.
+    Converting to UTC first makes the comparison a single calendar standard
+    on both sides. Naive datetimes (``fromtimestamp`` — local wall clock) pass
+    through unchanged.
+    """
+    if getattr(pub_date, "tzinfo", None) is not None:
+        return pub_date.astimezone(timezone.utc).replace(tzinfo=None)
+    return pub_date
+
+
 def _in_news_window(pub_date, start_dt, end_dt) -> bool:
     """Whether an article belongs in the [start_dt, end_dt] window.
 
-    Dated articles are kept only if they fall in the window. An undated article
+    Dated articles are kept only if they fall in the window (aware timestamps
+    are normalized to UTC first — see :func:`_to_naive_utc`). An undated article
     is kept only when the window reaches the present (live run) — in a
     historical/backtest window it's excluded, since we can't prove it isn't
     future news (look-ahead safety, #992/#1007).
     """
     if pub_date is not None:
-        naive = pub_date.replace(tzinfo=None) if hasattr(pub_date, "replace") else pub_date
+        naive = _to_naive_utc(pub_date)
         return start_dt <= naive <= end_dt + relativedelta(days=1)
     return end_dt >= datetime.now() - relativedelta(days=1)
 
@@ -128,6 +147,11 @@ def get_news_yfinance(
         Formatted string containing news articles
     """
     article_limit = get_config()["news_article_limit"]
+    # PIT guard: like get_YFin_data_online, the tool carries no analysis-date
+    # argument (the LLM picks end_date from its prompt context), so clamp the
+    # window against the run's pinned analysis date. Live mode (no analysis
+    # date pinned) is a no-op pass-through.
+    end_date = current_pit_end(end_date) or end_date
     # Query Yahoo with the canonical symbol, like every other yfinance path —
     # a raw broker/forex/crypto alias (XAUUSD, BTCUSD) otherwise silently
     # returns no news. Keep the user's ticker in the report header.
@@ -201,6 +225,10 @@ def get_global_news_yfinance(
     if limit is None:
         limit = config["global_news_article_limit"]
     search_queries = config["global_news_queries"]
+    # PIT guard: curr_date comes from the LLM's tool call; clamp it against the
+    # run's pinned analysis date so a backtest cannot receive today's headlines
+    # (same guard as get_news_yfinance above; no-op in live mode).
+    curr_date = current_pit_end(curr_date) or curr_date
 
     all_news = []
     seen_titles = set()

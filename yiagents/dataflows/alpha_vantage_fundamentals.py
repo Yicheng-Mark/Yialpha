@@ -1,3 +1,5 @@
+import json
+
 from .alpha_vantage_common import _make_api_request
 from .symbol_utils import NoMarketDataError, normalize_symbol
 from .utils import is_filing_public, overview_would_leak_future
@@ -11,8 +13,23 @@ def _filter_reports_by_date(result: dict | str, curr_date: str | None) -> dict |
     :func:`yiagents.dataflows.utils.is_filing_public`). Keeping only reports
     whose period end + filing lag is on/before ``curr_date`` prevents a backtest
     from reading a report the market could not yet have seen.
+
+    ``_make_api_request`` always returns the raw response *text* (``str``),
+    so a JSON statement payload arrives here as a string. It is parsed with
+    ``json.loads`` and the filtered ``dict`` is returned; a string that is not
+    valid JSON (a CSV dataset, or an error/notice body) is returned unchanged —
+    there is nothing statement-shaped to filter in it. The returned dict is
+    consumed downstream exactly like a dict response (the tool layer
+    JSON-serializes non-str tool outputs).
     """
-    if not curr_date or not isinstance(result, dict):
+    if not curr_date:
+        return result
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except json.JSONDecodeError:
+            return result
+    if not isinstance(result, dict):
         return result
     for key in ("annualReports", "quarterlyReports"):
         if key in result:

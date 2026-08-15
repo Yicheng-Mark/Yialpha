@@ -1,6 +1,10 @@
-"""StockTwits fetch: transport-error resilience (never raises, including the
-http.client chunked-transfer exceptions that are not OSErrors, #1024) and the
-short-TTL disk cache (repeat calls within the TTL skip the network)."""
+"""StockTwits fetch: transport-error resilience (the placeholder contract the
+sentiment node relies on, including the http.client chunked-transfer exceptions
+that are not OSErrors, #1024), the short-TTL disk cache (repeat calls within
+the TTL skip the network), the data-quality sentinel recorded on degradation
+(the fetcher is NOT routed through the router, so without recording it here
+the run's evidence chain loses the failure), and the safe-ticker path
+validation before URL interpolation."""
 
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ from urllib.error import HTTPError
 
 import pytest
 
-from yiagents.dataflows import stocktwits
+from yiagents.dataflows import quality, stocktwits
 
 
 def _raise(exc):
@@ -87,6 +91,52 @@ class TestStockTwitsResilience:
             out = stocktwits.fetch_stocktwits_messages("NVDA")
         assert "unavailable" in out.lower()
         assert out.startswith("<stocktwits unavailable")
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            http.client.IncompleteRead(b""),
+            HTTPError("url", 503, "down", {}, None),  # type: ignore[arg-type]
+            TimeoutError("slow"),
+        ],
+    )
+    def test_transport_degradation_records_quality_sentinel(self, exc):
+        """The placeholder must NOT be the only trace: an optional-unavailable
+        sentinel is recorded so the run's data_quality block reflects the
+        missing source (this fetcher bypasses route_to_vendor)."""
+        quality.ensure_run_context()
+        try:
+            with patch.object(stocktwits, "urlopen", return_value=_raise(exc)):
+                stocktwits.fetch_stocktwits_messages("NVDA")
+            events = quality.snapshot_quality()
+        finally:
+            quality.reset_quality()
+        assert any(
+            e["method"] == "fetch_stocktwits_messages"
+            and e["kind"] == quality.KIND_OPTIONAL_UNAVAILABLE
+            for e in events
+        )
+
+
+@pytest.mark.unit
+class TestStockTwitsTickerValidation:
+    @pytest.mark.parametrize("bad", ["../../etc/passwd", "A B", "a|b", "."])
+    def test_unsafe_ticker_raises_before_url_build(self, bad):
+        """A malformed/attacker-controlled ticker must never be interpolated
+        into the URL path (fail-closed ValueError from safe_ticker_component)."""
+        with patch.object(stocktwits, "urlopen") as transport:
+            transport.side_effect = AssertionError("no request may be attempted")
+            with pytest.raises(ValueError):
+                stocktwits.fetch_stocktwits_messages(bad)
+
+    def test_valid_tickers_pass_validation(self):
+        # Dashed, dotted, caret, equals, plus — the symbol grammar — all pass.
+        for ok in ("BRK.B", "BTC-USD", "^GSPC", "GC=F", "XAUUSD+"):
+            with patch.object(
+                stocktwits, "urlopen", return_value=_ok(_messages_payload("Bullish"))
+            ):
+                out = stocktwits.fetch_stocktwits_messages(ok)
+            assert "Bullish: 1 (100%)" in out
 
 
 @pytest.mark.unit

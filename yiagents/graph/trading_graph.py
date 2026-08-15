@@ -5,6 +5,7 @@ import logging
 import os
 from contextlib import AbstractContextManager
 from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,23 @@ logger = logging.getLogger(__name__)
 #: A pending memory-log entry older than this (in days) that still cannot be
 #: resolved is logged at WARNING so it does not silently accumulate forever.
 STALE_PENDING_DAYS = 7
+
+
+@lru_cache(maxsize=4096)
+def _memoized_close_and_atr(ticker: str, trade_date: str) -> tuple[float, float]:
+    """Load and compute the deterministic PIT ``(close, atr)`` for one date.
+
+    Module-level LRU keyed by ``(ticker, trade_date)`` — see
+    ``YiAgentsGraph._latest_close_and_atr`` for the PIT-safety argument.
+    Raises on any failure so failures are never cached (the caller converts
+    them to ``(None, None)`` and retries on the next run).
+    """
+    from yiagents.dataflows.stockstats_utils import load_ohlcv
+    from yiagents.risk.atr_stop import latest_atr_from_frame
+
+    frame = load_ohlcv(ticker, str(trade_date))
+    close, atr = latest_atr_from_frame(frame)
+    return float(close), float(atr)
 
 
 def _entry_precedes_cutoff(entry: dict[str, Any], cutoff: datetime) -> bool:
@@ -230,8 +248,8 @@ class YiAgentsGraph:
         self.risk_manager = self._build_risk_manager()
 
         # State tracking
-        self.curr_state = None
-        self.ticker = None
+        self.curr_state: dict[str, Any] | None = None
+        self.ticker: str | None = None
         self.selected_analysts = tuple(selected_analysts)  # for P0 telemetry plan
         self.log_states_dict: dict[str, dict[str, Any]] = {}  # date to full state dict
 
@@ -439,14 +457,18 @@ class YiAgentsGraph:
         PIT-safe: reuses the project's cached, date-truncated OHLCV loader. Any
         failure returns ``(None, None)`` so the overlay still runs without a
         stop rather than aborting the decision.
+
+        Memoized per ``(ticker, trade_date)`` at module level: the 14-period
+        stockstats ATR for a fixed PIT date is deterministic, and backtests
+        hit the same (ticker, date) repeatedly (A/B legs, multi-run
+        distributions). The date being part of the key is what keeps this
+        PIT-safe — a new analysis date re-computes rather than reusing a
+        prior day's value. Failures are NOT memoized (an lru_cache on a
+        raising function re-invokes next call), so a transient vendor fault
+        still retries on the next run.
         """
         try:
-            from yiagents.dataflows.stockstats_utils import load_ohlcv
-            from yiagents.risk.atr_stop import latest_atr_from_frame
-
-            frame = load_ohlcv(ticker, str(trade_date))
-            close, atr = latest_atr_from_frame(frame)
-            return float(close), float(atr)
+            return _memoized_close_and_atr(ticker, str(trade_date))
         except Exception as exc:  # noqa: BLE001
             logger.warning("risk overlay could not load price/ATR for %s on %s: %s",
                            ticker, trade_date, exc)
@@ -514,13 +536,17 @@ class YiAgentsGraph:
         if state is None:
             state = PortfolioState(equity=0.0)
 
-        close, atr = self._latest_close_and_atr(company_name, trade_date)
+        # Naming clarification: ``company_name`` IS the tradable ticker symbol
+        # throughout this codebase (the historical parameter name predates the
+        # ticker/company split); every data loader below keys on it as such.
+        ticker = company_name
+        close, atr = self._latest_close_and_atr(ticker, trade_date)
         try:
             decision = self.risk_manager.decide(
-                company_name, rating, state, price=close, atr=atr, date=str(trade_date),
+                ticker, rating, state, price=close, atr=atr, date=str(trade_date),
             )
         except Exception as exc:  # noqa: BLE001 -- overlay must never break a run
-            logger.warning("risk overlay failed for %s on %s: %s", company_name, trade_date, exc)
+            logger.warning("risk overlay failed for %s on %s: %s", ticker, trade_date, exc)
             final_state["final_trade_decision"] = (
                 final_state.get("final_trade_decision", "")
                 + self._risk_disabled_warning(f"overlay computation failed: {exc}")
@@ -779,18 +805,34 @@ class YiAgentsGraph:
                 self.config["data_cache_dir"], company_name
             )
             saver = self._checkpointer_ctx.__enter__()
-            self.graph = self.workflow.compile(checkpointer=saver)
+            # From the moment the saver's SQLite connection is open, every
+            # subsequent step — including checkpoint_step, which opens its OWN
+            # second connection and can raise — must run under the same
+            # try/finally that closes the saver. Otherwise an exception between
+            # __enter__ and the old try block leaked the saver connection.
+            try:
+                self.graph = self.workflow.compile(checkpointer=saver)
 
-            step = checkpoint_step(
-                self.config["data_cache_dir"], company_name, str(trade_date),
-                self._run_signature(asset_type),
-            )
-            if step is not None:
-                logger.info(
-                    "Resuming from step %d for %s on %s", step, company_name, trade_date
+                step = checkpoint_step(
+                    self.config["data_cache_dir"], company_name, str(trade_date),
+                    self._run_signature(asset_type),
                 )
-            else:
-                logger.info("Starting fresh for %s on %s", company_name, trade_date)
+                if step is not None:
+                    logger.info(
+                        "Resuming from step %d for %s on %s", step, company_name, trade_date
+                    )
+                else:
+                    logger.info("Starting fresh for %s on %s", company_name, trade_date)
+
+                return self._run_graph(
+                    company_name, trade_date, asset_type=asset_type,
+                    portfolio_state=portfolio_state,
+                )
+            finally:
+                if self._checkpointer_ctx is not None:
+                    self._checkpointer_ctx.__exit__(None, None, None)
+                    self._checkpointer_ctx = None
+                    self.graph = self.workflow.compile()
 
         try:
             return self._run_graph(
@@ -961,11 +1003,23 @@ class YiAgentsGraph:
             if self.perf_tracker is not None:
                 self._dump_perf(trade_date)
 
-            # Store decision for deferred reflection on the next same-ticker run.
+            # Store decision for deferred reflection on the next same-ticker
+            # run. Every other field read here uses .get(); this was the one
+            # bare subscript — a KeyError from a degenerate state would mask
+            # the underlying condition, so degrade to "" with a WARNING
+            # instead (parse_rating on "" already falls back to Hold).
+            decision_for_memory = final_state.get("final_trade_decision")
+            if decision_for_memory is None:
+                logger.warning(
+                    "final_state lacked 'final_trade_decision' for %s on %s; "
+                    "storing empty decision for reflection",
+                    company_name, trade_date,
+                )
+                decision_for_memory = ""
             self.memory_log.store_decision(
                 ticker=company_name,
                 trade_date=trade_date,
-                final_trade_decision=final_state["final_trade_decision"],
+                final_trade_decision=decision_for_memory,
             )
 
             # Clear checkpoint on successful completion to avoid stale state.
@@ -1055,6 +1109,28 @@ class YiAgentsGraph:
         # final_state — the report writer and web UI render it as the
         # human-facing degraded-run banner.
         return quality_block
+
+    def finalize_streamed_run(
+        self, ticker: str, trade_date: str, final_state: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Apply the ``_run_graph`` evidence contract to a caller-streamed run.
+
+        The interactive CLI streams ``self.graph.stream`` directly for its live
+        UI, bypassing :meth:`_run_graph`. That path used to skip
+        :meth:`_log_state`, so a CLI run never wrote
+        ``full_states_log_<date>.json`` (invisible in the web history) and
+        never carried ``data_quality`` (the DEGRADED banner never rendered).
+        This method reuses ``_log_state`` unchanged so both entry points land
+        the identical on-disk evidence. The caller owns the pre-stream
+        ``quality.ensure_run_context()`` call (it must run before the first
+        node executes, not after streaming ends).
+
+        Returns ``final_state`` with the consumed ``data_quality`` block
+        attached (same shape ``_run_graph`` returns).
+        """
+        self.ticker = ticker
+        final_state["data_quality"] = self._log_state(trade_date, final_state)
+        return final_state
 
     def _dump_perf(self, trade_date):
         """Write per-node perf telemetry to node_perf_<trade_date>.json.

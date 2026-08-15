@@ -138,3 +138,35 @@ class TestAnalystToolRouting:
         cl = ConditionalLogic()
         state = {"messages": []}
         assert getattr(cl, method)(state) == clear_node
+
+
+class TestDebateRoundValidation:
+    """C10: 0 debate rounds must be rejected loudly, not silently accepted.
+
+    The graph topology runs Bull Researcher / Aggressive Analyst once before
+    the router fires, so ``max_*_rounds=0`` never meant "skip the debate" —
+    it silently burned one LLM call per run while pretending to disable the
+    stage. The validation layer now rejects it.
+    """
+
+    @pytest.mark.parametrize("kwargs", [
+        {"max_debate_rounds": 0},
+        {"max_risk_discuss_rounds": 0},
+        {"max_debate_rounds": -1},
+        {"max_risk_discuss_rounds": -2},
+        {"max_debate_rounds": 1.5},
+        {"max_debate_rounds": True},
+        {"max_risk_discuss_rounds": "2"},
+    ])
+    def test_non_positive_or_non_int_rounds_rejected(self, kwargs):
+        with pytest.raises(ValueError, match="integer >= 1"):
+            ConditionalLogic(**kwargs)
+
+    @pytest.mark.parametrize("kwargs", [
+        {"max_debate_rounds": 1},
+        {"max_debate_rounds": 2},
+        {"max_risk_discuss_rounds": 1},
+        {"max_risk_discuss_rounds": 5},
+    ])
+    def test_valid_rounds_accepted(self, kwargs):
+        ConditionalLogic(**kwargs)
