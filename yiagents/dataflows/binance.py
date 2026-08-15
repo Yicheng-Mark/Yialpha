@@ -375,21 +375,31 @@ def _http_get(
     return parsed
 
 
-def get_binance_klines(
+def binance_klines_frame(
     symbol: str,
     start_date: str,
     end_date: str,
     interval: str = "1d",
-) -> str:
-    """Daily OHLCV for a Binance USDT-M perpetual pair.
+    venue: str = "binance_perp",
+) -> pd.DataFrame:
+    """OHLCV DataFrame for a Binance pair (perp or spot), PIT-clamped.
 
-    Returns a ``str`` shaped like yfinance's ``get_YFin_data_online`` output —
-    header block + CSV with columns ``Open, High, Low, Close, Adj Close,
-    Volume`` (``Adj Close`` mirrors ``Close`` since perps have no splits) — so
-    the downstream stockstats indicator path is reusable. ``interval`` defaults
-    to ``"1d"``; the analyst passes it through for intraday if ever needed.
+    Shared data layer for the klines CSV tools and the indicator tool
+    (``get_binance_indicators``) so classic stockstats indicators can be
+    computed on the SAME candles the analyst reads. Date-indexed, sorted,
+    rounded to match the CSV tools' output exactly. Raises NoMarketDataError
+    on empty windows, and ``current_pit_end`` clamps the end so a backtest
+    never sees klines after its analysis date.
     """
-    canonical = normalize_symbol_for_venue(symbol, "binance_perp")
+    if venue == "binance_spot":
+        path, limit, base, weight_key = (
+            "/api/v3/klines", _SPOT_KLINES_LIMIT, _spot_host(), "spot",
+        )
+    else:
+        path, limit, base, weight_key = (
+            "/fapi/v1/klines", _FAPI_KLINES_LIMIT, None, None,
+        )
+    canonical = normalize_symbol_for_venue(symbol, venue)
 
     start_ms = int(
         datetime.strptime(start_date, "%Y-%m-%d")
@@ -397,23 +407,23 @@ def get_binance_klines(
         .timestamp()
         * 1000
     )
-    # PIT guard: clamp the fetch window to the analysis date so a backtest
-    # never sees klines after it. Live mode (no analysis date pinned) is a
-    # no-op pass-through.
     end_date = current_pit_end(end_date) or end_date
     end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    # End-of-day so the requested end_date row is included.
-    end_ms = int((end_dt.timestamp() + 86399) * 1000)
+    end_ms = int((end_dt.timestamp() + 86399) * 1000)  # end-of-day inclusive
 
+    kwargs: dict = {"base": base, "weight_key": weight_key}
+    if base is None:
+        kwargs = {}
     rows = _paginate_history(
-        "/fapi/v1/klines",
+        path,
         {"symbol": canonical, "interval": interval},
-        _FAPI_KLINES_LIMIT,
+        limit,
         lambda k: k[0],  # kline open_time (ms) is element 0
         start_ms,
         end_ms,
         symbol,
         canonical,
+        **kwargs,
     )
 
     if not isinstance(rows, list) or not rows:
@@ -422,7 +432,6 @@ def get_binance_klines(
         )
 
     # Binance kline array indices: [1]Open [2]High [3]Low [4]Close [5]Volume.
-    # Index 0 is the open time (ms, UTC); cast numerics via pandas.
     records = []
     for k in rows:
         if not isinstance(k, list) or len(k) < 6:
@@ -452,7 +461,28 @@ def get_binance_klines(
     # Mirror yfinance: round numerics for cleaner display.
     for col in ("Open", "High", "Low", "Close", "Adj Close"):
         df[col] = df[col].round(2)
+    return df
 
+
+def get_binance_klines(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    interval: str = "1d",
+) -> str:
+    """Daily OHLCV for a Binance USDT-M perpetual pair.
+
+    Returns a ``str`` shaped like yfinance's ``get_YFin_data_online`` output —
+    header block + CSV with columns ``Open, High, Low, Close, Adj Close,
+    Volume`` (``Adj Close`` mirrors ``Close`` since perps have no splits) — so
+    the downstream stockstats indicator path is reusable. ``interval`` defaults
+    to ``"1d"``; the analyst passes it through for intraday if ever needed.
+    """
+    df = binance_klines_frame(
+        symbol, start_date, end_date, interval=interval, venue="binance_perp"
+    )
+    canonical = normalize_symbol_for_venue(symbol, "binance_perp")
+    end_date = current_pit_end(end_date) or end_date
     label = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
     header = f"# Perp USDT-M klines for {label} from {start_date} to {end_date}\n"
     header += f"# Total records: {len(df)}\n"
@@ -1008,67 +1038,11 @@ def get_binance_spot_klines(
     ``Close``; spot has no splits) — so the downstream stockstats indicator path
     is reusable for spot runs. Hits ``/api/v3/klines`` on the spot host.
     """
+    df = binance_klines_frame(
+        symbol, start_date, end_date, interval=interval, venue="binance_spot"
+    )
     canonical = normalize_symbol_for_venue(symbol, "binance_spot")
-
-    start_ms = int(
-        datetime.strptime(start_date, "%Y-%m-%d")
-        .replace(tzinfo=timezone.utc)
-        .timestamp()
-        * 1000
-    )
-    # PIT guard: clamp the fetch window to the analysis date (see perp variant).
     end_date = current_pit_end(end_date) or end_date
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end_ms = int((end_dt.timestamp() + 86399) * 1000)  # end-of-day inclusive
-
-    rows = _paginate_history(
-        "/api/v3/klines",
-        {"symbol": canonical, "interval": interval},
-        _SPOT_KLINES_LIMIT,
-        lambda k: k[0],  # kline open_time (ms) is element 0
-        start_ms,
-        end_ms,
-        symbol,
-        canonical,
-        base=_spot_host(),
-        weight_key="spot",
-    )
-
-    if not isinstance(rows, list) or not rows:
-        raise NoMarketDataError(
-            symbol, canonical, f"no spot klines between {start_date} and {end_date}"
-        )
-
-    # Same array indices as fapi klines: [1]Open [2]High [3]Low [4]Close [5]Volume.
-    records = []
-    for k in rows:
-        if not isinstance(k, list) or len(k) < 6:
-            continue
-        open_ms = int(k[0])
-        records.append(
-            {
-                "Date": datetime.fromtimestamp(open_ms / 1000, tz=timezone.utc)
-                .strftime("%Y-%m-%d" if interval == "1d" else "%Y-%m-%d %H:%M:%S"),
-                "Open": float(k[1]),
-                "High": float(k[2]),
-                "Low": float(k[3]),
-                "Close": float(k[4]),
-                "Adj Close": float(k[4]),
-                "Volume": float(k[5]),
-            }
-        )
-
-    if not records:
-        raise NoMarketDataError(
-            symbol, canonical, f"no parseable spot klines between {start_date} and {end_date}"
-        )
-
-    df = pd.DataFrame.from_records(records)
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.set_index("Date").sort_index()
-    for col in ("Open", "High", "Low", "Close", "Adj Close"):
-        df[col] = df[col].round(2)
-
     label = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
     header = f"# Spot USDT klines for {label} from {start_date} to {end_date}\n"
     header += f"# Total records: {len(df)}\n"

@@ -161,14 +161,13 @@ class _RecordingLLM:
 class TestConservativeDebaterWiring:
     def test_off_is_byte_equivalent_on_injects_one_line(self, monkeypatch):
         # When OFF, get_config returns market_regime falsy; the debater must
-        # not call format_market_regime and the prompt must carry no regime line.
+        # not call format_regime_context and the prompt must carry no regime line.
         monkeypatch.setattr(cd, "get_config", lambda: {"market_regime": False})
-        sentinel = format_market_regime  # noqa: F841 — referenced for clarity
 
         def must_not_call(*a, **k):
-            raise AssertionError("format_market_regime must not run when off")
+            raise AssertionError("format_regime_context must not run when off")
 
-        monkeypatch.setattr(cd, "format_market_regime", must_not_call)
+        monkeypatch.setattr(cd, "format_regime_context", must_not_call)
 
         llm = _RecordingLLM()
         cd.create_conservative_debator(llm)(_state())
@@ -177,8 +176,10 @@ class TestConservativeDebaterWiring:
         assert "turbulence" not in off_prompt
 
         # When ON, exactly the injected line is added; nothing else changes.
+        # (2026-08-15: the injected reading is the composite regime line — a
+        # superset of the old turbulence-only format_market_regime.)
         monkeypatch.setattr(cd, "get_config", lambda: {"market_regime": True})
-        monkeypatch.setattr(cd, "format_market_regime", lambda *a, **k: "SENTINEL_READING")
+        monkeypatch.setattr(cd, "format_regime_context", lambda *a, **k: "SENTINEL_READING")
         cd.create_conservative_debator(llm)(_state())
         on_prompt = llm.prompts[1]
         assert "Market Regime: SENTINEL_READING" in on_prompt
@@ -187,12 +188,13 @@ class TestConservativeDebaterWiring:
         assert on_prompt.replace("Market Regime: SENTINEL_READING\n", "") == off_prompt
 
     def test_on_but_reading_none_marks_unavailable(self, monkeypatch):
-        # Fail-soft but VISIBLE: with the flag on and format returning None
-        # (no data), the prompt must say the reading is unavailable — silently
-        # omitting the cue the operator opted into made "configured but
-        # broken" indistinguishable from "configured and calm".
+        # Fail-soft but VISIBLE: with the flag on and the composite regime
+        # line returning None (no data), the prompt must say the reading is
+        # unavailable — silently omitting the cue the operator opted into
+        # made "configured but broken" indistinguishable from "configured
+        # and calm".
         monkeypatch.setattr(cd, "get_config", lambda: {"market_regime": True})
-        monkeypatch.setattr(cd, "format_market_regime", lambda *a, **k: None)
+        monkeypatch.setattr(cd, "format_regime_context", lambda *a, **k: None)
         llm = _RecordingLLM()
         cd.create_conservative_debator(llm)(_state())
         on_none_prompt = llm.prompts[0]
@@ -205,5 +207,5 @@ class TestConservativeDebaterWiring:
         # The unavailable line is the ONLY difference from the off prompt.
         assert on_none_prompt.replace(
             "Market Regime: unavailable (fetch failed or insufficient "
-            "benchmark history)\n", ""
+            "history)\n", ""
         ) == off_prompt

@@ -147,6 +147,70 @@ def _sample_excess_kurtosis(returns: np.ndarray) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Trade-quality and benchmark-relative pure helpers (2026-08-15 expansion).
+# ---------------------------------------------------------------------------
+def trade_quality_stats(position_returns: Sequence[float]) -> dict[str, float | None]:
+    """Profit factor / average win / average loss / payoff over closed trades.
+
+    ``avg_loss`` keeps its sign (negative). ``profit_factor`` is ``None``
+    when there is no P&L at all and ``inf`` when there are wins but zero
+    losses (the convention keeps "no losing trade" distinguishable from
+    "no trades").
+    """
+    rets = [float(r) for r in position_returns]
+    wins = [r for r in rets if r > 0.0]
+    losses = [r for r in rets if r < 0.0]
+    if not rets:
+        return {
+            "profit_factor": None, "avg_win": None,
+            "avg_loss": None, "payoff_ratio": None,
+        }
+    gross_win = sum(wins)
+    gross_loss = -sum(losses)
+    if gross_loss > 0.0:
+        profit_factor: float | None = gross_win / gross_loss
+    else:
+        profit_factor = float("inf") if gross_win > 0.0 else None
+    avg_win: float | None = (gross_win / len(wins)) if wins else None
+    avg_loss: float | None = (-gross_loss / len(losses)) if losses else None
+    payoff_ratio: float | None = None
+    if avg_win is not None and avg_loss is not None and avg_loss != 0.0:
+        payoff_ratio = abs(avg_win / avg_loss)
+    return {
+        "profit_factor": profit_factor,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff_ratio": payoff_ratio,
+    }
+
+
+def benchmark_comparison(
+    returns: Sequence[float] | np.ndarray,
+    benchmark_returns: Sequence[float] | np.ndarray,
+    periods_per_year: int,
+) -> tuple[float | None, float | None]:
+    """Annualized (information ratio, tracking error) of active returns.
+
+    Active returns are ``strategy - benchmark`` per period; TE is their
+    annualized std (ddof=1), IR their annualized mean-to-TE ratio. Returns
+    ``(None, None)`` on length mismatch, <2 observations, or a zero-variance
+    active series (IR undefined; TE 0 is still reported in that case — a
+    perfectly tracking strategy has zero TE by definition, while its IR has
+    no denominator).
+    """
+    r = np.asarray(returns, dtype=float).ravel()
+    b = np.asarray(benchmark_returns, dtype=float).ravel()
+    if r.size != b.size or r.size < 2:
+        return None, None
+    active = r - b
+    mean_active = float(active.mean())
+    std_active = float(active.std(ddof=1))
+    te = std_active * math.sqrt(periods_per_year)
+    ir = (mean_active / std_active) * math.sqrt(periods_per_year) if std_active > 0.0 else None
+    return ir, te
+
+
+# ---------------------------------------------------------------------------
 # Public data container.
 # ---------------------------------------------------------------------------
 @dataclass
@@ -174,6 +238,22 @@ class BacktestMetrics:
     turnover_annual: float | None = None
     max_drawdown_date: str | None = None
     num_trades: int = 0
+    # Trade-quality extras over closed position episodes (filled by
+    # ``run_backtest`` like win_rate; None when there are no closed trades).
+    # profit_factor = gross wins / gross losses (None with no P&L at all,
+    # inf with wins and zero losses); avg_loss keeps its sign (negative);
+    # payoff_ratio = |avg_win / avg_loss|.
+    profit_factor: float | None = None
+    avg_win: float | None = None
+    avg_loss: float | None = None
+    payoff_ratio: float | None = None
+    # Benchmark-relative risk-adjusted stats vs the SAME-TICKER buy-and-hold
+    # curve ``compute_metrics`` already receives: annualized tracking error
+    # (std of active returns) and information ratio (mean active / TE).
+    # None without a benchmark or a zero-variance active series.
+    information_ratio: float | None = None
+    tracking_error: float | None = None
+    benchmark_name: str | None = None
     # Fama-French factor attribution. Populated by run_backtest only when the
     # caller opts in via its ``factor_model`` param; left at None otherwise.
     # compute_metrics is pure-equity and never touches these, so every existing
@@ -385,13 +465,18 @@ def compute_metrics(
         kurt_override=strategy_kurtosis,
     )
 
-    # --- Alpha vs buy-and-hold -------------------------------------------
+    # --- Alpha / IR / TE vs buy-and-hold ----------------------------------
     alpha_vs_buyhold: float | None = None
+    information_ratio: float | None = None
+    tracking_error: float | None = None
     if benchmark_equity is not None:
         bench = np.asarray(benchmark_equity, dtype=float).ravel()
         if bench.size == eq.size and bench.size >= 2:
             bret = returns_from_equity(bench)
             alpha_vs_buyhold = float((mean_ret - float(bret.mean())) * ppy)
+            information_ratio, tracking_error = benchmark_comparison(
+                returns, bret, ppy
+            )
 
     return BacktestMetrics(
         total_return=total_return,
@@ -403,6 +488,8 @@ def compute_metrics(
         calmar=calmar,
         deflated_sharpe=deflated_sharpe,
         alpha_vs_buyhold=alpha_vs_buyhold,
+        information_ratio=information_ratio,
+        tracking_error=tracking_error,
         num_periods=n,
         periods_per_year=ppy,
     )

@@ -992,51 +992,13 @@ def _limit_thresholds(code: str | None, name: str | None) -> tuple[float, float]
     return (_MAIN_LIMIT_PCT, -_MAIN_LIMIT_PCT)
 
 
-def get_a_share_market_breadth_native(
-    curr_date: str | None = None,
-) -> str:
-    """A-share market breadth (advance-decline, live mode only).
+def _breadth_counts(df) -> dict | None:
+    """Aggregate an AKShare spot table into breadth counts.
 
-    Pulls AKShare's ``stock_zh_a_spot`` (A-share real-time spot for the whole
-    market), reached **directly** (proxy env popped), and aggregates: count of
-    advancing / declining / flat stocks, average change, limit-up / limit-down
-    counts. This is a market-level (not per-stock) signal — the breadth of
-    participation behind a move.
-
-    Live mode only (``curr_date`` empty or exactly today, per
-    :func:`utils.is_historical_date`): for a historical ``curr_date`` the
-    function honestly returns a sentinel explaining that real-time breadth
-    cannot be reconstructed for a past date (preventing lookahead bias in
-    backtests). Limit-up/down counting is tiered by the stock's board and ST
-    status (see :func:`_limit_thresholds`), not a one-size 9.9%.
+    Shared by the formatted breadth tool and the market-regime context line,
+    so both report identical numbers from the same fetch. Returns ``None``
+    when no row parses (caller decides how to degrade).
     """
-    ak = _require_akshare()
-
-    if is_historical_date(curr_date):
-        out = io.StringIO()
-        out.write("# A-share Market Breadth\n")
-        out.write(f"(requested as of {curr_date})\n\n")
-        out.write("REAL_TIME_UNAVAILABLE: This is a historical analysis date. "
-                  "Market breadth (advance-decline counts) is a live-snapshot "
-                  "signal that cannot be reconstructed for a past date. Do not "
-                  "infer or fabricate breadth data for this date.")
-        return out.getvalue().rstrip("\n")
-
-    try:
-        with _direct_connect():
-            df = ak.stock_zh_a_spot()
-    except Exception as exc:
-        raise _akshare_failure(exc, "", "stock_zh_a_spot") from exc
-
-    out = io.StringIO()
-    out.write("# A-share Market Breadth (AKShare)\n")
-    out.write("# Source: AKShare stock_zh_a_spot (whole-market real-time). Reached "
-              "directly (proxy bypassed). Advance-decline counts are a live signal.\n")
-    if df is None or getattr(df, "empty", True):
-        out.write("\nNo market data returned. Report 'data not available' and do "
-                  "not fabricate breadth.")
-        return out.getvalue().rstrip("\n")
-
     col_pct = _pick(df.columns, ("涨跌幅", "changepercent"))
     col_code = _pick(df.columns, ("代码", "code", "symbol"))
     col_name = _pick(df.columns, ("名称", "name"))
@@ -1063,13 +1025,84 @@ def get_a_share_market_breadth_native(
             limit_up += 1
         elif pct <= down_thr:
             limit_down += 1
-
     if counted == 0:
-        out.write("\nNo stocks parsed from the spot table. Report 'data not "
-                  "available' and do not fabricate breadth.")
+        return None
+    return {
+        "advancing": adv,
+        "declining": dec,
+        "flat": flat,
+        "limit_up": limit_up,
+        "limit_down": limit_down,
+        "average_change_pct": total_pct / counted,
+        "counted": counted,
+        "has_name_column": col_name is not None,
+    }
+
+
+def fetch_a_share_breadth_counts() -> dict | None:
+    """Live whole-market breadth counts, shared by the breadth tool and the
+    market-regime context line.
+
+    Raises on vendor failure (the caller decides how to degrade — the
+    formatted tool converts via ``_akshare_failure``, the fail-soft regime
+    line omits the breadth part). Returns ``None`` when the spot table is
+    empty or nothing parses. Live data by construction; callers gate
+    historical dates themselves.
+    """
+    ak = _require_akshare()
+    with _direct_connect():
+        df = ak.stock_zh_a_spot()
+    if df is None or getattr(df, "empty", True):
+        return None
+    return _breadth_counts(df)
+
+
+def get_a_share_market_breadth_native(
+    curr_date: str | None = None,
+) -> str:
+    """A-share market breadth (advance-decline, live mode only).
+
+    Pulls AKShare's ``stock_zh_a_spot`` (A-share real-time spot for the whole
+    market), reached **directly** (proxy env popped), and aggregates: count of
+    advancing / declining / flat stocks, average change, limit-up / limit-down
+    counts. This is a market-level (not per-stock) signal — the breadth of
+    participation behind a move.
+
+    Live mode only (``curr_date`` empty or exactly today, per
+    :func:`utils.is_historical_date`): for a historical ``curr_date`` the
+    function honestly returns a sentinel explaining that real-time breadth
+    cannot be reconstructed for a past date (preventing lookahead bias in
+    backtests). Limit-up/down counting is tiered by the stock's board and ST
+    status (see :func:`_limit_thresholds`), not a one-size 9.9%.
+    """
+    if is_historical_date(curr_date):
+        out = io.StringIO()
+        out.write("# A-share Market Breadth\n")
+        out.write(f"(requested as of {curr_date})\n\n")
+        out.write("REAL_TIME_UNAVAILABLE: This is a historical analysis date. "
+                  "Market breadth (advance-decline counts) is a live-snapshot "
+                  "signal that cannot be reconstructed for a past date. Do not "
+                  "infer or fabricate breadth data for this date.")
         return out.getvalue().rstrip("\n")
 
-    avg_pct = total_pct / counted if counted else 0.0
+    try:
+        counts = fetch_a_share_breadth_counts()
+    except Exception as exc:
+        raise _akshare_failure(exc, "", "stock_zh_a_spot") from exc
+
+    out = io.StringIO()
+    out.write("# A-share Market Breadth (AKShare)\n")
+    out.write("# Source: AKShare stock_zh_a_spot (whole-market real-time). Reached "
+              "directly (proxy bypassed). Advance-decline counts are a live signal.\n")
+    if counts is None:
+        out.write("\nNo market data returned. Report 'data not available' and do "
+                  "not fabricate breadth.")
+        return out.getvalue().rstrip("\n")
+
+    adv, dec, flat = counts["advancing"], counts["declining"], counts["flat"]
+    limit_up, limit_down = counts["limit_up"], counts["limit_down"]
+    counted = counts["counted"]
+    avg_pct = counts["average_change_pct"]
     out.write(f"\n# Market Breadth ({counted} stocks)\n\n")
     out.write(f"- 上涨: {adv}  |  下跌: {dec}  |  平盘: {flat}\n")
     out.write(f"- 平均涨跌幅: {avg_pct:+.2f}%\n")
@@ -1077,7 +1110,7 @@ def get_a_share_market_breadth_native(
               f"(tiered thresholds: 主板 ±{_MAIN_LIMIT_PCT}% / 创业板·科创板 "
               f"±{_GEM_STAR_LIMIT_PCT}% / ST ±{_ST_LIMIT_PCT}%; 300/301/688/681 "
               "prefixes and ST-in-name detected per row")
-    if col_name is None:
+    if not counts["has_name_column"]:
         out.write("; NOTE: no 名称 column returned — the ST tier could not be "
                   "applied, so ST stocks near ±5% are NOT counted as limit moves")
     out.write(")\n")

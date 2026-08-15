@@ -12,6 +12,7 @@ Pure functions only: render / aggregate / write. No network, no LLM.
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
@@ -56,6 +57,15 @@ def _fmt_num(x: float | None) -> str:
     if x is None:
         return "n/a"
     return f"{x:.3f}"
+
+
+def _fmt_profit_factor(x: float | None) -> str:
+    """Profit factor with the inf case spelled out (wins, zero losses)."""
+    if x is None:
+        return "n/a"
+    if math.isinf(x):
+        return "inf (no losing trades)"
+    return f"{x:.2f}"
 
 
 def _metric_dict(result: BacktestResult) -> dict[str, Any]:
@@ -118,7 +128,12 @@ def render_backtest_report(result: BacktestResult) -> str:
     lines.append(f"| Calmar | {_fmt_num(m.get('calmar'))} | n/a |")
     lines.append(f"| Deflated Sharpe | {_fmt_num(m.get('deflated_sharpe'))} | n/a |")
     lines.append(f"| Alpha vs B&H (ann.) | {_fmt_pct(m.get('alpha_vs_buyhold'))} | -- |")
+    lines.append(f"| Information ratio vs B&H | {_fmt_num(m.get('information_ratio'))} | -- |")
+    lines.append(f"| Tracking error vs B&H (ann.) | {_fmt_pct(m.get('tracking_error'))} | -- |")
     lines.append(f"| Win rate (net position episodes) | {_fmt_pct(m.get('win_rate'))} | n/a |")
+    lines.append(f"| Profit factor | {_fmt_profit_factor(m.get('profit_factor'))} | n/a |")
+    lines.append(f"| Avg win / avg loss | {_fmt_pct(m.get('avg_win'))} / {_fmt_pct(m.get('avg_loss'))} | n/a |")
+    lines.append(f"| Payoff ratio | {_fmt_num(m.get('payoff_ratio'))} | n/a |")
     lines.append(f"| Turnover (ann.) | {_fmt_pct(m.get('turnover_annual'))} | n/a |")
     _mdd_date = m.get("max_drawdown_date")
     lines.append(f"| Max drawdown date | {_mdd_date if _mdd_date else 'n/a'} | n/a |")

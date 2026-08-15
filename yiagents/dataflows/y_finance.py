@@ -10,10 +10,12 @@ import yfinance as yf
 from dateutil.relativedelta import relativedelta
 
 from .disk_cache import cached_or_fetch, safe_cache_component, vendor_cache_dir
+from .feature_registry import compute_derived
 from .indicator_catalog import TOOL_DESCRIPTIONS
 from .stockstats_utils import (
     OHLCV_CACHE_TTL_SECONDS,
     _assert_ohlcv_not_stale,
+    compute_indicator,
     filter_financials_by_date,
     load_ohlcv,
     read_cached_ohlcv,
@@ -344,7 +346,7 @@ def get_stock_stats_indicators_window(
 def _get_stock_stats_bulk(
     symbol: Annotated[str, "ticker symbol of the company"],
     indicator: Annotated[str, "technical indicator to calculate"],
-    curr_date: Annotated[str, "current date for reference"]
+    curr_date: str,
 ) -> dict:
     """
     Optimized bulk calculation of stock stats indicators.
@@ -354,11 +356,24 @@ def _get_stock_stats_bulk(
     from stockstats import wrap
 
     data = load_ohlcv(symbol, curr_date)
+
+    # Derived features (vol estimators, OBV, ...) compute on the raw frame
+    # via the feature registry; stockstats names go through wrap().
+    derived = compute_derived(data, indicator)
+    if derived is not None:
+        dates = pd.to_datetime(data["Date"]).dt.strftime("%Y-%m-%d")
+        result_dict = {}
+        for date_str, value in zip(dates, derived, strict=True):
+            result_dict[date_str] = "N/A" if pd.isna(value) else str(float(value))
+        return result_dict
+
     df = wrap(data)
     df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
 
-    # Calculate the indicator for all rows at once
-    df[indicator]  # This triggers stockstats to calculate the indicator
+    # Calculate the indicator for all rows at once (this triggers stockstats'
+    # lazy computation; compute_indicator also applies vendor-scale fixes such
+    # as mfi 0-1 -> 0-100 so the values match the Alpha Vantage scale).
+    compute_indicator(df, indicator)
 
     # Create a dictionary mapping date strings to indicator values
     result_dict = {}

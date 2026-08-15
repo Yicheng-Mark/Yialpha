@@ -16,13 +16,17 @@ import pandas as pd
 from stockstats import wrap
 
 from yiagents.dataflows.errors import NoMarketDataError
-from yiagents.dataflows.stockstats_utils import load_ohlcv
+from yiagents.dataflows.feature_registry import compute_derived
+from yiagents.dataflows.stockstats_utils import compute_indicator, load_ohlcv
 
 # A fixed, common indicator set so the snapshot is the same shape every run.
+# kdjk / adx join the baseline set so the two most hallucination-prone claims
+# (KDJ-level quotes, trend-strength assertions) also get a ground-truth row.
 DEFAULT_SNAPSHOT_INDICATORS: tuple[str, ...] = (
     "close_10_ema", "close_50_sma", "close_200_sma",
     "rsi", "boll", "boll_ub", "boll_lb",
     "macd", "macds", "macdh", "atr",
+    "kdjk", "adx",
 )
 
 
@@ -94,8 +98,12 @@ def build_verified_market_snapshot(
     indicator_values: dict[str, str] = {}
     for name in selected:
         try:
-            stock_df[name]  # triggers stockstats calculation
-            indicator_values[name] = _fmt(stock_df.iloc[-1][name])
+            derived = compute_derived(df, name)  # None for stockstats names
+            if derived is not None:
+                indicator_values[name] = _fmt(derived.iloc[-1])
+            else:
+                compute_indicator(stock_df, name)  # stockstats + scale fixes
+                indicator_values[name] = _fmt(stock_df.iloc[-1][name])
         except Exception as exc:  # noqa: BLE001 — one bad indicator shouldn't sink the snapshot
             indicator_values[name] = f"N/A ({type(exc).__name__})"
 

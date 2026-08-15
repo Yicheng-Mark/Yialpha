@@ -17,6 +17,12 @@ only hard numeric dependencies. ``scipy`` is *optional* -- when
 ``scipy.stats.spearmanr`` is importable it is used, otherwise Spearman rank
 correlation is computed manually (rank both arrays with ``pandas.Series.rank``
 then take the Pearson correlation of the ranks).
+
+Beyond the level+persistence pruning rule, the 2026-08-15 expansion adds the
+diagnostics that make IC evidence actionable: :func:`ic_decay` (how fast
+predictive power fades with the forward horizon), :func:`quantile_spread`
+(whether the factor is monotone across quantiles or only tail-effective) and
+:func:`factor_turnover` (how churny the signal is to actually capture).
 """
 
 from __future__ import annotations
@@ -168,6 +174,116 @@ def rolling_ic(
         ic = information_coefficient(f.iloc[start : end + 1], r.iloc[start : end + 1])
         out.iloc[end] = ic
     return out
+
+
+def ic_decay(
+    factor: ArrayLike,
+    forward_returns_by_horizon: dict[str, ArrayLike],
+) -> dict[str, float | None]:
+    """Full-sample Spearman IC per forward horizon — the IC decay curve.
+
+    ``forward_returns_by_horizon`` maps a horizon label (e.g. ``"1d"``,
+    ``"10d"``) to an equal-length forward-return series; the result maps the
+    same labels to :func:`information_coefficient` values. A curve decaying
+    toward zero as the horizon grows marks a short-lived signal; one that
+    holds up at 20d supports slower rebalancing. ``None`` where a horizon
+    lacks enough finite pairs.
+
+    Raises ``ValueError`` when any horizon series differs in length from
+    ``factor``.
+    """
+    f = _as_clean_series(factor)
+    return {
+        label: information_coefficient(f, fwd)
+        for label, fwd in forward_returns_by_horizon.items()
+    }
+
+
+def quantile_spread(
+    factor: ArrayLike,
+    forward_returns: ArrayLike,
+    n_quantiles: int = 5,
+) -> dict | None:
+    """Mean forward return per factor quantile, the Q_hi−Q_lo spread, and
+    monotonicity of the profile.
+
+    Rows are bucketed by factor value into ``n_quantiles`` equal-count groups
+    (Q1 = lowest factor values). Returns::
+
+        {
+            "quantile_means": [mean forward return of Q1..Qk],
+            "spread": mean(Qk) − mean(Q1),
+            "monotonic": True/False,
+            "n_quantiles": k,
+        }
+
+    ``monotonic`` means the quantile means move in ONE direction across
+    buckets (weakly, ties allowed) — the shape that makes a factor usable as
+    a ranked long-short signal rather than only at its tails. ``duplicates``
+    in the factor collapse buckets; fewer than 2 usable buckets or too few
+    rows returns ``None``.
+
+    Raises ``ValueError`` when the inputs differ in length or
+    ``n_quantiles < 2``.
+    """
+    f = _as_clean_series(factor)
+    r = _as_clean_series(forward_returns)
+    if len(f) != len(r):
+        raise ValueError(
+            "factor and forward_returns must have equal length; got "
+            f"{len(f)} and {len(r)}"
+        )
+    if n_quantiles < 2:
+        raise ValueError(f"n_quantiles must be >= 2; got {n_quantiles}")
+
+    finite = np.isfinite(f.values) & np.isfinite(r.values)
+    f_ok = f[finite]
+    r_ok = r[finite]
+    if len(f_ok) < n_quantiles:
+        return None
+
+    try:
+        buckets = pd.qcut(f_ok, q=n_quantiles, labels=False, duplicates="drop")
+    except ValueError:
+        return None
+
+    frame = pd.DataFrame({"q": np.asarray(buckets), "r": r_ok.values})
+    means = frame.groupby("q")["r"].mean().sort_index()
+    k = len(means)
+    if k < 2:
+        return None
+
+    diffs = means.diff().dropna()
+    monotonic = bool((diffs >= 0).all() or (diffs <= 0).all())
+    return {
+        "quantile_means": [float(m) for m in means],
+        "spread": float(means.iloc[-1] - means.iloc[0]),
+        "monotonic": monotonic,
+        "n_quantiles": k,
+    }
+
+
+def factor_turnover(factor: ArrayLike) -> float | None:
+    """Mean absolute rank change between consecutive rows, normalized to
+    ``[0, 1]``.
+
+    ``0.0`` means the row ranking never changes (a static factor); values
+    approaching ``1.0`` mean the ranking reshuffles almost completely row to
+    row — a high-churn signal whose realized IC is expensive to capture after
+    costs. Non-finite rows are dropped before ranking. Returns ``None`` for
+    fewer than 2 usable rows or a zero-variance factor (all ties — the
+    ranking is meaningless).
+    """
+    s = _as_clean_series(factor)
+    s = s[np.isfinite(s.values)]
+    if len(s) < 2:
+        return None
+    ranks = s.rank()
+    if int(ranks.nunique()) <= 1:
+        return None
+    denom = float(len(s) - 1)  # max possible |Δrank| between adjacent rows
+    diffs = ranks.diff().dropna()
+    return float(diffs.abs().mean() / denom)
 
 
 def consecutive_below_threshold(

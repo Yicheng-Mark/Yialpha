@@ -33,9 +33,15 @@ class TestCatalogConsistency:
             assert description == ic.INDICATORS[name].description
 
     def test_av_gate_and_columns_cover_the_same_set(self):
-        """The AV supported gate and column map cover the whole catalog."""
+        """The AV supported gate covers the whole catalog; the column map
+        covers exactly the entries that have an AV endpoint (everything
+        except the yfinance-only set)."""
         assert set(avi.supported_indicators) == set(ic.INDICATORS)
-        assert set(avi.col_name_map) | {"vwma"} == set(ic.INDICATORS)
+        assert set(avi.col_name_map) | ic.YFINANCE_ONLY == set(ic.INDICATORS)
+        assert frozenset(
+            name for name, spec in ic.INDICATORS.items()
+            if spec.av_function is None
+        ) == ic.YFINANCE_ONLY
         for name, (label, series) in avi.supported_indicators.items():
             assert label == ic.INDICATORS[name].label
             assert series == ic.INDICATORS[name].av_series_type

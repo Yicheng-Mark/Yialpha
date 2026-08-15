@@ -184,6 +184,16 @@ _ENV_OVERRIDES = {
     # complementary to the portfolio-level reactive DrawdownBreaker. Advisory and
     # fail-soft; it changes agent input only when explicitly enabled.
     "YIAGENTS_MARKET_REGIME":                "market_regime",
+    # Composite regime context (see yiagents.dataflows.market_regime.
+    # format_regime_context): one structured line — ticker trend state
+    # (close vs 50/200 SMA + ADX), volatility state (rvol_20 percentile vs
+    # trailing year), benchmark turbulence, and (A-share live runs)
+    # whole-market breadth — appended to the market analyst's prompt. ON by
+    # default (it is deterministic, advisory, and fail-soft: any component
+    # that cannot be computed is omitted); set false to restore the bare
+    # prompt. The pre-existing YIAGENTS_MARKET_REGIME turbulence-only
+    # opt-in for the conservative debater is unchanged.
+    "YIAGENTS_REGIME_CONTEXT":               "regime_context",
 }
 
 
@@ -359,6 +369,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # squared-z, FinRL-derived) is appended to the conservative debater's data
     # sources. Advisory + fail-soft; only the conservative debater sees it.
     "market_regime": False,
+    # Composite regime context (env: YIAGENTS_REGIME_CONTEXT). ON by default:
+    # the market analyst's prompt gains one structured regime line (trend
+    # state + volatility state + benchmark turbulence +, on A-share live
+    # runs, market breadth). Deterministic and fail-soft — components that
+    # cannot be computed are omitted, and the line disappears entirely when
+    # neither trend nor volatility state has enough history. Set false to
+    # restore the pre-2026-08-15 bare prompt.
+    "regime_context": True,
     # Phase 4: global kill switch (env: YIAGENTS_KILL_SWITCH). Halt = no
     # new orders submitted by the browser broker; read live at order time.
     "kill_switch": False,
@@ -480,8 +498,13 @@ DEFAULT_CONFIG = _apply_env_overrides({
         ".L":   "^FTSE",       # London (FTSE 100)
         ".TO":  "^GSPTSE",     # Toronto (TSX Composite)
         ".AX":  "^AXJO",       # Australia (ASX 200)
-        ".SS":  "000001.SS",   # Shanghai (SSE Composite)
-        ".SZ":  "399001.SZ",   # Shenzhen (SZSE Component)
+        # A-shares benchmark against CSI 300 (沪深300, 000300.SS) — the
+        # investable large-cap index fund flows actually track — rather than
+        # the SSE Composite, which is dominated by state-owned banks and
+        # makes almost any growth stock look like it has index alpha. Both
+        # .SS and .SZ map to the same cross-market index on purpose.
+        ".SS":  "000300.SS",   # China A-share (CSI 300)
+        ".SZ":  "000300.SS",   # China A-share (CSI 300)
         "":     "SPY",         # default for US-listed tickers (no suffix)
     },
 })

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,15 +46,27 @@ import pandas as pd
 from yiagents.backtest.ic import (
     build_ic_report,
     consecutive_below_threshold,
+    factor_turnover,
+    ic_decay,
     prune_indicators,
+    quantile_spread,
     rolling_ic,
 )
 
+#: Columns ``export_ic_dataset.py --extra-horizons`` emits (e.g. fwd_ret_10d).
+_FWD_RET_RE = re.compile(r"^fwd_ret_(\d+)d$")
 
-def _load_ic_data(csv_path: str) -> tuple[pd.Series, dict[str, pd.Series]]:
+
+def _load_ic_data(
+    csv_path: str,
+) -> tuple[pd.Series, dict[str, pd.Series], dict[str, pd.Series]]:
     """Load indicator values + forward returns from a CSV.
 
-    Returns ``(forward_returns, {indicator_name: values})``.
+    Returns ``(forward_returns, {indicator_name: values},
+    {horizon_label: forward_returns})``. The horizon map captures the optional
+    ``fwd_ret_<h>d`` columns the exporter's ``--extra-horizons`` emits; empty
+    for single-horizon CSVs (the diagnostics sections then stay hidden and
+    the report keeps its original shape).
     """
     df = pd.read_csv(csv_path, parse_dates=["date"])
     if "date" not in df.columns:
@@ -62,14 +75,19 @@ def _load_ic_data(csv_path: str) -> tuple[pd.Series, dict[str, pd.Series]]:
         raise ValueError("CSV must have a 'forward_return' column")
 
     forward = df["forward_return"]
-    indicators = {
-        col: df[col]
-        for col in df.columns
-        if col not in ("date", "forward_return")
-    }
+    horizon_returns: dict[str, pd.Series] = {}
+    reserved = {"date", "forward_return"}
+    indicators: dict[str, pd.Series] = {}
+    for col in df.columns:
+        match = _FWD_RET_RE.match(col)
+        if match:
+            horizon_returns[f"{match.group(1)}d"] = df[col]
+            reserved.add(col)
+        elif col not in reserved:
+            indicators[col] = df[col]
     if not indicators:
         raise ValueError("CSV must have at least one indicator column")
-    return forward, indicators
+    return forward, indicators, horizon_returns
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -120,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        forward, indicators = _load_ic_data(str(csv_path))
+        forward, indicators, horizon_returns = _load_ic_data(str(csv_path))
     except (ValueError, KeyError) as exc:
         print(f"Error loading CSV: {exc}", file=sys.stderr)
         return 1
@@ -132,6 +150,23 @@ def main(argv: list[str] | None = None) -> int:
             values, forward, window=args.window
         )
 
+    # Diagnostics (evidence beyond level+persistence). All optional — every
+    # section is hidden when the CSV carries no extra-horizon columns, so a
+    # single-horizon run keeps its original report shape.
+    decay_by_indicator: dict[str, dict[str, float | None]] = {}
+    if horizon_returns:
+        for name, values in indicators.items():
+            decay_by_indicator[name] = ic_decay(values, horizon_returns)
+    spread_by_indicator: dict[str, dict] = {}
+    turnover_by_indicator: dict[str, float] = {}
+    for name, values in indicators.items():
+        qs = quantile_spread(values, forward)
+        if qs is not None:
+            spread_by_indicator[name] = qs
+        tvr = factor_turnover(values)
+        if tvr is not None:
+            turnover_by_indicator[name] = tvr
+
     # Apply the pruning rule.
     result = prune_indicators(
         ic_by_indicator,
@@ -141,6 +176,56 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     report = build_ic_report(result, ic_by_indicator)
+
+    if decay_by_indicator:
+        horizon_labels = sorted(
+            horizon_returns, key=lambda lab: int(lab.rstrip("d"))
+        )
+        lines = ["", "## IC decay (full-sample IC by forward horizon)", ""]
+        lines.append("| Indicator | " + " | ".join(horizon_labels) + " |")
+        lines.append("|---|" + "---:|" * len(horizon_labels))
+        for name in indicators:
+            row = decay_by_indicator.get(name, {})
+            cells = []
+            for lab in horizon_labels:
+                ic = row.get(lab)
+                cells.append(f"{ic:.3f}" if ic is not None else "n/a")
+            lines.append(f"| {name} | " + " | ".join(cells) + " |")
+        lines.append(
+            "\nIC collapsing toward 0 as the horizon lengthens marks a "
+            "short-lived signal; a flat curve supports slower rebalancing."
+        )
+        report += "\n".join(lines) + "\n"
+
+    if spread_by_indicator:
+        n_q = max(qs["n_quantiles"] for qs in spread_by_indicator.values())
+        lines = ["", "## Quantile spread & turnover (primary horizon)", ""]
+        header = ["Indicator"] + [f"Q{i+1}" for i in range(n_q)]
+        header += ["Q_hi−Q_lo", "Monotonic", "Turnover"]
+        lines.append("| " + " | ".join(header) + " |")
+        lines.append("|---|" + "---:|" * (len(header) - 2) + "---|---:|")
+        for name, qs in spread_by_indicator.items():
+            cells = [name]
+            for i in range(n_q):
+                if i < len(qs["quantile_means"]):
+                    cells.append(f"{qs['quantile_means'][i]:.4f}")
+                else:
+                    cells.append("—")
+            cells.append(f"{qs['spread']:.4f}")
+            cells.append("yes" if qs["monotonic"] else "no")
+            cells.append(
+                f"{turnover_by_indicator.get(name, float('nan')):.3f}"
+                if name in turnover_by_indicator else "n/a"
+            )
+            lines.append("| " + " | ".join(cells) + " |")
+        lines.append(
+            "\nMonotone quantile means make a factor usable as a ranked "
+            "long-short signal; a spread concentrated only in the tail "
+            "quantiles means tail-only usefulness. Turnover near 1.0 = the "
+            "ranking reshuffles almost every row (expensive to capture)."
+        )
+        report += "\n".join(lines) + "\n"
+
     report += (
         f"\n---\n\n_Window={args.window}, min|IC|={args.min_abs_ic}, "
         f"min_consecutive={args.min_consecutive}, "
@@ -161,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
         for name, series in ic_by_indicator.items():
             finite = series.dropna()
             finite_abs = finite.abs()
-            per_indicator[name] = {
+            entry: dict = {
                 "verdict": "prune" if name in set(result["prune"]) else "keep",
                 "mean_abs_ic": (
                     float(finite_abs.mean()) if not finite_abs.empty else None
@@ -174,6 +259,15 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 ),
             }
+            if name in decay_by_indicator:
+                entry["ic_by_horizon"] = decay_by_indicator[name]
+            if name in spread_by_indicator:
+                entry["quantile_means"] = spread_by_indicator[name]["quantile_means"]
+                entry["quantile_spread"] = spread_by_indicator[name]["spread"]
+                entry["monotonic"] = spread_by_indicator[name]["monotonic"]
+            if name in turnover_by_indicator:
+                entry["turnover"] = turnover_by_indicator[name]
+            per_indicator[name] = entry
         verdict = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "params": {

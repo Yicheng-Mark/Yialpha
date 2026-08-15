@@ -167,25 +167,47 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
         node(self._state(asset_type, trade_date))
         return [t.name for t in llm.bound_tools]
 
-    def test_stock_binds_three_baseline_tools(self):
+    def test_stock_binds_baseline_plus_expansion_tools(self):
+        # 2026-08-15 technical-analysis expansion (weekly + price-structure
+        # + relative strength).
         self.assertEqual(
             self._tool_names("stock"),
-            ["get_stock_data", "get_indicators", "get_verified_market_snapshot"],
+            [
+                "get_stock_data",
+                "get_indicators",
+                "get_verified_market_snapshot",
+                "get_indicators_weekly",
+                "get_support_resistance",
+                "get_volume_features",
+                "get_candlestick_patterns",
+                "get_relative_strength",
+            ],
         )
 
-    def test_crypto_binds_three_baseline_tools(self):
+    def test_crypto_binds_baseline_plus_expansion_tools(self):
         self.assertEqual(
             self._tool_names("crypto"),
-            ["get_stock_data", "get_indicators", "get_verified_market_snapshot"],
+            [
+                "get_stock_data",
+                "get_indicators",
+                "get_verified_market_snapshot",
+                "get_indicators_weekly",
+                "get_support_resistance",
+                "get_volume_features",
+                "get_candlestick_patterns",
+                "get_relative_strength",
+            ],
         )
 
-    def test_spot_binds_five_tools(self):
+    def test_spot_binds_six_tools(self):
         names = self._tool_names("crypto_spot")
         # Spot keeps indicators + verified snapshot (symbol resolves correctly)
-        # and adds the 3 spot-native tools.
+        # and adds the 3 spot-native tools, plus get_binance_indicators
+        # (2026-08-15): the classic battery computed on the Binance candles.
         self.assertEqual(
             sorted(names),
             [
+                "get_binance_indicators",
                 "get_binance_spot_klines",
                 "get_binance_spot_perp_basis",
                 "get_binance_spot_ticker24",
@@ -201,6 +223,7 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
         self.assertEqual(
             sorted(self._tool_names("crypto_spot", "2020-01-02")),
             [
+                "get_binance_indicators",
                 "get_binance_spot_klines",
                 "get_indicators",
                 "get_verified_market_snapshot",
