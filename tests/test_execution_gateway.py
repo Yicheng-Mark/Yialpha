@@ -1013,3 +1013,80 @@ class TestPositionMode:
         kw = gw._client.rest_api.new_order.call_args.kwargs
         assert kw["position_side"] == "BOTH"
         assert kw["reduce_only"] == "false"
+
+
+# ---------------------------------------------------------------------------
+# Round-5 gates: MARKET-order minNotional pre-check via the risk reference
+# price + trading-status rejection (Binance rejects under-notional MARKET
+# orders AT SUBMIT with -4014, not at fill; BREAK/HALT symbols accept no
+# new orders at all)
+# ---------------------------------------------------------------------------
+
+
+class TestMarketNotionalAndStatusGates:
+    @staticmethod
+    def _restrictive_filters(monkeypatch, *, status="TRADING", min_notional="5"):
+        from decimal import Decimal
+
+        import yiagents.execution.binance_gateway as gw_mod
+        from yiagents.dataflows.binance_filters import SymbolFilters
+
+        def _filters(symbol, venue):  # noqa: ARG001
+            return SymbolFilters(
+                symbol=symbol, status=status,
+                tick_size=Decimal("0.01"), step_size=Decimal("1"),
+                min_qty=Decimal("1"), max_qty=Decimal("0"),
+                min_notional=Decimal(min_notional),
+                price_precision=2, quantity_precision=0,
+            )
+
+        monkeypatch.setattr(gw_mod, "get_symbol_filters", _filters)
+
+    def test_market_order_min_notional_prechecked_with_ref_price(self, monkeypatch, caplog):
+        """MARKET qty 2 x ref 2.0 = 4 USDT < 5 floor -> fail-closed BEFORE submit."""
+        self._restrictive_filters(monkeypatch)
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.return_value = _FakeResp(
+            {"status": "NEW", "orderId": 20, "executedQty": "0"}
+        )
+        with caplog.at_level("WARNING", logger="yiagents.execution.binance_gateway"):
+            order = gw.send_order(
+                _req(volume=2.0), reference_price=2.0,
+            )
+        assert order.status is Status.REJECTED
+        assert "below_min_notional" in caplog.text
+        gw._client.rest_api.new_order.assert_not_called()
+
+    def test_market_order_over_floor_passes_shaping(self, monkeypatch):
+        self._restrictive_filters(monkeypatch)
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.return_value = _FakeResp(
+            {"status": "NEW", "orderId": 21, "executedQty": "3",
+             "updateTime": 1700000000000}
+        )
+        order = gw.send_order(_req(volume=3.0), reference_price=2.0)  # 6 >= 5
+        assert order.status is Status.NOTTRADED
+        assert gw._client.rest_api.new_order.call_args.kwargs["quantity"] == 3.0
+
+    def test_market_order_without_ref_price_leaves_notional_to_exchange(self, monkeypatch):
+        """No price and no reference: the floor stays undecided, not guessed."""
+        self._restrictive_filters(monkeypatch)
+        gw = _perp_gw_with_client()
+        # reference_price is explicitly absent for this order.
+        gw._client.rest_api.new_order.return_value = _FakeResp(
+            {"status": "NEW", "orderId": 22, "executedQty": "0",
+             "updateTime": 1700000000000}
+        )
+        order = gw.send_order(
+            _req(volume=2.0), risk_decision=_risk_decision(), equity=1_000_000,
+        )
+        assert order.status is Status.NOTTRADED
+
+    def test_non_trading_symbol_rejected_before_quantization(self, monkeypatch, caplog):
+        self._restrictive_filters(monkeypatch, status="BREAK")
+        gw = _perp_gw_with_client()
+        with caplog.at_level("WARNING", logger="yiagents.execution.binance_gateway"):
+            order = gw.send_order(_req(volume=3.0), reference_price=60_000.0)
+        assert order.status is Status.REJECTED
+        assert "not trading" in caplog.text
+        gw._client.rest_api.new_order.assert_not_called()

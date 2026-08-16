@@ -138,6 +138,20 @@ def is_yahoo_safe(symbol: str) -> bool:
     return bool(symbol) and _YAHOO_SAFE.fullmatch(symbol) is not None
 
 
+def is_crypto_symbol(raw: str) -> bool:
+    """True when ``raw`` is a known crypto base quoted in USD/USDT/USDC.
+
+    Accepts every spelling :func:`_normalize_crypto` accepts (``BTCUSD``,
+    ``BTCUSDT``, ``BTC-USD``, ...). Purely syntactic (no network) — used to
+    pick 24/7 annualization (365 periods) for vol estimators on Yahoo-resolved
+    crypto series, which otherwise default to the equity 252 convention and
+    understate crypto vol by sqrt(252/365).
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    return _normalize_crypto(raw.strip().upper().rstrip("+")) is not None
+
+
 def is_a_stock(ticker: str) -> bool:
     """True when ``ticker`` is a China A-share (Shanghai or Shenzhen) symbol.
 

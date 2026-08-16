@@ -62,14 +62,26 @@ _PERP_NUDGE = (
     "Call get_binance_premium_index for the mark-price snapshot and anchor ALL "
     "liquidation-distance claims to its markPrice (Binance liquidates on the "
     "mark price, not the last traded price) and use its lastFundingRate as the "
-    "currently-effective rate. If a tool returns a sentinel/unavailable marker, "
+    "currently-effective rate. The generic instructions above to call "
+    "get_stock_data / get_indicators / get_verified_market_snapshot and to "
+    "cite get_indicators_weekly / get_support_resistance / "
+    "get_volume_features / get_candlestick_patterns / get_relative_strength "
+    "are WAIVED for this instrument — those tools price a different (Yahoo "
+    "spot) market. Higher-timeframe and price-structure analysis must instead "
+    "come from get_binance_klines / get_binance_indicators on the actual perp "
+    "candles. If a tool returns a sentinel/unavailable marker, "
     "say so plainly rather than inventing values."
 )
 
 _PERP_HISTORICAL_NUDGE = (
     " This is a point-in-time historical analysis of a Binance USDT-M "
     "PERPETUAL. Use get_binance_klines and get_binance_funding_rate with date "
-    "bounds ending on the stated analysis date. Current open-interest snapshots, "
+    "bounds ending on the stated analysis date. The generic instructions to "
+    "call get_stock_data / get_indicators / get_verified_market_snapshot / "
+    "get_indicators_weekly and the price-structure citation rules "
+    "(get_support_resistance, get_volume_features, get_candlestick_patterns, "
+    "get_relative_strength) are WAIVED — they price a different (Yahoo spot) "
+    "market. Current open-interest snapshots, "
     "long/short positioning, taker order flow, and basis are intentionally not "
     "available because they cannot be reconstructed reliably as of that date. "
     "Do not infer or fabricate those omitted signals."
@@ -322,20 +334,29 @@ def create_market_analyst(llm):
                 )
         elif state.get("asset_type") == "crypto_spot":
             # A Binance SPOT pair. Unlike perp, the symbol resolves correctly
-            # via Yahoo (BTCUSDT -> BTC-USD), so get_indicators /
-            # get_verified_market_snapshot are kept — they price the same spot
-            # market. The spot-native klines + 24h ticker are bound to the
-            # actual Binance spot book, get_binance_spot_indicators computes
-            # on those same Binance candles (venue defaults to spot — the
-            # plain perp-default tool would silently price the perpetual if
-            # the LLM omitted venue), and the cross-venue spot-perp basis
-            # tool exposes the perpetual's premium/discount vs this spot
-            # reference. Stock/crypto/perp branches are untouched.
+            # via Yahoo (BTCUSDT -> BTC-USD), so get_stock_data /
+            # get_indicators / get_verified_market_snapshot AND the five
+            # TA-expansion evidence tools (weekly resample, S/R, volume
+            # features, candlestick patterns, benchmark relative strength)
+            # are kept — they price the same spot market and the base prompt
+            # mandates citations from all of them. The spot-native klines +
+            # 24h ticker are bound to the actual Binance spot book,
+            # get_binance_spot_indicators computes on those same Binance
+            # candles (venue defaults to spot — the plain perp-default tool
+            # would silently price the perpetual if the LLM omitted venue),
+            # and the cross-venue spot-perp basis tool exposes the
+            # perpetual's premium/discount vs this spot reference.
             tools = [
+                get_stock_data,
                 get_binance_spot_klines,
                 get_binance_spot_indicators,
                 get_indicators,
                 get_verified_market_snapshot,
+                get_indicators_weekly,
+                get_support_resistance,
+                get_volume_features,
+                get_candlestick_patterns,
+                get_relative_strength,
             ]
             if not historical:
                 tools[1:1] = [

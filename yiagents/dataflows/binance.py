@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import math
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -1350,6 +1351,20 @@ def get_binance_spot_ticker24(symbol: str) -> str:
     return header + df.to_csv(index=False)
 
 
+def _sig_digits(x: float, digits: int = 6) -> float:
+    """Round to ``digits`` SIGNIFICANT digits, not decimal places.
+
+    ``round(x, 6)`` collapses sub-cent pairs: a 1.234567e-05 perp close loses
+    five of its six significant digits, and a 2.4e-07 basis rounds to exactly
+    0.0 while its basisRate says 2% — the display twin of the round(2) P0
+    (round-5 audit, 2026-08-16). Significant-digit rounding keeps the same
+    six-digit precision at every price magnitude.
+    """
+    if not math.isfinite(x) or x == 0.0:
+        return x
+    return float(f"%.{digits}g" % x)
+
+
 def get_binance_spot_perp_basis(
     symbol: str, look_back_days: int = 7,
     start_date: str | None = None, end_date: str | None = None,
@@ -1457,10 +1472,10 @@ def get_binance_spot_perp_basis(
         records.append(
             {
                 "date": d,
-                "perpClose": round(pc, 6),
-                "spotClose": round(sc, 6),
-                "basis": round(basis, 6),
-                "basisRate": (round(basis / sc, 8) if sc else None),
+                "perpClose": _sig_digits(pc),
+                "spotClose": _sig_digits(sc),
+                "basis": _sig_digits(basis),
+                "basisRate": (_sig_digits(basis / sc) if sc else None),
             }
         )
 

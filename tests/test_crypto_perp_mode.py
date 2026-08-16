@@ -256,6 +256,26 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
             ],
         )
 
+    def test_perp_nudge_waives_unbound_prompt_mandates(self):
+        """Round-5: the base prompt mandates get_stock_data / weekly /
+        price-structure citations for EVERY asset type; the perp nudges must
+        explicitly waive the mandates whose tools price the wrong (Yahoo
+        spot) market — otherwise the model receives directly contradictory
+        instructions ("you must call X" + "X is not available")."""
+        from yiagents.agents.analysts.market_analyst import (
+            _PERP_HISTORICAL_NUDGE,
+            _PERP_NUDGE,
+        )
+
+        for nudge in (_PERP_NUDGE, _PERP_HISTORICAL_NUDGE):
+            self.assertIn("WAIVED", nudge)
+            for tool in (
+                "get_stock_data", "get_indicators_weekly",
+                "get_support_resistance", "get_volume_features",
+                "get_candlestick_patterns", "get_relative_strength",
+            ):
+                self.assertIn(tool, nudge)
+
 
 if __name__ == "__main__":
     unittest.main()

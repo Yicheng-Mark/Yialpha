@@ -75,7 +75,7 @@ def _metrics_table(result: BacktestResult) -> str:
         ("Max drawdown", _fmt_pct(m.max_drawdown)),
         ("Calmar", _fmt_num(m.calmar)),
         ("Deflated Sharpe", _fmt_num(m.deflated_sharpe)),
-        ("Alpha vs B&H", _fmt_pct(m.alpha_vs_buyhold)),
+        ("Alpha vs B&H (ann.)", _fmt_pct(m.alpha_vs_buyhold)),
     ]
     body = "".join(f"<tr><td>{html.escape(k)}</td><td>{html.escape(v)}</td></tr>" for k, v in rows)
     return (

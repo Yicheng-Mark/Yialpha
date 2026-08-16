@@ -67,8 +67,81 @@ def _fmt_profit_factor(x: float | None) -> str:
     return f"{x:.2f}"
 
 
+def _fmt_price(x: float | None) -> str:
+    """Price at adaptive precision — 2dp for equity-scale, sig-digits below.
+
+    ``f"{x:.2f}"`` renders every sub-cent perpetual (PEPE/SHIB class, prices
+    ~1e-5) as "0.00", making the trade table unusable exactly where perp
+    simulation runs. Below 1.0 we keep 4 significant digits instead.
+    """
+    if x is None:
+        return "n/a"
+    if x >= 1.0:
+        return f"{x:.2f}"
+    return f"{x:.4g}"
+
+
 def _metric_dict(result: BacktestResult) -> dict[str, Any]:
     return asdict(result.metrics) if result.metrics else {}
+
+
+def _cost_summary(result: BacktestResult) -> str:
+    """The cost model the engine actually charged, not the raw parameter.
+
+    Perp runs charge (taker_bps or cost_bps), optionally x0.9 BNB, plus
+    slippage — the engine carries the effective-fee string in config_summary
+    (``perp_fees``). Showing the bare ``cost_bps`` parameter instead mis-states
+    what ran (e.g. "0.0 bps" while taker_bps=8 charged every fill).
+    """
+    perp_fees = result.config_summary.get("perp_fees")
+    if perp_fees:
+        return str(perp_fees)
+    return f"{result.config_summary.get('cost_bps', 0.0)} bps"
+
+
+def _perp_section(result: BacktestResult) -> list[str]:
+    """Perp-simulation observability block, or [] for non-perp runs.
+
+    The engine models leverage, funding drag, isolated-margin liquidation,
+    shorts and venue fill quantization — but none of it was rendered, so a
+    run that liquidated produced a report structurally identical to one that
+    never came close (round-5 audit, 2026-08-16). This surfaces the fields
+    the engine already records.
+    """
+    cs = result.config_summary
+    if "perp_leverage" not in cs:
+        return []
+    lines = ["", "## Perp simulation", ""]
+    lines.append(
+        f"- Leverage: {cs.get('perp_leverage', 1)}x  |  "
+        f"Side: {'long + short' if cs.get('perp_short') else 'long-only'}  |  "
+        f"Fill quantization: {cs.get('perp_fill_quantization', 'n/a')}"
+    )
+    funding = cs.get("perp_funding_paid_total")
+    if funding is not None:
+        # Signed: positive = net paid (long-biased drag), negative = net
+        # received (short-biased runs collect when funding is positive).
+        direction = "net paid (drag)" if funding >= 0 else "net received"
+        lines.append(f"- Funding over the window: {funding:+.2f} USDT ({direction})")
+    liqs = cs.get("perp_liquidations") or []
+    if liqs:
+        lines.append(f"- ⚠️ Liquidation events: {len(liqs)}")
+        lines.append("")
+        lines.append("| Date | Side | Entry | Liquidation price | Fee |")
+        lines.append("|---|---|---:|---:|---:|")
+        for ev in liqs:
+            lines.append(
+                f"| {ev.get('date', 'n/a')} | {ev.get('side', 'n/a')} | "
+                f"{_fmt_price(ev.get('entry'))} | "
+                f"{_fmt_price(ev.get('liquidation_price'))} | "
+                f"{_fmt_num(ev.get('fee'))} |"
+            )
+    else:
+        lines.append("- Liquidation events: 0")
+    note = cs.get("perp_model_note")
+    if note:
+        lines.append(f"- Model: {note}")
+    return lines
 
 
 def render_backtest_report(result: BacktestResult) -> str:
@@ -94,7 +167,8 @@ def render_backtest_report(result: BacktestResult) -> str:
                  f"Actual rebalances: {sum(t.is_rebalance for t in result.trades)}  |  "
                  f"Position episodes: {m.get('num_trades', 0)}  |  "
                  f"Initial capital: {result.initial_capital:,.0f}  |  "
-                 f"Transaction cost: {result.config_summary.get('cost_bps', 0.0)} bps")
+                 f"Transaction cost: {_cost_summary(result)}  |  "
+                 f"Annualization: {result.config_summary.get('periods_per_year', 'n/a')}/yr")
     lines.append(f"- Cache: {result.cached_hits} hits / {result.cached_misses} misses")
     if result.degraded_decision_count:
         lines.append(
@@ -179,6 +253,7 @@ def render_backtest_report(result: BacktestResult) -> str:
         ]
     lines.append(f"**Verdict: {result.ticker} strategy {beats} buy-and-hold on total return.**")
     lines.append("")
+    lines.extend(_perp_section(result))
     if result.trades:
         lines.append("## Trades")
         lines.append("")
@@ -188,8 +263,8 @@ def render_backtest_report(result: BacktestResult) -> str:
         )
         lines.append("|---|---|---|---|---:|---:|---:|---:|---:|---:|")
         for t in result.trades:
-            price_str = f"{t.price:.2f}" if t.price is not None else "n/a"
-            stop_str = f"{t.stop_loss:.2f}" if t.stop_loss is not None else "n/a"
+            price_str = _fmt_price(t.price)
+            stop_str = _fmt_price(t.stop_loss)
             lines.append(
                 f"| {t.date} | {t.execution_date or 'n/a'} | {t.rating} | "
                 f"{'rebalance' if t.is_rebalance else 'hold/no order'} | "
@@ -207,7 +282,10 @@ def summarize_distribution(results: Sequence[BacktestResult]) -> dict[str, dict[
     """Aggregate key metrics across N runs to mean +/- std.
 
     Returns ``{metric: {"mean": ..., "std": ..., "min": ..., "max": ..., "n": int}}``.
-    Metrics are only summarized when every run has a non-None value for them.
+    A metric is summarized over the runs that produced a non-None value for
+    it — optional evidence (e.g. factor attribution) may exist for only a
+    subset of runs, and ``n`` records that subset size so a single-run
+    "distribution" can't masquerade as a stable one.
     """
     if not results:
         return {}
@@ -246,13 +324,13 @@ def render_multi_run_report(results: Sequence[BacktestResult]) -> str:
         f"- Runs aggregated: {len(results)}",
         "- LLM decisions are non-deterministic; report the distribution, not a single draw.",
         "",
-        "| Metric | mean | std | min | max |",
-        "|---|---:|---:|---:|---:|",
+        "| Metric | mean | std | min | max | n |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
     label_map = {
         "total_return": "Total return", "cagr": "CAGR", "sharpe": "Sharpe",
         "sortino": "Sortino", "max_drawdown": "Max drawdown", "calmar": "Calmar",
-        "deflated_sharpe": "Deflated Sharpe", "alpha_vs_buyhold": "Alpha vs B&H",
+        "deflated_sharpe": "Deflated Sharpe", "alpha_vs_buyhold": "Alpha vs B&H (ann.)",
         "factor_alpha": "Factor alpha (ann.)",
     }
     pct_keys = {"total_return", "cagr", "max_drawdown", "alpha_vs_buyhold", "factor_alpha"}
@@ -263,7 +341,7 @@ def render_multi_run_report(results: Sequence[BacktestResult]) -> str:
         fmt = (lambda x: _fmt_pct(x)) if key in pct_keys else (lambda x: _fmt_num(x))
         lines.append(
             f"| {label_map[key]} | {fmt(e['mean'])} | {fmt(e['std'])} | "
-            f"{fmt(e['min'])} | {fmt(e['max'])} |"
+            f"{fmt(e['min'])} | {fmt(e['max'])} | {int(e['n'])} |"
         )
     lines.append("")
     return "\n".join(lines)

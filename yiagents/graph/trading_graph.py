@@ -14,9 +14,18 @@ from langgraph.prebuilt import ToolNode
 # Import the abstract tool methods from agent_utils
 from yiagents.agents.utils.agent_utils import (
     build_instrument_context,
+    get_a_share_balance_sheet_native,
+    get_a_share_cashflow_statement_native,
+    get_a_share_dragon_tiger_native,
     get_a_share_fundamentals_native,
+    get_a_share_income_statement_native,
+    get_a_share_market_breadth_native,
+    get_a_share_money_flow_native,
     get_a_share_news_native,
+    get_a_share_northbound_native,
     get_a_share_ohlc_native,
+    get_a_share_realtime_quote_native,
+    get_a_share_sector_flow_native,
     get_balance_sheet,
     get_binance_basis,
     get_binance_funding_rate,
@@ -30,6 +39,7 @@ from yiagents.agents.utils.agent_utils import (
     get_binance_spot_perp_basis,
     get_binance_spot_ticker24,
     get_binance_taker_buy_sell,
+    get_candlestick_patterns,
     get_cashflow,
     get_form4_insider_trading,
     get_ftd_data,
@@ -37,17 +47,23 @@ from yiagents.agents.utils.agent_utils import (
     get_global_news,
     get_income_statement,
     get_indicators,
+    get_indicators_weekly,
     get_insider_transactions,
     get_institutional_holdings,
     get_macro_indicators,
     get_margin_trading,
     get_news,
     get_prediction_markets,
+    get_relative_strength,
     get_stock_data,
+    get_support_resistance,
     get_verified_market_snapshot,
+    get_volume_features,
     resolve_instrument_identity,
 )
 from yiagents.agents.utils.memory import TradingMemoryLog
+from yiagents.agents.utils.pot_tool import make_pot_compute_tool
+from yiagents.agents.utils.valuation_tools import get_valuation_metrics
 from yiagents.dataflows.config import set_config
 from yiagents.dataflows.utils import safe_ticker_component, set_analysis_date
 from yiagents.default_config import DEFAULT_CONFIG
@@ -337,6 +353,19 @@ class YiAgentsGraph:
                     # LLM and required by its prompt; must be executable here or
                     # the call fails and the model reports it "unavailable").
                     get_verified_market_snapshot,
+                    # Price-structure evidence tools + weekly timeframe
+                    # (2026-08-15 TA expansion). The market analyst's prompt
+                    # MANDATES citations from these five tools for stock (and
+                    # crypto_spot) runs, and its bind_tools list includes them —
+                    # they must therefore be executable here. Missing from this
+                    # map, every mandated call would die with "not a valid tool"
+                    # and the evidence chain the prompt demands would silently
+                    # degrade to model memory (P0 wiring gap, round-5 audit).
+                    get_indicators_weekly,
+                    get_support_resistance,
+                    get_volume_features,
+                    get_candlestick_patterns,
+                    get_relative_strength,
                     # Binance USDT-M perp tools. Dormant for non-perp runs: the
                     # market analyst only advertises them when asset_type ==
                     # "crypto_perp", so the LLM never names them otherwise and
@@ -360,6 +389,14 @@ class YiAgentsGraph:
                     get_binance_spot_klines,
                     get_binance_spot_ticker24,
                     get_binance_spot_perp_basis,
+                    # Native A-share market signal tools (a_share_native gate on
+                    # the analyst side). Same dormant contract: only advertised
+                    # when YIAGENTS_A_SHARE_NATIVE is on AND the ticker is an
+                    # A-share, so they sit unused otherwise.
+                    get_a_share_northbound_native,
+                    get_a_share_sector_flow_native,
+                    get_a_share_realtime_quote_native,
+                    get_a_share_market_breadth_native,
                 ]
             ),
             "social": ToolNode(
@@ -416,6 +453,25 @@ class YiAgentsGraph:
                     # map (same dormant contract as the margin tool above).
                     get_a_share_fundamentals_native,
                     get_a_share_ohlc_native,
+                    # Native A-share financials (a_share_native gate): the
+                    # fundamentals analyst appends these five alongside the two
+                    # above when the flag and ticker gates both hold; they must
+                    # be executable in the same ToolNode or those calls fail
+                    # (same wiring-gap class as the market price-structure
+                    # tools, round-5 audit).
+                    get_a_share_money_flow_native,
+                    get_a_share_dragon_tiger_native,
+                    get_a_share_income_statement_native,
+                    get_a_share_balance_sheet_native,
+                    get_a_share_cashflow_statement_native,
+                    # Deterministic valuation + PoT compute (valuation_tools
+                    # gate). The analyst binds make_pot_compute_tool(llm) with
+                    # the SAME quick-tier client this graph was built with; the
+                    # ToolNode instance below is a second closure over that
+                    # same client, registered under the identical tool name so
+                    # routed calls execute with the configured model.
+                    get_valuation_metrics,
+                    make_pot_compute_tool(self.quick_thinking_llm),
                 ]
             ),
         }

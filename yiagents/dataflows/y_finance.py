@@ -21,8 +21,9 @@ from .stockstats_utils import (
     read_cached_ohlcv,
     yf_retry,
 )
-from .symbol_utils import NoMarketDataError, normalize_symbol
+from .symbol_utils import NoMarketDataError, is_crypto_symbol, normalize_symbol
 from .utils import current_pit_end, overview_would_leak_future
+from .vol_estimators import CRYPTO_TRADING_DAYS_PER_YEAR, TRADING_DAYS_PER_YEAR
 
 logger = logging.getLogger(__name__)
 
@@ -358,8 +359,17 @@ def _get_stock_stats_bulk(
     data = load_ohlcv(symbol, curr_date)
 
     # Derived features (vol estimators, OBV, ...) compute on the raw frame
-    # via the feature registry; stockstats names go through wrap().
-    derived = compute_derived(data, indicator)
+    # via the feature registry; stockstats names go through wrap(). Crypto
+    # series resolve to a 24/7 -USD pair and MUST annualize on 365 — the
+    # registry default is the equity 252, which understates crypto vol by
+    # sqrt(252/365) (~17%) and contradicts the Binance-native indicator
+    # tools on the same asset (round-5 audit, 2026-08-16).
+    ppy = (
+        CRYPTO_TRADING_DAYS_PER_YEAR
+        if is_crypto_symbol(symbol)
+        else TRADING_DAYS_PER_YEAR
+    )
+    derived = compute_derived(data, indicator, periods_per_year=ppy)
     if derived is not None:
         dates = pd.to_datetime(data["Date"]).dt.strftime("%Y-%m-%d")
         result_dict = {}
