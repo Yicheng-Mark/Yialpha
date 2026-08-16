@@ -784,7 +784,12 @@ def test_router_money_flow_non_a_share_degrades_to_sentinel(monkeypatch):
 
 
 class NewsAShareWiringTests(unittest.TestCase):
-    """a_share_native news — default-off byte-equivalence + on-appends-news-tool."""
+    """a_share_native news — default-off byte-equivalence + on-appends-news-tool.
+
+    web_search_enabled is frozen off in every override below: these tests pin
+    the a_share_native gating contract only (the default news toolset,
+    web_search included, is pinned in test_tavily_web_search.py).
+    """
 
     def _tool_names(
         self,
@@ -795,9 +800,11 @@ class NewsAShareWiringTests(unittest.TestCase):
         from yiagents.agents.analysts.news_analyst import create_news_analyst
         from yiagents.dataflows import config as cfgmod
         orig = cfgmod.get_config()
+        frozen = {"web_search_enabled": False}
+        if config_overrides:
+            frozen.update(config_overrides)
         try:
-            if config_overrides:
-                cfgmod.set_config({**orig, **config_overrides})
+            cfgmod.set_config({**orig, **frozen})
             llm = _RecordingLLM()
             node = create_news_analyst(llm)
             state = _state(ticker)

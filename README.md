@@ -53,10 +53,10 @@ Give YiAgents a **ticker + date** and it analyzes from four angles, runs multipl
 | ------ | ------ | ------ |
 | Market Analyst | Technical: picks up to 8 complementary indicators from a 28-name catalog (trend / momentum / volatility / volume) by market regime; five evidence tools always bound — weekly timeframe, support/resistance, volume features, candlestick patterns, benchmark relative strength | yfinance / Alpha Vantage |
 | Sentiment Analyst | Social sentiment | Reddit, StockTwits (current-date analysis only) |
-| News Analyst | Ticker news + macro/global news (Fed, geopolitics, central-bank policy …) | yfinance / Alpha Vantage News |
+| News Analyst | Ticker news + macro/global news (Fed, geopolitics, central-bank policy …) + open-web search for qualitative context | yfinance / Alpha Vantage News / Tavily |
 | Fundamentals Analyst | Financial fundamentals | yfinance / Alpha Vantage |
 
-Macro data flows through FRED (Federal Reserve), event probabilities through Polymarket (prediction markets), and alternative data can be collected via browser. Sources without a trustworthy as-of parameter are omitted from historical runs rather than silently substituting today's data.
+Macro data flows through FRED (Federal Reserve), event probabilities through Polymarket (prediction markets), and alternative data can be collected via browser. The news analyst can also search the open web (Tavily, free tier) for developments the news vendors cover thinly — snippets are prompt-constrained to qualitative, URL-cited context; numbers always come from the structured data tools. Sources without a trustworthy as-of parameter are omitted from historical runs rather than silently substituting today's data.
 
 ### Crypto analysis modes
 
@@ -123,7 +123,7 @@ Two optional loops close the cycle after a run: the causal memory log (`memory_e
 ## Architecture
 
 ```text
-Data layer (yfinance / Alpha Vantage / FRED / Polymarket / Reddit / StockTwits / Binance)
+Data layer (yfinance / Alpha Vantage / FRED / Polymarket / Reddit / StockTwits / Binance / Tavily)
         │
    ┌────▼───── Analyst Team (serial, or parallel behind a flag) ─────┐
    │  Market · Sentiment · News · Fundamentals                       │
@@ -201,6 +201,7 @@ ZHIPU_CN_API_KEY=...            # GLM (BigModel China)
 MINIMAX_API_KEY=...             # MiniMax (global)
 ALPHA_VANTAGE_API_KEY=...       # Alpha Vantage
 FRED_API_KEY=...                # Federal Reserve macro data
+TAVILY_API_KEY=...              # open-web search (free tier, tvly-dev- prefix)
 ```
 
 **Recommended DeepSeek split** — heavy deliberation on the deep channel, light multi-turn on the quick channel (~8–10 min wall-clock per ticker):
