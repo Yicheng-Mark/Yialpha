@@ -158,6 +158,27 @@ def list_runs(ticker: str) -> dict:
     }
 
 
+def list_compare() -> dict:
+    """Per-ticker rating series for the compare view.
+
+    One entry per ticker that has at least one *readable* rating — a ticker
+    whose JSON files are all unreadable would render as an empty row in the
+    comparison chart, so it is skipped here rather than filtered client-side.
+    """
+    out: list[dict] = []
+    if not LOGS_ROOT.is_dir():
+        return {"tickers": out}
+    for d in sorted(LOGS_ROOT.iterdir(), key=lambda p: p.name.lower()):
+        if not d.is_dir() or d.name in _NON_TICKER_DIRS:
+            continue
+        date_ratings = [
+            {"date": dt, "rating": _latest_rating(d.name, dt)} for dt in _dates_for(d.name)
+        ]
+        if any(dr["rating"] for dr in date_ratings):
+            out.append({"ticker": d.name, "date_ratings": date_ratings})
+    return {"tickers": out}
+
+
 def load_node_perf(ticker: str, date: str) -> dict | None:
     """Per-node wall-clock + token telemetry, if ``--profile`` wrote it."""
     path = _strategy_dir(ticker) / f"node_perf_{date}.json"

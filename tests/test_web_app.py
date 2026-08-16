@@ -1,5 +1,6 @@
 """HTTP contract and browser security-header tests for the local Web UI."""
 
+import json
 import time
 from datetime import date, timedelta
 
@@ -101,3 +102,49 @@ def test_reports_root_created_on_startup_not_import(monkeypatch, tmp_path):
     assert not target.exists()
     with TestClient(app):
         assert target.is_dir()
+
+
+def _write_state_log(root, ticker: str, day: str, rating_word: str) -> None:
+    d = root / ticker / "YiAgentsStrategy_logs"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"full_states_log_{day}.json").write_text(
+        json.dumps({"final_trade_decision": f"**Rating**: {rating_word}"}),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.unit
+def test_api_compare_returns_empty_when_no_logs(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "LOGS_ROOT", tmp_path)
+    response = client.get("/api/compare")
+    assert response.status_code == 200
+    assert response.json() == {"tickers": []}
+
+
+@pytest.mark.unit
+def test_api_compare_aggregates_rating_series(client, monkeypatch, tmp_path):
+    _write_state_log(tmp_path, "AAPL", "2026-06-01", "Buy")
+    _write_state_log(tmp_path, "AAPL", "2026-06-02", "Hold")
+    _write_state_log(tmp_path, "MSFT", "2026-06-01", "Sell")
+    monkeypatch.setattr(store, "LOGS_ROOT", tmp_path)
+    response = client.get("/api/compare")
+    assert response.status_code == 200
+    got = {e["ticker"]: e["date_ratings"] for e in response.json()["tickers"]}
+    assert got["AAPL"] == [
+        {"date": "2026-06-01", "rating": "Buy"},
+        {"date": "2026-06-02", "rating": "Hold"},
+    ]
+    assert got["MSFT"] == [{"date": "2026-06-01", "rating": "Sell"}]
+
+
+@pytest.mark.unit
+def test_api_compare_skips_ticker_with_only_unreadable_logs(client, monkeypatch, tmp_path):
+    _write_state_log(tmp_path, "AAPL", "2026-06-01", "Buy")
+    bad = tmp_path / "CRASH" / "YiAgentsStrategy_logs"
+    bad.mkdir(parents=True)
+    (bad / "full_states_log_2026-06-01.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(store, "LOGS_ROOT", tmp_path)
+    response = client.get("/api/compare")
+    assert response.status_code == 200
+    tickers = [e["ticker"] for e in response.json()["tickers"]]
+    assert tickers == ["AAPL"]

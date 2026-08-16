@@ -4,8 +4,9 @@
 // system automatically. All instances are tracked so theme switches and route
 // changes can dispose + redraw cleanly. Exposed as window.YiCharts.
 //
-// The keyword-lean analysis mirrors verdictTilt() in app.js — values are
-// derived from real char counts and keyword densities, never fabricated scores.
+// The keyword-lean analysis and small helpers come from common.js
+// (window.YiUtil) — values are derived from real char counts and keyword
+// densities, never fabricated scores.
 
 (function () {
   "use strict";
@@ -15,18 +16,13 @@
   var RATING_VAL = { Buy: 5, Overweight: 4, Hold: 3, Underweight: 2, Sell: 1 };
   var RATING_KEY = { Buy: "buy", Overweight: "over", Hold: "hold", Underweight: "under", Sell: "sell" };
 
-  // ---- keyword sets for wording-lean analysis (mirrors app.js verdictTilt) ----
-  var BULL_RE = /bullish|overweight|\bbuy\b|upside|\blong\b|optimistic|compelling|attractive|constructive|favor(?:able|s)?/gi;
-  var BEAR_RE = /bearish|underweight|\bsell\b|downside|\bshort\b|overvalued|pessimistic|caution|deteriorat|\brisk\b/gi;
-  var CAUTION_RE = /caution|risk|drawdown|stop.?loss|downside|volatil|exposure|hedge|protect|cut|reduce|limit/gi;
-
-  function countMatches(text, re) { return ((text || "").match(re) || []).length; }
-  function fmtK(n) { n = n || 0; return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n); }
-  function escapeHTML(value) {
-    return String(value == null ? "" : value)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  }
+  // ---- shared helpers (single source of truth: common.js) ----
+  var BULL_RE = window.YiUtil.BULL_RE;
+  var BEAR_RE = window.YiUtil.BEAR_RE;
+  var CAUTION_RE = window.YiUtil.CAUTION_RE;
+  var countMatches = window.YiUtil.countMatches;
+  var fmtK = window.YiUtil.fmtK;
+  var escapeHTML = window.YiUtil.escapeHTML;
 
   // ---- read CSS custom properties into a theme snapshot ----
   function cssVar(name) {
@@ -410,6 +406,84 @@
     return register(el, chart, function () { drawRiskRadar(el, risk); });
   }
 
+  /**
+   * Multi-ticker rating step comparison (compare view).
+   * One series per ticker over the union of all dates, stepped at the 5-tier
+   * scale; series use the categorical --cat-* ramp (multi-series only).
+   * @param {HTMLElement} el
+   * @param {Array} series - [{ticker, date_ratings:[{date,rating}]}] (rated entries only)
+   * @param {Function} onClick - callback(ticker, date)
+   */
+  function drawRatingCompare(el, series, onClick) {
+    if (!el || !window.echarts) return null;
+    var th = theme();
+    var dates = [];
+    var seen = {};
+    (series || []).forEach(function (s) {
+      (s.date_ratings || []).forEach(function (dr) {
+        if (dr.date && !seen[dr.date]) { seen[dr.date] = true; dates.push(dr.date); }
+      });
+    });
+    dates.sort();
+    if (!dates.length || !series.length) { el.innerHTML = ""; return null; }
+
+    function catColor(i) { return cssVar("--cat-" + ((i % 6) + 1)) || th.accent; }
+
+    var chart = echarts.init(el, null, { renderer: "canvas" });
+    var opt = {
+      tooltip: Object.assign(triggerAxis(tooltipStyle(th)), {
+        formatter: function (params) {
+          var lines = params.map(function (p) {
+            var label = (p.value == null) ? "—" : (RATING_ORDER[5 - p.value] || p.value);
+            return p.marker + " " + p.seriesName + ": " + label;
+          });
+          return params[0].axisValue + "<br/>" + lines.join("<br/>");
+        }
+      }),
+      legend: {
+        bottom: 0, itemWidth: 14, itemHeight: 8, itemGap: 14,
+        textStyle: { color: th.ink2, fontSize: 11 }
+      },
+      grid: { left: 36, right: 20, top: 20, bottom: 46 },
+      xAxis: {
+        type: "category", data: dates, boundaryGap: false,
+        axisLine: axisLine(th), axisTick: { show: false },
+        axisLabel: { color: th.ink3, fontSize: 11, rotate: dates.length > 6 ? 30 : 0 }
+      },
+      yAxis: {
+        type: "value", min: 0.5, max: 5.5, interval: 1,
+        axisLine: { show: false }, axisTick: { show: false },
+        splitLine: splitLine(th),
+        axisLabel: {
+          color: th.ink3, fontSize: 11,
+          formatter: function (v) { return ({ 1: "Sell", 2: "Under", 3: "Hold", 4: "Over", 5: "Buy" })[v] || ""; }
+        }
+      },
+      series: series.map(function (s, i) {
+        var byDate = {};
+        s.date_ratings.forEach(function (dr) { byDate[dr.date] = RATING_VAL[dr.rating]; });
+        var color = catColor(i);
+        return {
+          name: s.ticker, type: "line", step: "middle", smooth: false,
+          symbol: "circle", symbolSize: 8, connectNulls: false,
+          lineStyle: { color: color, width: 2.2 },
+          itemStyle: { color: color, borderColor: th.panel, borderWidth: 2 },
+          emphasis: { focus: "series" },
+          data: dates.map(function (d) { return byDate[d] == null ? null : byDate[d]; })
+        };
+      })
+    };
+    chart.setOption(opt);
+    chart.on("click", function (params) {
+      if (params.componentType === "series" && onClick && params.value != null) {
+        var s = series[params.seriesIndex];
+        var date = dates[params.dataIndex];
+        if (s && date) onClick(s.ticker, date);
+      }
+    });
+    return register(el, chart, function () { drawRatingCompare(el, series, onClick); });
+  }
+
   // ---- lifecycle: resize, theme switch, route change ----
 
   function resizeAll() {
@@ -463,6 +537,7 @@
     drawNodePerf: drawNodePerf,
     drawDebateBalance: drawDebateBalance,
     drawRiskRadar: drawRiskRadar,
+    drawRatingCompare: drawRatingCompare,
     resizeAll: resizeAll,
     redrawAll: redrawAll,
     disposeAll: disposeAll
