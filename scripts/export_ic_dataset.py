@@ -43,7 +43,10 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from yiagents.agents.analysts.market_analyst import INDICATOR_NAMES  # noqa: E402
 from yiagents.dataflows.feature_registry import compute_derived  # noqa: E402
-from yiagents.dataflows.stockstats_utils import load_ohlcv  # noqa: E402
+from yiagents.dataflows.stockstats_utils import (  # noqa: E402
+    compute_indicator,
+    load_ohlcv,
+)
 
 
 def build_ic_frame(
@@ -96,7 +99,10 @@ def build_ic_frame(
             if derived is not None:
                 out[ind] = pd.to_numeric(derived, errors="coerce")
                 continue
-            series = wrapped[ind]
+            # compute_indicator (not a bare wrapped[ind]) so the vendor-scale
+            # fixes (e.g. mfi 0-1 -> 0-100) apply here too — the IC must be
+            # computed on the same scale every other consumer emits.
+            series = compute_indicator(wrapped, ind)
         except Exception as exc:  # noqa: BLE001 -- skip-and-report, never zero-fill
             logger.warning("indicator %s failed to compute for %s: %s", ind, ticker, exc)
             skipped.append(ind)

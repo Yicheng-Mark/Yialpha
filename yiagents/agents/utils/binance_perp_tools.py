@@ -21,21 +21,27 @@ def get_binance_klines(
     start_date: Annotated[str, "Start date in yyyy-mm-dd format"],
     end_date: Annotated[str, "End date in yyyy-mm-dd format"],
     interval: Annotated[str, "Kline interval, e.g. '1d' (default) or '1h'"] = "1d",
+    price_type: Annotated[str, "'last' (default, traded price) or 'mark' (price Binance liquidates against)"] = "last",
 ) -> str:
     """Retrieve daily OHLCV candles for a Binance USDT-M perpetual contract.
 
     Prefer this over ``get_stock_data`` for perpetuals: it prices the actual
     USDT-M perp (not the Yahoo spot pair). Returns a CSV with Open, High, Low,
-    Close, Adj Close, Volume columns (Adj Close == Close for perps).
+    Close, Adj Close, Volume columns (Adj Close == Close for perps). Use
+    ``price_type='mark'`` when assessing liquidation risk — Binance triggers
+    liquidations on the mark price, not the last traded price.
     Args:
         symbol: Binance USDT-M perp symbol, e.g. BTCUSDT, ETHUSDT, 1000PEPEUSDT.
         start_date: Start date in yyyy-mm-dd format.
         end_date: End date in yyyy-mm-dd format.
         interval: Kline interval (default '1d').
+        price_type: 'last' (default) or 'mark' (mark-price klines).
     Returns:
         str: Header + CSV of OHLCV candles for the requested range.
     """
-    return route_to_vendor("get_binance_klines", symbol, start_date, end_date, interval)
+    return route_to_vendor(
+        "get_binance_klines", symbol, start_date, end_date, interval, price_type
+    )
 
 
 @tool
@@ -46,9 +52,10 @@ def get_binance_funding_rate(
 ) -> str:
     """Retrieve funding-rate history for a Binance USDT-M perpetual contract.
 
-    Funding is charged every 8h; persistently positive funding means longs pay
-    shorts (long crowding / cost-of-carry). Returns fundingTime, fundingRate,
-    symbol columns.
+    Funding settles on the contract's own cadence (8h on most contracts, 4h/1h
+    on many newer ones — the header states the inferred cadence); persistently
+    positive funding means longs pay shorts (long crowding / cost-of-carry).
+    Returns fundingTime, fundingRate, symbol columns.
     Args:
         symbol: Binance USDT-M perp symbol, e.g. BTCUSDT.
         start_date: Start date in yyyy-mm-dd format.
@@ -118,6 +125,25 @@ def get_binance_taker_buy_sell(
         str: Header + CSV of taker buy/sell rows.
     """
     return route_to_vendor("get_binance_taker_buy_sell", symbol, look_back_days)
+
+
+@tool
+def get_binance_premium_index(
+    symbol: Annotated[str, "Binance USDT-M perpetual symbol, e.g. BTCUSDT"],
+) -> str:
+    """Retrieve the mark-price snapshot for a Binance USDT-M perpetual.
+
+    ``/fapi/v1/premiumIndex`` in one call: ``markPrice`` (the price Binance
+    liquidates against — anchor liquidation-distance claims here, NOT the last
+    traded price), ``indexPrice``, ``markVsIndexPct`` (mark premium vs index,
+    %), ``lastFundingRate`` (the rate in effect for the NEXT settlement — more
+    current than the history tool's last settled row), and ``nextFundingTime``.
+    Args:
+        symbol: Binance USDT-M perp symbol, e.g. BTCUSDT.
+    Returns:
+        str: Header + single-row CSV of the mark-price snapshot.
+    """
+    return route_to_vendor("get_binance_premium_index", symbol)
 
 
 @tool

@@ -210,12 +210,14 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
         self.assertNotIn("get_stock_data", names)
         self.assertNotIn("get_indicators", names)
         self.assertNotIn("get_verified_market_snapshot", names)
-        # The 7 perp-native Binance tools: OHLCV/funding/OI (the original
+        # The 8 perp-native Binance tools: OHLCV/funding/OI (the original
         # cost-of-carry & crowding trio) plus the positioning/order-flow/basis
         # trio, plus get_binance_indicators (2026-08-15) which computes the
         # classic stockstats battery on the actual perp klines — the indicator
-        # capability perp runs previously lacked entirely.
-        self.assertEqual(len(names), 7)
+        # capability perp runs previously lacked entirely — and
+        # get_binance_premium_index (2026-08-16): the mark-price snapshot that
+        # liquidation-distance claims must anchor to.
+        self.assertEqual(len(names), 8)
         self.assertEqual(
             sorted(names),
             [
@@ -225,6 +227,7 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
                 "get_binance_klines",
                 "get_binance_long_short_ratio",
                 "get_binance_open_interest",
+                "get_binance_premium_index",
                 "get_binance_taker_buy_sell",
             ],
         )

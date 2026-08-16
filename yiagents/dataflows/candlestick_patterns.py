@@ -72,10 +72,31 @@ def _detect_three_white_soldiers(rows: pd.DataFrame) -> bool:
 
 
 def _detect_three_black_crows(rows: pd.DataFrame) -> bool:
-    flipped = rows.copy()
-    flipped[["Open", "Close"]] = flipped[["Close", "Open"]].to_numpy()
-    flipped[["High", "Low"]] = flipped[["Low", "High"]].to_numpy()
-    return _detect_three_white_soldiers(flipped)
+    """Textbook three black crows: the price-mirror of three white soldiers.
+
+    Three red bars with strictly falling closes, each opening inside the prior
+    bar's real body, and small lower shadows (selling that closes near the
+    low). NOTE: the previous column-swap implementation was NOT a mirror —
+    swapping Open/Close without negating prices required RISING opens and
+    closes, so textbook crows never matched and ascending red bars were
+    flagged as crows (P0, 2026-08-16).
+    """
+    o = rows["Open"].to_numpy(dtype=float)
+    lo = rows["Low"].to_numpy(dtype=float)
+    c = rows["Close"].to_numpy(dtype=float)
+    if len(o) != 3:
+        return False
+    if not all(c[i] < o[i] for i in range(3)):
+        return False
+    if not (c[0] > c[1] > c[2]):
+        return False
+    # Each open within (or at the edge of) the prior bar's real body.
+    within = (c[0] - 1e-12 <= o[1] <= o[0]) and (c[1] - 1e-12 <= o[2] <= o[1])
+    small_lower = all(
+        (min(o[i], c[i]) - lo[i]) <= 0.3 * abs(c[i] - o[i]) + 1e-12
+        for i in range(3)
+    )
+    return bool(within and small_lower)
 
 
 def scan_candlestick_patterns(
@@ -215,7 +236,10 @@ def detect_double_top_bottom(
     with at least ``wing`` bars between them. The neckline is the intervening
     opposite extreme; confirmation requires a later close beyond it (a
     double top is only COMPLETE once price closes below the neckline low).
-    Unconfirmed shapes are reported with ``confirmed: False``.
+    Unconfirmed shapes are reported with ``confirmed: False``. When several
+    pairs qualify, the MOST RECENT one (latest second pivot) is reported —
+    the decision-useful shape is the one nearest the current bar, not the
+    oldest coincidence in the window.
     """
     if df is None or len(df) < 3 * _PIVOT_WING + 2:
         return []
@@ -225,6 +249,7 @@ def detect_double_top_bottom(
     out: list[DoubleExtremeShape] = []
 
     def scan(extremes: list[int], values: np.ndarray, is_top: bool) -> None:
+        best: tuple[int, DoubleExtremeShape] | None = None
         for a_pos in range(len(extremes)):
             for b_pos in range(a_pos + 1, len(extremes)):
                 i, j = extremes[a_pos], extremes[b_pos]
@@ -248,7 +273,7 @@ def detect_double_top_bottom(
                     confirmed = bool(
                         (later["Close"].astype(float) > neck).any()
                     ) if not later.empty else False
-                out.append(DoubleExtremeShape(
+                shape = DoubleExtremeShape(
                     pattern="double_top" if is_top else "double_bottom",
                     first_pivot_date=str(dates[i]),
                     second_pivot_date=str(dates[j]),
@@ -256,8 +281,12 @@ def detect_double_top_bottom(
                     neckline=neck,
                     confirmed=confirmed,
                     direction="bearish" if is_top else "bullish",
-                ))
-                return  # one shape per side is enough signal
+                )
+                # Keep the most recent qualifying pair (largest second pivot).
+                if best is None or j > best[0]:
+                    best = (j, shape)
+        if best is not None:
+            out.append(best[1])  # one shape per side is enough signal
 
     scan(highs, tail["High"].astype(float).to_numpy(), True)
     scan(lows, tail["Low"].astype(float).to_numpy(), False)

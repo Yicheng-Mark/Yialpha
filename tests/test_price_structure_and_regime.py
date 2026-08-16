@@ -26,6 +26,7 @@ from yiagents.dataflows.support_resistance import (
     classic_pivots,
     daily_pivots,
     volume_profile,
+    weekly_pivots,
 )
 
 
@@ -90,6 +91,18 @@ class TestBuildSupportResistance:
         assert report["volume_profile"] is not None
         assert report["latest_close"] == pytest.approx(100 + 299 * 0.5)
 
+    def test_weekly_pivots_use_last_completed_week(self):
+        # 2026-08-12 is a Wednesday: the week ending Fri 2026-08-07 is the
+        # last COMPLETED week, so its H/L/C must drive the pivots (the old
+        # iloc[-2] returned the week before that — one week too far back).
+        # 8 business days from Mon 2026-08-03 land on Wed 2026-08-12; the
+        # first five (08-03..08-07) form the completed W-FRI-labelled week.
+        rows = [(c - 0.5, c + 0.6, c - 0.7, c, 1000) for c in range(100, 108)]
+        bars = _bars(rows, "2026-08-03")
+        pivots = weekly_pivots(bars, "2026-08-12")
+        assert pivots is not None
+        assert pivots["P"] == pytest.approx((104.6 + 99.3 + 104.0) / 3.0)
+
 
 @pytest.mark.unit
 class TestCandlestickPatterns:
@@ -143,6 +156,46 @@ class TestCandlestickPatterns:
         engulf = next(h for h in hits if h["pattern"] == "bullish_engulfing")
         assert engulf["direction"] == "bullish"
         assert engulf["date"]
+
+    def test_three_black_crows_textbook_hits(self):
+        # P0 regression (2026-08-16): the old column-swap "mirror" required
+        # rising opens/closes, so textbook crows NEVER matched. Textbook
+        # shape: three red bars, closes strictly falling, each open inside
+        # the prior body, small lower shadows.
+        rows = [
+            (100.0, 100.6, 99.2, 100.2, 1),   # bland lead-in
+            (105.0, 105.3, 99.4, 100.0, 1),   # red, closes near low
+            (102.0, 102.3, 96.4, 97.0, 1),    # red, open within prior body
+            (99.0, 99.3, 93.4, 94.0, 1),      # red, open within prior body
+        ]
+        hits = scan_candlestick_patterns(_bars(rows), lookback=5)
+        crow = next(h for h in hits if h["pattern"] == "three_black_crows")
+        assert crow["direction"] == "bearish"
+        # _bars starts 2025-01-01 (bdate_range): rows land Wed 01, Thu 02,
+        # Fri 03, Mon 06 — the shape attaches to its LAST bar.
+        assert crow["date"] == "2025-01-06"
+
+    def test_three_black_crows_ascending_red_bars_rejected(self):
+        # The inverse regression: ascending red bars (opens AND closes
+        # rising) were exactly what the broken detector flagged as crows.
+        rows = [
+            (100.0, 100.6, 99.2, 100.2, 1),
+            (105.0, 106.3, 99.4, 100.0, 1),
+            (110.0, 111.3, 104.4, 105.0, 1),
+            (115.0, 116.3, 109.4, 110.0, 1),
+        ]
+        hits = scan_candlestick_patterns(_bars(rows), lookback=5)
+        assert not any(h["pattern"] == "three_black_crows" for h in hits)
+
+    def test_three_white_soldiers_unchanged(self):
+        rows = [
+            (100.0, 100.6, 99.2, 100.2, 1),
+            (100.0, 101.3, 99.8, 101.0, 1),
+            (101.0, 102.3, 100.8, 102.0, 1),
+            (102.0, 103.3, 101.8, 103.0, 1),
+        ]
+        hits = scan_candlestick_patterns(_bars(rows), lookback=5)
+        assert any(h["pattern"] == "three_white_soldiers" for h in hits)
 
 
 @pytest.mark.unit

@@ -20,9 +20,12 @@ from yiagents.agents.utils.agent_utils import (
     get_balance_sheet,
     get_binance_basis,
     get_binance_funding_rate,
+    get_binance_indicators,
     get_binance_klines,
     get_binance_long_short_ratio,
     get_binance_open_interest,
+    get_binance_premium_index,
+    get_binance_spot_indicators,
     get_binance_spot_klines,
     get_binance_spot_perp_basis,
     get_binance_spot_ticker24,
@@ -344,6 +347,12 @@ class YiAgentsGraph:
                     get_binance_long_short_ratio,
                     get_binance_taker_buy_sell,
                     get_binance_basis,
+                    get_binance_premium_index,
+                    # Classic indicators on Binance candles, one binding per
+                    # venue default (perp / spot); dormant unless the matching
+                    # crypto run advertises them.
+                    get_binance_indicators,
+                    get_binance_spot_indicators,
                     # Binance SPOT tools. Same dormant contract as the perp
                     # tools above: only advertised when asset_type ==
                     # "crypto_spot", so they sit unused in the name->tool map
@@ -414,23 +423,22 @@ class YiAgentsGraph:
     def _resolve_benchmark(self, ticker: str) -> str:
         """Pick the benchmark ticker for alpha calculation against ``ticker``.
 
-        ``config["benchmark_ticker"]`` overrides everything when set; otherwise
-        the suffix map matches the ticker's exchange suffix (e.g. ``.T`` for
-        Tokyo). US-listed tickers without a dotted suffix fall through to the
-        empty-suffix entry (SPY by default). Unrecognised suffixes (including
-        US tickers with dots like ``BRK.B``) also fall back to the empty-suffix
-        entry, which is the right default because the alpha calculation works
-        in USD.
+        Thin delegation to :func:`yiagents.dataflows.market_regime.
+        resolve_market_benchmark` (the dataflow-layer implementation this
+        method was previously a verbatim copy of — the two drifted once
+        already). ``config["benchmark_ticker"]`` overrides everything when
+        set; otherwise the suffix map matches the ticker's exchange suffix
+        and the empty-suffix entry (SPY by default) is the fallback, which is
+        right because the alpha calculation works in USD.
         """
+        from yiagents.dataflows.market_regime import resolve_market_benchmark
+
+        # The dataflow resolver reads the same config keys through
+        # get_config(); the graph's self.config is the same mapping source.
         explicit = self.config.get("benchmark_ticker")
         if explicit:
             return explicit
-        benchmark_map = self.config.get("benchmark_map", {})
-        ticker_upper = ticker.upper()
-        for suffix, benchmark in benchmark_map.items():
-            if suffix and ticker_upper.endswith(suffix.upper()):
-                return benchmark
-        return benchmark_map.get("", "SPY")
+        return resolve_market_benchmark(ticker)
 
     def _build_risk_manager(self):
         """Construct the Phase-1 RiskManager when ``risk_enabled`` is set.

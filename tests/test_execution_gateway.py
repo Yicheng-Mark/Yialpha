@@ -47,6 +47,24 @@ def _arm_test_execution_policy(monkeypatch):
     monkeypatch.setenv(_ENV_LIVE_ENABLED, "true")
     monkeypatch.setenv(_ENV_ENABLED, "true")
     monkeypatch.setenv("YIAGENTS_KILL_SWITCH", "false")
+    monkeypatch.delenv("YIAGENTS_EXECUTION_LEVERAGE", raising=False)
+    # exchangeInfo gate (2026-08-16): a permissive tick/step grid so the
+    # pre-existing mapping assertions still see their exact values, while
+    # the quantization path itself is exercised by dedicated tests below.
+    from decimal import Decimal
+
+    import yiagents.execution.binance_gateway as gw_mod
+    from yiagents.dataflows.binance_filters import SymbolFilters
+
+    def _permissive_filters(symbol, venue):  # noqa: ARG001
+        return SymbolFilters(
+            symbol=symbol, status="TRADING",
+            tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+            min_qty=Decimal("0.001"), max_qty=Decimal("0"),
+            min_notional=Decimal("0"), price_precision=2, quantity_precision=3,
+        )
+
+    monkeypatch.setattr(gw_mod, "get_symbol_filters", _permissive_filters)
 
 
 # ---------------------------------------------------------------------------
@@ -851,3 +869,147 @@ class TestCloseReleasesSdkSession:
         gw._client = facade
         gw.close()
         facade.session.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Exchange-rule gates (2026-08-16): exchangeInfo quantization, position mode,
+# opt-in leverage.
+# ---------------------------------------------------------------------------
+
+
+def _filters(tick="0.01", step="0.001", min_qty="0.001", max_qty="0",
+             min_notional="0"):
+    from decimal import Decimal
+
+    from yiagents.dataflows.binance_filters import SymbolFilters
+
+    def factory(symbol, venue):  # noqa: ARG001
+        return SymbolFilters(
+            symbol=symbol, status="TRADING",
+            tick_size=Decimal(tick), step_size=Decimal(step),
+            min_qty=Decimal(min_qty), max_qty=Decimal(max_qty),
+            min_notional=Decimal(min_notional),
+            price_precision=2, quantity_precision=3,
+        )
+
+    return factory
+
+
+class TestExchangeRuleGates:
+    def test_quantity_floored_to_step_and_price_to_tick(self, monkeypatch):
+        import yiagents.execution.binance_gateway as gw_mod
+
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.return_value = _FakeResp(
+            {"status": "NEW", "orderId": 200, "executedQty": "0",
+             "updateTime": 1700000000000}
+        )
+        monkeypatch.setattr(
+            gw_mod, "get_symbol_filters", _filters(tick="0.10"),
+        )
+        gw.send_order(_req(otype=OrderType.LIMIT, volume=0.30718, price=60000.37))
+        kw = gw._client.rest_api.new_order.call_args.kwargs
+        assert kw["quantity"] == 0.307  # floored, never rounded up
+        assert kw["price"] == 60000.4   # nearest tick
+
+    def test_below_min_notional_rejected(self, monkeypatch):
+        import yiagents.execution.binance_gateway as gw_mod
+
+        gw = _perp_gw_with_client()
+        monkeypatch.setattr(
+            gw_mod, "get_symbol_filters", _filters(min_notional="100"),
+        )
+        order = gw.send_order(
+            _req(otype=OrderType.LIMIT, volume=0.5, price=10.0)
+        )  # notional 5 < 100
+        assert order.status is Status.REJECTED
+        gw._client.rest_api.new_order.assert_not_called()
+
+    def test_exchangeinfo_unavailable_rejects_fail_closed(self, monkeypatch):
+        import yiagents.execution.binance_gateway as gw_mod
+
+        def boom(symbol, venue):
+            raise RuntimeError("exchangeInfo down")
+
+        monkeypatch.setattr(gw_mod, "get_symbol_filters", boom)
+        gw = _perp_gw_with_client()
+        order = gw.send_order(_req())
+        assert order.status is Status.REJECTED
+        gw._client.rest_api.new_order.assert_not_called()
+
+    def test_optin_leverage_set_once_per_symbol(self, monkeypatch):
+        monkeypatch.setenv("YIAGENTS_EXECUTION_LEVERAGE", "3")
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.return_value = _FakeResp(
+            {"status": "FILLED", "orderId": 1, "executedQty": "0.5",
+             "avgPrice": "60000"}
+        )
+        gw.send_order(_req())
+        gw.send_order(_req())
+        gw._client.rest_api.change_initial_leverage.assert_called_once_with(
+            symbol="BTCUSDT", leverage=3,
+        )
+
+    def test_leverage_failure_rejects_fail_closed(self, monkeypatch):
+        monkeypatch.setenv("YIAGENTS_EXECUTION_LEVERAGE", "3")
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.change_initial_leverage.side_effect = RuntimeError("nope")
+        order = gw.send_order(_req())
+        assert order.status is Status.REJECTED
+        gw._client.rest_api.new_order.assert_not_called()
+
+
+class TestPositionMode:
+    def test_query_hedge_mode_parses_dual_side(self):
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.get_current_position_mode.return_value = _FakeResp(
+            {"dualSidePosition": True}
+        )
+        assert gw._query_hedge_mode() is True
+        gw._client.rest_api.get_current_position_mode.return_value = _FakeResp(
+            {"dualSidePosition": False}
+        )
+        assert gw._query_hedge_mode() is False
+
+    def test_query_hedge_mode_failure_returns_none(self):
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.get_current_position_mode.side_effect = RuntimeError("net")
+        assert gw._query_hedge_mode() is None
+
+    def test_hedge_mode_long_close_maps_sell_long_no_reduce_only(self):
+        gw = _perp_gw_with_client()
+        gw._hedge_mode = True
+        gw._client.rest_api.new_order.return_value = _FakeResp(
+            {"status": "FILLED", "orderId": 9, "executedQty": "0.5",
+             "avgPrice": "61000"}
+        )
+        gw.send_order(_req(direction=Direction.LONG, offset=Offset.CLOSE))
+        kw = gw._client.rest_api.new_order.call_args.kwargs
+        assert kw["side"] == "SELL"       # unwinding the long
+        assert kw["position_side"] == "LONG"
+        assert "reduce_only" not in kw    # invalid in hedge mode
+
+    def test_hedge_mode_short_open_maps_sell_short(self):
+        gw = _perp_gw_with_client()
+        gw._hedge_mode = True
+        gw._client.rest_api.new_order.return_value = _FakeResp(
+            {"status": "NEW", "orderId": 10, "executedQty": "0",
+             "updateTime": 1700000000000}
+        )
+        gw.send_order(_req(direction=Direction.SHORT))
+        kw = gw._client.rest_api.new_order.call_args.kwargs
+        assert kw["side"] == "SELL"
+        assert kw["position_side"] == "SHORT"
+        assert "reduce_only" not in kw
+
+    def test_one_way_mode_keeps_both_and_reduce_only(self):
+        gw = _perp_gw_with_client()
+        gw._hedge_mode = False
+        gw._client.rest_api.new_order.return_value = _FakeResp(
+            {"status": "NEW", "orderId": 11, "executedQty": "0",
+             "updateTime": 1700000000000}
+        )
+        gw.send_order(_req())
+        kw = gw._client.rest_api.new_order.call_args.kwargs
+        assert kw["position_side"] == "BOTH"
+        assert kw["reduce_only"] == "false"

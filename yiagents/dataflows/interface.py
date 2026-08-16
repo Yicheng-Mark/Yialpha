@@ -36,6 +36,7 @@ from .binance import (
     get_binance_klines,
     get_binance_long_short_ratio,
     get_binance_open_interest,
+    get_binance_premium_index,
     get_binance_spot_klines,
     get_binance_spot_perp_basis,
     get_binance_spot_ticker24,
@@ -130,7 +131,7 @@ TOOLS_CATEGORIES = {
     # Binance block / rate-limit degrades to a sentinel and the analyst falls
     # back to the Yahoo spot OHLCV rather than aborting the run.
     "binance_perp": {
-        "description": "Binance USDT-M perpetual (klines/funding/openInterest/long_short_ratio/taker_buy_sell/basis)",
+        "description": "Binance USDT-M perpetual (klines/funding/openInterest/long_short_ratio/taker_buy_sell/basis/premium_index)",
         "tools": [
             "get_binance_klines",
             "get_binance_funding_rate",
@@ -138,6 +139,7 @@ TOOLS_CATEGORIES = {
             "get_binance_long_short_ratio",
             "get_binance_taker_buy_sell",
             "get_binance_basis",
+            "get_binance_premium_index",
         ],
     },
     # Binance SPOT (crypto_spot). Spot only carries OHLCV + 24h ticker (no
@@ -302,6 +304,11 @@ VENDOR_METHODS: dict[str, dict[str, Callable[..., Any] | list[Any]]] = {
     },
     "get_binance_basis": {
         "binance": get_binance_basis,
+    },
+    # Mark-price snapshot (premiumIndex): the liquidation anchor + current
+    # funding rate. Single vendor, same optional-category contract.
+    "get_binance_premium_index": {
+        "binance": get_binance_premium_index,
     },
     # binance_spot — single vendor each; the category is optional so a Binance
     # failure (429 / unsupported symbol / no spot listing) degrades to a

@@ -20,7 +20,10 @@ from yiagents.agents.utils.a_share_native_tools import (
     get_a_share_realtime_quote_native,
     get_a_share_sector_flow_native,
 )
-from yiagents.agents.utils.binance_indicator_tools import get_binance_indicators
+from yiagents.agents.utils.binance_indicator_tools import (
+    get_binance_indicators,
+    get_binance_spot_indicators,
+)
 
 # Import tools from separate utility files
 from yiagents.agents.utils.binance_perp_tools import (
@@ -29,6 +32,7 @@ from yiagents.agents.utils.binance_perp_tools import (
     get_binance_klines,
     get_binance_long_short_ratio,
     get_binance_open_interest,
+    get_binance_premium_index,
     get_binance_taker_buy_sell,
 )
 from yiagents.agents.utils.binance_spot_tools import (
@@ -77,12 +81,14 @@ __all__ = [
     "get_candlestick_patterns",
     "get_relative_strength",
     "get_binance_indicators",
+    "get_binance_spot_indicators",
     "get_binance_klines",
     "get_binance_funding_rate",
     "get_binance_open_interest",
     "get_binance_long_short_ratio",
     "get_binance_taker_buy_sell",
     "get_binance_basis",
+    "get_binance_premium_index",
     "get_binance_spot_klines",
     "get_binance_spot_ticker24",
     "get_binance_spot_perp_basis",

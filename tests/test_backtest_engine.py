@@ -187,12 +187,71 @@ def test_last_signal_without_a_future_bar_is_not_executed():
 
 
 @pytest.mark.unit
-def test_crypto_perp_fails_closed_in_spot_engine():
-    with pytest.raises(NotImplementedError, match="crypto_perp"):
+def test_crypto_perp_missing_funding_fails_closed():
+    """A perp backtest without funding history must not silently run as a
+    spot simulation (the pre-2026-08-16 guard rejected perp outright; now the
+    engine supports long-only perp WITH funding and fails closed without)."""
+    with pytest.raises(ValueError, match="funding"):
         run_backtest(
             FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],
             price_provider=_rising_prices, asset_type="crypto_perp",
+            funding_provider=lambda *a: pd.Series(dtype=float),
         )
+
+
+def _funding_provider(rate: float):
+    """Constant per-day funding-rate provider over a fixed window."""
+    def provider(ticker, start, end):
+        idx = pd.bdate_range(start, end)
+        return pd.Series(
+            [rate] * len(idx), index=idx.strftime("%Y-%m-%d"), dtype=float,
+        )
+    return provider
+
+
+@pytest.mark.unit
+def test_crypto_perp_funding_drag_reduces_equity():
+    dates = _decision_dates(6)
+    graph = FakeGraph(dict.fromkeys(dates, "Buy"))
+    kwargs = {
+        "initial_capital": 100_000.0, "holding_days": 5,
+        "price_provider": _rising_prices, "asset_type": "crypto_perp",
+        "compute_index_alpha": False, "periods_per_year": 365,
+    }
+    dragged = run_backtest(
+        graph, "BTCUSDT", dates, funding_provider=_funding_provider(0.001),
+        **kwargs,
+    )
+    clean = run_backtest(
+        graph, "BTCUSDT", dates, funding_provider=_funding_provider(0.0),
+        **kwargs,
+    )
+    # Longs pay positive funding: every equity point must sit at/below the
+    # zero-funding twin, and the summary must state the drag honestly.
+    assert dragged.metrics.total_return < clean.metrics.total_return
+    assert dragged.config_summary["perp_funding_drag"] is True
+    assert dragged.config_summary["perp_funding_paid_total"] > 0
+    assert "NOT modeled" in dragged.config_summary["perp_model_note"]
+    # Buy-and-hold pays the same drag (both are perp longs).
+    assert dragged.benchmark_equity[-1] < clean.benchmark_equity[-1]
+
+
+@pytest.mark.unit
+def test_crypto_perp_zero_funding_matches_spot_engine():
+    dates = _decision_dates(6)
+    graph = FakeGraph(dict.fromkeys(dates, "Buy"))
+    kwargs = {
+        "initial_capital": 100_000.0, "holding_days": 5,
+        "price_provider": _rising_prices, "compute_index_alpha": False,
+        "periods_per_year": 365,
+    }
+    perp = run_backtest(
+        graph, "BTCUSDT", dates, asset_type="crypto_perp",
+        funding_provider=_funding_provider(0.0), **kwargs,
+    )
+    spot = run_backtest(graph, "BTCUSDT", dates, asset_type="crypto", **kwargs)
+    assert perp.equity[-1] == pytest.approx(spot.equity[-1])
+    assert perp.benchmark_equity[-1] == pytest.approx(spot.benchmark_equity[-1])
 
 
 @pytest.mark.unit

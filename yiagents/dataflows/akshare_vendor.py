@@ -67,7 +67,10 @@ import logging
 import math
 import os
 import threading
+import time
 from datetime import date, timedelta
+
+import pandas as pd
 
 from .errors import NoMarketDataError, VendorRateLimitError
 from .utils import is_historical_date
@@ -997,46 +1000,81 @@ def _breadth_counts(df) -> dict | None:
 
     Shared by the formatted breadth tool and the market-regime context line,
     so both report identical numbers from the same fetch. Returns ``None``
-    when no row parses (caller decides how to degrade).
+    when no row parses (caller decides how to degrade). Vectorized (the
+    ~5400-row ``iterrows`` scan dominated the tool's wall time); the
+    per-symbol limit thresholds still need the code/name columns, so those
+    two run as array lookups rather than a Python row loop.
     """
     col_pct = _pick(df.columns, ("涨跌幅", "changepercent"))
     col_code = _pick(df.columns, ("代码", "code", "symbol"))
     col_name = _pick(df.columns, ("名称", "name"))
-    adv = dec = flat = limit_up = limit_down = 0
-    total_pct = 0.0
-    counted = 0
-    for _, r in df.iterrows():
-        try:
-            pct = float(r[col_pct]) if col_pct else 0.0
-        except (TypeError, ValueError):
-            continue
-        counted += 1
-        total_pct += pct
-        if pct > 0.01:
-            adv += 1
-        elif pct < -0.01:
-            dec += 1
-        else:
-            flat += 1
-        code = str(_cell(r, col_code) or "").strip()
-        name = str(_cell(r, col_name) or "").strip()
-        up_thr, down_thr = _limit_thresholds(code, name)
-        if pct >= up_thr:
-            limit_up += 1
-        elif pct <= down_thr:
-            limit_down += 1
+    pct = pd.to_numeric(df[col_pct], errors="coerce") if col_pct else pd.Series(dtype=float)
+    pct = pct.dropna()
+    counted = int(len(pct))
     if counted == 0:
         return None
+    adv = int((pct > 0.01).sum())
+    dec = int((pct < -0.01).sum())
+    flat = counted - adv - dec
+    codes = (
+        [str(v).strip() for v in df.loc[pct.index, col_code].tolist()]
+        if col_code else [""] * counted
+    )
+    names = (
+        [str(v).strip() for v in df.loc[pct.index, col_name].tolist()]
+        if col_name else [""] * counted
+    )
+    pct_values = pct.to_numpy(dtype=float)
+    limit_up = limit_down = 0
+    for code, name, p in zip(codes, names, pct_values, strict=False):
+        up_thr, down_thr = _limit_thresholds(code, name)
+        if p >= up_thr:
+            limit_up += 1
+        elif p <= down_thr:
+            limit_down += 1
     return {
         "advancing": adv,
         "declining": dec,
         "flat": flat,
         "limit_up": limit_up,
         "limit_down": limit_down,
-        "average_change_pct": total_pct / counted,
+        "average_change_pct": float(pct.mean()),
         "counted": counted,
         "has_name_column": col_name is not None,
     }
+
+
+# ---- breadth TTL cache ------------------------------------------------------
+# stock_zh_a_spot() is a whole-market snapshot (~5400 rows). A single live
+# run asks for it twice (the breadth tool + the regime context line) and the
+# LLM may call the tool repeatedly — each fetch re-pulls the full table for
+# numbers that change on minute granularity. A 90s process TTL collapses the
+# duplicates without serving meaningfully stale breadth.
+_BREADTH_TTL_S = 90.0
+_breadth_cache: tuple[float, dict | None] | None = None
+_breadth_lock = threading.Lock()
+
+
+def _cached_breadth_counts() -> dict | None:
+    """TTL-cached wrapper around the whole-market spot fetch + aggregation."""
+    global _breadth_cache
+    with _breadth_lock:
+        if (
+            _breadth_cache is not None
+            and time.monotonic() - _breadth_cache[0] < _BREADTH_TTL_S
+        ):
+            return _breadth_cache[1]
+    result = fetch_a_share_breadth_counts()
+    with _breadth_lock:
+        _breadth_cache = (time.monotonic(), result)
+    return result
+
+
+def reset_breadth_cache_for_test() -> None:
+    """Drop the breadth TTL cache (tests only)."""
+    global _breadth_cache
+    with _breadth_lock:
+        _breadth_cache = None
 
 
 def fetch_a_share_breadth_counts() -> dict | None:
@@ -1047,7 +1085,8 @@ def fetch_a_share_breadth_counts() -> dict | None:
     formatted tool converts via ``_akshare_failure``, the fail-soft regime
     line omits the breadth part). Returns ``None`` when the spot table is
     empty or nothing parses. Live data by construction; callers gate
-    historical dates themselves.
+    historical dates themselves. Callers wanting the deduplicated view use
+    :func:`_cached_breadth_counts` (90s TTL) instead of re-fetching.
     """
     ak = _require_akshare()
     with _direct_connect():
@@ -1086,7 +1125,7 @@ def get_a_share_market_breadth_native(
         return out.getvalue().rstrip("\n")
 
     try:
-        counts = fetch_a_share_breadth_counts()
+        counts = _cached_breadth_counts()
     except Exception as exc:
         raise _akshare_failure(exc, "", "stock_zh_a_spot") from exc
 

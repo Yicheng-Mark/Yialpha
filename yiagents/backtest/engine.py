@@ -238,6 +238,52 @@ def _finish_open_position_episode(
     return realized
 
 
+def _binance_funding_provider(ticker: str, start: str, end: str) -> pd.Series:
+    """Daily aggregated funding rates for a Binance USDT-M perp.
+
+    Returns a float Series indexed by ``YYYY-MM-DD`` strings; each value is
+    the SUM of that UTC day's settlement rates (most perps settle every 8h →
+    ~3 entries/day; 4h/1h contracts have more). A positive sum means longs
+    paid that day — the drag a long-only perp strategy must carry.
+    """
+    from datetime import datetime, timezone
+
+    from ..dataflows.binance import _FAPI_FUNDING_LIMIT, _paginate_history
+    from ..dataflows.symbol_utils import normalize_symbol_for_venue
+
+    canonical = normalize_symbol_for_venue(ticker, "binance_perp")
+    start_ms = int(
+        datetime.strptime(start, "%Y-%m-%d")
+        .replace(tzinfo=timezone.utc).timestamp() * 1000
+    )
+    end_ms = int(
+        (
+            datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+            + 86399
+        ) * 1000
+    )
+    rows = _paginate_history(
+        "/fapi/v1/fundingRate", {"symbol": canonical}, _FAPI_FUNDING_LIMIT,
+        lambda r: r["fundingTime"], start_ms, end_ms, ticker, canonical,
+    )
+    agg: dict[str, float] = {}
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict) or r.get("fundingTime") is None:
+            continue
+        day = datetime.fromtimestamp(
+            int(r["fundingTime"]) / 1000, tz=timezone.utc
+        ).strftime("%Y-%m-%d")
+        try:
+            raw_rate = r.get("fundingRate")
+            rate = float(raw_rate) if raw_rate is not None else None
+        except (TypeError, ValueError):
+            continue
+        if rate is None:
+            continue
+        agg[day] = agg.get(day, 0.0) + rate
+    return pd.Series(agg, index=list(agg), dtype=float)
+
+
 def run_backtest(
     graph: _GraphLike,
     ticker: str,
@@ -250,6 +296,7 @@ def run_backtest(
     cache: DecisionCache | None = None,
     run_tag: str = "default",
     price_provider: Callable[[str, str, str], pd.Series] = _yfinance_price_provider,
+    funding_provider: Callable[[str, str, str], pd.Series] | None = None,
     periods_per_year: int | None = None,
     cost_bps: float = 0.0,
     n_trials: int = 1,
@@ -286,6 +333,16 @@ def run_backtest(
         Number of available price bars between a completed daily signal and its
         fill.  The minimum/default is one: a signal that can read the complete
         signal-day OHLCV can never fill at that same close.
+    funding_provider:
+        Daily funding-rate source for ``asset_type="crypto_perp"`` — a callable
+        ``(ticker, start, end) -> pd.Series`` indexed by ``YYYY-MM-DD`` whose
+        values are each day's summed settlement rates. Defaults to the Binance
+        USDT-M vendor (paginated ``/fapi/v1/fundingRate``). The perp mode is a
+        LONG-ONLY simulation with the funding drag charged on held notional
+        (strategy and buy-and-hold alike); shorting, leverage, margin and
+        liquidation remain unmodeled and ``config_summary`` says so. Missing
+        funding data fails closed (ValueError) rather than silently relabeling
+        a spot simulation as a perp backtest.
     n_trials:
         Number of independent strategy variants being compared in this research
         run, forwarded to :func:`compute_metrics` for the Deflated Sharpe Ratio
@@ -324,13 +381,6 @@ def run_backtest(
         raise ValueError(f"n_trials must be an integer >= 1, got {n_trials!r}")
     if not isinstance(execution_lag_bars, int) or execution_lag_bars < 1:
         raise ValueError("execution_lag_bars must be an integer >= 1")
-    if asset_type == "crypto_perp":
-        raise NotImplementedError(
-            "crypto_perp backtesting is disabled: this engine is a long-only "
-            "cash/spot simulator and does not model short exposure, funding, "
-            "leverage, margin, or liquidation. Labeling its output as a "
-            "perpetual-futures backtest would be misleading."
-        )
     if periods_per_year is None:
         periods_per_year = 365 if asset_type.startswith("crypto") else 252
     if periods_per_year < 1:
@@ -353,6 +403,35 @@ def run_backtest(
             "cannot mark the backtest to market."
         )
     prices = prices.sort_index()
+
+    # --- Perp funding (long-only crypto_perp mode, 2026-08-16) ---------------
+    # The engine remains a long-only cash simulator; for a USDT-M perpetual it
+    # additionally charges the daily funding drag on the held notional (longs
+    # pay positive funding). Shorting, leverage, margin and liquidation are
+    # still NOT modeled — config_summary says so explicitly. Fail-closed: a
+    # perp backtest without funding history would silently relabel a spot
+    # simulation, so missing funding data raises instead.
+    perp_funding: pd.Series | None = None
+    funding_paid_total = 0.0
+    if asset_type == "crypto_perp":
+        provider = funding_provider or _binance_funding_provider
+        try:
+            perp_funding = provider(ticker, start_date, end_date)
+        except Exception as exc:  # noqa: BLE001 — converted to the loud gate below
+            raise ValueError(
+                f"crypto_perp backtest requires funding-rate history for "
+                f"{ticker}; the funding fetch failed "
+                f"({type(exc).__name__}: {exc}). Pass funding_provider with "
+                "the data, or use asset_type='crypto' for an explicit "
+                "spot-style simulation."
+            ) from exc
+        if perp_funding is None or perp_funding.empty:
+            raise ValueError(
+                f"crypto_perp backtest requires funding-rate history; none "
+                f"was returned for {ticker} between {start_date} and "
+                f"{end_date}. Use asset_type='crypto' for a spot-style "
+                "simulation instead."
+            )
 
     index_prices: pd.Series | None = None
     index_name = ""
@@ -420,6 +499,18 @@ def run_backtest(
         px = float(price)
         if px <= 0.0 or not np.isfinite(px):
             raise ValueError(f"Invalid execution price for {ticker} on {trade_date}: {price!r}")
+
+        # Perp funding drag: charge the day's settlements on the marked
+        # notional BEFORE recording equity, so the equity curve, the sizing
+        # context and the metrics all see the post-funding value. Daily
+        # granularity attributes the day's settlements (UTC) to that day's
+        # close — the standard bar-level approximation.
+        if perp_funding is not None and shares > 0:
+            rate = float(perp_funding.get(str(trade_date), 0.0) or 0.0)
+            if rate and np.isfinite(rate):
+                charge = shares * px * rate
+                cash -= charge
+                funding_paid_total += charge
 
         # Mark to market at today's completed close before any close-price fill.
         equity = cash + shares * px
@@ -565,6 +656,12 @@ def run_backtest(
         if first_execution_date is not None and date >= first_execution_date and bh_shares == 0.0:
             bh_shares = bh_cash / px
             bh_cash = 0.0
+        # Buy-and-hold pays the same funding drag (it is also a perp long) —
+        # charging only the strategy would bias the comparison in its favour.
+        if perp_funding is not None and bh_shares > 0.0:
+            rate = float(perp_funding.get(date, 0.0) or 0.0)
+            if rate and np.isfinite(rate):
+                bh_cash -= bh_shares * px * rate
         bh_curve.append(float(bh_cash + bh_shares * px))
 
     metrics = compute_metrics(
@@ -622,6 +719,18 @@ def run_backtest(
             "risk_warnings": sorted({
                 t.risk_warning for t in trades if t.risk_warning
             }),
+            **(
+                {
+                    "perp_funding_drag": True,
+                    "perp_funding_paid_total": round(funding_paid_total, 2),
+                    "perp_model_note": (
+                        "long-only USDT-M perp simulation: daily funding drag "
+                        "applied to strategy AND buy-and-hold; shorting, "
+                        "leverage, margin and liquidation are NOT modeled"
+                    ),
+                }
+                if asset_type == "crypto_perp" else {}
+            ),
         },
         cached_hits=cached_hits,
         cached_misses=cached_misses,

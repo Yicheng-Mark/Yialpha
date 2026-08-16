@@ -65,13 +65,17 @@ def weekly_pivots(df: pd.DataFrame, curr_date: str) -> dict[str, float] | None:
     """Pivot levels derived from the previous COMPLETED weekly bar.
 
     ``resample_weekly`` drops the still-open week (its Friday label lies
-    after ``curr_date``), so the last weekly row is complete and the levels
-    come from the row before it. ``None`` when fewer than 2 complete weeks.
+    after ``curr_date``), so the LAST weekly row already IS the most recent
+    completed week — read it directly. (The previous ``iloc[-2]`` reached one
+    week further back than the label promised: a Wednesday analysis returned
+    the week-before-last's levels. On a Friday ``curr_date`` the W-FRI label
+    keeps the current week, which completes that day.) ``None`` when no
+    complete week exists.
     """
     weekly = resample_weekly(df, curr_date)
-    if len(weekly) < 2:
+    if weekly is None or weekly.empty:
         return None
-    prev = weekly.iloc[-2]
+    prev = weekly.iloc[-1]
     try:
         return classic_pivots(
             float(prev["High"]), float(prev["Low"]), float(prev["Close"])

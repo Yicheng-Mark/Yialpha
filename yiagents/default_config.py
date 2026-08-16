@@ -399,10 +399,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # the vendor reads the X-MBX-USED-WEIGHT-1M response header and sleeps
     # before the per-minute ceiling so it avoids a 429 rather than only
     # reacting to one. Off by default = the vendor neither reads the header
-    # nor sleeps, byte-equivalent to today. binance_weight_threshold is the
-    # fapi USDT-M default (2400/min); override for a VIP-tier IP.
+    # nor sleeps, byte-equivalent to today. Per-product documented budgets
+    # apply when binance_weight_threshold is unset: fapi 2400/min, spot
+    # 6000/min (2026-08-16); set it only to override BOTH (e.g. a shared
+    # VPN-exit IP that must stay extra conservative).
     "binance_proactive_backoff": False,
-    "binance_weight_threshold": 2400,
+    "binance_weight_threshold": 0,
     # Binance SPOT host mirror switch (env: YIAGENTS_BINANCE_SPOT_MIRROR). Off
     # by default = spot vendor hits api.binance.com (proven through the SOCKS5
     # proxy); on = key-free market-data mirror data-api.binance.vision. The

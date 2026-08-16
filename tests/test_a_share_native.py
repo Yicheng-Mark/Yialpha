@@ -492,7 +492,11 @@ def test_router_news_optional_category_degrades_to_sentinel(monkeypatch):
 # AKShare money-flow + dragon-tiger vendors (Phase 4)
 # --------------------------------------------------------------------------- #
 def _patch_ak(monkeypatch, **fns):
-    """Patch _require_akshare to a fake module exposing the given callables."""
+    """Patch _require_akshare to a fake module exposing the given callables.
+
+    Also drops the breadth TTL cache so each test's patched fetch is actually
+    served (otherwise a sibling test's 90s-cached counts bleed through)."""
+    akv.reset_breadth_cache_for_test()
     monkeypatch.setattr(akv, "_require_akshare", lambda: SimpleNamespace(**fns))
 
 

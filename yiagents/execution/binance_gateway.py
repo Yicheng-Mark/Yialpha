@@ -47,7 +47,11 @@ Design invariants (every path preserves these):
   stub comment lines are added to ``.env.example``.
 
 Scope (MVP): LIMIT / MARKET **entry** orders, query / cancel, account,
-position. Out of scope (later): wiring into the LangGraph graph; user-data
+position. Order shaping (2026-08-16): quantities/prices are quantized to the
+symbol's exchangeInfo tick/step grid before submit, hedge (dual-side) and
+one-way position modes are both mapped, and an opt-in
+``YIAGENTS_EXECUTION_LEVERAGE`` sets initial leverage once per symbol.
+Out of scope (later): wiring into the LangGraph graph; user-data
 stream live callbacks (``on_*``); futures conditional orders
 (``STOP_MARKET`` / ``TRAILING_STOP_MARKET`` via ``new_algo_order``);
 order-count budget throttling; ED25519 key auth.
@@ -66,6 +70,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
+from ..dataflows.binance_filters import get_symbol_filters, quantize_order
 from ..dataflows.errors import VendorNotConfiguredError
 from .browser_broker import KillSwitch, LiveExecutionSwitch, _coerce_bool_env
 from .domain import (
@@ -93,6 +98,10 @@ _ENV_MAINNET = "YIAGENTS_EXECUTION_MAINNET"
 _ENV_KEY = "BINANCE_API_KEY"
 _ENV_SECRET = "BINANCE_API_SECRET"
 _ENV_TIMEOUT_MS = "YIAGENTS_EXECUTION_TIMEOUT_MS"
+# Opt-in initial leverage for perp symbols (POST /fapi/v1/leverage, weight 1).
+# 0 / unset = leave each symbol at the account default (leverage affects
+# margin utilization and liquidation distance, not position size).
+_ENV_LEVERAGE = "YIAGENTS_EXECUTION_LEVERAGE"
 
 _DEFAULT_TIMEOUT_MS = 10000
 
@@ -246,6 +255,13 @@ class BinanceGateway(BaseGateway):
         self._mainnet: bool = bool(self.setting.get("mainnet", False))
         self._client = None  # SDK facade; built in connect()
         self._connected: bool = False
+        # Hedge (dual-side) vs one-way position mode, queried at connect for
+        # perp. None = unknown (query failed) — orders are then mapped one-way
+        # and Binance rejects loudly (-4061) rather than us guessing silently.
+        self._hedge_mode: bool | None = None
+        # Symbols whose leverage was already set this connection (one
+        # POST /fapi/v1/leverage per symbol, not per order).
+        self._leverage_set: set[str] = set()
 
     # ------------------------------------------------------------------
     # Connection
@@ -302,11 +318,49 @@ class BinanceGateway(BaseGateway):
 
         self._client = self._build_client(api_key, api_secret)
         self._connected = True
+        if self._product == "perp":
+            self._hedge_mode = self._query_hedge_mode()
         logger.info(
-            "BinanceGateway connected: product=%s, %s",
+            "BinanceGateway connected: product=%s, %s%s",
             self._product,
             "MAINNET" if self._mainnet else "testnet",
+            (
+                f", position_mode={'hedge(dual-side)' if self._hedge_mode else 'one-way'}"
+                if self._product == "perp" else ""
+            ),
         )
+
+    def _query_hedge_mode(self) -> bool | None:
+        """Query the account's perp position mode (GET /fapi/v1/positionSide/dual).
+
+        Returns ``True`` (hedge/dual-side), ``False`` (one-way) or ``None``
+        when the query failed (network/permissions) — logged, never raised:
+        connect() must not die on an advisory query. ``None`` maps orders the
+        one-way way; a wrong guess produces a loud Binance -4061 reject, not a
+        silent mis-position.
+        """
+        client = self._client
+        if client is None:
+            return None
+        try:
+            resp = client.rest_api.get_current_position_mode()
+            data = _as_dict(_resp_data(resp)) or {}
+            if not isinstance(data, dict):
+                return None
+            dual = data.get("dualSidePosition")
+            if isinstance(dual, bool):
+                return dual
+            if isinstance(dual, str):
+                return dual.lower() == "true"
+            return None
+        except Exception as exc:  # noqa: BLE001 — advisory query at connect
+            logger.warning(
+                "BinanceGateway: position-mode query failed (%s: %s); mapping "
+                "orders as one-way — a hedge-mode account will reject with "
+                "-4061 rather than mis-position.",
+                type(exc).__name__, exc,
+            )
+            return None
 
     def _build_client(self, api_key: str, api_secret: str) -> Any:
         """Lazily import the SDK and construct the per-product facade.
@@ -403,6 +457,10 @@ class BinanceGateway(BaseGateway):
                         logger.debug("SDK session.close() raised; ignoring.", exc_info=True)
         self._client = None
         self._connected = False
+        # A reconnect re-queries both (position mode may have changed server
+        # side; leverage state is per connection session cache).
+        self._hedge_mode = None
+        self._leverage_set.clear()
 
     def _require_client(self) -> Any:
         """Return the client or raise — used by explicit query methods."""
@@ -494,6 +552,20 @@ class BinanceGateway(BaseGateway):
             logger.warning("BinanceGateway.send_order(%s): %s", req.symbol, exc)
             return self._rejected(req, reason=str(exc))
 
+        # Exchange-rule gates (2026-08-16): quantize to the symbol's
+        # tick/step grid (Binance rejects off-grid floats with -1111) and,
+        # when an explicit leverage is configured, confirm it once per
+        # symbol. Both fail closed with a stated reason.
+        gate_reason = self._shape_to_symbol_rules(req, extra)
+        if gate_reason is None:
+            gate_reason = self._ensure_leverage(req.symbol)
+        if gate_reason is not None:
+            logger.warning(
+                "BinanceGateway.send_order(%s): %s -> REJECTED (fail-closed).",
+                req.symbol, gate_reason,
+            )
+            return self._rejected(req, reason=gate_reason)
+
         client_order_id = req.reference or self._gen_client_order_id()
         kwargs = {
             "symbol": req.symbol,
@@ -554,6 +626,14 @@ class BinanceGateway(BaseGateway):
         Returns ``(side, sdk_type, extra_kwargs)``. LIMIT/MARKET only; STOP
         and friends raise (conditional orders need ``new_algo_order`` on
         futures — out of MVP scope).
+
+        Position-mode aware (2026-08-16): one-way accounts send
+        ``position_side=BOTH`` + ``reduce_only``; hedge (dual-side) accounts
+        send ``position_side=LONG/SHORT`` per the requested direction with the
+        BUY/SELL side flipped for closes — ``reduce_only`` is INVALID in hedge
+        mode per the SDK signature (``NewOrderReduceOnlyEnum`` doc: "Cannot be
+        sent in Hedge Mode"). The strings "true"/"false" for ``reduce_only``
+        are deliberate: the SDK enum's values are those exact strings.
         """
         if req.direction == Direction.LONG:
             side = "BUY"
@@ -564,14 +644,24 @@ class BinanceGateway(BaseGateway):
 
         extra: dict = {}
         if self._product == "perp":
-            # One-way (hedge-off) mode. Closing a position uses reduce_only.
-            extra["position_side"] = "BOTH"
             close_offsets = {
                 Offset.CLOSE,
                 Offset.CLOSETODAY,
                 Offset.CLOSEYESTERDAY,
             }
-            extra["reduce_only"] = "true" if req.offset in close_offsets else "false"
+            is_close = req.offset in close_offsets
+            if self._hedge_mode:
+                # Hedge mode: position_side carries the direction; the order
+                # side flips to unwind (close long = SELL against LONG).
+                extra["position_side"] = (
+                    "LONG" if req.direction == Direction.LONG else "SHORT"
+                )
+                if is_close:
+                    side = "SELL" if side == "BUY" else "BUY"
+                # reduce_only must NOT be sent in hedge mode.
+            else:
+                extra["position_side"] = "BOTH"
+                extra["reduce_only"] = "true" if is_close else "false"
         elif self._product == "spot" and req.offset != Offset.NONE:
             # Spot has no exchange-level reduce-only flag. Accepting a futures
             # CLOSE marker here would silently turn a risk exit into an ordinary
@@ -592,6 +682,70 @@ class BinanceGateway(BaseGateway):
                 "(LIMIT/MARKET only; conditional stops need new_algo_order)"
             )
         return side, sdk_type, extra
+
+    # ------------------------------------------------------------------
+    # Exchange-rule gates (exchangeInfo precision / leverage)
+    # ------------------------------------------------------------------
+
+    def _shape_to_symbol_rules(self, req: OrderRequest, extra: dict) -> str | None:
+        """Quantize ``extra`` to the symbol's tick/step grid; None or reason.
+
+        Fetches the TTL-cached exchangeInfo filters (``LOT_SIZE`` stepSize /
+        ``PRICE_FILTER`` tickSize / ``MIN_NOTIONAL``) and rewrites
+        ``extra["quantity"]`` / ``extra["price"]`` in place. Returns a reject
+        reason when the LLM-sized values cannot be placed honestly (below
+        min qty/notional, over max qty, or the filters are unavailable —
+        fail-closed: Binance would reject a mis-quantized order with -1111
+        anyway, and clamping silently would change the intended exposure).
+        """
+        try:
+            filters = get_symbol_filters(
+                req.symbol,
+                "binance_perp" if self._product == "perp" else "binance_spot",
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-closed gate reason
+            return f"exchangeInfo unavailable ({type(exc).__name__}: {exc})"
+        shaped = quantize_order(extra.get("price"), float(extra["quantity"]), filters)
+        violations = [k for k in ("below_min_qty", "below_min_notional", "over_max_qty")
+                      if shaped[k]]
+        if violations:
+            return (
+                f"symbol rules violation: {', '.join(violations)} "
+                f"(quantized qty={shaped['quantity']}, "
+                f"min_qty={filters.min_qty}, min_notional={filters.min_notional})"
+            )
+        extra["quantity"] = shaped["quantity"]
+        if "price" in extra and shaped["price"] is not None:
+            extra["price"] = shaped["price"]
+        return None
+
+    def _ensure_leverage(self, symbol: str) -> str | None:
+        """Set the configured initial leverage once per symbol; None or reason.
+
+        ``YIAGENTS_EXECUTION_LEVERAGE`` (default 0/unset) opts in; 0 leaves
+        each symbol at the account default and this gate is a no-op. With an
+        explicit leverage configured, a failed POST /fapi/v1/leverage rejects
+        the order (fail-closed): leverage moves the liquidation distance, and
+        proceeding on an unconfirmed margin setup is exactly the silent
+        risk-change this codebase refuses.
+        """
+        try:
+            leverage = int(os.environ.get(_ENV_LEVERAGE, "0"))
+        except ValueError:
+            return f"{_ENV_LEVERAGE} is not an integer"
+        if leverage <= 0 or self._product != "perp" or symbol in self._leverage_set:
+            return None
+        client = self._client
+        if client is None:
+            return "gateway not connected"
+        try:
+            client.rest_api.change_initial_leverage(
+                symbol=symbol, leverage=leverage,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-closed gate reason
+            return f"cannot set leverage {leverage}x on {symbol} ({type(exc).__name__}: {exc})"
+        self._leverage_set.add(symbol)
+        return None
 
     def _handle_submit_error(
         self, req: OrderRequest, client_order_id: str, exc: BaseException

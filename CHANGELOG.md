@@ -10,6 +10,105 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+
+- **P0: Binance OHLC no longer rounded to 2 decimals.**
+  `binance_klines_frame` mirrored yfinance's display rounding
+  (`df.round(2)`), which zeroes sub-cent contracts outright (PEPE ≈ 1e-5 →
+  0.0) and badly distorts others (1000PEPE ≈ 19% error) — and
+  `get_binance_indicators` computed its whole battery on that destroyed
+  frame. Prices now keep the exchange's own precision end-to-end, and the
+  indicator markdown table formats adaptively by magnitude (the display twin
+  of the same bug: `.2f` rendered low-price closes as `0.00`). Tests used
+  ~100-priced fixtures, which is why this survived every prior audit.
+- **P0: `_detect_three_black_crows` detected the wrong shape entirely.**
+  The "mirror" implementation swapped Open/Close and High/Low columns
+  without negating prices, so its conditions required RISING opens and
+  closes: textbook three-black-crows never matched, while three ascending
+  red bars were flagged as bearish crows and fed to the LLM as evidence.
+  Rewritten to the textbook definition (three red bars, strictly falling
+  closes, each open inside the prior body, small lower shadows) with
+  regression tests for both directions; three white soldiers unchanged.
+- **`weekly_pivots` off-by-one week.** `resample_weekly` already drops the
+  incomplete week, so `iloc[-2]` returned the week-before-last's pivots
+  (a Wednesday analysis cited levels from 8+ trading days ago). Now reads
+  the last completed week directly, with a semantic test.
+- **`relative_volume` division-by-zero → `inf`.** A zero prior-window mean
+  (suspended/new listings) now yields NaN ("unmeasurable"), not an
+  infinitely-unusual reading rendered as `inf`.
+- **Cross-market relative-strength windows aligned by date.** The benchmark
+  leg counted rows (21 crypto days ≈ 29 calendar days of SPY), stretching
+  the benchmark window and skewing every RS ratio for crypto/US pairs; it
+  now anchors on the ticker's window dates via asof.
+- **IC exporter bypassed the vendor-scale fix.** `export_ic_dataset` read
+  `wrapped[ind]` directly instead of `compute_indicator`, so mfi's 0–1→0–100
+  rescale never applied to IC inputs (latent — the indicator gate currently
+  excludes mfi). Same scale as every other consumer now.
+- **`_futures_data_window` start-only lookahead.** With only `start_date`
+  given, the window end defaulted to `datetime.now()` even under a pinned
+  analysis date, handing backtests positioning rows past their decision
+  point; the start-only branch now clamps through `current_pit_end` exactly
+  like an explicit end date.
+- **`resample_weekly` silently ignored an unparseable `curr_date`**, keeping
+  the still-open week as if complete (a look-ahead-style weekly close); it
+  now raises instead of guessing.
+
+### Added
+
+- **Mark-price system for USDT-M perps.** New
+  `get_binance_premium_index` tool (`/fapi/v1/premiumIndex`, weight 1)
+  surfaces markPrice / indexPrice / markVsIndexPct / lastFundingRate (the
+  rate in effect for the NEXT settlement) / nextFundingTime, bound to the
+  perp analyst in live mode; `binance_klines_frame`/`get_binance_klines`
+  accept `price_type="mark"` for mark-price klines; and the analyst nudge
+  now requires liquidation-distance claims to anchor to markPrice (Binance
+  liquidates on mark, not last price — the old discussion was structurally
+  biased). Funding cadence is inferred from settlement spacing (8h/4h/1h
+  per contract) and stated in the header instead of hardcoded 8h.
+- **exchangeInfo filters + order quantization.** New
+  `dataflows/binance_filters.py`: TTL-cached symbol filter blocks
+  (tickSize/stepSize/minNotional) with Decimal-exact `quantize_order`
+  (quantity floors to stepSize, price rounds to tickSize, min-qty/notional/
+  max-qty flags). The execution gateway quantizes every order through it
+  before submit — LLM-sized floats otherwise draw `-1111 Precision` rejects
+  on essentially every order — and fails closed when the filters can't be
+  fetched or the sized order violates the symbol's rules (no silent
+  clamping of intended exposure).
+- **Position-mode + leverage handling in the execution gateway.** `connect`
+  queries the account's perp position mode (`get_current_position_mode`);
+  hedge (dual-side) accounts now map `position_side=LONG/SHORT` with the
+  correct close-side flip and omit `reduce_only` (invalid in hedge mode)
+  instead of guaranteed `-4061` rejects; one-way accounts keep BOTH +
+  reduce_only. Opt-in `YIAGENTS_EXECUTION_LEVERAGE` sets initial leverage
+  once per symbol (`change_initial_leverage`) and rejects the order if the
+  call fails (leverage moves liquidation distance — an unconfirmed margin
+  setup must not trade silently). Documented in `.env.example`.
+- **Long-only perp backtesting with funding drag.** `run_backtest` now
+  accepts `asset_type="crypto_perp"`: the long-only engine charges each
+  day's funding settlements on the held notional (strategy AND buy-and-hold,
+  so the comparison stays apples-to-apples), sourced from the Binance
+  funding vendor or an injectable `funding_provider`. Missing funding data
+  fails closed (a spot simulation relabeled as a perp backtest is worse
+  than no answer); `config_summary` states the model's limits explicitly
+  (shorting/leverage/margin/liquidation not modeled).
+- **Binance live-window staleness guard.** When a klines window reaches
+  near the present, a frame whose last candle is >10 days old (delisted /
+  renamed contract) now raises the same typed stale error as the yfinance
+  path instead of feeding months-old prices as "current". Historical
+  windows stay exempt — an early-ending series is a legitimate backtest
+  input.
+- **Outbound-URL validation on the Binance transport.** `_do_request`
+  refuses non-HTTP(S) schemes and localhost/loopback/private/reserved
+  literal hosts before any request is issued, so a misconfigured base can
+  never turn a market-data fetch into an internal-network probe.
+- **Per-product Binance weight budgets.** The spot limiter now defaults to
+  the documented 6000/min (was sharing fapi's 2400 — merely over-conservative);
+  an explicit `binance_weight_threshold` still overrides both.
+- **Spot-default indicator binding.** `get_binance_spot_indicators` mirrors
+  the perp tool with venue defaulting to spot, bound in crypto_spot runs so
+  an omitted venue argument can never silently compute spot indicators on
+  perp candles (or vice versa).
+
 ### Changed
 
 - **Reddit dataflow: OAuth-API-first.** When `REDDIT_CLIENT_ID` /
@@ -28,6 +127,32 @@ Breaking changes within the 0.x line are called out explicitly.
   untouched. Optional `REDDIT_USER_AGENT` personalizes the UA per Reddit's API
   etiquette. The secret lives only in env / memory; it never touches disk or
   logs.
+- **`get_binance_spot_perp_basis` is backtest-safe.** Optional
+  `start_date`/`end_date` with `current_pit_end` clamping, and the default
+  "now" end is clamped the same way — the previously documented look-ahead
+  can no longer fire under a pinned analysis date.
+- **A-share breadth: 90s TTL cache + vectorized aggregation.** One live run
+  fetched the ~5400-row whole-market spot table per caller (breadth tool,
+  regime line, each LLM re-call); the fetch is now shared behind a
+  process-level TTL cache and the row loop is vectorized (per-symbol limit
+  thresholds remain per-row). Tests reset the cache via
+  `_patch_ak` automatically.
+- **Deduplication cleanup.** `YiAgentsGraph._resolve_benchmark` now
+  delegates to `market_regime.resolve_market_benchmark` (it was a verbatim
+  copy that had already drifted once); the dead turbulence-only renderer
+  `format_market_regime` is removed (its superset
+  `format_regime_context` replaced it in 2026-08-15 and only its own tests
+  still called it); double-top/bottom scanning reports the MOST RECENT
+  qualifying pair instead of the oldest coincidence in the window.
+- **Indicator tool docstring encourages batching.** `get_indicators` told
+  the LLM to "call once per indicator" while already supporting
+  comma-separated names — an 8-indicator analysis made 8 tool round-trips
+  for identical data; it now asks for one batched call.
+- **Simulated exchangeInfo in gateway tests.** The gateway tests'
+  assertions that raw quantities/prices pass through untouched are
+  superseded: they now pin a permissive tick/step grid while dedicated
+  tests pin the quantization math (floor-to-step, nearest-tick,
+  min-notional rejection, fail-closed on unavailable filters).
 
 ## [0.3.0] — 2026-06-22
 
