@@ -240,12 +240,16 @@ def smoke(ticker: str, date: str, profile: bool = False) -> int:
         return 2
 
 
-def baseline_backtest(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, out, workers=1):
-    """档 1：现状基线（简单评级→仓位）。
+def baseline_backtest(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, out,
+                      workers=1, asset_type="stock", perp_kwargs=None):
+    """档 1：纯基线回测（无风控 overlay）。
 
     ``workers`` > 1 并发跑多个 ticker（每票借一个独立 graph 实例，内部
     dates/runs 仍串行）。默认 ``workers``=1 与今天逐票串行完全等价。
+    ``asset_type="crypto_perp"`` 时引擎自动改用 Binance perp 自身 K 线计价、
+    拉取资金费，并可叠加 ``perp_kwargs``（杠杆/做空/费用模型）。
     """
+    perp_kwargs = perp_kwargs or {}
     print(f"\n=== 基线回测：{tickers} | {start}→{end} | {n_dates}×再平衡 ×{runs} 次 ===")
     dates = _rebalance_dates(start, end, step, n_dates)
     print(f"  再平衡日期 {dates}")
@@ -256,7 +260,8 @@ def baseline_backtest(tickers, start, end, step, n_dates, holding_days, cost_bps
             print(f"    [{t}] run {r} ...", flush=True)
             res = run_backtest(ta, t, dates, holding_days=holding_days,
                                cost_bps=cost_bps, run_tag=f"base_r{r}",
-                               factor_model="3")
+                               factor_model="3", asset_type=asset_type,
+                               **perp_kwargs)
             m = res.metrics
             print(f"      [{t}] 总收益 {m.total_return:.2%} | Sharpe {m.sharpe:.2f} | "
                   f"MDD {m.max_drawdown:.2%} | vs B&H alpha {m.alpha_vs_buyhold:.2%}")
@@ -284,12 +289,15 @@ def baseline_backtest(tickers, start, end, step, n_dates, holding_days, cost_bps
     return failures == 0
 
 
-def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, out, workers=1):
+def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, out, workers=1,
+            asset_type="stock", perp_kwargs=None):
     """档 2：基线 vs 风控增强 + 闸门判定。
 
     ``workers`` > 1 并发跑多个 ticker（每票借独立 graph 实例）。默认 ``workers``=1
     与今天逐票串行等价；闸门判定与报告聚合始终串行（确定性顺序）。
+    ``asset_type``/``perp_kwargs`` 语义与 baseline_backtest 相同，两腿同等应用。
     """
+    perp_kwargs = perp_kwargs or {}
     print(f"\n=== 完整 A/B：基线 vs Phase-1 风控 | {tickers} ===")
 
     # 启用风控配置
@@ -323,6 +331,7 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
                 ta, t, dates, holding_days=holding_days,
                 cost_bps=cost_bps, run_tag=pair_tag, cache=decision_cache,
                 n_trials=n_trials, factor_model="3",
+                asset_type=asset_type, **perp_kwargs,
             )
             rm = RiskManager.from_config(risk_cfg)
             wfn = build_backtest_weight_fn(rm, t)
@@ -331,6 +340,7 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
                 cost_bps=cost_bps, weight_fn=wfn,
                 run_tag=pair_tag, cache=decision_cache,
                 n_trials=n_trials, factor_model="3",
+                asset_type=asset_type, **perp_kwargs,
             )
             mb = base.metrics
             mi = res.metrics
@@ -397,6 +407,17 @@ def main():
     p.add_argument("--holding-days", type=int, default=5)
     p.add_argument("--cost-bps", type=float, default=5.0)
     p.add_argument("--runs", type=int, default=2)
+    p.add_argument("--asset-type", default="stock",
+                   choices=["stock", "crypto", "crypto_perp"],
+                   help="crypto_perp：Binance 永续自身 K 线计价 + 资金费拖累（覆盖缺口 fail-closed）")
+    p.add_argument("--leverage", type=float, default=1.0,
+                   help="永续杠杆（>1 启用 isolated 保证金/强平建模；仅 crypto_perp）")
+    p.add_argument("--allow-short", action="store_true",
+                   help="永续做空（Sell→-1x，收资金费；仅 crypto_perp）")
+    p.add_argument("--slippage-bps", type=float, default=0.0,
+                   help="成交滑点 bps（不利方向折入成交价）")
+    p.add_argument("--bnb-discount", action="store_true",
+                   help="手续费按 BNB 抵扣 9 折")
     p.add_argument("--workers", type=int, default=1,
                    help="跨 ticker 并发数 K（1=串行，与今天等价；>1 并发，受 DeepSeek RPM/代理约束）")
     p.add_argument("--profile", action="store_true",
@@ -408,6 +429,21 @@ def main():
     start = args.start or (datetime.strptime(end, "%Y-%m-%d")
                            - timedelta(days=180)).strftime("%Y-%m-%d")
 
+    # Perp knobs thread through both modes; at defaults the dict is empty and
+    # every call is byte-identical to the pre-perp behaviour.
+    perp_kwargs = {}
+    if args.asset_type == "crypto_perp":
+        if args.leverage != 1.0:
+            perp_kwargs["leverage"] = args.leverage
+        if args.allow_short:
+            perp_kwargs["allow_short"] = True
+        if args.slippage_bps:
+            perp_kwargs["slippage_bps"] = args.slippage_bps
+        if args.bnb_discount:
+            perp_kwargs["bnb_discount"] = True
+        print(f"  perp 模式: leverage={args.leverage} short={args.allow_short} "
+              f"slippage={args.slippage_bps}bps bnb9折={args.bnb_discount}")
+
     if args.preflight:
         sys.exit(preflight(args.ticker))
     elif args.smoke:
@@ -415,12 +451,14 @@ def main():
     elif args.baseline:
         ok = baseline_backtest(args.tickers, start, end, args.step, args.rebalance,
                                args.holding_days, args.cost_bps, args.runs, args.out,
-                               workers=args.workers)
+                               workers=args.workers, asset_type=args.asset_type,
+                               perp_kwargs=perp_kwargs)
         sys.exit(0 if ok else 1)
     else:
         ok = full_ab(args.tickers, start, end, args.step, args.rebalance,
                      args.holding_days, args.cost_bps, args.runs, args.out,
-                     workers=args.workers)
+                     workers=args.workers, asset_type=args.asset_type,
+                     perp_kwargs=perp_kwargs)
         sys.exit(0 if ok else 1)
 
 

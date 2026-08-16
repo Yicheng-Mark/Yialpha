@@ -115,13 +115,19 @@ def _indicators_core(
         )
 
     frame_reset = frame.reset_index()
+    # The wrap() copy is load-bearing: stockstats converts/adds columns on the
+    # frame it wraps, and frame_reset stays the read-only source below.
     sdf = wrap(frame_reset.copy())
     columns: dict[str, pd.Series] = {}
     skipped: list[str] = []
     for name in names:
         try:
             if name in DERIVED_FEATURES:
-                derived = compute_derived(frame_reset.copy(), name)
+                # compute_derived never mutates its input (obv copies
+                # internally; rvol/ewma_vol/rel_vol_20 are read-only) — the
+                # old per-name full-frame copy was one DataFrame copy per
+                # derived indicator, ~12 per tool call.
+                derived = compute_derived(frame_reset, name)
                 if derived is None:
                     raise RuntimeError("registry miss")
                 columns[name] = derived

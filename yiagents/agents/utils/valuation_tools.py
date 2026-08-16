@@ -22,6 +22,7 @@ from typing import Annotated
 from langchain_core.tools import tool
 
 from yiagents.dataflows.valuation_methods import summarize
+from yiagents.fmt import fmt_pct
 
 
 def _fmt(x: float | None) -> str:
@@ -31,9 +32,8 @@ def _fmt(x: float | None) -> str:
 
 
 def _fmt_pct(x: float | None) -> str:
-    if x is None:
-        return "n/a"
-    return f"{x * 100:.2f}%"
+    # Shared implementation (yiagents.fmt); local alias for the call sites.
+    return fmt_pct(x)
 
 
 @tool

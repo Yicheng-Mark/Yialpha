@@ -83,12 +83,16 @@ def _extract_article_data(article: dict) -> dict:
     else:
         # Fallback for flat structure. Parse the epoch publish time so flat
         # articles are date-filterable too (otherwise they bypass the
-        # historical window and leak future news, #992/#1007).
+        # historical window and leak future news, #992/#1007). The epoch is
+        # converted as UTC — ``fromtimestamp(ts)`` without tz yields the HOST's
+        # wall clock, which on a non-UTC host (e.g. UTC+8) mixes two time
+        # bases in the same window comparison and skews inclusion near
+        # midnight by the offset.
         pub_date = None
         ts = article.get("providerPublishTime")
         if ts:
             with contextlib.suppress(ValueError, OSError, TypeError):
-                pub_date = datetime.fromtimestamp(ts)
+                pub_date = datetime.fromtimestamp(ts, tz=timezone.utc)
         return {
             "title": article.get("title", "No title"),
             "summary": article.get("summary", ""),
@@ -107,8 +111,7 @@ def _to_naive_utc(pub_date) -> datetime:
     article at ``2025-05-10T01:30+08:00`` (i.e. 2025-05-09 17:30 UTC) was
     compared as if it were May 10th, skewing the window by up to the offset.
     Converting to UTC first makes the comparison a single calendar standard
-    on both sides. Naive datetimes (``fromtimestamp`` — local wall clock) pass
-    through unchanged.
+    on both sides. Naive datetimes pass through unchanged.
     """
     if getattr(pub_date, "tzinfo", None) is not None:
         return pub_date.astimezone(timezone.utc).replace(tzinfo=None)

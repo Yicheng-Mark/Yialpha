@@ -205,6 +205,34 @@ def _in_window(d_str: str, upper_d: date, upper_set: bool) -> bool:
     return not (upper_set and d > upper_d)
 
 
+def _date_window_rows(df, col_date, upper_d: date, upper_set: bool, lower_d: date):
+    """Windowed ``(d_str, row)`` pairs — the vectorized per-row date gate.
+
+    Column-level equivalent of the old ``iterrows`` loop calling
+    ``date.fromisoformat`` per row: rows with empty/unparseable dates drop,
+    dated rows outside ``[lower_d, upper_d]`` drop (the upper bound only when
+    a PIT date is set). Vendor frames often carry YEARS of full history (the
+    money-flow / dragon-tiger / northbound endpoints have no date params), so
+    the old scan built a Series object per historical row just to discard it;
+    this builds the boolean mask column-wise and materializes only the
+    windowed slice. Output order matches the input frame, exactly like the
+    loop it replaces.
+    """
+    if col_date is None or getattr(df, "empty", True):
+        return []
+    strs = df[col_date].map(_parse_news_date)
+    dts = pd.to_datetime(strs, errors="coerce", format="%Y-%m-%d")
+    keep = dts.notna()
+    keep &= dts.dt.date >= lower_d
+    if upper_set:
+        keep &= dts.dt.date <= upper_d
+    kept = df[keep]
+    return [
+        (d_str, r)
+        for d_str, (_, r) in zip(strs[keep].tolist(), kept.iterrows(), strict=True)
+    ]
+
+
 def _market_for(ticker: str) -> str:
     """Derive the AKShare market prefix ('sh'/'sz') from a YiAgents A-share ticker.
 
@@ -285,7 +313,10 @@ def get_a_share_news_native(
 
     Pulled from AKShare's ``stock_news_em`` (Eastmoney per-stock feed), reached
     **directly** (proxy env popped) so the domestic HTTP host cannot hang on the
-    SOCKS5 VPN tunnel. Items are filtered by publish date ``<= curr_date``.
+    SOCKS5 VPN tunnel. Items are filtered to ``[curr_date - look_back_days,
+    curr_date]`` (both bounds client-side; the feed returns full history with no
+    date params). Dated rows outside the window are dropped; undated rows keep
+    the documented PIT fail-open policy.
     Returns a markdown list of the most recent headlines (title, date, source,
     short snippet). Non-A-share ticker -> :class:`NoMarketDataError`.
 
@@ -298,6 +329,7 @@ def get_a_share_news_native(
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
     upper_set = bool(upper)
+    lower_d = upper_d - timedelta(days=int(look_back_days))
 
     try:
         with _direct_connect():
@@ -332,6 +364,17 @@ def get_a_share_news_native(
     for _, r in df.iterrows():
         d_str = _parse_news_date(r.get(col_time)) if col_time else ""
         if not _in_window(d_str, upper_d, upper_set):
+            continue
+        # Window lower bound — the header promises "last {look_back_days}d"
+        # and every sibling tool enforces it; without this, stale dated
+        # headlines survive (and can displace recent ones under ``limit``).
+        # Undated/unparseable rows keep the documented _in_window fail-open
+        # policy (a real headline is signal even without a timestamp).
+        try:
+            d = date.fromisoformat(d_str[:10]) if d_str else None
+        except ValueError:
+            d = None
+        if d is not None and d < lower_d:
             continue
         title = str(r.get(col_title, "") or "").strip()
         if not title:
@@ -416,20 +459,7 @@ def get_a_share_money_flow_native(
     col_md = _pick(df.columns, ("中单净流入-净额",))
     col_sm = _pick(df.columns, ("小单净流入-净额",))
 
-    rows = []
-    for _, r in df.iterrows():
-        d_str = _parse_news_date(r[col_date]) if col_date else ""
-        try:
-            d = date.fromisoformat(d_str) if d_str else None
-        except ValueError:
-            d = None
-        if d is None:
-            continue
-        if upper_set and d > upper_d:       # PIT: drop post-curr_date
-            continue
-        if d < lower_d:                     # window lower bound
-            continue
-        rows.append((d_str, r))
+    rows = _date_window_rows(df, col_date, upper_d, upper_set, lower_d)
 
     if not rows:
         out.write(f"\nNo money-flow rows for {ticker} fall within the last "
@@ -534,21 +564,10 @@ def get_a_share_dragon_tiger_native(
     col_net_ratio = _pick(df.columns, ("净买额占总成交比",))
 
     rows = []
-    for _, r in df.iterrows():
-        if col_code and str(r[col_code]).strip() != code:
-            continue
-        d_str = _parse_news_date(r[col_date]) if col_date else ""
-        try:
-            d = date.fromisoformat(d_str) if d_str else None
-        except ValueError:
-            d = None
-        if d is None:
-            continue
-        if upper_set and d > upper_d:       # PIT belt (end_date already bounds it)
-            continue
-        if d < lower_d:
-            continue
-        rows.append((d_str, r))
+    if col_code:
+        code_mask = df[col_code].astype(str).str.strip() == code
+        df = df[code_mask]
+    rows = _date_window_rows(df, col_date, upper_d, upper_set, lower_d)
 
     if not rows:
         out.write(f"\nNo dragon-tiger (龙虎榜) appearances for {ticker} in the last "
@@ -624,20 +643,7 @@ def get_a_share_northbound_native(
     col_shares_pct = _pick(df.columns, ("持股数量占发行股", "持股比例"))
     col_mkt_val_pct = _pick(df.columns, ("持股市值占比",))
 
-    rows = []
-    for _, r in df.iterrows():
-        d_str = _parse_news_date(r[col_date]) if col_date else ""
-        try:
-            d = date.fromisoformat(d_str) if d_str else None
-        except ValueError:
-            d = None
-        if d is None:
-            continue
-        if upper_set and d > upper_d:
-            continue
-        if d < lower_d:
-            continue
-        rows.append((d_str, r))
+    rows = _date_window_rows(df, col_date, upper_d, upper_set, lower_d)
 
     if not rows:
         out.write(f"\nNo northbound holding rows for {ticker} fall within the last "
@@ -807,11 +813,13 @@ def get_a_share_sector_flow_native(
     col_large = _pick(df.columns, ("今日大单净流入-净额", "大单净流入-净额"))
 
     rows = []
-    for _, r in df.iterrows():
-        sector_name = str(_cell(r, col_sector) or "").strip()
-        if not sector_name:
-            continue
-        rows.append((sector_name, r))
+    if col_sector is not None and not getattr(df, "empty", True):
+        names = df[col_sector].map(lambda v: str(v or "").strip())
+        kept = df[names != ""]
+        rows = [
+            (str(_cell(r, col_sector) or "").strip(), r)
+            for _, r in kept.iterrows()
+        ]
 
     if not rows:
         out.write("\nNo sector rows parsed. Report 'no coverage found' and do not "
@@ -922,10 +930,12 @@ def get_a_share_realtime_quote_native(
     col_prev = _pick(df.columns, ("昨收",))
 
     row = None
-    for _, r in df.iterrows():
-        if col_code and str(r[col_code]).strip() == code:
-            row = r
-            break
+    if col_code and not getattr(df, "empty", True):
+        # The spot table carries ~5,400 rows; the old iterrows scan built a
+        # Series per row until the code matched. One column-wise compare.
+        hits = df[df[col_code].astype(str).str.strip() == code]
+        if not hits.empty:
+            row = hits.iloc[0]
 
     if row is None:
         out.write(f"\nStock {code} not found in the real-time spot table. Report "

@@ -1,8 +1,11 @@
 import os
 from typing import Any
 
-from ._timeout import resolve_timeout
-from .base_client import BaseLLMClient, normalize_content
+from .base_client import (
+    BaseLLMClient,
+    apply_passthrough_kwargs,
+    make_normalized_chat_class,
+)
 from .validators import validate_model
 
 # Bedrock has no global default region; us-west-2 hosts the broadest model set.
@@ -29,13 +32,10 @@ def _bedrock_class() -> type:
             'Install it with: pip install "yiagents[bedrock]"'
         ) from exc
 
-    class NormalizedChatBedrockConverse(ChatBedrockConverse):
-        """ChatBedrockConverse with normalized (string) content output."""
-
-        def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
-            return normalize_content(super().invoke(input, config, **kwargs))
-
-    _BEDROCK_CLASS = NormalizedChatBedrockConverse
+    _BEDROCK_CLASS = make_normalized_chat_class(
+        ChatBedrockConverse, "NormalizedChatBedrockConverse",
+        "ChatBedrockConverse with normalized (string) content output.",
+    )
     return _BEDROCK_CLASS
 
 
@@ -60,15 +60,14 @@ class BedrockClient(BaseLLMClient):
             or _DEFAULT_REGION
         )
         llm_kwargs: dict[str, Any] = {"model": self.model, "region_name": region}
-        for key in ("temperature", "max_tokens", "max_retries", "callbacks", "timeout"):
-            if key in self.kwargs:
-                llm_kwargs[key] = self.kwargs[key]
-
-        # Read-timeout safety net (shared with all LLM clients).
-        # ChatBedrockConverse's ``timeout`` sets botocore connect/read timeouts;
-        # without it a half-open socket hangs the batch. Bedrock is always a
-        # cloud provider -> is_local=False.
-        resolve_timeout(llm_kwargs, is_local=False, provider_name="bedrock")
+        # Read-timeout note: ChatBedrockConverse's ``timeout`` sets botocore
+        # connect/read timeouts; the shared safety net below keeps a half-open
+        # socket from hanging the batch.
+        apply_passthrough_kwargs(
+            llm_kwargs, self.kwargs,
+            ("temperature", "max_tokens", "max_retries", "callbacks", "timeout"),
+            "bedrock",
+        )
 
         return chat_cls(**llm_kwargs)
 

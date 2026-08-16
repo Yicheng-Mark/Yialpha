@@ -106,8 +106,14 @@ def test_overview_rejects_future_label_for_todays_snapshot():
 
 
 @pytest.mark.unit
-def test_overview_conservative_on_unparseable():
-    assert overview_would_leak_future("not-a-date") is False
+def test_overview_fails_closed_on_unparseable():
+    """2026-08-16: an unparseable non-empty date cannot be proven to be today,
+    so the current-point overview snapshot is refused (fail-closed, the same
+    "fail open only for live" policy as clamp_end_date). It used to return
+    False — serving today's .info values into a nominally historical run —
+    which the 2026-08-16 audit reclassified as a leak, not conservatism."""
+    assert overview_would_leak_future("not-a-date") is True
+    assert overview_would_leak_future("2026/08/01") is True   # slash form an LLM can emit
 
 
 # ---------------------------------------------------------------------------

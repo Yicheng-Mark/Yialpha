@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from yiagents.backtest.engine import BacktestResult
+from yiagents.fmt import fmt_num3, fmt_pct
 
 logger = logging.getLogger(__name__)
 
@@ -48,15 +49,13 @@ def _sparkline(values: Sequence[float]) -> str:
 
 
 def _fmt_pct(x: float | None) -> str:
-    if x is None:
-        return "n/a"
-    return f"{x * 100:.2f}%"
+    # Shared implementation (yiagents.fmt) — kept as a local alias so the
+    # ~26 call sites read unchanged.
+    return fmt_pct(x)
 
 
 def _fmt_num(x: float | None) -> str:
-    if x is None:
-        return "n/a"
-    return f"{x:.3f}"
+    return fmt_num3(x)
 
 
 def _fmt_profit_factor(x: float | None) -> str:

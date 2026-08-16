@@ -53,8 +53,6 @@ from yiagents.logging_config import setup_logging  # noqa: E402
 setup_logging()
 
 from yiagents.batch.runner import BatchRunner  # noqa: E402
-from yiagents.cli.utils import detect_asset_type, is_valid_ticker_input  # noqa: E402
-from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -82,51 +80,25 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _resolve_asset_type(tickers: list[str], choice: str) -> str:
-    if choice != "auto":
-        return choice
-    # 按首个 ticker 判定，并校验整批同类（一个批次只能一种 config）。
-    inferred = detect_asset_type(tickers[0]).value
-    mismatch = [t for t in tickers if detect_asset_type(t).value != inferred]
-    if mismatch:
-        print(
-            f"❌ 批次含混合资产类别：首个 {tickers[0]} 判为 {inferred}，"
-            f"但 {mismatch} 不一致。一个批次只能同一类——请分成两个批次。"
-        )
-        sys.exit(2)
-    print(f"ℹ️  资产类别自动判定：{inferred}（按 {tickers[0]}）")
-    return inferred
-
-
 def main() -> int:
     args = _parse_args()
 
-    # 校验每个 ticker 字符合法（绕过单符号限制，逐个校验列表元素）。
-    bad = [t for t in args.tickers if not is_valid_ticker_input(t)]
-    if bad:
-        print(f"❌ 非法 ticker：{bad}（允许字母数字与 ._-^=）")
-        return 2
+    # Shared validation/config assembly (the single source both this script
+    # and `yiagents batch` agree on — the validation, worker-override and
+    # config code that used to be duplicated here now lives in
+    # yiagents.batch.runner.prepare_batch_run).
+    from yiagents.batch.runner import BatchInputError, prepare_batch_run
 
     try:
-        datetime.strptime(args.date, "%Y-%m-%d")
-    except ValueError:
-        print(f"❌ 日期格式错误：{args.date}（需 YYYY-MM-DD）")
+        config, asset_type = prepare_batch_run(
+            args.tickers, args.date, args.asset_type,
+            workers=args.workers, results_dir=args.out,
+        )
+    except BatchInputError as exc:
+        print(f"❌ {exc}")
         return 2
-
-    asset_type = _resolve_asset_type(args.tickers, args.asset_type)
-
-    config = DEFAULT_CONFIG.copy()
-    # DEFAULT_CONFIG["batch_concurrency"] = False → 默认严格串行（K=1）。
-    # 显式 --workers 是权威的：>1 强制开启并发，==1 显式串行，缺省才尊重
-    # env/默认。与 yiagents.cli.main._apply_batch_worker_override 同语义
-    # （避免导入整个 CLI 只为复用这一个纯函数）。
-    if args.workers is not None:
-        if args.workers < 1:
-            print("❌ --workers 必须 >= 1")
-            return 2
-        config["batch_concurrency"] = args.workers > 1
-    if args.out:
-        config["results_dir"] = args.out
+    if args.asset_type == "auto":
+        print(f"ℹ️  资产类别自动判定：{asset_type}（按 {args.tickers[0]}）")
 
     workers_hint = "" if args.workers is None else f" (K={args.workers})"
     print(

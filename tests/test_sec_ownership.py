@@ -649,6 +649,46 @@ def test_13f_row_malformed_filing_date_fail_closed(monkeypatch, tmp_path, caplog
 
 
 @pytest.mark.unit
+def test_13f_row_missing_filing_date_fail_closed(monkeypatch, tmp_path, caplog):
+    # An EMPTY FILING_DATE is the same fail-closed class: the row carries no
+    # as-of proof at all. The old `if fd:` wrapper skipped the PIT gate for
+    # exactly this case and kept the holding.
+    cover = COVER_HEADER + "\n" + (
+        "00007A\t0001\t2024-05-15\tEARLY CAPITAL\t2024-03-31\n"
+        "00007B\t0002\t\tNO DATE CAPITAL\t2024-03-31"
+    )
+    holding = HOLDING_HEADER + "\n" + (
+        "00007A\tAPPLE INC\t037833100\tCOM\t10000\t100\tSH\t\tSOLE\t100\t0\t0\n"
+        "00007B\tAPPLE INC\t037833100\tCOM\t88888\t888\tSH\t\tSOLE\t888\t0\t0"
+    )
+    _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
+    with caplog.at_level("DEBUG", logger="yiagents.dataflows.sec_ownership"):
+        out = sec_ownership.get_institutional_holdings("AAPL", "2024-06-15", 180)
+    assert "EARLY CAPITAL" in out
+    assert "NO DATE CAPITAL" not in out    # no as-of proof -> dropped
+    assert any("missing filing_date" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_13f_holding_without_cover_row_dropped(monkeypatch, tmp_path):
+    # A holding whose accession has NO cover row at all (cover_by_acc miss)
+    # has no filing date either — dropped by the same gate, not kept.
+    cover = COVER_HEADER + "\n" + (
+        "00008A\t0001\t2024-05-15\tEARLY CAPITAL\t2024-03-31"
+    )
+    holding = HOLDING_HEADER + "\n" + (
+        "00008A\tAPPLE INC\t037833100\tCOM\t10000\t100\tSH\t\tSOLE\t100\t0\t0\n"
+        "00008Z\tAPPLE INC\t037833100\tCOM\t77777\t777\tSH\t\tSOLE\t777\t0\t0"
+    )
+    _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
+    out = sec_ownership.get_institutional_holdings("AAPL", "2024-06-15", 180)
+    assert "EARLY CAPITAL" in out
+    # The accessionless row surfaces only via its fallback name (the accession
+    # id itself), which must not appear as a holder.
+    assert "00008Z" not in out
+
+
+@pytest.mark.unit
 def test_13f_no_holders_honest_empty(monkeypatch, tmp_path):
     holding = HOLDING_HEADER + "\n" + (
         "00004A\tMICROSOFT CORP\t594918104\tCOM\t9999\t10\tSH\t\tSOLE\t10\t0\t0"

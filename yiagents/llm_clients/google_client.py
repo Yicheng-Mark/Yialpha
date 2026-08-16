@@ -2,20 +2,19 @@ from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from ._timeout import resolve_timeout
-from .base_client import BaseLLMClient, normalize_content
+from .base_client import (
+    BaseLLMClient,
+    apply_passthrough_kwargs,
+    make_normalized_chat_class,
+)
 from .validators import validate_model
 
-
-class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
-    """ChatGoogleGenerativeAI with normalized content output.
-
-    Gemini 3 models return content as list of typed blocks.
-    This normalizes to string for consistent downstream handling.
-    """
-
-    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
-        return normalize_content(super().invoke(input, config, **kwargs))
+# Gemini 3 models return content as list of typed blocks; normalized to
+# string for consistent downstream handling.
+NormalizedChatGoogleGenerativeAI = make_normalized_chat_class(
+    ChatGoogleGenerativeAI, "NormalizedChatGoogleGenerativeAI",
+    "ChatGoogleGenerativeAI with normalized content output.",
+)
 
 
 class GoogleClient(BaseLLMClient):
@@ -32,9 +31,12 @@ class GoogleClient(BaseLLMClient):
         if self.base_url:
             llm_kwargs["base_url"] = self.base_url
 
-        for key in ("timeout", "max_retries", "temperature", "callbacks", "http_client", "http_async_client"):
-            if key in self.kwargs:
-                llm_kwargs[key] = self.kwargs[key]
+        apply_passthrough_kwargs(
+            llm_kwargs, self.kwargs,
+            ("timeout", "max_retries", "temperature", "callbacks",
+             "http_client", "http_async_client"),
+            "google",
+        )
 
         # Unified api_key maps to provider-specific google_api_key
         google_api_key = self.kwargs.get("api_key") or self.kwargs.get("google_api_key")
@@ -50,11 +52,6 @@ class GoogleClient(BaseLLMClient):
             if "pro" in self.model.lower() and thinking_level == "minimal":
                 thinking_level = "low"
             llm_kwargs["thinking_level"] = thinking_level
-
-        # Read-timeout safety net (shared with all LLM clients). ChatGoogle has
-        # no default read timeout, so without this a half-open socket would
-        # hang the batch. Google is always a cloud provider -> is_local=False.
-        resolve_timeout(llm_kwargs, is_local=False, provider_name="google")
 
         return NormalizedChatGoogleGenerativeAI(**llm_kwargs)
 

@@ -135,6 +135,49 @@ class FundingCadenceTests(unittest.TestCase):
             out = bn.get_binance_funding_rate("BTCUSDT", "2026-08-01", "2026-08-10")
         self.assertIn("~8h", out)
 
+    def test_fundinginfo_interval_wins_over_spacing(self):
+        """The authoritative /fapi/v1/fundingInfo interval beats inference.
+
+        A 4h-spaced series with fundingInfo declaring 4h and a mismatched
+        spacing must resolve to the DECLARED value, and the header must say
+        where the number came from.
+        """
+        base = int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        # Spacing says 8h, fundingInfo says 4h — the endpoint is authoritative.
+        rows = [
+            {"fundingTime": base + i * 8 * 3_600_000, "fundingRate": "0.0001",
+             "symbol": "XYZUSDT"}
+            for i in range(6)
+        ]
+
+        def fake_get(path, *a, **k):
+            if "fundingInfo" in path:
+                return [{"symbol": "XYZUSDT", "fundingIntervalHours": 4}]
+            return rows
+
+        with mock.patch.object(bn, "_http_get", fake_get):
+            out = bn.get_binance_funding_rate("XYZUSDT", "2026-08-01", "2026-08-10")
+        self.assertIn("~4h", out)
+        self.assertIn("fundingInfo endpoint", out)
+
+    def test_fundinginfo_failure_falls_back_to_inference(self):
+        base = int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        rows = [
+            {"fundingTime": base + i * 4 * 3_600_000, "fundingRate": "0.0001",
+             "symbol": "XYZUSDT"}
+            for i in range(12)
+        ]
+
+        def fake_get(path, *a, **k):
+            if "fundingInfo" in path:
+                raise RuntimeError("transport blip")
+            return rows
+
+        with mock.patch.object(bn, "_http_get", fake_get):
+            out = bn.get_binance_funding_rate("XYZUSDT", "2026-08-01", "2026-08-10")
+        self.assertIn("~4h", out)
+        self.assertIn("inferred from settlement spacing", out)
+
 
 class PremiumIndexTests(unittest.TestCase):
     _SNAP = {

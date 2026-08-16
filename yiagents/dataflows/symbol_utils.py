@@ -159,6 +159,18 @@ def is_a_stock(ticker: str) -> bool:
     return False
 
 
+def _plausible_delivery_code(code: str) -> bool:
+    """YYMMDD sanity for a quarterly-delivery suffix.
+
+    Binance delivery contracts expire on quarterly/monthly dates through the
+    2020s-2040s; requiring a real month/day in that year window keeps numeric
+    bases (which start with digits, never end in a date-shaped 6-pack) from
+    tripping the delivery guard.
+    """
+    yy, mm, dd = int(code[:2]), int(code[2:4]), int(code[4:6])
+    return 24 <= yy <= 49 and 1 <= mm <= 12 and 1 <= dd <= 31
+
+
 def normalize_symbol_for_venue(raw: str, venue: str = "binance_perp") -> str:
     """Map a user/broker symbol to a venue's canonical symbol.
 
@@ -193,6 +205,19 @@ def normalize_symbol_for_venue(raw: str, venue: str = "binance_perp") -> str:
     if venue not in ("binance_perp", "binance_spot"):
         # Unknown venue: fall back to the cleaned form rather than guessing.
         return s
+
+    # Delivery/quarterly contract suffix (BTCUSDT_260327, BTCUSDT260326):
+    # this data layer serves PERPETUAL-only endpoints (klines/funding hardcode
+    # contractType=PERPETUAL). The bare-base fall-through below used to
+    # append USDT anyway, pricing a fabricated symbol like
+    # "BTCUSDT_260327USDT" — refusing loudly is the honest behaviour.
+    m = re.search(r"(\d{6})$", s)
+    if m and _plausible_delivery_code(m.group(1)):
+        raise ValueError(
+            f"Symbol {raw!r} looks like a dated delivery contract, which the "
+            "Binance PERPETUAL-only data layer does not serve; pass the perp "
+            "form (e.g. 'BTCUSDT') instead."
+        )
 
     # Collapse USD/USDC quote suffixes to USDT (USDT-M book). Order matters:
     # match the longest suffix first so "USDT" is not shadowed by "USD".

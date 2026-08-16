@@ -22,6 +22,58 @@ def normalize_content(response: Any) -> Any:
     return response
 
 
+class _NormalizedInvokeMixin:
+    """Invoke wrapper that joins typed content blocks into a plain string.
+
+    Defined in a class body so zero-arg ``super()`` resolves through the real
+    MRO (a function attached via ``type(...)`` has no ``__class__`` cell).
+    """
+
+    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        # ``super()`` resolves to the chat class this mixin is combined with
+        # at runtime (see make_normalized_chat_class); mypy cannot see that
+        # MRO from the mixin alone, so the call carries a targeted ignore.
+        return normalize_content(
+            super().invoke(input, config, **kwargs)  # type: ignore[misc]
+        )
+
+
+def make_normalized_chat_class(chat_cls: type, class_name: str, doc: str) -> type:
+    """``chat_cls`` subclass whose ``invoke`` normalizes content to a string.
+
+    The one boilerplate every cloud client (anthropic / azure / bedrock /
+    google / openai variants) used to duplicate: providers that emit typed
+    content blocks get them joined into the plain string downstream agents
+    expect. ``class_name``/``doc`` keep the dynamic subclass readable in
+    tracebacks instead of surfacing as an anonymous closure class.
+    """
+    return type(class_name, (_NormalizedInvokeMixin, chat_cls), {"__doc__": doc})
+
+
+def apply_passthrough_kwargs(
+    llm_kwargs: dict[str, Any],
+    kwargs: dict[str, Any],
+    keys: tuple[str, ...],
+    timeout_provider: str,
+) -> None:
+    """Copy the provider's accepted kwargs through, then set the read timeout.
+
+    The other half of the per-client boilerplate: whitelist-copy the
+    caller-supplied overrides that this provider's chat class understands,
+    and apply the shared read-timeout safety net (cloud providers have no
+    default read timeout; a half-open socket would hang the batch).
+    Mutates ``llm_kwargs`` in place. A key may be pre-filtered by the caller
+    (e.g. Anthropic drops ``effort`` on models that 400 on it) simply by not
+    including it in ``keys``.
+    """
+    from ._timeout import resolve_timeout
+
+    for key in keys:
+        if key in kwargs:
+            llm_kwargs[key] = kwargs[key]
+    resolve_timeout(llm_kwargs, is_local=False, provider_name=timeout_provider)
+
+
 class BaseLLMClient(ABC):
     """Abstract base class for LLM clients."""
 

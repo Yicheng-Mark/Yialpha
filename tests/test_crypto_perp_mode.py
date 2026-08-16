@@ -56,6 +56,20 @@ class NormalizeSymbolForVenueTests(unittest.TestCase):
                 normalize_symbol(raw),
             )
 
+    def test_delivery_contract_refused_not_mangled(self):
+        # 2026-08-16: a dated delivery suffix used to fall into the bare-base
+        # branch and price a fabricated "BTCUSDT_260327USDT" — the perpetual
+        # data layer must refuse instead.
+        for raw in ("BTCUSDT_260327", "BTCUSDT260327", "BTC_260626", "ethusdt_270924"):
+            with self.assertRaises(ValueError, msg=raw):
+                normalize_symbol_for_venue(raw)
+
+    def test_numeric_bases_do_not_trip_delivery_guard(self):
+        # Real bases carry digits (prefix form), never a trailing date-shaped
+        # 6-pack; these must keep normalizing normally.
+        self.assertEqual(normalize_symbol_for_venue("1000PEPE"), "1000PEPEUSDT")
+        self.assertEqual(normalize_symbol_for_venue("1MBABYDOGE-USDT"), "1MBABYDOGEUSDT")
+
 
 class FilterAnalystsPerpTests(unittest.TestCase):
     """T15.2 — perp drops Fundamentals like crypto; stock/crypto unchanged."""

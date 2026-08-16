@@ -1060,7 +1060,7 @@ class YiAgentsGraph:
         quality_block = quality.summarize_quality(quality.snapshot_quality())
         quality.reset_quality()
 
-        self.log_states_dict[str(trade_date)] = {
+        entry = {
             "company_of_interest": final_state["company_of_interest"],
             "trade_date": final_state["trade_date"],
             "market_report": final_state["market_report"],
@@ -1095,6 +1095,12 @@ class YiAgentsGraph:
             "pm_rating": final_state.get("pm_rating", ""),
             "data_quality": quality_block,
         }
+        # Write-and-drop: nothing downstream reads PAST dates from this dict
+        # (the on-disk JSON below is the durable record), but a multi-date
+        # backtest or a long-lived web process would otherwise accumulate
+        # every date's FULL state — analyst reports, debate histories, the
+        # works — for the lifetime of the graph object.
+        self.log_states_dict = {str(trade_date): entry}
 
         # Save to file. Reject ticker values that would escape the
         # results directory when joined as a path component.
@@ -1110,7 +1116,7 @@ class YiAgentsGraph:
         # file is used as. Mirrors the atomic pattern in memory.py.
         tmp_path = directory / f".full_states_log_{trade_date}.json.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(self.log_states_dict[str(trade_date)], f, indent=4)
+            json.dump(entry, f, indent=4)
         os.replace(tmp_path, log_path)
 
         # Return the consumed quality block so the caller can attach it to

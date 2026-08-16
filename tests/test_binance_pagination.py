@@ -32,6 +32,101 @@ def _fake_funding_server(all_rows):
     return _mock
 
 
+class TestClosedWindowMemo(unittest.TestCase):
+    """2026-08-16: identical fully-closed windows are fetched once per process.
+
+    The memo kills the 2-3x duplicate full-history pulls one analysis run used
+    to make (kline tool + indicator battery + basis + backtest propagation),
+    which all counted against the shared per-IP weight budget.
+    """
+
+    def _rows(self, n=30):
+        base = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        return [
+            {"fundingTime": base + i * _FUND_MS, "fundingRate": "0.0001",
+             "symbol": "BTCUSDT"}
+            for i in range(n)
+        ]
+
+    def test_second_identical_closed_window_hits_memo(self):
+        calls = []
+        rows = self._rows()
+
+        def counting_server(path, params, symbol, canonical, **kwargs):
+            calls.append(params["startTime"])
+            return _fake_funding_server(rows)(path, params, symbol, canonical, **kwargs)
+
+        with mock.patch.object(binance, "_http_get", counting_server):
+            binance._paginate_history(
+                "/fapi/v1/fundingRate", {"symbol": "BTCUSDT"}, 1000,
+                lambda r: r["fundingTime"],
+                int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000),
+                int(datetime(2024, 1, 15, tzinfo=timezone.utc).timestamp() * 1000),
+                "BTCUSDT", "BTCUSDT",
+            )
+            binance._paginate_history(
+                "/fapi/v1/fundingRate", {"symbol": "BTCUSDT"}, 1000,
+                lambda r: r["fundingTime"],
+                int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000),
+                int(datetime(2024, 1, 15, tzinfo=timezone.utc).timestamp() * 1000),
+                "BTCUSDT", "BTCUSDT",
+            )
+        self.assertEqual(len(calls), 1, "closed window must be served from the memo")
+
+    def test_window_touching_present_is_not_cached(self):
+        calls = []
+        rows = self._rows()
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+        def counting_server(path, params, symbol, canonical, **kwargs):
+            calls.append(params["startTime"])
+            return _fake_funding_server(rows)(path, params, symbol, canonical, **kwargs)
+
+        for _ in range(2):
+            with mock.patch.object(binance, "_http_get", counting_server):
+                binance._paginate_history(
+                    "/fapi/v1/fundingRate", {"symbol": "BTCUSDT"}, 1000,
+                    lambda r: r["fundingTime"], now_ms - _DAY_MS, now_ms,
+                    "BTCUSDT", "BTCUSDT",
+                )
+        self.assertEqual(len(calls), 2, "a still-open window must never be memoized")
+
+    def test_different_pit_end_is_a_different_key(self):
+        calls = []
+        rows = self._rows()
+
+        def counting_server(path, params, symbol, canonical, **kwargs):
+            calls.append(params["endTime"])
+            return _fake_funding_server(rows)(path, params, symbol, canonical, **kwargs)
+
+        base = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        for end in (base + 10 * _DAY_MS, base + 12 * _DAY_MS):
+            with mock.patch.object(binance, "_http_get", counting_server):
+                binance._paginate_history(
+                    "/fapi/v1/fundingRate", {"symbol": "BTCUSDT"}, 1000,
+                    lambda r: r["fundingTime"], base, end, "BTCUSDT", "BTCUSDT",
+                )
+        self.assertEqual(len(calls), 2, "a clamped window must not alias a wider one")
+
+    def test_memo_returns_a_copy(self):
+        rows = self._rows()
+        base = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        end = base + 5 * _DAY_MS
+        args = (
+            "/fapi/v1/fundingRate", {"symbol": "BTCUSDT"}, 1000,
+            lambda r: r["fundingTime"], base, end, "BTCUSDT", "BTCUSDT",
+        )
+        with mock.patch.object(binance, "_http_get", _fake_funding_server(rows)):
+            first = binance._paginate_history(*args)
+        first.append({"poison": True})  # caller mutation must not leak
+        with mock.patch.object(
+            binance, "_http_get",
+            lambda *a, **k: self.fail("memo hit must serve the copy"),
+        ):
+            second = binance._paginate_history(*args)
+        self.assertNotIn({"poison": True}, second)
+
+
 class TestKlinesPagination(unittest.TestCase):
     def test_long_range_is_not_truncated(self):
         # 2000 daily bars: the old default-limit (500) and even one 1500-page
