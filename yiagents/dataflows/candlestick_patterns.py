@@ -99,6 +99,25 @@ def _detect_three_black_crows(rows: pd.DataFrame) -> bool:
     return bool(within and small_lower)
 
 
+def _prior_trend(c, i: int, lookback: int = 3) -> str | None:
+    """Classify the close run just before bar ``i``: "down", "up", or None.
+
+    Trend-context patterns (hammer vs hanging man, shooting star vs inverted
+    hammer) are named by the trend they reverse, so the scanner needs to know
+    whether the bars leading into the shape were declining or advancing.
+    Flat / too-short lead-ins return None and the caller keeps its fallback.
+    """
+    start = max(0, i - lookback)
+    window = c[start:i]
+    if len(window) < 2:
+        return None
+    if window[-1] < window[0]:
+        return "down"
+    if window[-1] > window[0]:
+        return "up"
+    return None
+
+
 def scan_candlestick_patterns(
     df: pd.DataFrame, lookback: int = 30
 ) -> list[dict[str, object]]:
@@ -132,15 +151,32 @@ def scan_candlestick_patterns(
         if body_ratio <= _DOJI_BODY_RATIO:
             add("doji", i, "neutral")
 
-        # Hammer / inverted hammer / shooting star (only meaningful bodies —
-        # near-dojis are already captured by the doji branch).
+        # Hammer-family / star-family shapes (only meaningful bodies —
+        # near-dojis are already captured by the doji branch). Traditional
+        # definitions split the PAIR by prior trend, not candle color: the
+        # same long-lower-shadow body is a bullish hammer after a decline
+        # and a bearish hanging man after an advance (mirror for shooting
+        # star / inverted hammer). Color-based naming mislabeled the red
+        # hammer in a downtrend as bearish (round-5 audit, 2026-08-16);
+        # when the prior trend is flat the color heuristic is kept.
         if body_ratio >= 0.05:
+            trend = _prior_trend(c, i)
             if lower >= _SHADOW_BODY_MULT * body and upper <= _SMALL_SHADOW_RATIO * rng:
-                add("hammer" if c[i] >= o[i] else "hanging_man", i,
-                    "bullish" if c[i] >= o[i] else "bearish")
+                if trend == "up":
+                    add("hanging_man", i, "bearish")
+                elif trend == "down":
+                    add("hammer", i, "bullish")
+                else:
+                    add("hammer" if c[i] >= o[i] else "hanging_man", i,
+                        "bullish" if c[i] >= o[i] else "bearish")
             if upper >= _SHADOW_BODY_MULT * body and lower <= _SMALL_SHADOW_RATIO * rng:
-                add("shooting_star" if c[i] < o[i] else "inverted_hammer", i,
-                    "bearish" if c[i] < o[i] else "bullish")
+                if trend == "up":
+                    add("shooting_star", i, "bearish")
+                elif trend == "down":
+                    add("inverted_hammer", i, "bullish")
+                else:
+                    add("shooting_star" if c[i] < o[i] else "inverted_hammer", i,
+                        "bearish" if c[i] < o[i] else "bullish")
 
         if i >= 1:
             pbody, prng, pbody_ratio = _body(o[i-1], h[i-1], lo[i-1], c[i-1])

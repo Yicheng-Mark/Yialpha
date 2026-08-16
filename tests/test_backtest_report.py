@@ -142,3 +142,118 @@ def test_none_metrics_handled():
     )
     md = render_backtest_report(r)
     assert "n/a" in md  # metrics gracefully absent
+
+
+# ---------------------------------------------------------------------------
+# Round-5 audit (2026-08-16): perp-simulation observability + honest display
+# ---------------------------------------------------------------------------
+
+
+def _rising_subcent(ticker, start, end):
+    idx = pd.bdate_range(start, end)
+    vals = [1.23456e-5 * (1 + 0.002 * i) for i in range(len(idx))]
+    return pd.Series(vals, index=idx.strftime("%Y-%m-%d"), dtype=float)
+
+
+def _perp_result(**config_extra) -> BacktestResult:
+    """A real backtest run with the engine's perp config fields overlaid."""
+    dates = _dates(8)
+    g = FakeGraph(dict.fromkeys(dates, "Buy"))
+    r = run_backtest(
+        g, "PEPEUSDT", dates, holding_days=5, price_provider=_rising_subcent
+    )
+    r.config_summary.update({
+        "asset_type": "crypto_perp",
+        "cost_bps": 0.0,
+        "periods_per_year": 365,
+        "perp_fees": "taker 4.5bps x0.9 BNB, slippage 2bps",
+        "perp_funding_paid_total": -12.34,
+        "perp_leverage": 3,
+        "perp_short": True,
+        "perp_fill_quantization": "stepSize/minNotional",
+        "perp_model_note": "USDT-M perp simulation: daily funding drag",
+        "perp_liquidations": [
+            {
+                "date": "2026-08-01", "side": "long", "shares": 2.0,
+                "entry": 0.0000123456, "liquidation_price": 0.0000041,
+                "exit_price": 0.0000041, "fee": 3.2,
+            }
+        ],
+        **config_extra,
+    })
+    return r
+
+
+@pytest.mark.unit
+def test_perp_section_renders_funding_liquidations_and_fees():
+    md = render_backtest_report(_perp_result())
+    assert "## Perp simulation" in md
+    # Effective fees the engine actually charged, not the raw cost_bps=0.
+    assert "taker 4.5bps x0.9 BNB" in md
+    assert "0.0 bps" not in md
+    # Signed funding: negative = net received (short-biased run).
+    assert "-12.34" in md and "net received" in md
+    # Liquidation visibility: count + entry/liquidation prices (adaptive
+    # precision — the raw 4.1e-6 must not collapse to "0.00").
+    assert "Liquidation events: 1" in md
+    assert "4.1e-06" in md
+    # Leverage / side / model note.
+    assert "3x" in md and "long + short" in md
+    assert "USDT-M perp simulation" in md
+
+
+@pytest.mark.unit
+def test_non_perp_report_has_no_perp_section():
+    r = BacktestResult(
+        ticker="AAPL", initial_capital=100_000, holding_days=5,
+        equity=[100_000, 101_000], equity_dates=["2024-01-01", "2024-01-02"],
+        trades=[], benchmark_equity=[100_000, 101_000],
+        benchmark_name="AAPL buy-and-hold", metrics=None,
+        config_summary={"cost_bps": 5.0, "periods_per_year": 252},
+    )
+    md = render_backtest_report(r)
+    assert "Perp simulation" not in md
+    assert "5.0 bps" in md  # plain runs still show the raw parameter
+    assert "252/yr" in md
+
+
+@pytest.mark.unit
+def test_sub_cent_perp_prices_render_nonzero():
+    """Prices ~1e-5 must not collapse to '0.00' in the trades table."""
+    md = render_backtest_report(_perp_result())
+    assert "## Trades" in md
+    assert "0.00" not in md.split("## Trades")[1].split("\n\n")[0]
+    assert "1.235e-05" in md or "0.00001235" in md or "1.2346e-05" in md
+
+
+@pytest.mark.unit
+def test_multi_run_table_shares_n_column():
+    """Partial-coverage metrics show their run count, not a fake distribution."""
+    variants = []
+    for scale in (0.9, 1.0, 1.1):
+        r = _perp_result()
+        variants.append(
+            BacktestResult(
+                ticker=r.ticker, initial_capital=r.initial_capital,
+                holding_days=r.holding_days,
+                equity=[v * scale for v in r.equity],
+                equity_dates=r.equity_dates, trades=r.trades,
+                benchmark_equity=r.benchmark_equity,
+                benchmark_name=r.benchmark_name, metrics=r.metrics,
+                config_summary=r.config_summary,
+            )
+        )
+    md = render_multi_run_report(variants)
+    assert "| n |" in md
+    # The header row plus at least one metric row carrying n=3.
+    assert "| 3 |" in md
+
+
+@pytest.mark.unit
+def test_fmt_price_adaptive_precision():
+    from yiagents.backtest.report import _fmt_price
+
+    assert _fmt_price(123.456) == "123.46"
+    assert _fmt_price(0.0000123456) == "1.235e-05"
+    assert _fmt_price(None) == "n/a"
+    assert float(_fmt_price(0.5)) == 0.5

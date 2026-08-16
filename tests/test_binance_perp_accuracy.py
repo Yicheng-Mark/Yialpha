@@ -330,6 +330,68 @@ class ExchangeInfoFilterTests(unittest.TestCase):
         ), self.assertRaises(NoMarketDataError):
             bf.get_symbol_filters("GONEUSDT")
 
+    def test_market_order_ref_price_prechecks_notional(self):
+        """Round-5: MARKET orders DO get a -4014 at submit, not at fill."""
+        f = bf.SymbolFilters(
+            symbol="BTCUSDT", status="TRADING",
+            tick_size=bf.Decimal("0.10"), step_size=bf.Decimal("1"),
+            min_qty=bf.Decimal("1"), max_qty=bf.Decimal("0"),
+            min_notional=bf.Decimal("5"), price_precision=2, quantity_precision=0,
+        )
+        out = bf.quantize_order(None, 2.0, f, ref_price=2.0)  # 4 < 5
+        self.assertTrue(out["below_min_notional"])
+        out_ok = bf.quantize_order(None, 3.0, f, ref_price=2.0)  # 6 >= 5
+        self.assertFalse(out_ok["below_min_notional"])
+
+    def test_market_order_without_any_price_leaves_floor_undecided(self):
+        f = bf.SymbolFilters(
+            symbol="BTCUSDT", status="TRADING",
+            tick_size=bf.Decimal("0.10"), step_size=bf.Decimal("1"),
+            min_qty=bf.Decimal("1"), max_qty=bf.Decimal("0"),
+            min_notional=bf.Decimal("5"), price_precision=2, quantity_precision=0,
+        )
+        out = bf.quantize_order(None, 2.0, f)  # no price, no ref
+        self.assertFalse(out["below_min_notional"])  # undecided, exchange decides
+
+    def test_notional_exactly_at_minimum_not_float_shaved(self):
+        """Decimal-exact floor: an order landing exactly on the min passes."""
+        f = bf.SymbolFilters(
+            symbol="BTCUSDT", status="TRADING",
+            tick_size=bf.Decimal("0.10"), step_size=bf.Decimal("1"),
+            min_qty=bf.Decimal("1"), max_qty=bf.Decimal("0"),
+            min_notional=bf.Decimal("0.3"), price_precision=2, quantity_precision=0,
+        )
+        out = bf.quantize_order(0.3, 1.0, f)  # exactly 0.3 (0.1 float is < 0.3)
+        self.assertEqual(out["price"], 0.3)
+        self.assertFalse(out["below_min_notional"])
+
+
+class BasisPrecisionTests(unittest.TestCase):
+    """Round-5: round(x, 6) collapsed a sub-cent basis to exactly 0.0."""
+
+    def test_low_price_basis_keeps_precision(self):
+        base = _today_ms() - 8 * _DAY_MS
+        perp_rows = [
+            _kline(base + i * _DAY_MS, 1.23456e-5, 1.24e-5, 1.23e-5, 1.23456e-5)
+            for i in range(9)
+        ]
+        spot_rows = [
+            _kline(base + i * _DAY_MS, 1.21e-5, 1.22e-5, 1.20e-5, 1.21e-5)
+            for i in range(9)
+        ]
+
+        def server(path, params, symbol, canonical, **kwargs):
+            rows = perp_rows if path.startswith("/fapi") else spot_rows
+            return _klines_server(rows)(path, params, symbol, canonical, **kwargs)
+
+        with mock.patch.object(bn, "_http_get", server):
+            out = bn.get_binance_spot_perp_basis("PEPEUSDT", look_back_days=7)
+        # The true per-venue basis is 2.456e-07; round(..., 6) rendered it 0.0
+        # while basisRate said ~2%. Six significant digits keep it visible.
+        self.assertIn("2.456e-07", out)
+        # Closes keep their significant digits too (1.23456e-5, not 1.2e-05).
+        self.assertIn("1.23456e-05", out)
+
 
 if __name__ == "__main__":
     unittest.main()

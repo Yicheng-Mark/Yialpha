@@ -201,11 +201,13 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
 
     def test_spot_binds_six_tools(self):
         names = self._tool_names("crypto_spot")
-        # Spot keeps indicators + verified snapshot (symbol resolves correctly)
-        # and adds the 3 spot-native tools, plus get_binance_spot_indicators
-        # (2026-08-15; spot-default binding 2026-08-16): the classic battery
-        # computed on the Binance candles, defaulting to the SPOT venue so an
-        # omitted venue arg can never price the perpetual.
+        # Spot keeps the full stock baseline (get_stock_data + indicators +
+        # verified snapshot + the five TA-expansion evidence tools — the
+        # symbol resolves correctly via Yahoo) and adds the 3 spot-native
+        # tools plus get_binance_spot_indicators (2026-08-15; spot-default
+        # binding 2026-08-16): the classic battery computed on the Binance
+        # candles, defaulting to the SPOT venue so an omitted venue arg can
+        # never price the perpetual.
         self.assertEqual(
             sorted(names),
             [
@@ -213,8 +215,14 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
                 "get_binance_spot_klines",
                 "get_binance_spot_perp_basis",
                 "get_binance_spot_ticker24",
+                "get_candlestick_patterns",
                 "get_indicators",
+                "get_indicators_weekly",
+                "get_relative_strength",
+                "get_stock_data",
+                "get_support_resistance",
                 "get_verified_market_snapshot",
+                "get_volume_features",
             ],
         )
         # Spot must NOT bind the perp-native tools (including the perp-default
@@ -229,8 +237,14 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
             [
                 "get_binance_spot_indicators",
                 "get_binance_spot_klines",
+                "get_candlestick_patterns",
                 "get_indicators",
+                "get_indicators_weekly",
+                "get_relative_strength",
+                "get_stock_data",
+                "get_support_resistance",
                 "get_verified_market_snapshot",
+                "get_volume_features",
             ],
         )
 

@@ -140,12 +140,13 @@ def quantize_order(
     price: float | None,
     quantity: float,
     filters: SymbolFilters,
+    ref_price: float | None = None,
 ) -> dict[str, float | bool | None]:
     """Shape an order to Binance's precision rules; report compliance.
 
     Quantity floors to a multiple of ``stepSize`` (floor, never round up —
     rounding up could exceed the intended exposure and the margin behind it).
-    Price, when supplied (limit orders), rounds HALF-EVEN to ``tickSize`` —
+    Price, when supplied (limit orders), rounds HALF_EVEN to ``tickSize`` —
     the neutral choice, since rounding direction changes fill priority, not
     validity. Returns a dict with the quantized ``price``/``quantity`` (floats
     ready for the SDK), plus compliance flags::
@@ -155,6 +156,14 @@ def quantize_order(
 
     Callers are expected to refuse the order when any flag is true (the LLM's
     sizing was outside the symbol's rules) rather than silently clamping.
+
+    ``ref_price``: an indicative price for MIN_NOTIONAL pre-validation of
+    MARKET orders, which carry no ``price``. Binance rejects a market order
+    whose notional is under the floor AT SUBMIT (-4014), not at fill — the
+    old "the exchange checks it at fill" assumption was wrong — so live
+    callers should pass their best reference (mark price / latest close).
+    Without any price the check stays undecided (flag False) and the reject
+    is left to the exchange, as before.
     """
     step = filters.step_size if filters.step_size > 0 else Decimal(1)
     tick = filters.tick_size if filters.tick_size > 0 else Decimal(1)
@@ -168,12 +177,15 @@ def quantize_order(
         # direction changes fill priority, not validity.
         price_out = float((price_dec / tick).quantize(Decimal("1")) * tick)
 
-    # Notional is only decidable client-side for price-bearing orders; a
-    # market order's notional is checked by the exchange at fill.
+    # Notional floor check, Decimal-exact so an order landing exactly on the
+    # minimum is not float-shaved into a false violation.
     below_min_notional = False
-    if price is not None and filters.min_notional > 0:
-        ref_price = price_out if price_out is not None else 0.0
-        below_min_notional = ref_price * float(quantized_qty) < float(filters.min_notional)
+    notional_ref = price if price is not None else ref_price
+    if notional_ref is not None and filters.min_notional > 0:
+        ref_dec = (
+            Decimal(str(price_out)) if price is not None else Decimal(str(notional_ref))
+        )
+        below_min_notional = ref_dec * quantized_qty < filters.min_notional
 
     return {
         "price": price_out,

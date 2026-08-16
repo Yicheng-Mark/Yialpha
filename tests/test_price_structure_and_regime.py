@@ -187,6 +187,36 @@ class TestCandlestickPatterns:
         hits = scan_candlestick_patterns(_bars(rows), lookback=5)
         assert not any(h["pattern"] == "three_black_crows" for h in hits)
 
+    def test_red_hammer_in_downtrend_is_bullish_hammer(self):
+        # Round-5 (2026-08-16): hammer vs hanging man is split by the PRIOR
+        # TREND, not candle color — a red hammer-shaped bar after a decline
+        # is a bullish hammer; the color rule labeled it hanging_man/bearish.
+        rows = [
+            (104.0, 104.4, 103.4, 103.6, 1),   # declining lead-in
+            (103.5, 103.8, 102.4, 102.6, 1),   # declining lead-in
+            (103.0, 103.1, 97.0, 102.5, 1),    # RED bar: open 103, close 102.5,
+                                               # long lower shadow, tiny upper
+        ]
+        hits = scan_candlestick_patterns(_bars(rows), lookback=5)
+        ham = [h for h in hits if h["pattern"] in ("hammer", "hanging_man")]
+        assert ham and ham[0]["pattern"] == "hammer"
+        assert ham[0]["direction"] == "bullish"
+
+    def test_green_star_shape_after_advance_is_bearish_shooting_star(self):
+        # Mirror case: a GREEN star-shaped bar (small body low, long upper
+        # shadow) after an advance is a bearish shooting star; the color
+        # rule labeled it inverted_hammer/bullish.
+        rows = [
+            (100.0, 101.0, 99.6, 100.8, 1),   # advancing lead-in
+            (100.8, 102.0, 100.6, 101.8, 1),  # advancing lead-in
+            (102.0, 108.0, 101.9, 102.4, 1),  # GREEN: open 102, close 102.4,
+                                              # long upper shadow, tiny lower
+        ]
+        hits = scan_candlestick_patterns(_bars(rows), lookback=5)
+        star = [h for h in hits if h["pattern"] in ("shooting_star", "inverted_hammer")]
+        assert star and star[0]["pattern"] == "shooting_star"
+        assert star[0]["direction"] == "bearish"
+
     def test_three_white_soldiers_unchanged(self):
         rows = [
             (100.0, 100.6, 99.2, 100.2, 1),
@@ -403,3 +433,38 @@ class TestPriceStructureTools:
             {"symbol": "TEST", "curr_date": "2026-03-01"}
         )
         assert out.startswith("DATA_UNAVAILABLE")
+
+    def test_relative_strength_wealth_ratio_in_down_market(self, monkeypatch):
+        """Round-5: r/b flipped sign when the benchmark fell — +2% vs -1%
+        scored -2.0 "underperforming". The wealth ratio (1+r)/(1+b) stays >1
+        exactly when the ticker outperformed."""
+        import pandas as pd
+
+        import yiagents.agents.utils.price_structure_tools as pst
+
+        n = 260
+        dates = pd.bdate_range("2025-01-01", periods=n)
+
+        def up_frame():
+            closes = [100.0 * (1.004 ** i) for i in range(n)]  # ~rising
+            return _bars([(c - 0.2, c + 0.5, c - 0.6, c, 1000) for c in closes],
+                         start="2025-01-01")
+
+        def down_frame():
+            closes = [100.0 * (0.998 ** i) for i in range(n)]  # ~falling
+            return _bars([(c - 0.2, c + 0.5, c - 0.6, c, 1000) for c in closes],
+                         start="2025-01-01")
+
+        frames = {"TEST": up_frame(), "SPY": down_frame()}
+        monkeypatch.setattr(pst, "load_ohlcv", lambda s, d: frames[s])
+        monkeypatch.setattr(pst, "resolve_market_benchmark", lambda t: "SPY")
+
+        out = pst.get_relative_strength.invoke(
+            {"symbol": "TEST", "curr_date": str(dates[-1].date())}
+        )
+        # Ticker up vs benchmark down over the same windows: every window's
+        # RS ratio must exceed 1 (outperforming), which r/b could not deliver.
+        import re as _re
+
+        ratios = [float(m) for m in _re.findall(r"\| \d+m \|[^|]+\|[^|]+\| ([\d.]+) \|", out)]
+        assert ratios and all(r > 1.0 for r in ratios), out

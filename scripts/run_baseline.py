@@ -264,7 +264,7 @@ def baseline_backtest(tickers, start, end, step, n_dates, holding_days, cost_bps
                                **perp_kwargs)
             m = res.metrics
             print(f"      [{t}] 总收益 {m.total_return:.2%} | Sharpe {m.sharpe:.2f} | "
-                  f"MDD {m.max_drawdown:.2%} | vs B&H alpha {m.alpha_vs_buyhold:.2%}")
+                  f"MDD {m.max_drawdown:.2%} | vs B&H alpha (ann.) {m.alpha_vs_buyhold:.2%}")
             out_res.append(res)
         return out_res
 

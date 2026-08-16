@@ -514,3 +514,58 @@ def test_indicators_window_generic_exception_propagates(monkeypatch, caplog):
     with pytest.raises(RuntimeError):
         y_finance.get_stock_stats_indicators_window("AAPL", "rsi", "2026-06-12", 3)
     assert any("bulk stockstats calc failed" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Round-5 audit (2026-08-16): crypto series must annualize vol on 365
+# ---------------------------------------------------------------------------
+
+
+def _mini_ohlcv(n=5):
+    return pd.DataFrame({
+        "Date": pd.bdate_range("2026-07-01", periods=n).strftime("%Y-%m-%d"),
+        "Open": [100.0] * n, "High": [101.0] * n,
+        "Low": [99.0] * n, "Close": [100.5] * n, "Volume": [1000.0] * n,
+    })
+
+
+@pytest.mark.unit
+def test_crypto_symbol_annualizes_derived_features_on_365(monkeypatch):
+    """get_indicators on a crypto pair (crypto_spot binds it) must pass 365 —
+    the registry default 252 understates crypto vol by sqrt(252/365)."""
+    captured = {}
+
+    def fake_derived(data, name, periods_per_year=252.0):  # noqa: ARG001
+        captured["ppy"] = periods_per_year
+        return pd.Series([0.2] * len(data))
+
+    monkeypatch.setattr(y_finance, "load_ohlcv", lambda s, d: _mini_ohlcv())
+    monkeypatch.setattr(y_finance, "compute_derived", fake_derived)
+    y_finance._get_stock_stats_bulk("BTCUSDT", "rvol_20", "2026-07-07")
+    assert captured["ppy"] == 365.0
+
+
+@pytest.mark.unit
+def test_stock_symbol_keeps_252_annualization(monkeypatch):
+    captured = {}
+
+    def fake_derived(data, name, periods_per_year=252.0):  # noqa: ARG001
+        captured["ppy"] = periods_per_year
+        return pd.Series([0.2] * len(data))
+
+    monkeypatch.setattr(y_finance, "load_ohlcv", lambda s, d: _mini_ohlcv())
+    monkeypatch.setattr(y_finance, "compute_derived", fake_derived)
+    y_finance._get_stock_stats_bulk("AAPL", "rvol_20", "2026-07-07")
+    assert captured["ppy"] == 252.0
+
+
+@pytest.mark.unit
+def test_is_crypto_symbol_accepts_all_spelling_forms():
+    from yiagents.dataflows.symbol_utils import is_crypto_symbol
+
+    assert is_crypto_symbol("BTCUSDT") is True
+    assert is_crypto_symbol("BTC-USD") is True
+    assert is_crypto_symbol("eth-usdt") is True
+    assert is_crypto_symbol("AAPL") is False
+    assert is_crypto_symbol("EURUSD") is False  # forex, not crypto
+    assert is_crypto_symbol("") is False

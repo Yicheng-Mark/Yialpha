@@ -555,8 +555,11 @@ class BinanceGateway(BaseGateway):
         # Exchange-rule gates (2026-08-16): quantize to the symbol's
         # tick/step grid (Binance rejects off-grid floats with -1111) and,
         # when an explicit leverage is configured, confirm it once per
-        # symbol. Both fail closed with a stated reason.
-        gate_reason = self._shape_to_symbol_rules(req, extra)
+        # symbol. Both fail closed with a stated reason. The risk reference
+        # price rides along so MARKET orders get the -4014 MIN_NOTIONAL
+        # pre-check instead of a guaranteed exchange reject.
+        ref_px = reference_price or (reference_prices or {}).get(req.symbol)
+        gate_reason = self._shape_to_symbol_rules(req, extra, ref_price=ref_px)
         if gate_reason is None:
             gate_reason = self._ensure_leverage(req.symbol)
         if gate_reason is not None:
@@ -687,7 +690,9 @@ class BinanceGateway(BaseGateway):
     # Exchange-rule gates (exchangeInfo precision / leverage)
     # ------------------------------------------------------------------
 
-    def _shape_to_symbol_rules(self, req: OrderRequest, extra: dict) -> str | None:
+    def _shape_to_symbol_rules(
+        self, req: OrderRequest, extra: dict, ref_price: float | None = None,
+    ) -> str | None:
         """Quantize ``extra`` to the symbol's tick/step grid; None or reason.
 
         Fetches the TTL-cached exchangeInfo filters (``LOT_SIZE`` stepSize /
@@ -697,6 +702,12 @@ class BinanceGateway(BaseGateway):
         min qty/notional, over max qty, or the filters are unavailable —
         fail-closed: Binance would reject a mis-quantized order with -1111
         anyway, and clamping silently would change the intended exposure).
+
+        ``ref_price`` pre-validates the MIN_NOTIONAL floor for MARKET orders
+        (which carry no price): Binance rejects an under-notional market
+        order AT SUBMIT with -4014, so when the caller supplies its risk
+        reference price we check the floor here instead of letting the
+        exchange do it. Without a reference the check stays undecided.
         """
         try:
             filters = get_symbol_filters(
@@ -705,7 +716,14 @@ class BinanceGateway(BaseGateway):
             )
         except Exception as exc:  # noqa: BLE001 — fail-closed gate reason
             return f"exchangeInfo unavailable ({type(exc).__name__}: {exc})"
-        shaped = quantize_order(extra.get("price"), float(extra["quantity"]), filters)
+        if filters.status and filters.status != "TRADING":
+            # BREAK/HALT/SETTLING symbols accept no new orders at all; the
+            # shaped values are irrelevant until the venue reopens the book.
+            return f"symbol not trading (exchangeInfo status={filters.status})"
+        shaped = quantize_order(
+            extra.get("price"), float(extra["quantity"]), filters,
+            ref_price=ref_price,
+        )
         violations = [k for k in ("below_min_qty", "below_min_notional", "over_max_qty")
                       if shaped[k]]
         if violations:

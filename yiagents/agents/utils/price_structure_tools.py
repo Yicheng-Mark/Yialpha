@@ -351,7 +351,17 @@ def get_relative_strength(
             _bench_return_over(bench_close, then_date, bench_end)
             if then_date is not None else None
         )
-        ratio = (r / b) if (r is not None and b not in (None, 0.0)) else None
+        # Wealth-ratio RS: (1+r)/(1+b). The plain r/b ratio flips sign and
+        # magnitude whenever the benchmark return is negative — ticker +2% vs
+        # benchmark -1% scored -2.0 ("underperforming") and ticker -1% vs
+        # benchmark -4% scored 0.25 — while a wealth ratio stays >1 exactly
+        # when the ticker outperformed over the window, in up and down
+        # markets alike (round-5 audit, 2026-08-16).
+        ratio = (
+            ((1.0 + r) / (1.0 + b))
+            if (r is not None and b is not None and (1.0 + b) != 0.0)
+            else None
+        )
         if ratio is not None:
             ratios.append(ratio)
         lines.append(
