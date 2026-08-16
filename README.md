@@ -51,7 +51,7 @@ Give YiAgents a **ticker + date** and it analyzes from four angles, runs multipl
 
 | Analyst | Dimension | Data source |
 | ------ | ------ | ------ |
-| Market Analyst | Technical: picks up to 8 complementary indicators (MACD / RSI / Bollinger / ATR / VWMA / SMA / EMA …) by market regime | yfinance / Alpha Vantage |
+| Market Analyst | Technical: picks up to 8 complementary indicators from a 28-name catalog (trend / momentum / volatility / volume) by market regime; five evidence tools always bound — weekly timeframe, support/resistance, volume features, candlestick patterns, benchmark relative strength | yfinance / Alpha Vantage |
 | Sentiment Analyst | Social sentiment | Reddit, StockTwits (current-date analysis only) |
 | News Analyst | Ticker news + macro/global news (Fed, geopolitics, central-bank policy …) | yfinance / Alpha Vantage News |
 | Fundamentals Analyst | Financial fundamentals | yfinance / Alpha Vantage |
@@ -65,10 +65,22 @@ Crypto has three opt-in modes. `crypto` (Yahoo spot) is the default; `crypto_spo
 | Mode | `--asset-type` | Source | Tools bound to the analyst | Notes |
 | ------ | ------ | ------ | ------ | ------ |
 | Yahoo spot (default) | `crypto` | Yahoo Finance (`BTC-USD`) | indicators + verified_snapshot | Default crypto path; no funding / OI / leverage |
-| Binance spot | `crypto_spot` | Binance spot (`api.binance.com`, optional mirror) | historical: spot_klines + dated indicators/snapshot; current date also: ticker24 / **spot_perp_basis** | Rolling 24h and current cross-venue basis are never injected into historical runs |
-| Binance perpetual | `crypto_perp` | Binance USDT-M perp (`fapi.binance.com`) | historical: klines + funding; current date also: OI / long-short / taker flow / basis | Analysis only. The spot/long-only backtest engine explicitly refuses this mode |
+| Binance spot | `crypto_spot` | Binance spot (`api.binance.com`, optional mirror) | all runs: spot klines + spot indicators + dated indicators / snapshot / evidence tools; current date also: ticker24 / **spot_perp_basis** | Rolling 24h and current cross-venue basis are never injected into historical runs |
+| Binance perpetual | `crypto_perp` | Binance USDT-M perp (`fapi.binance.com`) | all runs: klines + funding + indicators; current date also: OI / long-short / taker flow / basis / mark-price premium index | Analysis only. Backtests supported with full perp modeling (funding / costs / leverage / liquidation) |
 
 In crypto modes the Fundamentals Analyst is dropped automatically (perpetual/spot pairs have no fundamentals). All Binance requests are hand-written `requests` (not the official SDK) over the existing SOCKS5 proxy, with per-product-line rate limiting and reactive 429/418 backstop.
+
+### A-share native data
+
+Opt-in native data for A-share tickers: set `YIAGENTS_A_SHARE_NATIVE=true` (default off; install the vendors with `pip install "yiagents[a-share]"`). The gate is flag **and** `is_a_stock(ticker)`, so US / crypto / HK runs stay byte-identical. When both hold, 12 PIT-correct read-only tools from Chinese vendors are appended to the analysts:
+
+| Analyst | Appended tools (vendor) |
+| ------ | ------ |
+| Market | northbound flows · sector fund-flow · realtime quote · market breadth (AKShare) |
+| Fundamentals | TTM PE/PB/dividend · forward-adjusted OHLCV · income / balance-sheet / cash-flow statements (BaoStock); money flow · dragon-tiger list (AKShare) |
+| News | per-stock Chinese headlines, Eastmoney via AKShare |
+
+A Tushare quality tier (`pip install "yiagents[a-share-tushare]"` + `TUSHARE_TOKEN`) is also available for fundamentals/news. Vendors are lazy-imported: without the extras, default-off runs are unaffected.
 
 ---
 
@@ -114,6 +126,7 @@ pip install -e .
 # Optional extras
 pip install -e ".[web]"        # FastAPI + Uvicorn for the local Web UI
 pip install -e ".[bedrock]"    # Amazon Bedrock provider (AWS SigV4)
+pip install -e ".[a-share]"    # AKShare + BaoStock for A-share native data
 pip install -e ".[dev]"        # ruff / pytest
 ```
 
@@ -216,6 +229,18 @@ yiagents batch -t BTCUSDT -t ETHUSDT -d 2026-06-30 --asset-type crypto_spot
 
 **Concurrency is safe**: each worker thread owns its own graph instance (no races); the memory log and OHLCV cache are serialized with filelock; one failed ticker does not abort the batch; and each ticker's analysis is **byte-equivalent** to running it serially — the concurrency layer sits above `propagate()` and never touches any agent's input, depth, or reasoning parameters. See [yiagents/batch/runner.py](yiagents/batch/runner.py).
 
+### Config validation & audit: `yiagents config-check` / `yiagents snapshot`
+
+```bash
+yiagents config-check     # validates the selected provider's key, reports optional
+                          # data-source keys, and checks indicator_battery names
+yiagents snapshot record -r "Pruned low-IC indicators" [-e evidence]
+                          # append-only config snapshot (timestamp / reason /
+                          # evidence / git commit); never edits the live config
+yiagents snapshot diff    # diff the active config against the last snapshot
+yiagents snapshot list    # list recorded snapshots
+```
+
 ---
 
 ## Web UI
@@ -229,9 +254,9 @@ python web/app.py                # serves http://127.0.0.1:8000
 
 > Must be launched from the **project root** (the dir containing `.env`, `yiagents/`, `scripts/`): `yiagents/__init__.py` loads `.env` via `load_dotenv(usecwd=True)`, so starting elsewhere leaves the DeepSeek key and the SOCKS5 proxy unset, and the spawned `run_robust` subprocess would inherit that broken env.
 
-- **Browse**: ticker grid → per-ticker dates → full report view (rating badge, quantitative risk-overlay card, 5 collapsible sections, optional node-perf bar chart).
+- **Browse**: ticker grid → per-ticker dates → full report view (rating badge, quantitative risk-overlay card, 5 collapsible sections, optional node-perf bar chart), plus a rating-comparison view (`#/compare`) across tickers and dates.
 - **Submit**: a form spawns `scripts/run_robust.py` (the same watchdog-backed path the CLI uses); the UI polls every 4 s and links the finished report. One analysis at a time (409 while one is running).
-- **API**: `GET /api/tickers`, `GET /api/tickers/{t}/runs[/{date}]`, `POST /api/analyze`, `GET /api/tasks/{id}`, `GET /api/health`.
+- **API**: `GET /api/tickers`, `GET /api/tickers/{t}/runs[/{date}]`, `GET /api/compare`, `POST /api/analyze`, `GET /api/tasks/{id}`, `GET /api/health`.
 
 See [web/README.md](web/README.md) for the architecture and the full endpoint reference.
 
@@ -303,7 +328,7 @@ python scripts/run_baseline.py --baseline --tickers AAPL NVDA
 python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 ```
 
-Common options: `--tickers` (A-share `600519.SS`) / `--start --end` / `--step` (rebalance interval, default 10) / `--rebalance` (number of rebalances, default 6) / `--holding-days` / `--cost-bps` (one-side cost, default 5bp) / `--runs` (LLM non-determinism — run each ticker several times for a distribution) / `--workers` (cross-ticker concurrency) / `--out` (default `./backtest_output`).
+Common options: `--tickers` (A-share `600519.SS`) / `--asset-type` (`stock` / `crypto` / `crypto_perp`) / `--start --end` / `--step` (rebalance interval, default 10) / `--rebalance` (number of rebalances, default 6) / `--holding-days` / `--cost-bps` (one-side cost, default 5bp) / `--runs` (LLM non-determinism — run each ticker several times for a distribution) / `--workers` (cross-ticker concurrency) / `--out` (default `./backtest_output`). Perp-only: `--leverage` (default 1.0; >1 enables isolated-margin liquidation modeling) / `--allow-short` / `--slippage-bps` (default 0) / `--bnb-discount`.
 
 > Each `propagate()` = one full LLM graph (4 analysts + debates + trader + risk debate + PM). Cost scales linearly with `tickers × dates × runs`. **Get preflight green first, then smoke, then scale up.**
 
@@ -314,7 +339,17 @@ Stage 2 (`--full`) runs the baseline-vs-risk-overlay A/B and independently judge
 - Baseline and improved legs reuse the same cached LLM decision tape; every ticker/run gets a fresh stateful risk manager
 - Reports, dashboards, and gate verdicts land in `--out` (default `backtest_output/`)
 
-Daily signals execute on the **next available bar**, never on the completed bar the model just read. `Hold` creates no rebalance or fee, and win rate is computed from actual position P&L. `crypto_perp` backtests are deliberately rejected until funding, shorting, leverage, margin, and liquidation are modeled.
+Daily signals execute on the **next available bar**, never on the completed bar the model just read. `Hold` creates no rebalance or fee, and win rate is computed from actual position P&L. Crypto runs annualize on 365 trading days, stocks on 252.
+
+`crypto_perp` backtests (`--asset-type crypto_perp`) ship with full perp accuracy modeling:
+
+- **Marking**: positions mark to the perp's own Binance candles, not Yahoo spot.
+- **Funding drag**: charged per funding interval; **fail-closed** — a coverage gap in the funding series aborts the run instead of silently assuming zero.
+- **Costs**: taker fee + `--slippage-bps` + optional BNB discount, with `stepSize` / `minNotional` fill quantization from live exchange filters.
+- **Leverage / liquidation**: `--leverage > 1` enables isolated-margin modeling — bar-extreme (high/low) liquidation triggers, MMR ladder from `leverageBracket`, liquidation events recorded in the run summary. Default is 1× long-only.
+- **Shorts**: `--allow-short` opts in (Sell → −1×, receiving funding); perp-only.
+
+**Indicator self-improvement loop (offline, no LLM):** the market analyst's 28-name catalog can be pruned by evidence — `scripts/export_ic_dataset.py` derives a `date, forward_return, <indicator>…` table straight from the PIT-filtered OHLCV cache, `scripts/prune_indicators_cli.py` ranks rolling IC and prints a keep/prune report (never auto-applied), and the reviewed list lands in the `indicator_battery` config key, validated by `yiagents config-check`. `yiagents snapshot record` keeps the change on an append-only audit trail.
 
 ```text
 [AAPL] gate verdict: ✅ PASS | DSR 1.42 | beats B&H True
@@ -362,6 +397,11 @@ One-line telemetry: `python scripts/run_baseline.py --smoke --profile --ticker <
 | [scripts/run_batch.py](scripts/run_batch.py) | Batch concurrent analysis (equivalent to `yiagents batch`) |
 | [scripts/run_analyst_parallel_ab.py](scripts/run_analyst_parallel_ab.py) | A/B gate verifying analyst-parallel is distribution-equivalent to serial |
 | [scripts/smoke_structured_output.py](scripts/smoke_structured_output.py) | Verify the three structured-output agents against any provider |
+| [scripts/analyze_window.py](scripts/analyze_window.py) | Multi-day decision window over one ticker with the quantitative risk overlay (Kelly / ATR / CVaR) |
+| [scripts/export_ic_dataset.py](scripts/export_ic_dataset.py) | Build the IC dataset (from the OHLCV cache) that feeds the pruning CLI |
+| [scripts/prune_indicators_cli.py](scripts/prune_indicators_cli.py) | Offline keep/prune report for low-IC indicators (evidence for `indicator_battery`) |
+| [scripts/rank_signals.py](scripts/rank_signals.py) | Rank a batch of tickers by conviction from existing reports (read-only) |
+| [scripts/trade_ticket.py](scripts/trade_ticket.py) | Post-analysis execution-ticket generator (read-only enhancement layer) |
 
 ---
 
@@ -379,12 +419,12 @@ One-line telemetry: `python scripts/run_baseline.py --smoke --profile --ticker <
 │   ├── execution/            # browser_broker (browser broker + kill switch)
 │   ├── monitoring/           # dashboard (HTML dashboard)
 │   ├── llm_clients/          # multi-provider adapters + rate limiter + shared httpx
-│   ├── cli/                  # interactive CLI (analyze / batch)
+│   ├── cli/                  # interactive CLI (analyze / batch / config-check / snapshot)
 │   ├── default_config.py     # config + env mapping
 │   └── reporting.py
 ├── cli/                      # source compatibility shims; packaged CLI is yiagents.cli
 ├── web/                      # FastAPI Web UI (run in place, not packaged)
-├── scripts/                  # run_baseline / run_robust / run_batch / run_analyst_parallel_ab / …
+├── scripts/                  # run_baseline / run_robust / run_batch / export_ic_dataset / prune_indicators_cli / rank_signals / …
 ├── tests/                    # test suite — data / risk / backtest / gate / multi-provider / i18n / concurrency
 └── pyproject.toml
 ```
