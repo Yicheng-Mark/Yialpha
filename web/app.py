@@ -42,7 +42,7 @@ from yiagents.logging_config import setup_logging  # noqa: E402
 setup_logging()
 
 from fastapi import FastAPI, HTTPException  # noqa: E402
-from fastapi.responses import FileResponse  # noqa: E402
+from fastapi.responses import FileResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
@@ -167,6 +167,17 @@ class AnalyzeReq(BaseModel):
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(str(_STATIC_DIR / "index.html"))
+
+
+@app.get("/favicon.ico")
+def favicon_ico() -> RedirectResponse:
+    """Legacy favicon path.
+
+    Some browser surfaces (tab icon refresh, bookmarks) request /favicon.ico
+    regardless of the ``<link rel="icon">`` SVG; redirect them to it instead
+    of 404-ing. Takes effect on the next server start (routes load once).
+    """
+    return RedirectResponse(url="/static/favicon.svg", status_code=302)
 
 
 @app.get("/api/tickers")
