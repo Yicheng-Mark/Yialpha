@@ -35,7 +35,7 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 
 ## 能分析什么
 
-给 YiAgents 一个 **ticker + 日期**，它会从四个维度分析，经过多轮辩论与风控裁决，输出带评级、仓位、止损的结构化交易决策。
+给 YiAgents 一个 **ticker + 日期**，它会从四个维度分析，经过多轮辩论与风控裁决，输出带评级、仓位、止损的结构化交易决策。完整过程（从输入到落盘报告）见[分析流程](#分析流程)一节。
 
 **支持的资产**（Yahoo Finance 覆盖范围，用交易所后缀的 ticker；公司身份与 alpha 基准自动按市场解析）：
 
@@ -84,13 +84,49 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 
 ---
 
+## 分析流程
+
+所有入口——交互式 `yiagents analyze`、`yiagents batch` 与 Web UI——最终都汇聚到同一个 `YiAgentsGraph.propagate()` 运行。一个 ticker + 一个日期按下表顺序走完整条流水线：
+
+| # | 阶段 | 参与节点 | 产出 |
+| --- | --- | --- | --- |
+| 1 | 输入与 PIT 上下文 | `propagate()` | 播种状态：分析日期钉死 vendor 层 as-of 截断（杜绝未来数据泄漏），确定性解析 instrument identity，注入历史记忆教训（可选，默认关闭） |
+| 2 | 分析师团队 | Market / Sentiment / News / Fundamentals Analyst | 每个分析师在自己的工具集上循环（`analyst ⇄ ToolNode`）直到产出报告；默认串行，开 `analyst_parallel` 后合并为一个并行 fan-out 节点。例外：Sentiment Analyst 直接预取 Reddit / StockTwits / Yahoo 头条，不走工具循环 |
+| 3 | 多空研究辩论 | Bull ⇄ Bear Researcher | 多轮结构化辩论，`max_debate_rounds`（默认 2 → 4 次发言） |
+| 4 | 研究裁决 | Research Manager（deep LLM） | 结构化 `ResearchPlan` |
+| 5 | 交易提案 | Trader | `TraderProposal`——三档 Buy / Hold / Sell |
+| 6 | 风控辩论 | Aggressive · Conservative · Neutral | 三方裁决，`max_risk_discuss_rounds`（默认 2 → 6 次发言） |
+| 7 | 最终裁决 | Portfolio Manager（deep LLM） | `PortfolioDecision`——五档评级、目标价、时间跨度 |
+| 8 | 量化叠加 | RiskManager（确定性，无 LLM） | Kelly ¼ 仓位 / ATR 止损 / 回撤熔断 / CVaR 重校仓位、止损与敞口；以标记区块追加进决策 |
+| 9 | 输出与证据 | 报告写入器 | 各阶段 markdown 报告 + 汇总报告 + 机器可读全状态日志；评级解析为信号 |
+
+**一次运行的产物**（CLI 默认 `./reports/<TICKER>_<stamp>/`，编程调用默认 `~/.yiagents/logs/reports/`）：
+
+```text
+1_analysts/{market,sentiment,news,fundamentals}.md
+2_research/{bull,bear,manager}.md
+3_trading/trader.md
+4_risk/{aggressive,conservative,neutral}.md
+5_portfolio/decision.md      ← 最终决策（含量化叠加区块）
+complete_report.md           ← 汇总报告；数据质量降级时顶部有 "⚠ DEGRADED RUN" 横幅
+
+~/.yiagents/logs/<TICKER>/YiAgentsStrategy_logs/full_states_log_<date>.json
+   ← 机器可读全状态（证据、data_quality、节点级遥测）；Web 历史页读取此文件
+```
+
+> **数据质量随报告一起交付。** 数据源在每次运行中记录降级哨兵（`no_data` / `optional_unavailable` / `stale_cache`）并汇入 `data_quality` 区块；核心数据缺失的运行会在报告横幅与 Web UI 中标记 `DEGRADED`——绝不静默装作无事发生。Market Analyst 引用的精确价格与指标值必须来自已校验的市场数据快照，每个数值论断都有可核查的来源。
+
+运行结束后有两个可选闭环：因果记忆日志（`memory_enabled`，默认关闭——见[持久化与恢复](#持久化与恢复)）用已实现收益回溯过往同标的决策、把教训注入下一次运行；离线自我改进链（IC 剪枝 → 配置快照 → 验证闸门——见[回测与验证闸门](#回测与验证闸门)）。
+
+---
+
 ## 架构
 
 ```text
 数据层 (yfinance / Alpha Vantage / FRED / Polymarket / Reddit / StockTwits / Binance)
         │
    ┌────▼───── Analyst Team（串行，或开并行的标志位）──────────┐
-   │  Fundamentals · Sentiment · News · Technical              │
+   │  Market · Sentiment · News · Fundamentals                 │
    └───────────────────────────────────────────────────────────┘
         │
    ┌────▼───── Researcher Team ────────────────────────────────┐
