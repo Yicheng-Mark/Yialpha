@@ -51,7 +51,7 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 
 | 分析师 | 维度 | 数据来源 |
 | ------ | ------ | ------ |
-| Market Analyst | 技术面：从指标库（MACD / RSI / 布林带 / ATR / VWMA / SMA / EMA 等）按市况选最多 8 个互补指标 | yfinance / Alpha Vantage |
+| Market Analyst | 技术面：从 28 个指标目录（趋势 / 动量 / 波动率 / 成交量四类）按市况选最多 8 个互补指标；另常绑 5 个证据工具——周线级别、支撑/阻力、量价特征、K 线形态、基准相对强度 | yfinance / Alpha Vantage |
 | Sentiment Analyst | 社交情绪 | Reddit、StockTwits（仅当前日期分析） |
 | News Analyst | 个股新闻 + 宏观/全球新闻（美联储、地缘、央行政策等） | yfinance / Alpha Vantage News |
 | Fundamentals Analyst | 财务基本面 | yfinance / Alpha Vantage |
@@ -65,10 +65,22 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 | 模式 | `--asset-type` | 数据源 | 绑定工具 | 备注 |
 | ------ | ------ | ------ | ------ | ------ |
 | Yahoo 现货（默认） | `crypto` | Yahoo Finance（`BTC-USD`） | indicators + verified_snapshot | 默认加密路径；无 funding / OI / 杠杆 |
-| Binance 现货 | `crypto_spot` | Binance 现货（`api.binance.com`，可切镜像） | 历史：spot_klines + 有日期的指标/快照；当前日期另含 ticker24 / **spot_perp_basis** | 历史分析不会注入滚动 24h 与当前跨市场基差 |
-| Binance 永续 | `crypto_perp` | Binance USDT-M 永续（`fapi.binance.com`） | 历史：klines + funding；当前日期另含 OI / 多空比 / 主动买卖 / basis | 仅分析；现有现货多头回测引擎会明确拒绝该模式 |
+| Binance 现货 | `crypto_spot` | Binance 现货（`api.binance.com`，可切镜像） | 所有运行：spot_klines + 现货指标 + 有日期的指标/快照/证据工具；当前日期另含 ticker24 / **spot_perp_basis** | 历史分析不会注入滚动 24h 与当前跨市场基差 |
+| Binance 永续 | `crypto_perp` | Binance USDT-M 永续（`fapi.binance.com`） | 所有运行：klines + funding + 指标；当前日期另含 OI / 多空比 / 主动买卖 / basis / mark price 溢价指数 | 仅分析；回测已支持完整永续建模（资金费 / 成本 / 杠杆 / 强平） |
 
 加密模式下 Fundamentals Analyst 会自动剔除（永续 / 现货对无基本面）。所有 Binance 请求为手写 `requests`（**非官方 SDK**），复用已验证的 SOCKS5 代理，按产品线独立限流，并保留反应式 429/418 兜底。
+
+### A 股原生数据
+
+面向 A 股 ticker 的可选原生数据模式：设 `YIAGENTS_A_SHARE_NATIVE=true`（默认关闭；先 `pip install "yiagents[a-share]"` 装数据源）。门控为 **开关 AND `is_a_stock(ticker)`**，美股 / 加密 / 港股运行保持字节等价。两者同时成立时，向分析师追加 12 个 PIT 正确的只读工具：
+
+| 分析师 | 追加工具（数据源） |
+| ------ | ------ |
+| Market | 北向资金 · 板块资金流 · 实时行情 · 涨跌家数（AKShare） |
+| Fundamentals | TTM PE/PB/股息 · 前复权 OHLCV · 利润表 / 资产负债表 / 现金流量表（BaoStock）；资金流 · 龙虎榜（AKShare） |
+| News | 个股中文新闻，东财 via AKShare |
+
+另提供 Tushare 质量档（`pip install "yiagents[a-share-tushare]"` + `TUSHARE_TOKEN`）用于基本面/新闻。数据源均为惰性导入：未装 extra 时默认关闭的运行不受影响。
 
 ---
 
@@ -114,7 +126,14 @@ pip install -e .
 # 可选 extras
 pip install -e ".[web]"        # 本地 Web UI 的 FastAPI + Uvicorn
 pip install -e ".[bedrock]"    # Amazon Bedrock 提供商（AWS SigV4）
+pip install -e ".[a-share]"    # A 股原生数据的 AKShare + BaoStock
 pip install -e ".[dev]"        # ruff / pytest
+```
+
+如需完全可复现的环境（传递依赖全部锁版本），改从 lock 安装：
+
+```bash
+pip install -r requirements.lock   # core + dev，锁版本（重新生成：uv pip compile）
 ```
 
 Docker：
@@ -209,6 +228,18 @@ yiagents batch -t BTCUSDT -t ETHUSDT -d 2026-06-30 --asset-type crypto_spot
 
 **并发是安全的**：每个 worker 线程独占一个图实例（无竞态），记忆日志与 OHLCV 缓存用 filelock 序列化，单票失败不连累整批，且每只标的的分析与串行跑**字节等价**——并发层叠在 `propagate()` 之上，不改任何 agent 输入 / 深度 / 推理参数。详见 [yiagents/batch/runner.py](yiagents/batch/runner.py)。
 
+### 配置校验与审计：`yiagents config-check` / `yiagents snapshot`
+
+```bash
+yiagents config-check     # 校验所选提供商 key、报告可选数据源 env，
+                          # 并检查 indicator_battery 指标名
+yiagents snapshot record -r "剪枝低IC指标" [-e 证据]
+                          # 追加式配置快照（时间戳 / 原因 / 证据 / git commit），
+                          # 永不修改线上配置
+yiagents snapshot diff    # 当前配置与最后一份快照做 diff
+yiagents snapshot list    # 列出已记录的快照
+```
+
 ---
 
 ## Web UI
@@ -222,9 +253,9 @@ python web/app.py                # 启动 http://127.0.0.1:8000
 
 > 必须从**项目根**启动（包含 `.env`、`yiagents/`、`scripts/` 的目录）：`yiagents/__init__.py` 用 `load_dotenv(usecwd=True)` 加载 `.env`，在别处启动会令 DeepSeek key 与 SOCKS5 代理缺失，spawn 出来的 `run_robust` 子进程会继承这个坏环境。
 
-- **浏览**：ticker 网格 → 每只的日期 → 完整报告视图（评级徽章 + 量化风控 overlay 卡片 + 5 个可折叠章节 + 可选 node-perf 柱状图）。
+- **浏览**：ticker 网格 → 每只的日期 → 完整报告视图（评级徽章 + 量化风控 overlay 卡片 + 5 个可折叠章节 + 可选 node-perf 柱状图），另有跨票跨日期的评级对比视图（`#/compare`）。
 - **提交**：表单 spawn `scripts/run_robust.py`（与 CLI 同一条看门狗路径）；前端每 4 秒轮询并链接完成的报告。同一时刻只允许一个分析（运行中返回 409）。
-- **API**：`GET /api/tickers`、`GET /api/tickers/{t}/runs[/{date}]`、`POST /api/analyze`、`GET /api/tasks/{id}`、`GET /api/health`。
+- **API**：`GET /api/tickers`、`GET /api/tickers/{t}/runs[/{date}]`、`GET /api/compare`、`POST /api/analyze`、`GET /api/tasks/{id}`、`GET /api/health`。
 
 架构与完整端点说明见 [web/README.md](web/README.md)。
 
@@ -296,7 +327,7 @@ python scripts/run_baseline.py --baseline --tickers AAPL NVDA
 python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 ```
 
-常用参数：`--tickers`（A股 `600519.SS`）/ `--start --end` / `--step`（调仓间隔，默认 10）/ `--rebalance`（调仓次数，默认 6）/ `--holding-days` / `--cost-bps`（单边成本，默认 5bp）/ `--runs`（LLM 非确定性，每票跑几次取分布）/ `--workers`（跨 ticker 并发）/ `--out`（默认 `./backtest_output`）。
+常用参数：`--tickers`（A股 `600519.SS`）/ `--asset-type`（`stock` / `crypto` / `crypto_perp`）/ `--start --end` / `--step`（调仓间隔，默认 10）/ `--rebalance`（调仓次数，默认 6）/ `--holding-days` / `--cost-bps`（单边成本，默认 5bp）/ `--runs`（LLM 非确定性，每票跑几次取分布）/ `--workers`（跨 ticker 并发）/ `--out`（默认 `./backtest_output`）。仅永续：`--leverage`（默认 1.0；>1 启用逐仓强平建模）/ `--allow-short` / `--slippage-bps`（默认 0）/ `--bnb-discount`。
 
 > 每次 `propagate()` = 一次完整 LLM 图（4 分析师 + 辩论 + 交易员 + 风控辩论 + PM）。成本随 `tickers × 日期数 × runs` 线性增长。**先 preflight 全绿，再 smoke，最后放大。**
 
@@ -307,7 +338,17 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 - baseline / improved 复用同一份 LLM 决策带；每个 ticker/run 使用全新的有状态 RiskManager
 - 报告、仪表盘、闸门判定写入 `--out`（默认 `backtest_output/`）
 
-日线信号统一在**下一根可用 K 线**成交，不再使用刚被模型读过的当日收盘价；`Hold` 不调仓也不收费，胜率按实际持仓盈亏计算。`crypto_perp` 在实现资金费、做空、杠杆、保证金与爆仓前会被回测入口明确拒绝。
+日线信号统一在**下一根可用 K 线**成交，不再使用刚被模型读过的当日收盘价；`Hold` 不调仓也不收费，胜率按实际持仓盈亏计算。加密年化按 365 个交易日、股票按 252。
+
+`crypto_perp` 回测（`--asset-type crypto_perp`）已内置完整永续精度建模：
+
+- **计价**：持仓按永续自身的 Binance K 线计价，而非 Yahoo 现货。
+- **资金费拖累**：按资金费区间逐段计提；**fail-closed**——资金费序列出现覆盖缺口即中止运行，绝不静默当作零。
+- **成本**：taker 费 + `--slippage-bps` + 可选 BNB 抵扣，并按交易所真实 filters 做 `stepSize` / `minNotional` 成交量化。
+- **杠杆 / 强平**：`--leverage > 1` 启用逐仓建模——按 K 线极值（最高/最低价）触发强平、MMR 阶梯取自 `leverageBracket`，强平事件记入运行摘要。默认 1 倍、仅多头。
+- **做空**：`--allow-short` 显式开启（Sell → −1×，收资金费）；仅永续可用。
+
+**指标自改进环（离线、无 LLM）：** Market 分析师的 28 个指标目录可按证据剪枝——`scripts/export_ic_dataset.py` 直接从 PIT 过滤后的 OHLCV 缓存导出 `date, forward_return, <指标>…` 表，`scripts/prune_indicators_cli.py` 按滚动 IC 排名并输出保留/剪枝报告（绝不自动应用），人工审核后的名单落入 `indicator_battery` 配置键，由 `yiagents config-check` 校验；`yiagents snapshot record` 把变更记入追加式审计轨迹。
 
 ```text
 [AAPL] 闸门判定: ✅ PASS | DSR 1.42 | 跑赢B&H True
@@ -355,6 +396,11 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 | [scripts/run_batch.py](scripts/run_batch.py) | 批量并发分析多只 ticker（等价于 `yiagents batch`） |
 | [scripts/run_analyst_parallel_ab.py](scripts/run_analyst_parallel_ab.py) | 验证分析师并行与串行分布等价的 A/B 闸门 |
 | [scripts/smoke_structured_output.py](scripts/smoke_structured_output.py) | 针对任意提供商验证三个结构化输出 agent |
+| [scripts/analyze_window.py](scripts/analyze_window.py) | 单票多日决策窗口 + 量化风控叠加层（Kelly / ATR / CVaR） |
+| [scripts/export_ic_dataset.py](scripts/export_ic_dataset.py) | 从 OHLCV 缓存导出 IC 数据集，供剪枝 CLI 使用 |
+| [scripts/prune_indicators_cli.py](scripts/prune_indicators_cli.py) | 离线输出低 IC 指标保留/剪枝报告（`indicator_battery` 的证据） |
+| [scripts/rank_signals.py](scripts/rank_signals.py) | 按信心分对一批 ticker 的既有报告排名（只读） |
+| [scripts/trade_ticket.py](scripts/trade_ticket.py) | 分析后生成执行票据（只读增强层） |
 
 ---
 
@@ -372,12 +418,12 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 │   ├── execution/            # browser_broker（浏览器券商 + kill switch）
 │   ├── monitoring/           # dashboard（HTML 仪表盘）
 │   ├── llm_clients/          # 多 LLM 提供商适配 + 限流器 + 共享 httpx
-│   ├── cli/                  # 交互式 CLI（analyze / batch）
+│   ├── cli/                  # 交互式 CLI（analyze / batch / config-check / snapshot）
 │   ├── default_config.py     # 配置 + env 映射
 │   └── reporting.py
 ├── cli/                      # 源码兼容包装；正式入口是 yiagents.cli
 ├── web/                      # FastAPI Web UI（原地运行，不打包）
-├── scripts/                  # run_baseline / run_robust / run_batch / run_analyst_parallel_ab / …
+├── scripts/                  # run_baseline / run_robust / run_batch / export_ic_dataset / prune_indicators_cli / rank_signals / …
 ├── tests/                    # 测试套件——数据/风控/回测/闸门/多提供商/i18n/并发
 └── pyproject.toml
 ```
