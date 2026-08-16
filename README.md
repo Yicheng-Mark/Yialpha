@@ -35,7 +35,7 @@ YiAgents deploys a team of specialized **LLM agents** that mirror how a real tra
 
 ## What it can analyze
 
-Give YiAgents a **ticker + date** and it analyzes from four angles, runs multiple debate and risk-deliberation rounds, and outputs a structured trading decision with a rating, position size, and stop-loss.
+Give YiAgents a **ticker + date** and it analyzes from four angles, runs multiple debate and risk-deliberation rounds, and outputs a structured trading decision with a rating, position size, and stop-loss. The full journey — input to on-disk report — is detailed in [Analysis pipeline](#analysis-pipeline).
 
 **Supported assets** (Yahoo Finance coverage via exchange-suffix tickers; company identity and the alpha benchmark are resolved per market automatically):
 
@@ -84,13 +84,49 @@ A Tushare quality tier (`pip install "yiagents[a-share-tushare]"` + `TUSHARE_TOK
 
 ---
 
+## Analysis pipeline
+
+Every entry point — interactive `yiagents analyze`, `yiagents batch`, and the Web UI — funnels into the same `YiAgentsGraph.propagate()` run. One ticker + one date walks the full pipeline below, in order:
+
+| # | Stage | Who | Produces |
+| --- | --- | --- | --- |
+| 1 | Input & PIT context | `propagate()` | State seeded: the analysis date pins the vendor-layer as-of clamp (no future data leaks in), instrument identity resolved deterministically, past memory-log lessons injected (opt-in, off by default) |
+| 2 | Analyst team | Market / Sentiment / News / Fundamentals Analyst | Each analyst loops against its own tool set (`analyst ⇄ ToolNode`) until it emits its report; serial by default, collapsed into one parallel fan-out node behind `analyst_parallel`. Exception: the Sentiment Analyst pre-fetches Reddit / StockTwits / Yahoo headlines directly, no tool loop |
+| 3 | Research debate | Bull ⇄ Bear Researchers | Multi-round structured debate, `max_debate_rounds` (default 2 → 4 speeches) |
+| 4 | Research verdict | Research Manager (deep LLM) | Structured `ResearchPlan` |
+| 5 | Trade proposal | Trader | `TraderProposal` — three-tier Buy / Hold / Sell |
+| 6 | Risk debate | Aggressive · Conservative · Neutral | Three-way deliberation, `max_risk_discuss_rounds` (default 2 → 6 speeches) |
+| 7 | Final call | Portfolio Manager (deep LLM) | `PortfolioDecision` — five-tier rating, price target, time horizon |
+| 8 | Quant overlay | RiskManager (deterministic, no LLM) | Kelly ¼ sizing / ATR stop / drawdown breaker / CVaR recalibrate position, stop and exposure; appended to the decision under a marked section |
+| 9 | Output & evidence | report writer | Per-stage markdown reports + consolidated report + machine-readable full-state log; rating parsed into a signal |
+
+**What a run produces** (under `./reports/<TICKER>_<stamp>/` for CLI runs, `~/.yiagents/logs/reports/` programmatically):
+
+```text
+1_analysts/{market,sentiment,news,fundamentals}.md
+2_research/{bull,bear,manager}.md
+3_trading/trader.md
+4_risk/{aggressive,conservative,neutral}.md
+5_portfolio/decision.md      ← final decision, incl. the quant-overlay block
+complete_report.md           ← consolidated; "⚠ DEGRADED RUN" banner on top if data quality tripped
+
+~/.yiagents/logs/<TICKER>/YiAgentsStrategy_logs/full_states_log_<date>.json
+   ← machine-readable full state (evidence, data_quality, per-node telemetry); Web history reads this file
+```
+
+> **Data quality ships with the report.** Data vendors record degradation sentinels (`no_data` / `optional_unavailable` / `stale_cache`) into a `data_quality` block on every run; a run that lost core data is flagged `DEGRADED` in both the report banner and the Web UI — it never silently pretends nothing happened. Exact prices and indicator values cited by the Market Analyst must come from the verified market-data snapshot, so every numeric claim has a checkable source.
+
+Two optional loops close the cycle after a run: the causal memory log (`memory_enabled`, off by default — see [Persistence & recovery](#persistence--recovery)) resolves past same-ticker decisions against realized returns and injects lessons into the next run, and the offline self-improvement chain (IC pruning → config snapshot → validation gate — see [Backtest & validation gate](#backtest--validation-gate)).
+
+---
+
 ## Architecture
 
 ```text
 Data layer (yfinance / Alpha Vantage / FRED / Polymarket / Reddit / StockTwits / Binance)
         │
    ┌────▼───── Analyst Team (serial, or parallel behind a flag) ─────┐
-   │  Fundamentals · Sentiment · News · Technical                    │
+   │  Market · Sentiment · News · Fundamentals                       │
    └──────────────────────────────────────────────────────────────────┘
         │
    ┌────▼───── Researcher Team ──────────────────────────────────────┐
