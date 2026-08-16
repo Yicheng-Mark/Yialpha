@@ -15,11 +15,13 @@ import pandas as pd
 import pytest
 
 from yiagents.dataflows.vol_estimators import (
+    CRYPTO_TRADING_DAYS_PER_YEAR,
     TRADING_DAYS_PER_YEAR,
     close_to_close_vol,
     ewma_vol,
     garman_klass_vol,
     parkinson_vol,
+    periods_per_year_for,
     yang_zhang_vol,
 )
 from yiagents.dataflows.volume_features import (
@@ -127,6 +129,65 @@ class TestEwmaVol:
         for r in rets[1:]:
             var = lam * var + (1 - lam) * r * r
         assert vol.iloc[-1] == pytest.approx(math.sqrt(var * TRADING_DAYS_PER_YEAR), rel=1e-9)
+
+
+@pytest.mark.unit
+class TestAnnualizationFactor:
+    """Crypto (24/7) daily series annualize with 365, equities with 252.
+
+    Pins the 2026-08-16 fix: the Binance indicator tools computed rvol_20 /
+    ewma_vol on crypto candles through the 252 default, understating every
+    vol reading by sqrt(252/365) ≈ 0.83.
+    """
+
+    def test_periods_per_year_for_asset_type(self):
+        assert periods_per_year_for("crypto") == CRYPTO_TRADING_DAYS_PER_YEAR
+        assert periods_per_year_for("crypto_perp") == CRYPTO_TRADING_DAYS_PER_YEAR
+        assert periods_per_year_for("crypto_spot") == CRYPTO_TRADING_DAYS_PER_YEAR
+        assert periods_per_year_for("stock") == TRADING_DAYS_PER_YEAR
+        assert periods_per_year_for(None) == TRADING_DAYS_PER_YEAR
+        assert periods_per_year_for("") == TRADING_DAYS_PER_YEAR
+
+    def test_close_to_close_365_scales_by_sqrt_ratio(self):
+        rng = np.random.default_rng(11)
+        closes = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.02, 80)))
+        frame = _frame(closes, n=80)
+        vol252 = close_to_close_vol(frame, window=20)
+        vol365 = close_to_close_vol(
+            frame, window=20, periods_per_year=CRYPTO_TRADING_DAYS_PER_YEAR
+        )
+        ratio = float(vol365.iloc[-1] / vol252.iloc[-1])
+        assert ratio == pytest.approx(math.sqrt(365.0 / 252.0), rel=1e-12)
+        # Default remains the equity convention byte-for-byte.
+        assert vol252.iloc[-1] == pytest.approx(
+            close_to_close_vol(frame, window=20,
+                               periods_per_year=TRADING_DAYS_PER_YEAR).iloc[-1],
+            rel=1e-15,
+        )
+
+    def test_ewma_vol_accepts_periods_per_year(self):
+        closes = [100.0, 101.0, 100.5, 102.0, 101.5]
+        frame = _frame(closes, n=5)
+        a = ewma_vol(frame).iloc[-1]
+        b = ewma_vol(frame, periods_per_year=365.0).iloc[-1]
+        assert float(b / a) == pytest.approx(math.sqrt(365.0 / 252.0), rel=1e-12)
+
+    def test_registry_threads_factor_to_vol_features_only(self):
+        from yiagents.dataflows.feature_registry import compute_derived
+
+        rng = np.random.default_rng(12)
+        closes = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.02, 80)))
+        frame = _frame(closes, n=80)
+        base = float(compute_derived(frame, "rvol_20").iloc[-1])
+        crypto = float(
+            compute_derived(frame, "rvol_20",
+                            periods_per_year=CRYPTO_TRADING_DAYS_PER_YEAR).iloc[-1]
+        )
+        assert crypto / base == pytest.approx(math.sqrt(365.0 / 252.0), rel=1e-12)
+        # Volume features are unit-free ratios: the factor must not change them.
+        r1 = compute_derived(frame, "rel_vol_20")
+        r2 = compute_derived(frame, "rel_vol_20", periods_per_year=365.0)
+        assert float(r1.iloc[-1]) == pytest.approx(float(r2.iloc[-1]), rel=1e-15)
 
 
 @pytest.mark.unit

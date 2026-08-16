@@ -4,8 +4,11 @@ Close-to-close realized vol only uses one number per day; the high/low range
 carries far more information about intraday dispersion. These estimators are
 the standard ladder (Parkinson 1980, Garman-Klass 1980, Yang-Zhang 2000,
 plus RiskMetrics EWMA) computed as rolling series aligned to the input frame.
-All outputs are ANNUALIZED (× sqrt(252)) volatilities — comparable across
-windows and directly usable for vol-targeted sizing.
+All outputs are ANNUALIZED volatilities — comparable across windows and
+directly usable for vol-targeted sizing. The annualization factor defaults
+to the equity convention (× sqrt(252)); crypto (spot and perp) trades 24/7
+and MUST pass ``periods_per_year=CRYPTO_TRADING_DAYS_PER_YEAR`` (365), or
+every reading is understated by sqrt(252/365) ≈ 0.83.
 
 Pure pandas on the capitalized OHLCV columns ``load_ohlcv`` produces; no
 network, no LLM. Rows with a non-finite Close are dropped first; estimators
@@ -20,8 +23,25 @@ import math
 import numpy as np
 import pandas as pd
 
-#: Annualization factor for daily-frequency vol estimates.
+#: Annualization factor for daily-frequency vol estimates (equity convention).
 TRADING_DAYS_PER_YEAR = 252.0
+
+#: Crypto trades every calendar day — a daily crypto series annualizes with
+#: 365, not 252. Using 252 on Binance candles understates annualized vol by
+#: sqrt(252/365) ≈ 0.83 (a ~17% error on every vol-based reading).
+CRYPTO_TRADING_DAYS_PER_YEAR = 365.0
+
+
+def periods_per_year_for(asset_type: str | None) -> float:
+    """Annualization factor for a daily series of ``asset_type``.
+
+    Crypto (spot and perp) trades every calendar day; equities/A-shares keep
+    the 252-session convention. Unknown/None defaults to 252 (the historical
+    behaviour), matching the backtest engine's ``periods_per_year`` rule.
+    """
+    if (asset_type or "").startswith("crypto"):
+        return CRYPTO_TRADING_DAYS_PER_YEAR
+    return TRADING_DAYS_PER_YEAR
 
 #: RiskMetrics decay for the EWMA variance recursion (λ = 0.94, the standard
 #: daily-frequency value from the 1996 RiskMetrics technical document).
@@ -39,7 +59,10 @@ def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return out if not out.empty else pd.DataFrame()
 
 
-def close_to_close_vol(df: pd.DataFrame, window: int = 20) -> pd.Series:
+def close_to_close_vol(
+    df: pd.DataFrame, window: int = 20,
+    periods_per_year: float = TRADING_DAYS_PER_YEAR,
+) -> pd.Series:
     """Annualized rolling std (ddof=1) of daily log returns.
 
     The textbook realized-vol baseline every other estimator here is judged
@@ -51,10 +74,13 @@ def close_to_close_vol(df: pd.DataFrame, window: int = 20) -> pd.Series:
         return pd.Series(dtype=float)
     log_ret = np.log(data["Close"] / data["Close"].shift(1))
     var = log_ret.rolling(window, min_periods=window).var(ddof=1)
-    return np.sqrt(var * TRADING_DAYS_PER_YEAR)
+    return np.sqrt(var * periods_per_year)
 
 
-def parkinson_vol(df: pd.DataFrame, window: int = 20) -> pd.Series:
+def parkinson_vol(
+    df: pd.DataFrame, window: int = 20,
+    periods_per_year: float = TRADING_DAYS_PER_YEAR,
+) -> pd.Series:
     """Annualized Parkinson (1980) high-low-range volatility.
 
     σ² = mean(ln(H/L)²) / (4 ln 2). ~5× more efficient than close-to-close
@@ -66,10 +92,13 @@ def parkinson_vol(df: pd.DataFrame, window: int = 20) -> pd.Series:
         return pd.Series(dtype=float)
     hl = np.log(data["High"] / data["Low"])
     var = hl.pow(2).rolling(window, min_periods=window).mean() / (4.0 * math.log(2.0))
-    return np.sqrt(var * TRADING_DAYS_PER_YEAR)
+    return np.sqrt(var * periods_per_year)
 
 
-def garman_klass_vol(df: pd.DataFrame, window: int = 20) -> pd.Series:
+def garman_klass_vol(
+    df: pd.DataFrame, window: int = 20,
+    periods_per_year: float = TRADING_DAYS_PER_YEAR,
+) -> pd.Series:
     """Annualized Garman-Klass (1980) OHLC volatility.
 
     σ² = mean( 0.5·ln(H/L)² − (2·ln2 − 1)·ln(C/O)² ). Adds the open-close
@@ -84,10 +113,13 @@ def garman_klass_vol(df: pd.DataFrame, window: int = 20) -> pd.Series:
     oc = np.log(data["Close"] / data["Open"])
     term = 0.5 * hl.pow(2) - (2.0 * math.log(2.0) - 1.0) * oc.pow(2)
     var = term.rolling(window, min_periods=window).mean().clip(lower=0.0)
-    return np.sqrt(var * TRADING_DAYS_PER_YEAR)
+    return np.sqrt(var * periods_per_year)
 
 
-def yang_zhang_vol(df: pd.DataFrame, window: int = 20) -> pd.Series:
+def yang_zhang_vol(
+    df: pd.DataFrame, window: int = 20,
+    periods_per_year: float = TRADING_DAYS_PER_YEAR,
+) -> pd.Series:
     """Annualized Yang-Zhang (2000) volatility — min-variance unbiased under
     both overnight gaps and drift.
 
@@ -112,10 +144,13 @@ def yang_zhang_vol(df: pd.DataFrame, window: int = 20) -> pd.Series:
     var_c = open_to_close.rolling(window, min_periods=window).var(ddof=1)
     var_rs = rs.rolling(window, min_periods=window).mean()
     var = var_o + k * var_c + (1.0 - k) * var_rs
-    return np.sqrt(var.clip(lower=0.0) * TRADING_DAYS_PER_YEAR)
+    return np.sqrt(var.clip(lower=0.0) * periods_per_year)
 
 
-def ewma_vol(df: pd.DataFrame, lam: float = EWMA_LAMBDA) -> pd.Series:
+def ewma_vol(
+    df: pd.DataFrame, lam: float = EWMA_LAMBDA,
+    periods_per_year: float = TRADING_DAYS_PER_YEAR,
+) -> pd.Series:
     """Annualized RiskMetrics EWMA volatility (λ = 0.94 by default).
 
     σ²_t = λ·σ²_{t−1} + (1−λ)·r²_t with the recursion seeded at the first
@@ -129,4 +164,4 @@ def ewma_vol(df: pd.DataFrame, lam: float = EWMA_LAMBDA) -> pd.Series:
         return pd.Series(dtype=float)
     log_ret = np.log(data["Close"] / data["Close"].shift(1))
     var = log_ret.pow(2).ewm(alpha=1.0 - lam, adjust=False, min_periods=1).mean()
-    return np.sqrt(var * TRADING_DAYS_PER_YEAR)
+    return np.sqrt(var * periods_per_year)

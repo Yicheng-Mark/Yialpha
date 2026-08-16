@@ -367,7 +367,9 @@ def create_market_analyst(llm):
         # trend nor volatility state has enough history.
         if get_config().get("regime_context", True):
             try:
-                regime_line = format_regime_context(ticker, current_date)
+                regime_line = format_regime_context(
+                    ticker, current_date, asset_type=state.get("asset_type"),
+                )
             except Exception:  # noqa: BLE001 — advisory, never block the node
                 regime_line = None
             if regime_line:
