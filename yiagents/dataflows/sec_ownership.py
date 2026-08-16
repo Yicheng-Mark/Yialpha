@@ -779,20 +779,29 @@ def get_institutional_holdings(
             continue
         cov = cover_by_acc.get(h["accession"], {})
         fd = cov.get("filing_date", "")[:10]
-        if fd:
-            try:
-                if date.fromisoformat(fd) > upper_d:
-                    continue
-            except ValueError:
-                # Fail-closed like the CUSIP record gate above: a malformed
-                # filing date cannot prove the row was filed on time, so the
-                # holding is dropped instead of bypassing the PIT check
-                # (a `pass` here would leak future 13F holdings).
-                logger.debug(
-                    "sec_ownership: dropping 13F row with malformed "
-                    "filing_date %r (PIT gate) for %s", fd, ticker,
-                )
+        if not fd:
+            # Same fail-closed class as the malformed-date branch below: a
+            # holding with NO filing date (missing cover row / blank column)
+            # cannot prove it was filed on time either — an `if fd:` wrapper
+            # here used to skip the PIT check entirely and leak the row.
+            logger.debug(
+                "sec_ownership: dropping 13F row with missing filing_date "
+                "(PIT gate) for %s accession=%s", ticker, h["accession"],
+            )
+            continue
+        try:
+            if date.fromisoformat(fd) > upper_d:
                 continue
+        except ValueError:
+            # Fail-closed like the CUSIP record gate above: a malformed
+            # filing date cannot prove the row was filed on time, so the
+            # holding is dropped instead of bypassing the PIT check
+            # (a `pass` here would leak future 13F holdings).
+            logger.debug(
+                "sec_ownership: dropping 13F row with malformed "
+                "filing_date %r (PIT gate) for %s", fd, ticker,
+            )
+            continue
         name = cov.get("manager") or cov.get("filer_cik") or h["accession"]
         slot = agg.setdefault(name, {"shares": 0.0, "value": 0.0, "filing_date": ""})
         slot["shares"] += _num(h["shares"]) or 0.0

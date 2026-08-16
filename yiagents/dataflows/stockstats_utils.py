@@ -4,7 +4,7 @@ import os
 import socket
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
 import pandas as pd
 import yfinance as yf
@@ -23,11 +23,14 @@ logger = logging.getLogger(__name__)
 # hangs the whole batch — the same half-open-socket class as the LLM read
 # timeout in llm_clients/openai_client.py. Two layers, both opt-in via
 # YIAGENTS_HTTP_TIMEOUT_S (seconds), off by default:
-#   1. socket.setdefaulttimeout — process-wide backstop for the yfinance calls
-#      that take no per-call timeout (Ticker.info, get_news, Search). Every
-#      other network path here already passes an explicit timeout (Reddit,
-#      FRED, Alpha Vantage, the LLM clients), so this effectively binds only
-#      yfinance.
+#   1. a SCOPED socket.setdefaulttimeout, applied by yf_retry() around each
+#      attempt for the yfinance calls that take no per-call timeout
+#      (Ticker.info, get_news, Search). Every other network path here already
+#      passes an explicit timeout (Reddit, FRED, Alpha Vantage, the LLM
+#      clients, Binance), so the old import-time process-wide defaulttimeout
+#      only ever bound yfinance anyway — scoping it (2026-08-16) stops the
+#      import side effect from changing socket behavior for the REST of a
+#      host process (e.g. a web app embedding this package).
 #   2. timeout= on yf.download — the OHLCV path, the call that actually hangs
 #      the pipeline.
 _HTTP_TIMEOUT_ENV = os.environ.get("YIAGENTS_HTTP_TIMEOUT_S")
@@ -37,7 +40,6 @@ if _HTTP_TIMEOUT_ENV:
         parsed = float(_HTTP_TIMEOUT_ENV)
         if parsed > 0:
             YF_HTTP_TIMEOUT = parsed
-            socket.setdefaulttimeout(YF_HTTP_TIMEOUT)
         else:
             logger.warning(
                 "YIAGENTS_HTTP_TIMEOUT_S=%r is not positive; ignoring it "
@@ -50,6 +52,27 @@ if _HTTP_TIMEOUT_ENV:
             "YIAGENTS_HTTP_TIMEOUT_S=%r is not a number; ignoring it "
             "(no HTTP timeout will be applied)", _HTTP_TIMEOUT_ENV,
         )
+
+
+@contextmanager
+def _scoped_yf_socket_timeout():
+    """Apply YF_HTTP_TIMEOUT as the socket default for the duration only.
+
+    yfinance's no-timeout calls (``.info``/``get_news``/``Search``) create raw
+    sockets that inherit ``socket.getdefaulttimeout()``; setting it around the
+    attempt (and restoring the prior value after) binds exactly those calls.
+    Concurrent workers race only between identical values, so the restore
+    window is harmless.
+    """
+    if YF_HTTP_TIMEOUT is None:
+        yield
+        return
+    prev = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(YF_HTTP_TIMEOUT)
+    try:
+        yield
+    finally:
+        socket.setdefaulttimeout(prev)
 
 # A vendor's latest OHLCV row this many calendar days before the requested date
 # is treated as stale. Generous enough to span long holiday weekends, tight
@@ -91,7 +114,8 @@ def yf_retry(func, max_retries=3, base_delay=2.0, symbol=None, canonical=None):
     """
     for attempt in range(max_retries + 1):
         try:
-            return func()
+            with _scoped_yf_socket_timeout():
+                return func()
         except YFRateLimitError as err:
             if attempt < max_retries:
                 delay = base_delay * (2 ** attempt)

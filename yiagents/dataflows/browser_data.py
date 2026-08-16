@@ -1,5 +1,12 @@
 """Browser-driven alternative-data augmentation (Phase 2d).
 
+STATUS (2026-08-16): EXPERIMENTAL / PRODUCTION-ORPHANED. No agent, tool or
+script imports this module — only its own test exercises it. It is kept
+(deliberately, not accidentally): the Playwright fetch engine and the
+PIT-invariant plumbing are sound building blocks for a future alt-data tool;
+until something wires it into an analyst, treat every selector here as
+unmaintained and do NOT rely on it for live decisions.
+
 The framework's API data sources (yfinance / FRED / Polymarket) give breadth but
 miss forward-looking / alternative qualitative signals the analyst agents can
 read: earnings-revision momentum, management-guidance keyword tone, and

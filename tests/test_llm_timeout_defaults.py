@@ -370,17 +370,27 @@ def test_azure_caller_kwarg_wins(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_bedrock_get_llm_wires_timeout_helper():
-    """Bedrock get_llm() calls resolve_timeout (gap B wiring, source-level).
+    """Bedrock get_llm() reaches resolve_timeout (gap B wiring, source-level).
 
     langchain-aws is an optional extra absent from the default install, so we
-    assert the wiring statically: the resolve_timeout call site and the
-    ``timeout`` passthrough entry are both present in bedrock_client.py.
+    assert the wiring statically. Since the 2026-08-16 client dedup, the call
+    site is ``apply_passthrough_kwargs`` (base_client), which routes through
+    resolve_timeout with the provider name; ``timeout`` must stay in its
+    passthrough tuple.
     """
     from pathlib import Path
 
     src = Path(__file__).resolve().parent.parent / "yiagents" / "llm_clients" / "bedrock_client.py"
     text = src.read_text(encoding="utf-8")
-    assert "from ._timeout import resolve_timeout" in text
-    assert 'resolve_timeout(llm_kwargs, is_local=False, provider_name="bedrock")' in text
-    assert '"timeout"' in text  # added to passthrough tuple
+    assert "from .base_client import" in text
+    assert "apply_passthrough_kwargs(" in text
+    assert '"bedrock"' in text                # provider name for resolve_timeout
+    assert '"timeout"' in text                # in the passthrough tuple
+
+    # The helper itself must keep routing to resolve_timeout (cloud default).
+    base_src = (
+        Path(__file__).resolve().parent.parent
+        / "yiagents" / "llm_clients" / "base_client.py"
+    ).read_text(encoding="utf-8")
+    assert "resolve_timeout(llm_kwargs, is_local=False, provider_name=timeout_provider)" in base_src
 

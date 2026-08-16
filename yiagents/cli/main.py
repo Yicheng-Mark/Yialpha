@@ -1168,15 +1168,20 @@ def run_analysis(checkpoint: bool | None = None):
 
     # BatchRunner (including the web/run_robust path) takes this same
     # cross-process lock. The interactive streaming path bypasses BatchRunner,
-    # so it must join the shared run-lock contract explicitly.
+    # so it must join the shared run-lock contract explicitly. The same goes
+    # for the analysis-date PIT clamp: _run_graph pins it around propagate(),
+    # but this path streams graph.stream directly — without the pin a
+    # historical analysis date leaves every vendor clamp in live mode and
+    # rows after the analysis date leak into the prompt.
     from yiagents.batch.runner import serialized_run
+    from yiagents.dataflows.utils import pinned_analysis_date
 
     with serialized_run(
         config,
         selections["ticker"],
         selections["analysis_date"],
         selections["asset_type"],
-    ), Live(layout, refresh_per_second=4):
+    ), pinned_analysis_date(selections["analysis_date"]), Live(layout, refresh_per_second=4):
         # Initial display
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
@@ -1503,38 +1508,15 @@ def batch(
     across a pool of worker graphs; ``--workers 1`` is explicit serial. The
     env switch ``YIAGENTS_BATCH_CONCURRENCY=true`` also enables the pool.
     """
-    from yiagents.batch.runner import BatchRunner
+    from yiagents.batch.runner import BatchInputError, BatchRunner, prepare_batch_run
 
-    from .utils import is_valid_ticker_input
-
-    bad = [t for t in tickers if not is_valid_ticker_input(t)]
-    if bad:
-        console.print(f"[red]Invalid ticker(s): {bad}[/red]")
-        raise typer.Exit(code=2)
     try:
-        datetime.datetime.strptime(date, "%Y-%m-%d")
-    except ValueError:
-        console.print(f"[red]Bad date (need YYYY-MM-DD): {date}[/red]")
-        raise typer.Exit(code=2) from None
-
-    resolved = asset_type
-    if resolved == "auto":
-        resolved = detect_asset_type(tickers[0]).value
-        mismatch = [t for t in tickers if detect_asset_type(t).value != resolved]
-        if mismatch:
-            console.print(
-                f"[red]Mixed asset classes in one batch: {tickers[0]} is "
-                f"{resolved}, but {mismatch} differ. Use one class per batch.[/red]"
-            )
-            raise typer.Exit(code=2)
-        console.print(f"[cyan]Asset type inferred: {resolved} (from {tickers[0]})[/cyan]")
-
-    config = DEFAULT_CONFIG.copy()
-    try:
-        _apply_batch_worker_override(config, workers)
-    except ValueError as exc:
+        config, resolved = prepare_batch_run(tickers, date, asset_type, workers)
+    except BatchInputError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=2) from None
+    if asset_type == "auto":
+        console.print(f"[cyan]Asset type inferred: {resolved} (from {tickers[0]})[/cyan]")
 
     console.print(
         f"[bold]Batch: {len(tickers)} tickers | date={date} | type={resolved}[/bold]"

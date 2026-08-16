@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from yiagents.backtest.engine import BacktestResult
+from yiagents.fmt import fmt_num3, fmt_pct
 
 logger = logging.getLogger(__name__)
 
@@ -26,15 +27,12 @@ _DRAWDOWN_ALERT_THRESHOLD = 0.10  # flag red when max drawdown breaches 10%
 
 
 def _fmt_pct(x: float | None) -> str:
-    if x is None:
-        return "n/a"
-    return f"{x * 100:.2f}%"
+    # Shared implementation (yiagents.fmt); local alias for the call sites.
+    return fmt_pct(x)
 
 
 def _fmt_num(x: float | None) -> str:
-    if x is None:
-        return "n/a"
-    return f"{x:.3f}"
+    return fmt_num3(x)
 
 
 def _equity_svg(equity: Sequence[float], width: int = 760, height: int = 220) -> str:

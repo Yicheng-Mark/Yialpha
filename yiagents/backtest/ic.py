@@ -167,12 +167,73 @@ def rolling_ic(
         return out
 
     n = len(f)
-    for end in range(n):
-        start = end - window + 1
-        if start < 0:
-            continue
-        ic = information_coefficient(f.iloc[start : end + 1], r.iloc[start : end + 1])
-        out.iloc[end] = ic
+    if window <= 0 or n < window:
+        return out
+
+    # Vectorized (2026-08-16): the per-window loop called
+    # ``information_coefficient`` ~n times, re-ranking every window through
+    # scipy — ~1,200 redundant rank passes per indicator on a 5y frame, times
+    # the whole battery in the pruning CLI. The closed form computes ranks
+    # per window via a strided window view and row-wise Pearson on them.
+    # Pairwise-finite semantics are preserved by NaN-masking one input where
+    # the other is non-finite before windowing; windows with too few valid
+    # pairs stay NaN (the old None normalization), zero-variance windows
+    # divide 0/0 -> NaN (scipy's NaN), and floating noise is clamped to
+    # [-1, 1]. Windows containing TIED values fall back to the exact
+    # per-window call — positional ranks are only exact for tie-free windows.
+    fvals = f.values
+    rvals = r.values
+    bad = ~(np.isfinite(fvals) & np.isfinite(rvals))
+    if bad.any():
+        fvals = np.where(bad, np.nan, fvals)
+        rvals = np.where(bad, np.nan, rvals)
+
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    fw = sliding_window_view(fvals, window)
+    rw = sliding_window_view(rvals, window)
+    valid = np.isfinite(fw) & np.isfinite(rw)
+    counts = valid.sum(axis=1)
+
+    sf = np.sort(fw, axis=1)
+    sr = np.sort(rw, axis=1)
+    tie_rows = (
+        (np.isfinite(sf[:, :-1]) & (sf[:, :-1] == sf[:, 1:])).any(axis=1)
+        | (np.isfinite(sr[:, :-1]) & (sr[:, :-1] == sr[:, 1:])).any(axis=1)
+    )
+
+    def _positional_ranks(x):
+        order = np.argsort(x, axis=1, kind="stable")  # NaN sorts last
+        ranks = np.empty(x.shape, dtype=float)
+        rows = np.arange(x.shape[0])[:, None]
+        ranks[rows, order] = np.arange(1, x.shape[1] + 1)[None, :]
+        return ranks
+
+    rank_f = _positional_ranks(fw)
+    rank_r = _positional_ranks(rw)
+    rank_f[~valid] = np.nan
+    rank_r[~valid] = np.nan
+
+    n_pairs = counts.astype(float)
+    safe_n = np.maximum(n_pairs, 1.0)
+    mean_f = np.where(valid, rank_f, 0.0).sum(axis=1) / safe_n
+    mean_r = np.where(valid, rank_r, 0.0).sum(axis=1) / safe_n
+    dev_f = np.where(valid, rank_f - mean_f[:, None], 0.0)
+    dev_r = np.where(valid, rank_r - mean_r[:, None], 0.0)
+    cov = (dev_f * dev_r).sum(axis=1)
+    var_f = (dev_f * dev_f).sum(axis=1)
+    var_r = (dev_r * dev_r).sum(axis=1)
+    denom = np.sqrt(var_f * var_r)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ic = np.where(denom > 0.0, cov / denom, np.nan)
+
+    for i in np.nonzero(tie_rows & (counts >= _MIN_PAIRS))[0]:
+        exact = information_coefficient(fw[i], rw[i])
+        ic[i] = np.nan if exact is None else float(exact)
+
+    ic[counts < _MIN_PAIRS] = np.nan
+    ic = np.where(np.isfinite(ic), np.clip(ic, -1.0, 1.0), np.nan)
+    out.iloc[window - 1:] = ic
     return out
 
 

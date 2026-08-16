@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import date, datetime, timedelta
 
@@ -72,15 +73,22 @@ def is_historical_date(curr_date: str | None) -> bool:
     have no trustworthy historical/as-of parameter (social feeds, prediction
     markets, rolling 24-hour tickers, and selected positioning endpoints).
     A future label must not receive today's snapshot either, so every valid
-    explicit date other than today takes the causal/date-bounded branch. Empty
-    or malformed values are left to the caller's normal validation path.
+    explicit date other than today takes the causal/date-bounded branch.
+
+    Only empty/None means live mode (no as-of constraint). A NON-EMPTY but
+    unparseable value (e.g. "2026/08/01" — a form an LLM can emit) cannot be
+    proven to be today, so it takes the historical branch: the current-snapshot
+    sources degrade rather than leak today's state into a nominal backtest —
+    the same fail-open-*only*-for-live policy as :func:`clamp_end_date`. (It
+    used to return False here, serving live snapshots to malformed dates that
+    no caller validated.)
     """
     if not curr_date:
         return False
     try:
         as_of = datetime.strptime(str(curr_date)[:10], "%Y-%m-%d").date()
     except (ValueError, TypeError):
-        return False
+        return True
     return as_of != date.today()
 
 
@@ -131,6 +139,23 @@ def set_analysis_date(curr_date: str | None) -> None:
 def get_analysis_date() -> str | None:
     """The analysis date pinned for this run/thread, or ``None`` for live mode."""
     return _analysis_date_var.get()
+
+
+@contextmanager
+def pinned_analysis_date(curr_date: str | None):
+    """Pin the analysis date for the duration of a streamed graph run.
+
+    ``_run_graph`` pins/clears the ContextVar around propagate() manually; the
+    interactive CLI streams ``graph.stream`` directly instead, so it enters
+    this manager alongside its run-lock to get the identical PIT contract —
+    including clearing on an exception, so a crashed run cannot leave the
+    clamp pinned into the next one.
+    """
+    set_analysis_date(str(curr_date) if curr_date else None)
+    try:
+        yield
+    finally:
+        set_analysis_date(None)
 
 
 def clamp_end_date(end_date: str | None, curr_date: str | None = None) -> str | None:

@@ -77,3 +77,18 @@ def mock_llm_client():
         return_value=client,
     ):
         yield client
+
+
+@pytest.fixture(autouse=True)
+def _isolated_binance_history_memo():
+    """Drop the in-process Binance closed-window memo around every test.
+
+    Without the reset, a mocked page fetched by an earlier test would serve
+    every later test whose fetch lands on the same (path, params, window)
+    key, and that test's own mock would never fire.
+    """
+    from yiagents.dataflows.binance import reset_history_memo_for_test
+
+    reset_history_memo_for_test()
+    yield
+    reset_history_memo_for_test()

@@ -44,6 +44,67 @@ from yiagents.graph.trading_graph import YiAgentsGraph
 logger = logging.getLogger(__name__)
 
 
+class BatchInputError(ValueError):
+    """Invalid batch request (bad tickers/date/workers/mixed asset classes).
+
+    Every batch frontend (the Typer CLI command, ``scripts/run_batch.py``,
+    any future web entry) maps this to exit code 2 with the message as-is —
+    the single shared validation contract lives in :func:`prepare_batch_run`.
+    """
+
+
+def prepare_batch_run(
+    tickers: list[str],
+    date: str,
+    asset_type: str = "auto",
+    workers: int | None = None,
+    results_dir: str | None = None,
+) -> tuple[dict, str]:
+    """Validate a batch request and assemble its runner config.
+
+    Returns ``(config, resolved_asset_type)``. This is the ONE place the
+    ``yiagents batch`` command and ``scripts/run_batch.py`` agree on: ticker
+    charset, date format, one-class-per-batch, the explicit-``--workers``
+    override semantics (``workers > 1`` forces the pool on, ``1`` forces
+    serial, ``None`` honors the env/default), and the optional results_dir
+    override. Presentation (console table vs plain prints) stays per
+    frontend; behavior and exit codes are byte-identical between them.
+
+    Raises :class:`BatchInputError` with a user-facing message.
+    """
+    from datetime import datetime as _dt
+
+    from yiagents.cli.utils import detect_asset_type, is_valid_ticker_input
+    from yiagents.default_config import DEFAULT_CONFIG
+
+    bad = [t for t in tickers if not is_valid_ticker_input(t)]
+    if bad:
+        raise BatchInputError(f"Invalid ticker(s): {bad} (letters/digits and ._-^=)")
+    try:
+        _dt.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise BatchInputError(f"Bad date (need YYYY-MM-DD): {date}") from None
+
+    resolved = asset_type
+    if resolved == "auto":
+        resolved = detect_asset_type(tickers[0]).value
+        mismatch = [t for t in tickers if detect_asset_type(t).value != resolved]
+        if mismatch:
+            raise BatchInputError(
+                f"Mixed asset classes in one batch: {tickers[0]} is {resolved}, "
+                f"but {mismatch} differ. Use one class per batch."
+            )
+
+    config = DEFAULT_CONFIG.copy()
+    if workers is not None:
+        if workers < 1:
+            raise BatchInputError("workers must be at least 1")
+        config["batch_concurrency"] = workers > 1
+    if results_dir:
+        config["results_dir"] = results_dir
+    return config, resolved
+
+
 @contextmanager
 def serialized_run(
     config: dict, ticker: str, trade_date: str, asset_type: str

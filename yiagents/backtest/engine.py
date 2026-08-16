@@ -26,6 +26,7 @@ Design choices driven by the roadmap:
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -44,6 +45,17 @@ from yiagents.backtest.metrics import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Binance USDT-M regular-tier fee schedule (VIP-0, no promo). The engine's
+# fills are market orders at the daily close, so the applicable fee is the
+# TAKER rate; the maker constant is carried for config_summary honesty and
+# for callers pricing limit-style variants. BNB fee settlement takes 10% off.
+# ---------------------------------------------------------------------------
+BINANCE_USDT_M_TAKER_BPS = 5.0    # 0.05%
+BINANCE_USDT_M_MAKER_BPS = 2.0    # 0.02%
+BNB_FEE_DISCOUNT = 0.10
+
+
+# ---------------------------------------------------------------------------
 # Default rating -> target long-weight mapping (the Phase-0 *baseline*).
 # Buy/Overweight commit capital, Hold keeps the prior position (encoded as
 # ``None`` so the simulator knows to "do nothing"), Underweight/Sell go flat.
@@ -54,6 +66,14 @@ DEFAULT_RATING_TO_WEIGHT: dict[str, float | None] = {
     "Hold": None,           # hold the existing position (no rebalance)
     "Underweight": 0.0,
     "Sell": 0.0,
+}
+
+# The same map with shorting enabled (perp ``allow_short``): Sell goes to a
+# full short instead of flat. Underweight stays flat — the 5-tier scale has
+# no "weak short" rung, so inventing -0.8 would be a silent strategy change.
+SHORT_RATING_TO_WEIGHT: dict[str, float | None] = {
+    **DEFAULT_RATING_TO_WEIGHT,
+    "Sell": -1.0,
 }
 
 
@@ -99,6 +119,53 @@ def _yfinance_price_provider(ticker: str, start: str, end: str) -> pd.Series:
     s = hist["Close"].dropna()
     s.index = s.index.strftime("%Y-%m-%d")
     return s.astype(float)
+
+
+def _binance_perp_price_provider(price_type: str = "last"):
+    """Daily close-price provider backed by the perp's OWN Binance klines.
+
+    The engine's historical default marks a perp backtest on Yahoo SPOT data
+    (BTC-USD) — wrong instrument, wrong basis. This provider prices and marks
+    on the contract the strategy actually trades, via the shared PIT-clamped
+    data layer; ``price_type="mark"`` serves the mark-price klines Binance
+    liquidates against.
+    """
+
+    def provider(ticker: str, start: str, end: str) -> pd.Series:
+        from ..dataflows.binance import binance_klines_frame
+
+        df = binance_klines_frame(
+            ticker, start, end, interval="1d", venue="binance_perp",
+            price_type=price_type,
+        )
+        s = df["Close"].dropna()
+        s.index = s.index.strftime("%Y-%m-%d")
+        return s.astype(float)
+
+    return provider
+
+
+def _binance_perp_extremes_provider():
+    """Daily (low, high) series for intrabar liquidation triggers.
+
+    Liquidation is checked against the bar's adverse extreme (low for longs,
+    high for shorts), not only the close — a wick through the liquidation
+    price is a forced close even when the bar recovers. Returns a callable
+    ``(ticker, start, end) -> (lows, highs)`` on the same kline data as the
+    price provider.
+    """
+
+    def provider(ticker: str, start: str, end: str) -> tuple[pd.Series, pd.Series]:
+        from ..dataflows.binance import binance_klines_frame
+
+        df = binance_klines_frame(ticker, start, end, interval="1d", venue="binance_perp")
+        lows = df["Low"].dropna()
+        highs = df["High"].dropna()
+        lows.index = lows.index.strftime("%Y-%m-%d")
+        highs.index = highs.index.strftime("%Y-%m-%d")
+        return lows.astype(float), highs.astype(float)
+
+    return provider
 
 
 @dataclass
@@ -250,8 +317,13 @@ def _binance_funding_provider(ticker: str, start: str, end: str) -> pd.Series:
 
     from ..dataflows.binance import _FAPI_FUNDING_LIMIT, _paginate_history
     from ..dataflows.symbol_utils import normalize_symbol_for_venue
+    from ..dataflows.utils import current_pit_end
 
     canonical = normalize_symbol_for_venue(ticker, "binance_perp")
+    # Same PIT contract as every vendor call: a backtest for a past date must
+    # never receive settlements after it (benign today only because the
+    # backtest end is already past, but the engine must not rely on that).
+    end = current_pit_end(end) or end
     start_ms = int(
         datetime.strptime(start, "%Y-%m-%d")
         .replace(tzinfo=timezone.utc).timestamp() * 1000
@@ -299,6 +371,15 @@ def run_backtest(
     funding_provider: Callable[[str, str, str], pd.Series] | None = None,
     periods_per_year: int | None = None,
     cost_bps: float = 0.0,
+    taker_bps: float | None = None,
+    slippage_bps: float = 0.0,
+    bnb_discount: bool = False,
+    filters_provider: Callable[[str], Any] | None = None,
+    allow_funding_gaps: bool = False,
+    leverage: float = 1.0,
+    allow_short: bool = False,
+    brackets_provider: Callable[[str], list] | None = None,
+    extremes_provider: Callable[[str, str, str], tuple[pd.Series, pd.Series]] | None = None,
     n_trials: int = 1,
     execution_lag_bars: int = 1,
     compute_index_alpha: bool = True,
@@ -337,12 +418,35 @@ def run_backtest(
         Daily funding-rate source for ``asset_type="crypto_perp"`` — a callable
         ``(ticker, start, end) -> pd.Series`` indexed by ``YYYY-MM-DD`` whose
         values are each day's summed settlement rates. Defaults to the Binance
-        USDT-M vendor (paginated ``/fapi/v1/fundingRate``). The perp mode is a
-        LONG-ONLY simulation with the funding drag charged on held notional
-        (strategy and buy-and-hold alike); shorting, leverage, margin and
-        liquidation remain unmodeled and ``config_summary`` says so. Missing
-        funding data fails closed (ValueError) rather than silently relabeling
-        a spot simulation as a perp backtest.
+        USDT-M vendor (paginated ``/fapi/v1/fundingRate``, PIT-clamped). The
+        perp mode charges the funding drag on held notional — longs pay
+        positive rates, shorts (``allow_short``) receive them — for the
+        strategy and the buy-and-hold benchmark alike. Missing funding DATA
+        fails closed (ValueError), and so do missing COVERAGE days (a day
+        absent from the series would silently accrue zero drag;
+        ``allow_funding_gaps=True`` accepts that approximation explicitly).
+    taker_bps / slippage_bps / bnb_discount / filters_provider:
+        Execution-cost model for perp fills: taker fee in bps on the traded
+        notional (``taker_bps=None`` falls back to the single ``cost_bps``),
+        adverse slippage in bps baked into the fill price, an optional 10% BNB
+        discount, and an optional ``filters_provider(ticker) -> SymbolFilters``
+        for exchange order rules (fills floor the share delta to stepSize and
+        refuse sub-minNotional deltas). Defaults reproduce the historical
+        single-``cost_bps`` behaviour exactly.
+    leverage / brackets_provider / extremes_provider:
+        Perp-only leverage (default 1x = the historical cash simulation,
+        byte-identical). ``leverage > 1`` scales the target weight's notional
+        and models isolated-margin liquidation against the maintenance-margin
+        ladder — from ``/fapi/v1/leverageBracket`` when operator API keys
+        exist, else the documented default ladder, else an injected
+        ``brackets_provider``. The trigger checks the bar's adverse extreme
+        (from ``extremes_provider``, defaulting to Binance perp kline
+        low/high) rather than only the close. Liquidation events are recorded
+        in ``config_summary["perp_liquidations"]``.
+    allow_short:
+        Perp-only opt-in short side: ``Sell`` maps to weight -1.0, positions
+        and funding flip sign, and liquidation triggers on the upside. Default
+        off keeps the long-only semantics byte-identical.
     n_trials:
         Number of independent strategy variants being compared in this research
         run, forwarded to :func:`compute_metrics` for the Deflated Sharpe Ratio
@@ -381,11 +485,27 @@ def run_backtest(
         raise ValueError(f"n_trials must be an integer >= 1, got {n_trials!r}")
     if not isinstance(execution_lag_bars, int) or execution_lag_bars < 1:
         raise ValueError("execution_lag_bars must be an integer >= 1")
+    if not (np.isfinite(leverage) and leverage >= 1.0):
+        raise ValueError(f"leverage must be a finite number >= 1.0, got {leverage!r}")
+    if leverage != 1.0 and asset_type != "crypto_perp":
+        raise ValueError(
+            "leverage is a crypto_perp-only parameter; a levered spot/stock "
+            "simulation would be a margin model this engine does not have"
+        )
+    if allow_short and asset_type != "crypto_perp":
+        raise ValueError(
+            "allow_short is a crypto_perp-only parameter; shorting spot/stock "
+            "involves locate/borrow mechanics this engine does not model"
+        )
+    if slippage_bps < 0.0 or (taker_bps is not None and taker_bps < 0.0) or cost_bps < 0.0:
+        raise ValueError("cost_bps / taker_bps / slippage_bps must be >= 0")
     if periods_per_year is None:
         periods_per_year = 365 if asset_type.startswith("crypto") else 252
     if periods_per_year < 1:
         raise ValueError("periods_per_year must be >= 1")
 
+    if allow_short and rating_to_weight is None and weight_fn is None:
+        rating_to_weight = SHORT_RATING_TO_WEIGHT
     weight_fn = weight_fn or _default_weight_fn(rating_to_weight or DEFAULT_RATING_TO_WEIGHT)
 
     # --- Price window: span every decision date plus one holding period ----
@@ -396,6 +516,15 @@ def run_backtest(
     end_dt = datetime.strptime(sorted_dates[-1], "%Y-%m-%d") + timedelta(days=holding_days + 10)
     end_date = end_dt.strftime("%Y-%m-%d")
 
+    # Perp mode prices/marks on the perp's own candles: the historical default
+    # (Yahoo spot, e.g. BTC-USD) is the wrong instrument with the wrong basis.
+    # An explicit provider always wins — tests inject synthetic prices this
+    # way. The benchmark index keeps the ORIGINAL provider: index names are
+    # yfinance-shaped (SPY / 000300.SS), never Binance symbols.
+    index_price_provider = price_provider
+    if asset_type == "crypto_perp" and price_provider is _yfinance_price_provider:
+        price_provider = _binance_perp_price_provider()
+
     prices = price_provider(ticker, start_date, end_date)
     if prices.empty:
         raise ValueError(
@@ -405,12 +534,14 @@ def run_backtest(
     prices = prices.sort_index()
 
     # --- Perp funding (long-only crypto_perp mode, 2026-08-16) ---------------
-    # The engine remains a long-only cash simulator; for a USDT-M perpetual it
+    # The engine remains a cash simulator at 1x; for a USDT-M perpetual it
     # additionally charges the daily funding drag on the held notional (longs
-    # pay positive funding). Shorting, leverage, margin and liquidation are
-    # still NOT modeled — config_summary says so explicitly. Fail-closed: a
-    # perp backtest without funding history would silently relabel a spot
-    # simulation, so missing funding data raises instead.
+    # pay positive funding). Fail-closed: a perp backtest without funding
+    # history would silently relabel a spot simulation, so missing funding
+    # data raises instead — and so do COVERAGE gaps: a day absent from the
+    # funding series used to default to 0.0 drag, silently flattering a
+    # delisted/short-history contract (allow_funding_gaps overrides for
+    # research runs that accept the approximation).
     perp_funding: pd.Series | None = None
     funding_paid_total = 0.0
     if asset_type == "crypto_perp":
@@ -432,13 +563,106 @@ def run_backtest(
                 f"{end_date}. Use asset_type='crypto' for a spot-style "
                 "simulation instead."
             )
+        if not allow_funding_gaps:
+            funding_days = {str(d) for d in perp_funding.index}
+            # Days the simulator will actually charge: every price bar from
+            # the first decision onward (earlier bars never accrue drag). The
+            # FINAL bar is tolerated: a still-open current day can have
+            # settlements pending, and the last decision's window is buffered.
+            charge_days = [str(d) for d in prices.index if str(d) >= sorted_dates[0]]
+            missing = [d for d in charge_days[:-1] if d not in funding_days]
+            if missing:
+                shown = ", ".join(missing[:8]) + (" …" if len(missing) > 8 else "")
+                raise ValueError(
+                    f"crypto_perp funding history for {ticker} is missing "
+                    f"{len(missing)} priced day(s) ({shown}); those days would "
+                    "silently accrue zero drag. Pass allow_funding_gaps=True "
+                    "to accept the approximation explicitly."
+                )
+
+    # --- Execution-cost model (2026-08-16) -----------------------------------
+    # Fills are market orders at the daily close: taker fee (BNB-discountable)
+    # on the traded notional plus adverse slippage baked into the fill price.
+    # Defaults (taker_bps=None, slippage_bps=0, bnb off) reproduce the
+    # historical single cost_bps exactly.
+    fee_rate = (taker_bps if taker_bps is not None else cost_bps) / 10_000.0
+    if bnb_discount:
+        fee_rate *= 1.0 - BNB_FEE_DISCOUNT
+    slip_rate = slippage_bps / 10_000.0
+
+    # Exchange order rules (stepSize / minNotional), when a filters source is
+    # available: simulated fills floor the share DELTA to the symbol's step so
+    # the simulation cannot trade quantities the venue would reject. Offline
+    # runs pass filters_provider=None and fill fractionally (stated in
+    # config_summary).
+    symbol_filters: Any = None
+    if filters_provider is not None:
+        try:
+            symbol_filters = filters_provider(ticker)
+        except Exception as exc:  # noqa: BLE001 — quantization is an accuracy add-on
+            logger.warning(
+                "filters unavailable for %s (%s: %s); fills stay fractional",
+                ticker, type(exc).__name__, exc,
+            )
+            symbol_filters = None
+
+    # --- Leverage / margin / liquidation (2026-08-16, perp-only) -------------
+    # leverage=1.0 keeps the historical cash simulation byte-identical: no
+    # brackets are resolved, no liquidation is modeled. leverage>1 sizes the
+    # target weight's notional up by L (margin = notional / L inside the same
+    # cash account) and models isolated-margin forced closes against the
+    # maintenance-margin ladder: liquidation price = entry x (1 - 1/L + MMR +
+    # fee buffer), triggered by the bar's adverse extreme when extremes are
+    # available (else the close), exited at the liquidation price or the worse
+    # close when the bar gapped through it.
+    model_liquidation = asset_type == "crypto_perp" and leverage > 1.0
+    mmr_brackets: list | None = None
+    mmr_source = ""
+    liq_events: list[dict[str, Any]] = []
+    bar_lows: pd.Series | None = None
+    bar_highs: pd.Series | None = None
+    if model_liquidation:
+        from ..dataflows.binance_brackets import (
+            default_brackets,
+            get_leverage_brackets,
+        )
+
+        if brackets_provider is not None:
+            mmr_brackets = list(brackets_provider(ticker))
+            mmr_source = "injected"
+        else:
+            try:
+                mmr_brackets = get_leverage_brackets(ticker)
+                mmr_source = "leverageBracket"
+            except Exception as exc:  # noqa: BLE001 — documented approximation below
+                logger.warning(
+                    "leverageBracket unavailable for %s (%s: %s); using the "
+                    "default USDT-M MMR ladder (approximation — per-symbol "
+                    "ladders differ)", ticker, type(exc).__name__, exc,
+                )
+                mmr_brackets = default_brackets()
+                mmr_source = "default-ladder"
+        try:
+            extremes = (
+                extremes_provider(ticker, start_date, end_date)
+                if extremes_provider is not None
+                else _binance_perp_extremes_provider()(ticker, start_date, end_date)
+            )
+            bar_lows, bar_highs = extremes[0], extremes[1]
+        except Exception as exc:  # noqa: BLE001 — close-only trigger is the fallback
+            logger.warning(
+                "bar extremes unavailable for %s (%s: %s); liquidation checks "
+                "run on closes only", ticker, type(exc).__name__, exc,
+            )
+            bar_lows = None
+            bar_highs = None
 
     index_prices: pd.Series | None = None
     index_name = ""
     if compute_index_alpha:
         index_name = _resolve_index_benchmark(graph, ticker)
         try:
-            index_prices = price_provider(index_name, start_date, end_date).sort_index()
+            index_prices = index_price_provider(index_name, start_date, end_date).sort_index()
         except Exception as exc:  # noqa: BLE001 -- index data is advisory only
             logger.warning("Could not load index benchmark %s: %s", index_name, exc)
             index_prices = None
@@ -491,6 +715,7 @@ def run_backtest(
     total_traded_notional = 0.0
     opening_trade: TradeRow | None = None
     opening_equity: float | None = None
+    pos_avg_entry = 0.0            # weighted-average fill price of the open position
 
     for trade_date, price in prices.items():
         if trade_date < sorted_dates[0]:
@@ -504,13 +729,61 @@ def run_backtest(
         # notional BEFORE recording equity, so the equity curve, the sizing
         # context and the metrics all see the post-funding value. Daily
         # granularity attributes the day's settlements (UTC) to that day's
-        # close — the standard bar-level approximation.
-        if perp_funding is not None and shares > 0:
+        # close — the standard bar-level approximation. Signed shares make
+        # the direction automatic: longs PAY positive funding, shorts RECEIVE it.
+        if perp_funding is not None and shares != 0.0:
             rate = float(perp_funding.get(str(trade_date), 0.0) or 0.0)
             if rate and np.isfinite(rate):
                 charge = shares * px * rate
                 cash -= charge
                 funding_paid_total += charge
+
+        # Isolated-margin liquidation check (perp, leverage > 1 only). Runs
+        # after funding, before the mark, so the equity curve reflects the
+        # forced close on its own day. Trigger level: entry x (1 - 1/L + MMR
+        # + fee buffer) for longs (mirrored for shorts); the bar's adverse
+        # extreme triggers it even when the close recovers. The forced close
+        # executes AT the trigger level — in this cash-account model that
+        # credit equals the isolated-margin remainder exactly (margin + P&L
+        # at the trigger price), so the loss stays capped near the posted
+        # margin even when the bar gapped far through the level (gap
+        # slippage beyond that is the exchange's liquidation fee / insurance
+        # mechanics, approximated by the fee charged below).
+        if model_liquidation and shares != 0.0:
+            from ..dataflows.binance_brackets import mmr_for_notional as _mmr_for
+
+            notional = abs(shares) * px
+            mmr = _mmr_for(mmr_brackets, notional)
+            if shares > 0.0:
+                liq_price = pos_avg_entry * (1.0 - 1.0 / leverage + mmr + fee_rate)
+                adverse = (
+                    float(bar_lows.get(str(trade_date), px))
+                    if bar_lows is not None else px
+                )
+                triggered = adverse <= liq_price
+            else:
+                liq_price = pos_avg_entry * (1.0 + 1.0 / leverage - mmr - fee_rate)
+                adverse = (
+                    float(bar_highs.get(str(trade_date), px))
+                    if bar_highs is not None else px
+                )
+                triggered = adverse >= liq_price
+            if triggered:
+                exit_px = liq_price
+                exit_notional = abs(shares) * exit_px
+                liq_fee = exit_notional * fee_rate
+                cash += shares * exit_px - liq_fee
+                liq_events.append({
+                    "date": str(trade_date),
+                    "side": "long" if shares > 0.0 else "short",
+                    "shares": shares,
+                    "entry": pos_avg_entry,
+                    "liquidation_price": liq_price,
+                    "exit_price": exit_px,
+                    "fee": liq_fee,
+                })
+                shares = 0.0
+                pos_avg_entry = 0.0
 
         # Mark to market at today's completed close before any close-price fill.
         equity = cash + shares * px
@@ -551,12 +824,52 @@ def run_backtest(
                 cost = 0.0
                 target_weight: float | None = None
             else:
-                target_weight = float(np.clip(requested_weight, 0.0, 1.0))
-                desired_value = target_weight * equity_before
-                traded_notional = abs(desired_value - current_value)
-                cost = traded_notional * (cost_bps / 10_000.0)
-                cash += (current_value - desired_value) - cost
-                shares = desired_value / px
+                weight_lo = -1.0 if allow_short else 0.0
+                target_weight = float(np.clip(requested_weight, weight_lo, 1.0))
+                # Leverage scales the target weight's NOTIONAL (margin =
+                # notional / L inside the same cash account): at L=1 this is
+                # the historical target weight verbatim.
+                desired_value = target_weight * leverage * equity_before
+                delta_notional = desired_value - current_value
+                fill_px = (
+                    px * (1.0 + slip_rate) if delta_notional > 0.0
+                    else px * (1.0 - slip_rate)
+                )
+                # Exchange order rules: floor the share DELTA to the symbol's
+                # stepSize and refuse sub-minNotional deltas, so the simulator
+                # never trades a quantity the venue would reject. Fractional
+                # fills (no filters / offline) are the documented fallback.
+                delta_shares = delta_notional / px
+                if symbol_filters is not None:
+                    from ..dataflows.binance_filters import quantize_order
+
+                    q = quantize_order(fill_px, abs(delta_shares), symbol_filters)
+                    qty = q["quantity"]
+                    stepped = float(qty) if isinstance(qty, (int, float)) else 0.0
+                    if q["below_min_qty"] or q["below_min_notional"]:
+                        stepped = 0.0
+                    delta_shares = math.copysign(stepped, delta_shares) if stepped else 0.0
+                prev_shares = shares
+                shares = prev_shares + delta_shares
+                traded_notional = abs(delta_shares) * px
+                cost = abs(delta_shares) * fill_px * fee_rate
+                # Cash leg pays/receives the slipped fill price per share; at
+                # slip=0 and fee=cost_bps this reduces to the historical
+                # (current_value - desired_value) - cost exactly.
+                cash += -delta_shares * fill_px - cost
+                # Weighted-average entry basis for the liquidation level:
+                # extending a position blends fill prices; reducing keeps it;
+                # flipping restarts it at the new fill.
+                if model_liquidation:
+                    if prev_shares == 0.0 or (prev_shares > 0.0) == (delta_shares > 0.0):
+                        if delta_shares != 0.0 and shares != 0.0:
+                            total = abs(prev_shares) + abs(delta_shares)
+                            pos_avg_entry = (
+                                pos_avg_entry * abs(prev_shares)
+                                + fill_px * abs(delta_shares)
+                            ) / total
+                    elif shares != 0.0:
+                        pos_avg_entry = fill_px
 
             total_traded_notional += traded_notional
             equity_after = cash + shares * px
@@ -593,8 +906,8 @@ def run_backtest(
             )
             trades.append(row)
 
-            was_invested = previous_weight > 1e-12
-            is_invested = executed_weight > 1e-12
+            was_invested = abs(previous_weight) > 1e-12
+            is_invested = abs(executed_weight) > 1e-12
             if not was_invested and is_invested:
                 opening_trade = row
                 # Pre-fill equity makes the eventual episode return net of the
@@ -653,15 +966,20 @@ def run_backtest(
         strict=True,
     ):
         px = float(price)
-        if first_execution_date is not None and date >= first_execution_date and bh_shares == 0.0:
-            bh_shares = bh_cash / px
-            bh_cash = 0.0
         # Buy-and-hold pays the same funding drag (it is also a perp long) —
         # charging only the strategy would bias the comparison in its favour.
+        # The charge runs on the start-of-day position, mirroring the strategy
+        # loop (which charges before the day's fills): a position acquired at
+        # THIS close has not yet sat through any settlement, so the entry day
+        # itself pays nothing. Charging after the entry block used to bill
+        # B&H one extra funding day per backtest and inflate alpha_vs_buyhold.
         if perp_funding is not None and bh_shares > 0.0:
             rate = float(perp_funding.get(date, 0.0) or 0.0)
             if rate and np.isfinite(rate):
                 bh_cash -= bh_shares * px * rate
+        if first_execution_date is not None and date >= first_execution_date and bh_shares == 0.0:
+            bh_shares = bh_cash / px
+            bh_cash = 0.0
         bh_curve.append(float(bh_cash + bh_shares * px))
 
     metrics = compute_metrics(
@@ -723,13 +1041,43 @@ def run_backtest(
                 {
                     "perp_funding_drag": True,
                     "perp_funding_paid_total": round(funding_paid_total, 2),
+                    "perp_fees": (
+                        f"taker {round(fee_rate * 10_000.0, 4)}bps"
+                        + (" x0.9 BNB" if bnb_discount else "")
+                        + f", slippage {slippage_bps}bps"
+                    ),
+                    "perp_fill_quantization": (
+                        "stepSize/minNotional" if symbol_filters is not None
+                        else "fractional (no filters source)"
+                    ),
+                    "perp_price_source": (
+                        "binance perp klines"
+                        if asset_type == "crypto_perp"
+                        and index_price_provider is _yfinance_price_provider
+                        and price_provider is not index_price_provider
+                        else "caller-provided"
+                    ),
+                    "perp_leverage": leverage,
+                    "perp_short": allow_short,
                     "perp_model_note": (
-                        "long-only USDT-M perp simulation: daily funding drag "
-                        "applied to strategy AND buy-and-hold; shorting, "
-                        "leverage, margin and liquidation are NOT modeled"
+                        "USDT-M perp simulation: daily funding drag (strategy "
+                        "and buy-and-hold), taker fees + slippage on fills"
+                        + (
+                            ", isolated-margin liquidation vs the "
+                            f"{mmr_source} MMR ladder triggered on bar "
+                            "extremes" if model_liquidation
+                            else "; leverage/margin/liquidation NOT modeled "
+                            "(leverage=1x cash sim)"
+                        )
+                        + (", opt-in short side" if allow_short else
+                           "; long-only")
+                        + ". Buy-and-hold stays a 1x long."
                     ),
                 }
                 if asset_type == "crypto_perp" else {}
+            ),
+            **(
+                {"perp_liquidations": liq_events} if liq_events else {}
             ),
         },
         cached_hits=cached_hits,

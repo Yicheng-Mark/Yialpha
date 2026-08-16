@@ -3,8 +3,11 @@ from typing import Any
 
 from langchain_anthropic import ChatAnthropic
 
-from ._timeout import resolve_timeout
-from .base_client import BaseLLMClient, normalize_content
+from .base_client import (
+    BaseLLMClient,
+    apply_passthrough_kwargs,
+    make_normalized_chat_class,
+)
 from .validators import validate_model
 
 _PASSTHROUGH_KWARGS = (
@@ -36,16 +39,12 @@ def _supports_effort(model: str) -> bool:
     return (major, minor) >= _EFFORT_MIN_VERSION[family]
 
 
-class NormalizedChatAnthropic(ChatAnthropic):
-    """ChatAnthropic with normalized content output.
-
-    Claude models with extended thinking or tool use return content as a
-    list of typed blocks. This normalizes to string for consistent
-    downstream handling.
-    """
-
-    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
-        return normalize_content(super().invoke(input, config, **kwargs))
+# Claude models with extended thinking or tool use return content as a list
+# of typed blocks; normalized to string for consistent downstream handling.
+NormalizedChatAnthropic = make_normalized_chat_class(
+    ChatAnthropic, "NormalizedChatAnthropic",
+    "ChatAnthropic with normalized content output.",
+)
 
 
 class AnthropicClient(BaseLLMClient):
@@ -62,17 +61,11 @@ class AnthropicClient(BaseLLMClient):
         if self.base_url:
             llm_kwargs["base_url"] = self.base_url
 
-        for key in _PASSTHROUGH_KWARGS:
-            if key not in self.kwargs:
-                continue
-            if key == "effort" and not _supports_effort(self.model):
-                continue
-            llm_kwargs[key] = self.kwargs[key]
-
-        # Read-timeout safety net (shared with all LLM clients). ChatAnthropic
-        # has no default read timeout, so without this a half-open socket would
-        # hang the batch. Anthropic is always a cloud provider -> is_local=False.
-        resolve_timeout(llm_kwargs, is_local=False, provider_name="anthropic")
+        passthrough: tuple[str, ...] = _PASSTHROUGH_KWARGS
+        if "effort" in self.kwargs and not _supports_effort(self.model):
+            # The model would 400 on it — drop the key from the whitelist.
+            passthrough = tuple(k for k in passthrough if k != "effort")
+        apply_passthrough_kwargs(llm_kwargs, self.kwargs, passthrough, "anthropic")
 
         return NormalizedChatAnthropic(**llm_kwargs)
 

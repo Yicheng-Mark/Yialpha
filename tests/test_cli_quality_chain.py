@@ -153,6 +153,60 @@ def test_store_cli_decision_passes_decision_through(caplog):
 
 
 # --------------------------------------------------------------------------- #
+# D5 — the streamed CLI run pins the analysis date (PIT clamp) like _run_graph
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+class TestStreamedRunPinsAnalysisDate:
+    def test_pins_clears_and_survives_exceptions(self):
+        from yiagents.dataflows.utils import (
+            get_analysis_date,
+            pinned_analysis_date,
+            set_analysis_date,
+        )
+
+        set_analysis_date(None)
+        assert get_analysis_date() is None
+        with pinned_analysis_date("2026-06-10"):
+            assert get_analysis_date() == "2026-06-10"
+            # The pin is what the vendor-layer clamp reads — a window past the
+            # analysis date must be clamped INSIDE the block.
+            from yiagents.dataflows.utils import clamp_end_date
+
+            assert clamp_end_date("2026-08-01", get_analysis_date()) == "2026-06-10"
+        assert get_analysis_date() is None
+
+        with pytest.raises(RuntimeError), pinned_analysis_date("2026-06-10"):
+            assert get_analysis_date() == "2026-06-10"
+            raise RuntimeError("stream crashed")
+        # A crashed run must not leave the clamp pinned into the next one.
+        assert get_analysis_date() is None
+
+        # Empty string means live mode — never pinned.
+        with pinned_analysis_date(""):
+            assert get_analysis_date() is None
+
+    def test_run_analysis_source_pins_before_streaming(self):
+        """Wiring guard: the streamed path must enter the pin context.
+
+        ``run_analysis`` is an interactive Live-UI function that cannot be
+        invoked headlessly here, so this asserts on its source the same way
+        the signature-smoke guards do: the ``with`` statement that hosts the
+        stream loop must include ``pinned_analysis_date`` — the exact
+        omission the 2026-08-16 audit caught (clamp dead on the CLI path).
+        """
+        import inspect
+
+        from yiagents.cli import main as cli_main
+
+        src = inspect.getsource(cli_main.run_analysis)
+        assert "pinned_analysis_date(selections[\"analysis_date\"])" in src
+        # ...and the pin must appear before the stream loop that needs it.
+        assert src.index("pinned_analysis_date") < src.index("graph.graph.stream")
+
+
+# --------------------------------------------------------------------------- #
 # D3 — pure-dot tickers are path escapes, reject them
 # --------------------------------------------------------------------------- #
 

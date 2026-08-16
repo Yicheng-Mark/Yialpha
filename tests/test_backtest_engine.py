@@ -255,6 +255,38 @@ def test_crypto_perp_zero_funding_matches_spot_engine():
 
 
 @pytest.mark.unit
+def test_crypto_perp_bh_funding_symmetric_with_strategy():
+    """B&H must not pay an extra funding day relative to the strategy.
+
+    Both legs enter at the same executable close; the strategy loop charges
+    funding on the start-of-day position (the entry day pays nothing). The
+    B&H loop used to charge on the entry day itself — one extra settlement
+    per backtest, inflating alpha_vs_buyhold. With ONE Buy signal (no
+    rebalances to re-size the funding base) and zero transaction cost the
+    two equity curves must be identical, i.e. alpha exactly zero.
+    """
+    idx = pd.bdate_range("2024-01-01", periods=12)
+    values = [100.0] + [100.0 * (1.0 + 0.01 * i) for i in range(1, 12)]
+
+    def flat_then_rising(ticker, start, end):
+        return pd.Series(values, index=idx.strftime("%Y-%m-%d"), dtype=float)
+
+    res = run_backtest(
+        FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],
+        asset_type="crypto_perp",
+        funding_provider=_funding_provider(0.001), cost_bps=0.0,
+        initial_capital=100_000.0, holding_days=5,
+        price_provider=flat_then_rising, compute_index_alpha=False,
+        periods_per_year=365,
+    )
+    # Both are perp longs from the same entry close with identical funding
+    # exposure — no cost, no rebalance, so the curves coincide.
+    assert res.equity[-1] == pytest.approx(res.benchmark_equity[-1])
+    assert res.metrics.alpha_vs_buyhold == pytest.approx(0.0)
+    assert res.config_summary["perp_funding_paid_total"] > 0.0
+
+
+@pytest.mark.unit
 def test_engine_custom_weight_fn_overrides_mapping():
     dates = _decision_dates(6)
     graph = FakeGraph(dict.fromkeys(dates, "Buy"))

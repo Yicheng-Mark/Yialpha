@@ -3,20 +3,21 @@ from typing import Any
 
 from langchain_openai import AzureChatOpenAI
 
-from ._timeout import resolve_timeout
-from .base_client import BaseLLMClient, normalize_content
+from .base_client import (
+    BaseLLMClient,
+    apply_passthrough_kwargs,
+    make_normalized_chat_class,
+)
 
 _PASSTHROUGH_KWARGS = (
     "timeout", "max_retries", "api_key", "reasoning_effort", "temperature",
     "callbacks", "http_client", "http_async_client",
 )
 
-
-class NormalizedAzureChatOpenAI(AzureChatOpenAI):
-    """AzureChatOpenAI with normalized content output."""
-
-    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
-        return normalize_content(super().invoke(input, config, **kwargs))
+NormalizedAzureChatOpenAI = make_normalized_chat_class(
+    AzureChatOpenAI, "NormalizedAzureChatOpenAI",
+    "AzureChatOpenAI with normalized content output.",
+)
 
 
 class AzureOpenAIClient(BaseLLMClient):
@@ -40,15 +41,7 @@ class AzureOpenAIClient(BaseLLMClient):
             "model": self.model,
             "azure_deployment": os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", self.model),
         }
-
-        for key in _PASSTHROUGH_KWARGS:
-            if key in self.kwargs:
-                llm_kwargs[key] = self.kwargs[key]
-
-        # Read-timeout safety net (shared with all LLM clients). AzureChatOpenAI
-        # has no default read timeout, so without this a half-open socket would
-        # hang the batch. Azure is always a cloud provider -> is_local=False.
-        resolve_timeout(llm_kwargs, is_local=False, provider_name="azure")
+        apply_passthrough_kwargs(llm_kwargs, self.kwargs, _PASSTHROUGH_KWARGS, "azure")
 
         return NormalizedAzureChatOpenAI(**llm_kwargs)
 

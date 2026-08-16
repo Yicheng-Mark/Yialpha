@@ -126,6 +126,57 @@ def test_rolling_ic_length_mismatch_raises():
         rolling_ic([1, 2, 3], [1, 2], window=2)
 
 
+@pytest.mark.unit
+def test_rolling_ic_vectorized_matches_per_window_reference():
+    """The 2026-08-16 vectorized rolling_ic equals the old per-window loop.
+
+    Covers the messy cases explicitly: NaNs in both inputs (pairwise drop),
+    ties in factor and returns (exact average-rank fallback), a zero-variance
+    stretch, and a window smaller than some gaps' valid-pair count.
+    """
+    from yiagents.backtest.ic import information_coefficient
+
+    rng = np.random.default_rng(42)
+    n, window = 400, 30
+    factor = rng.normal(size=n)
+    # Inject ties: round a slice to a coarse grid.
+    factor[:120] = np.round(factor[:120], 0)
+    returns = 0.8 * factor + rng.normal(scale=0.5, size=n)
+    returns[200:260] = np.round(returns[200:260], 0)      # ties in returns
+    factor[300:310] = np.nan                              # pairwise gaps
+    returns[315:325] = np.nan
+    returns[350:352] = 3.33                               # zero-variance spot
+    factor[350:352] = 1.11
+
+    out = rolling_ic(factor, returns, window=window)
+    for end in range(window - 1, n):
+        expected = information_coefficient(factor[end - window + 1 : end + 1],
+                                           returns[end - window + 1 : end + 1])
+        got = out.iloc[end]
+        if expected is None or not np.isfinite(expected):
+            assert np.isnan(got), f"window ending {end}: expected NaN, got {got}"
+        else:
+            assert got == pytest.approx(expected, abs=1e-9), (
+                f"window ending {end}: {got} != {expected}"
+            )
+
+
+@pytest.mark.unit
+def test_rolling_ic_vectorized_is_actually_faster():
+    """Guard the reason for the rewrite: 5k rows must stay well under the
+    ~seconds the scipy-per-window loop cost."""
+    import time
+
+    rng = np.random.default_rng(1)
+    n, window = 5000, 60
+    factor = rng.normal(size=n)
+    returns = rng.normal(size=n)
+    t0 = time.perf_counter()
+    rolling_ic(factor, returns, window=window)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 2.0, f"vectorized rolling_ic took {elapsed:.2f}s for n={n}"
+
+
 # ---------------------------------------------------------------------------
 # consecutive_below_threshold
 # ---------------------------------------------------------------------------

@@ -423,6 +423,48 @@ def test_akshare_news_pit_drops_future(monkeypatch):
 
 
 @pytest.mark.unit
+def test_akshare_news_window_drops_stale(monkeypatch):
+    """look_back_days must bound the LOWER edge too, like every sibling tool.
+
+    The parameter used to be echoed in the header ("last Nd") but never
+    enforced: arbitrarily old dated headlines survived (and under ``limit``
+    could displace recent ones).
+    """
+    df = pd.DataFrame([
+        {"新闻标题": "新鲜新闻", "新闻内容": "c",
+         "发布时间": "2024-06-14 10:30:00", "文章来源": "东财", "新闻链接": "u1"},
+        {"新闻标题": "陈年旧闻", "新闻内容": "c",
+         "发布时间": "2024-01-02 09:00:00", "文章来源": "东财", "新闻链接": "u2"},
+    ])
+    _patch_akshare(monkeypatch, df)
+    out = akv.get_a_share_news_native("600519.SS", "2024-06-15", 14)
+    assert "新鲜新闻" in out              # within [2024-06-01, 2024-06-15]
+    assert "陈年旧闻" not in out          # 5 months old -> window drop
+
+    # Boundary is inclusive: "last 1d" as of 2024-06-15 = [06-14, 06-15].
+    out2 = akv.get_a_share_news_native("600519.SS", "2024-06-15", 1)
+    assert "新鲜新闻" in out2
+
+    # A window that excludes every dated item reports honestly.
+    out3 = akv.get_a_share_news_native("600519.SS", "2024-03-15", 14)
+    assert "No news items" in out3
+    assert "新鲜新闻" not in out3
+    assert "陈年旧闻" not in out3
+
+
+@pytest.mark.unit
+def test_akshare_news_undated_kept_by_fail_open(monkeypatch):
+    """The documented PIT fail-open for missing timestamps still holds."""
+    df = pd.DataFrame([
+        {"新闻标题": "无日期头条", "新闻内容": "c",
+         "发布时间": None, "文章来源": "东财", "新闻链接": "u1"},
+    ])
+    _patch_akshare(monkeypatch, df)
+    out = akv.get_a_share_news_native("600519.SS", "2024-06-15", 14)
+    assert "无日期头条" in out
+
+
+@pytest.mark.unit
 def test_akshare_news_empty_df_honest_empty(monkeypatch):
     _patch_akshare(monkeypatch, pd.DataFrame())
     out = akv.get_a_share_news_native("600519.SS", "2024-06-15", 14)
@@ -1175,6 +1217,26 @@ def test_realtime_quote_today_is_live_not_sentinel(monkeypatch):
                                                 date.today().isoformat())
     assert "REAL_TIME_UNAVAILABLE" not in out
     assert "贵州茅台" in out
+
+
+@pytest.mark.unit
+def test_realtime_quote_malformed_date_fails_closed(monkeypatch):
+    """A non-empty UNPARSEABLE curr_date (slash form an LLM can emit) used to
+    pass is_historical_date as "live" and serve today's snapshot into a
+    nominally historical run. It now takes the historical branch."""
+    from yiagents.dataflows.utils import is_historical_date
+
+    # Unit-level contract: only empty/None is live; garbage is historical.
+    assert is_historical_date(None) is False
+    assert is_historical_date("") is False
+    assert is_historical_date("2026/08/01") is True
+    assert is_historical_date("garbage") is True
+
+    # Gate-level: the realtime snapshot is refused, not served.
+    _patch_ak(monkeypatch, stock_zh_a_spot_em=lambda: _spot_em_df())
+    out = akv.get_a_share_realtime_quote_native("600519.SS", "2024/06/15")
+    assert "REAL_TIME_UNAVAILABLE" in out
+    assert "贵州茅台" not in out
 
 
 @pytest.mark.unit

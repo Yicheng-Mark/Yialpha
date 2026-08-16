@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
@@ -61,6 +62,20 @@ _FAPI_FUNDING_LIMIT = 1000
 # Runaway guard: ~50000 daily bars ≈ 137 years. Purely a safety ceiling so a
 # mis-sized range can never spin the paginator unboundedly.
 _FAPI_PAGINATION_SAFETY_CAP = 50000
+
+# Closed-window history memo (see _paginate_history): FIFO like the yfinance
+# _OHLCV_MEMO, generous TTL — an immutable past window does not go stale, the
+# TTL only bounds memory across a very long-lived process.
+_HISTORY_MEMO: dict[tuple, tuple[float, list]] = {}
+_HISTORY_MEMO_LOCK = threading.Lock()
+_HISTORY_MEMO_MAX = 64
+_HISTORY_MEMO_TTL_S = 6 * 3_600.0
+
+
+def reset_history_memo_for_test() -> None:
+    """Drop the closed-window history memo (tests only — fresh state per case)."""
+    with _HISTORY_MEMO_LOCK:
+        _HISTORY_MEMO.clear()
 
 # The /futures/data/* family (openInterestHist, the *Ratio endpoints, taker
 # volume, basis) accepts startTime/endTime, but Binance retains ONLY the most
@@ -125,7 +140,29 @@ def _paginate_history(
     ``base`` and ``weight_key`` default to the fapi perp host/budget so the two
     perp callers (klines, fundingRate) are byte-identical to the pre-spot form;
     spot callers pass ``base=_spot_host(), weight_key="spot"``.
+
+    Closed-window memoization (2026-08-16): a window ending more than 12h in
+    the past is immutable on the exchange side, but ONE analysis run fetches
+    the same window 2-3x (raw kline tool + indicator battery + basis + the
+    backtest's per-signal propagation), burning the shared per-IP weight
+    budget that then throttles the whole batch. Fully-closed results are
+    memoized keyed by ``(path, host, params, start_ms, end_ms)`` — the PIT end
+    is part of the key, so a clamped window can never be served from a wider
+    cached one, and a window touching the present is never cached at all.
     """
+    cache_key = (
+        path, base, tuple(sorted((base_params or {}).items())), start_ms, end_ms,
+    )
+    # 12h margin: the current UTC day's kline is still forming and an 8h
+    # funding cadence may have a settlement pending — never memoize those.
+    cacheable = end_ms <= int(time.time() * 1000) - 12 * 3_600_000
+    if cacheable:
+        with _HISTORY_MEMO_LOCK:
+            hit = _HISTORY_MEMO.get(cache_key)
+            if hit is not None and time.monotonic() - hit[0] < _HISTORY_MEMO_TTL_S:
+                logger.debug("Binance history cache hit for %s %s", path, canonical)
+                return list(hit[1])
+
     cursor = start_ms
     out: list = []
     while cursor <= end_ms and len(out) < _FAPI_PAGINATION_SAFETY_CAP:
@@ -158,6 +195,11 @@ def _paginate_history(
             "older rows may be truncated",
             path, _FAPI_PAGINATION_SAFETY_CAP, symbol_for_error,
         )
+    if cacheable and out:
+        with _HISTORY_MEMO_LOCK:
+            if len(_HISTORY_MEMO) >= _HISTORY_MEMO_MAX and cache_key not in _HISTORY_MEMO:
+                _HISTORY_MEMO.pop(next(iter(_HISTORY_MEMO)))  # FIFO eviction
+            _HISTORY_MEMO[cache_key] = (time.monotonic(), list(out))
     return out
 
 
@@ -215,21 +257,26 @@ def _validate_outbound_url(url: str) -> None:
         raise ValueError(f"non-public outbound host refused: {host!r}")
 
 
-def _do_request(url: str, params: dict, use_session: bool):
+def _do_request(url: str, params: dict, use_session: bool, headers: dict | None = None):
     """Fire ONE transport attempt and return the raw ``requests.Response``.
 
     When ``use_session`` is true, reuse the process-wide shared
     ``requests.Session`` (keepalive) so the TLS / SOCKS5-proxy connection is
     pooled across calls; otherwise a one-shot ``requests.get`` (today's form).
     Both paths take identical ``proxies`` / ``timeout`` so the response bytes are
-    the same either way — the session only adds connection reuse.
+    the same either way — the session only adds connection reuse. ``headers``
+    (signed-endpoint API keys) defaults to None: absent = byte-identical to
+    the public path.
     """
     _validate_outbound_url(url)
     if use_session:
         return get_shared_binance_session().get(
             url, params=params, proxies=proxy_map(), timeout=_TIMEOUT,
+            headers=headers,
         )
-    return requests.get(url, params=params, proxies=proxy_map(), timeout=_TIMEOUT)
+    return requests.get(
+        url, params=params, proxies=proxy_map(), timeout=_TIMEOUT, headers=headers,
+    )
 
 
 def _request_with_retry(do_request, max_retries: int, symbol_for_error: str, canonical: str):
@@ -310,6 +357,7 @@ def _http_get(
     canonical: str,
     base: str = _FAPI_BASE,
     weight_key: str = "fapi",
+    headers: dict | None = None,
 ) -> object:
     """GET a Binance public endpoint and return parsed JSON.
 
@@ -350,7 +398,7 @@ def _http_get(
 
     url = f"{base}{path}"
     resp = _request_with_retry(
-        lambda: _do_request(url, params, use_session),
+        lambda: _do_request(url, params, use_session, headers),
         max_retries, symbol_for_error, canonical,
     )
 
@@ -577,6 +625,29 @@ def _funding_cadence_hours(rows: list) -> int | None:
     return hours if hours > 0 else None
 
 
+def _funding_interval_hours_authoritative(canonical: str) -> int | None:
+    """Authoritative funding interval for ``canonical`` from ``/fapi/v1/fundingInfo``.
+
+    The public endpoint lists the symbols whose funding interval differs from
+    the 8h default and/or that carry funding caps (1h/4h contracts — often the
+    newer/tokenized-stock perps). A symbol absent from the list uses the 8h
+    default, so this returns ``None`` both for unlisted symbols and on any
+    transport failure — the settlement-spacing inference stays the fallback.
+    """
+    try:
+        data = _http_get("/fapi/v1/fundingInfo", {}, canonical, canonical)
+    except Exception:  # noqa: BLE001 — advisory metadata; spacing inference remains
+        return None
+    for item in data if isinstance(data, list) else []:
+        if isinstance(item, dict) and item.get("symbol") == canonical:
+            try:
+                hours = item.get("fundingIntervalHours")
+                return int(hours) if hours is not None else None
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def get_binance_funding_rate(
     symbol: str,
     start_date: str,
@@ -619,7 +690,14 @@ def get_binance_funding_rate(
             symbol, canonical, f"no funding rates between {start_date} and {end_date}"
         )
 
-    cadence_h = _funding_cadence_hours(rows)
+    # Authoritative cadence first: /fapi/v1/fundingInfo states the contract's
+    # own interval for non-default (1h/4h) settlers; spacing inference is the
+    # fallback for unlisted symbols / transport failures.
+    cadence_h = _funding_interval_hours_authoritative(canonical)
+    cadence_src = "fundingInfo endpoint"
+    if cadence_h is None:
+        cadence_h = _funding_cadence_hours(rows)
+        cadence_src = "inferred from settlement spacing"
 
     records = [
         {
@@ -645,7 +723,7 @@ def get_binance_funding_rate(
     if cadence_h is not None:
         header += (
             f"# funding settles every ~{cadence_h}h on this contract "
-            "(inferred from settlement spacing; annualised carry = mean rate x "
+            f"({cadence_src}; annualised carry = mean rate x "
             f"{24 / cadence_h:.1f} x 365)\n"
         )
     header += f"# Total records: {len(df)}\n"
