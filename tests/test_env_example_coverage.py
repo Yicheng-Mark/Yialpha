@@ -47,6 +47,7 @@ _DIRECT_READ_KEYS = {
     "YIAGENTS_EXECUTION_ENABLED",    # execution/binance_gateway.py (legacy gate)
     "YIAGENTS_EXECUTION_MAINNET",    # execution/binance_gateway.py
     "YIAGENTS_EXECUTION_TIMEOUT_MS",  # execution/binance_gateway.py
+    "YIAGENTS_EXECUTION_LEVERAGE",   # execution/binance_gateway.py (_ensure_leverage)
 }
 
 

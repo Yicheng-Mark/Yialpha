@@ -11,6 +11,8 @@ tests), but ALL indicator math runs on real stockstats.
 
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -99,7 +101,54 @@ class TestBinanceIndicatorsTool:
     def test_perp_prompt_mentions_indicator_tool(self):
         from yiagents.agents.analysts.market_analyst import _PERP_NUDGE, _SPOT_NUDGE
         assert "get_binance_indicators" in _PERP_NUDGE
-        assert "get_binance_indicators" in _SPOT_NUDGE
+        # 2026-08-16: the spot run binds the spot-default variant so an
+        # omitted venue arg can never price the perpetual.
+        assert "get_binance_spot_indicators" in _SPOT_NUDGE
+
+    def test_spot_tool_defaults_to_spot_venue(self, patched_frame):
+        bit.get_binance_spot_indicators.invoke({
+            "symbol": "BTCUSDT", "curr_date": "2026-01-15",
+        })
+        assert patched_frame["venue"] == "binance_spot"
+
+    def test_low_price_contract_not_zeroed(self, monkeypatch):
+        """PEPE-class closes (~1e-5) must survive the table, not render 0.00.
+
+        The data layer no longer rounds OHLC (P0 2026-08-16); this pins the
+        display twin — the markdown table's adaptive decimals — so a low-price
+        contract's close and indicator values stay legible.
+        """
+        n = 400
+        closes = 1.23e-5 * np.exp(np.cumsum(np.random.default_rng(3).normal(0, 0.02, n)))
+        idx = pd.bdate_range("2024-06-01", periods=n)
+        frame = pd.DataFrame(
+            {
+                "Open": closes * 0.999, "High": closes * 1.01, "Low": closes * 0.99,
+                "Close": closes, "Adj Close": closes,
+                "Volume": np.full(n, 1e11),
+            },
+            index=idx,
+        )
+        frame.index.name = "Date"
+        monkeypatch.setattr(bit, "binance_klines_frame", lambda *a, **k: frame)
+        out = bit.get_binance_indicators.invoke({
+            "symbol": "1000PEPEUSDT", "curr_date": "2025-08-05",
+            "indicators": "close_50_sma,rsi",
+        })
+        assert "DATA_UNAVAILABLE" not in out and not out.startswith("ERROR")
+        # Every Close cell in the table must carry the 1e-5-scale value, not
+        # a zeroed "0.00" (substring checks don't work — "0.0000123" starts
+        # with "0.00" — so parse the cells).
+        close_cells = []
+        for line in out.splitlines():
+            if not line.startswith("|"):
+                continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) >= 3 and cells[0][:2].isdigit() and cells[1]:
+                with contextlib.suppress(ValueError):
+                    close_cells.append(float(cells[1].replace(",", "")))
+        assert close_cells, "no data rows found in table"
+        assert all(v > 1e-7 for v in close_cells), close_cells[:5]
 
 
 def _recorder(fn, calls):

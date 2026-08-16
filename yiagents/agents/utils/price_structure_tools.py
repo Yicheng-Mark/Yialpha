@@ -262,6 +262,19 @@ def get_candlestick_patterns(
 _RS_WINDOWS: tuple[int, ...] = (21, 63, 126, 252)  # ~1m / 3m / 6m / 12m
 
 
+def _dated_close(df: pd.DataFrame | None) -> pd.Series:
+    """Date-indexed numeric Close series (sorted, NaN-dropped)."""
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    frame = pd.DataFrame(
+        {
+            "date": pd.to_datetime(df["Date"], errors="coerce"),
+            "close": pd.to_numeric(df["Close"], errors="coerce"),
+        }
+    ).dropna()
+    return frame.sort_values("date").set_index("date")["close"]
+
+
 def _window_return(close: pd.Series, rows: int) -> float | None:
     if len(close) <= rows:
         return None
@@ -269,6 +282,28 @@ def _window_return(close: pd.Series, rows: int) -> float | None:
     if then <= 0:
         return None
     return float(close.iloc[-1]) / then - 1.0
+
+
+def _bench_return_over(
+    bench: pd.Series, start_date: pd.Timestamp, end_value: float | None
+) -> float | None:
+    """Benchmark return over the SAME calendar span as the ticker window.
+
+    The ticker leg counts its own trading rows (its calendar defines the
+    window); the benchmark leg anchors on dates — ``asof`` takes the last
+    benchmark close at-or-before the window's start date. Row-count alignment
+    would compare 21 crypto days against 21 SPY sessions ≈ 29 calendar days,
+    stretching the benchmark's window and skewing the RS ratio.
+    """
+    if bench.empty or end_value is None or end_value <= 0:
+        return None
+    try:
+        start = float(bench.asof(start_date))
+    except (TypeError, ValueError):
+        return None
+    if not pd.notna(start) or start <= 0:
+        return None
+    return end_value / start - 1.0
 
 
 @tool
@@ -296,14 +331,10 @@ def get_relative_strength(
     except Exception:  # noqa: BLE001 — benchmark unavailable: RS not computable
         bench_data = None
 
-    close = pd.to_numeric(data["Close"], errors="coerce").dropna() if data is not None else pd.Series(dtype=float)
+    close = _dated_close(data)
     if close.empty:
         return f"DATA_UNAVAILABLE: no OHLCV history for {symbol!r} as of {curr_date}."
-    bench_close = (
-        pd.to_numeric(bench_data["Close"], errors="coerce").dropna()
-        if bench_data is not None and not bench_data.empty
-        else pd.Series(dtype=float)
-    )
+    bench_close = _dated_close(bench_data)
 
     lines = [
         f"## Relative strength: {symbol.upper()} vs {benchmark} (as of {curr_date})",
@@ -312,9 +343,14 @@ def get_relative_strength(
         "|---|---:|---:|---:|",
     ]
     ratios: list[float] = []
+    bench_end = float(bench_close.iloc[-1]) if not bench_close.empty else None
     for rows, label in zip(_RS_WINDOWS, ("1m", "3m", "6m", "12m"), strict=False):
         r = _window_return(close, rows)
-        b = _window_return(bench_close, rows) if not bench_close.empty else None
+        then_date = close.index[-1 - rows] if len(close) > rows else None
+        b = (
+            _bench_return_over(bench_close, then_date, bench_end)
+            if then_date is not None else None
+        )
         ratio = (r / b) if (r is not None and b not in (None, 0.0)) else None
         if ratio is not None:
             ratios.append(ratio)

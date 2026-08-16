@@ -202,12 +202,14 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
     def test_spot_binds_six_tools(self):
         names = self._tool_names("crypto_spot")
         # Spot keeps indicators + verified snapshot (symbol resolves correctly)
-        # and adds the 3 spot-native tools, plus get_binance_indicators
-        # (2026-08-15): the classic battery computed on the Binance candles.
+        # and adds the 3 spot-native tools, plus get_binance_spot_indicators
+        # (2026-08-15; spot-default binding 2026-08-16): the classic battery
+        # computed on the Binance candles, defaulting to the SPOT venue so an
+        # omitted venue arg can never price the perpetual.
         self.assertEqual(
             sorted(names),
             [
-                "get_binance_indicators",
+                "get_binance_spot_indicators",
                 "get_binance_spot_klines",
                 "get_binance_spot_perp_basis",
                 "get_binance_spot_ticker24",
@@ -215,15 +217,17 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
                 "get_verified_market_snapshot",
             ],
         )
-        # Spot must NOT bind the perp-native tools.
+        # Spot must NOT bind the perp-native tools (including the perp-default
+        # indicator binding).
         self.assertNotIn("get_binance_klines", names)
         self.assertNotIn("get_binance_funding_rate", names)
+        self.assertNotIn("get_binance_indicators", names)
 
     def test_historical_spot_omits_rolling_current_snapshots(self):
         self.assertEqual(
             sorted(self._tool_names("crypto_spot", "2020-01-02")),
             [
-                "get_binance_indicators",
+                "get_binance_spot_indicators",
                 "get_binance_spot_klines",
                 "get_indicators",
                 "get_verified_market_snapshot",

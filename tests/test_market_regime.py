@@ -19,7 +19,6 @@ import yiagents.agents.risk_mgmt.conservative_debator as cd
 import yiagents.dataflows.market_regime as mr
 from yiagents.dataflows.market_regime import (
     compute_turbulence,
-    format_market_regime,
     resolve_market_benchmark,
 )
 
@@ -99,29 +98,10 @@ class TestComputeTurbulence:
         assert compute_turbulence("SYN", "2024-01-01") is None
 
 
-@pytest.mark.unit
-class TestFormatMarketRegime:
-    def test_formats_a_line(self, monkeypatch):
-        monkeypatch.setattr(mr, "get_config", lambda: {"benchmark_map": {"": "SPY"}})
-        monkeypatch.setattr(
-            mr, "compute_turbulence", lambda *a, **k: 6.25
-        )  # sqrt = 2.5 -> elevated
-        line = format_market_regime("AAPL", "2024-01-15")
-        assert line is not None
-        assert "SPY" in line
-        assert "6.25" in line
-        assert "elevated" in line
-
-    def test_normal_label_below_threshold(self, monkeypatch):
-        monkeypatch.setattr(mr, "get_config", lambda: {"benchmark_map": {"": "SPY"}})
-        monkeypatch.setattr(mr, "compute_turbulence", lambda *a, **k: 1.0)  # 1.0σ
-        line = format_market_regime("AAPL", "2024-01-15")
-        assert "normal" in line
-
-    def test_none_propagates(self, monkeypatch):
-        monkeypatch.setattr(mr, "get_config", lambda: {"benchmark_map": {"": "SPY"}})
-        monkeypatch.setattr(mr, "compute_turbulence", lambda *a, **k: None)
-        assert format_market_regime("AAPL", "2024-01-15") is None
+# NOTE: the pre-expansion turbulence-only renderer ``format_market_regime``
+# was removed 2026-08-16 (format_regime_context is its strict superset; its
+# turbulence-label semantics — elevated >= 2.5σ vs normal — are pinned by
+# TestFormatRegimeContext in tests/test_price_structure_and_regime.py).
 
 
 # ---------------------------------------------------------------------------

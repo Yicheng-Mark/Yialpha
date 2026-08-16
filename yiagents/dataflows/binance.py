@@ -1,10 +1,12 @@
 """Binance USDT-M perpetual market-data vendor (Track A, analysis-only).
 
-Three read-only public GET endpoints (no API key, no trading):
+Read-only public GET endpoints (no API key, no trading):
 
   - /fapi/v1/klines            daily OHLCV for the market analyst
+  - /fapi/v1/markPriceKlines   mark-price OHLCV (liquidation anchor)
   - /fapi/v1/fundingRate        funding-rate history (perp cost-of-carry)
   - /fapi/v1/openInterest       live open interest
+  - /fapi/v1/premiumIndex       mark/index price + current funding snapshot
   - /futures/data/openInterestHist  daily open-interest history
 
 Returns CSV-shaped ``str`` (header + ``df.to_csv()``) so they slot into the
@@ -26,9 +28,11 @@ Design constraints:
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 import pandas as pd
 import requests
@@ -37,6 +41,7 @@ from .binance_http import get_shared_binance_session
 from .binance_rate_limiter import get_binance_weight_limiter
 from .config import get_config
 from .errors import NoMarketDataError, VendorRateLimitError
+from .stockstats_utils import MAX_OHLCV_STALE_DAYS, _assert_ohlcv_not_stale
 from .symbol_utils import normalize_symbol_for_venue
 from .utils import current_pit_end, proxy_map
 
@@ -177,6 +182,39 @@ def _observe_weight(resp, weight_key: str = "fapi") -> None:
     get_binance_weight_limiter(weight_key).observe(used)
 
 
+def _validate_outbound_url(url: str) -> None:
+    """Refuse non-HTTP(S) schemes and non-public hosts before any request.
+
+    Defense-in-depth for this module's fixed fapi/spot bases (and any future
+    configurable host): the scheme must be http/https and a literal IP host
+    must not be loopback/private/reserved/link-local/unspecified, and the name
+    must not be ``localhost``/``*.localhost``/``*.internal``. A mis-set base
+    can then never turn a market-data fetch into a probe of the internal
+    network. Names that resolve to private IPs are out of scope for this cheap
+    literal check (no DNS resolution here by design).
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError as exc:
+        raise ValueError(f"unparseable outbound URL: {url!r}") from exc
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(f"non-HTTP(S) outbound URL refused: {url!r}")
+    host = (parts.hostname or "").strip("[]").lower()
+    if not host:
+        raise ValueError(f"outbound URL without a host refused: {url!r}")
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(".internal"):
+        raise ValueError(f"non-public outbound host refused: {host!r}")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return  # ordinary DNS name — allowed
+    if (
+        ip.is_private or ip.is_loopback or ip.is_reserved
+        or ip.is_link_local or ip.is_unspecified
+    ):
+        raise ValueError(f"non-public outbound host refused: {host!r}")
+
+
 def _do_request(url: str, params: dict, use_session: bool):
     """Fire ONE transport attempt and return the raw ``requests.Response``.
 
@@ -186,6 +224,7 @@ def _do_request(url: str, params: dict, use_session: bool):
     Both paths take identical ``proxies`` / ``timeout`` so the response bytes are
     the same either way — the session only adds connection reuse.
     """
+    _validate_outbound_url(url)
     if use_session:
         return get_shared_binance_session().get(
             url, params=params, proxies=proxy_map(), timeout=_TIMEOUT,
@@ -381,23 +420,36 @@ def binance_klines_frame(
     end_date: str,
     interval: str = "1d",
     venue: str = "binance_perp",
+    price_type: str = "last",
 ) -> pd.DataFrame:
     """OHLCV DataFrame for a Binance pair (perp or spot), PIT-clamped.
 
     Shared data layer for the klines CSV tools and the indicator tool
     (``get_binance_indicators``) so classic stockstats indicators can be
     computed on the SAME candles the analyst reads. Date-indexed, sorted,
-    rounded to match the CSV tools' output exactly. Raises NoMarketDataError
-    on empty windows, and ``current_pit_end`` clamps the end so a backtest
-    never sees klines after its analysis date.
+    at the exchange's own precision (no rounding — Binance prices carry
+    sub-cent low-price contracts, e.g. PEPE ≈ 1e-5, and a display-style
+    round destroys them). Raises NoMarketDataError on empty windows, and
+    ``current_pit_end`` clamps the end so a backtest never sees klines after
+    its analysis date.
+
+    ``price_type="mark"`` (perp only) switches the endpoint to
+    ``/fapi/v1/markPriceKlines`` — the mark price Binance liquidates against —
+    for liquidation-sensitive research; the default ``"last"`` is the ordinary
+    last-traded-price kline.
     """
+    if price_type not in ("last", "mark"):
+        raise ValueError(f"price_type must be 'last' or 'mark', got {price_type!r}")
     if venue == "binance_spot":
+        if price_type == "mark":
+            raise ValueError("mark-price klines are a perp-only endpoint")
         path, limit, base, weight_key = (
             "/api/v3/klines", _SPOT_KLINES_LIMIT, _spot_host(), "spot",
         )
     else:
+        path = "/fapi/v1/markPriceKlines" if price_type == "mark" else "/fapi/v1/klines"
         path, limit, base, weight_key = (
-            "/fapi/v1/klines", _FAPI_KLINES_LIMIT, None, None,
+            path, _FAPI_KLINES_LIMIT, None, None,
         )
     canonical = normalize_symbol_for_venue(symbol, venue)
 
@@ -458,9 +510,18 @@ def binance_klines_frame(
     df = pd.DataFrame.from_records(records)
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.set_index("Date").sort_index()
-    # Mirror yfinance: round numerics for cleaner display.
-    for col in ("Open", "High", "Low", "Close", "Adj Close"):
-        df[col] = df[col].round(2)
+    # NO rounding: unlike equity quotes, Binance lists sub-cent contracts
+    # (PEPE ≈ 1e-5, 1000PEPE ≈ 1e-2) where a yfinance-style round(2) zeroes
+    # or badly distorts every price — and the indicator tool computes on this
+    # same frame. Binance strings already carry the exchange's own precision.
+    # Live-window staleness guard (same contract as the yfinance path, #1021):
+    # when the caller asked for data up to (near) the present, a frame whose
+    # last candle is far older — a delisted/renamed contract — must raise
+    # rather than silently feed months-old "current" prices to the analyst.
+    # Historical windows are exempt: an early-ending series is a legitimate
+    # backtest input, not a freshness lie.
+    if (datetime.now(timezone.utc) - end_dt).days <= MAX_OHLCV_STALE_DAYS:
+        _assert_ohlcv_not_stale(df, end_date, symbol, canonical)
     return df
 
 
@@ -469,6 +530,7 @@ def get_binance_klines(
     start_date: str,
     end_date: str,
     interval: str = "1d",
+    price_type: str = "last",
 ) -> str:
     """Daily OHLCV for a Binance USDT-M perpetual pair.
 
@@ -477,9 +539,12 @@ def get_binance_klines(
     Volume`` (``Adj Close`` mirrors ``Close`` since perps have no splits) — so
     the downstream stockstats indicator path is reusable. ``interval`` defaults
     to ``"1d"``; the analyst passes it through for intraday if ever needed.
+    ``price_type="mark"`` serves mark-price klines (the price Binance
+    liquidates against) for liquidation-sensitive research.
     """
     df = binance_klines_frame(
-        symbol, start_date, end_date, interval=interval, venue="binance_perp"
+        symbol, start_date, end_date, interval=interval, venue="binance_perp",
+        price_type=price_type,
     )
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
     end_date = current_pit_end(end_date) or end_date
@@ -490,6 +555,28 @@ def get_binance_klines(
     return header + df.to_csv()
 
 
+def _funding_cadence_hours(rows: list) -> int | None:
+    """Modal spacing (whole hours) between adjacent funding settlements.
+
+    Binance settles most USDT-M perps every 8h, but many newer contracts run
+    4h or 1h — annualising carry with the wrong cadence misstates it 2-24x.
+    The mode (not the min/median) is robust to a single missing settlement in
+    an otherwise regular series. Returns ``None`` when there are fewer than
+    two settlements to diff.
+    """
+    times = sorted(
+        int(r["fundingTime"])
+        for r in rows
+        if isinstance(r, dict) and r.get("fundingTime") is not None
+    )
+    diffs = [b - a for a, b in zip(times, times[1:], strict=False) if b > a]
+    if not diffs:
+        return None
+    mode_ms = max(set(diffs), key=diffs.count)
+    hours = round(mode_ms / 3_600_000)
+    return hours if hours > 0 else None
+
+
 def get_binance_funding_rate(
     symbol: str,
     start_date: str,
@@ -497,9 +584,11 @@ def get_binance_funding_rate(
 ) -> str:
     """Funding-rate history for a Binance USDT-M perpetual pair.
 
-    Returns header + CSV with ``fundingTime, fundingRate, symbol``. Funding is
-    charged every 8h and is the primary cost-of-carry / sentiment signal for a
-    perp (persistently positive = longs pay shorts = crowding).
+    Returns header + CSV with ``fundingTime, fundingRate, symbol``. Funding
+    settles on the contract's own cadence — 8h on most contracts, 4h/1h on
+    many newer ones; the header states the cadence inferred from the
+    settlement spacing. Persistently positive funding = longs pay shorts =
+    crowding / cost-of-carry.
     """
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
 
@@ -530,6 +619,8 @@ def get_binance_funding_rate(
             symbol, canonical, f"no funding rates between {start_date} and {end_date}"
         )
 
+    cadence_h = _funding_cadence_hours(rows)
+
     records = [
         {
             "fundingTime": datetime.fromtimestamp(
@@ -551,6 +642,12 @@ def get_binance_funding_rate(
 
     label = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
     header = f"# Perp USDT-M funding rate for {label} from {start_date} to {end_date}\n"
+    if cadence_h is not None:
+        header += (
+            f"# funding settles every ~{cadence_h}h on this contract "
+            "(inferred from settlement spacing; annualised carry = mean rate x "
+            f"{24 / cadence_h:.1f} x 365)\n"
+        )
     header += f"# Total records: {len(df)}\n"
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     return header + df.to_csv(index=False)
@@ -707,8 +804,9 @@ def _futures_data_window(
         :class:`NoMarketDataError` (the router degrades the optional category
         to a sentinel) is the honest result — falling back to the newest rows
         would hand a backtest future positioning data.
-      * ``start_date`` alone defaults the end to now; ``end_date`` alone
-        defaults the start to ``end - look_back_days``.
+      * ``start_date`` alone defaults the end to now, clamped to the pinned
+        analysis date (PIT) exactly like an explicit ``end_date``;
+        ``end_date`` alone defaults the start to ``end - look_back_days``.
     """
     if start_date is None and end_date is None:
         return {}, None, True
@@ -717,7 +815,13 @@ def _futures_data_window(
         end_date = current_pit_end(end_date) or end_date
         end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     else:
-        end_dt = datetime.now(timezone.utc)
+        # start_date-only: the nominal end is "now", but a pinned analysis
+        # date must clamp it exactly like an explicit end_date — otherwise a
+        # backtest would receive positioning rows past its decision point.
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        end_dt = datetime.strptime(
+            current_pit_end(now_iso) or now_iso, "%Y-%m-%d"
+        ).replace(tzinfo=timezone.utc)
     if start_date:
         start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     else:
@@ -1001,6 +1105,83 @@ def get_binance_basis(
     return header + df.to_csv(index=False)
 
 
+def get_binance_premium_index(symbol: str) -> str:
+    """Mark-price snapshot for a Binance USDT-M perp (``/fapi/v1/premiumIndex``).
+
+    One weight-1 call returning ``markPrice``, ``indexPrice``,
+    ``lastFundingRate`` (the rate currently in effect, payable at the next
+    settlement) and ``nextFundingTime``. Binance liquidates USDT-M positions
+    against the MARK price, not the last traded price — liquidation-distance
+    claims must anchor to ``markPrice`` (vs ``indexPrice`` for the premium
+    displacement), while the funding-rate history tool carries the settlement
+    history. Returns ``symbol, markPrice, indexPrice, markVsIndexPct,
+    lastFundingRate, nextFundingTime, time``.
+
+    Live-only snapshot: bound to the analyst only for non-historical runs
+    (same gate as the OI live snapshot); raising
+    :class:`NoMarketDataError` / :class:`VendorRateLimitError` degrades to
+    the optional-category sentinel.
+    """
+    canonical = normalize_symbol_for_venue(symbol, "binance_perp")
+
+    data = _http_get(
+        "/fapi/v1/premiumIndex", {"symbol": canonical}, symbol, canonical,
+    )
+
+    if not isinstance(data, dict) or data.get("markPrice") is None:
+        raise NoMarketDataError(
+            symbol, canonical, "premiumIndex returned no markPrice"
+        )
+
+    def _f(key: str) -> float | None:
+        raw = data.get(key)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    mark, index = _f("markPrice"), _f("indexPrice")
+    mark_vs_index_pct = (
+        round((mark / index - 1.0) * 100.0, 4)
+        if mark is not None and index not in (None, 0)
+        else None
+    )
+    nft = data.get("nextFundingTime")
+    ts = data.get("time")
+    records = [
+        {
+            "symbol": data.get("symbol", canonical),
+            "markPrice": data.get("markPrice"),
+            "indexPrice": data.get("indexPrice"),
+            "markVsIndexPct": mark_vs_index_pct,
+            "lastFundingRate": data.get("lastFundingRate"),
+            "nextFundingTime": (
+                datetime.fromtimestamp(int(nft) / 1000, tz=timezone.utc)
+                .strftime("%Y-%m-%d %H:%M:%S UTC")
+                if isinstance(nft, (int, float)) and nft > 0 else None
+            ),
+            "time": (
+                datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc)
+                .strftime("%Y-%m-%d %H:%M:%S UTC")
+                if isinstance(ts, (int, float)) and ts > 0 else None
+            ),
+        }
+    ]
+
+    df = pd.DataFrame.from_records(records)
+    vlabel = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
+    header = f"# Perp USDT-M mark-price snapshot for {vlabel}\n"
+    header += (
+        "# liquidations trigger on markPrice (not last price); lastFundingRate "
+        "is the rate in effect for the NEXT settlement; markVsIndexPct = mark "
+        "premium vs index (%).\n"
+    )
+    header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    return header + df.to_csv(index=False)
+
+
 # ---- Binance SPOT (crypto_spot asset type) ---------------------------------
 # Spot public market data (/api/v3/*) mirrors the perp shape: same 12-tuple
 # kline array, same X-MBX-USED-WEIGHT-1M header, same 429/418 throttle — only
@@ -1091,7 +1272,10 @@ def get_binance_spot_ticker24(symbol: str) -> str:
     return header + df.to_csv(index=False)
 
 
-def get_binance_spot_perp_basis(symbol: str, look_back_days: int = 7) -> str:
+def get_binance_spot_perp_basis(
+    symbol: str, look_back_days: int = 7,
+    start_date: str | None = None, end_date: str | None = None,
+) -> str:
     """Cross-venue basis: Binance USDT-M perp vs Binance SPOT (crypto_spot).
 
     The genuinely new signal spot unlocks: pull daily closes from BOTH
@@ -1106,28 +1290,38 @@ def get_binance_spot_perp_basis(symbol: str, look_back_days: int = 7) -> str:
     flight to spot). This is the "real" basis traders watch — distinct from the
     perp-native :func:`get_binance_basis`, which is perp-vs-Binance-index.
 
+    Backtest-safe windows: ``end_date`` (end inclusive) is clamped to the run's
+    pinned analysis date via :func:`current_pit_end`, and the default window's
+    end ("now" in live mode) is clamped the same way — so a pinned backtest can
+    no longer see future closes. An intraday run's last row compares both
+    venues' forming daily candles (same convention as the klines endpoints).
+
     Either side raising :class:`NoMarketDataError` / :class:`VendorRateLimitError`
     propagates so the router degrades this optional tool to a sentinel (the run
     continues without the basis column). Major USDT pairs (BTC/ETH/…) have both
     a deep perp and spot book; newer TRADIFI perps without a spot listing will
     cleanly degrade.
-
-    .. warning:: Backtest look-ahead — the window anchors to ``datetime.now()``,
-       so during a backtest (``curr_date`` in the past) this surfaces future
-       closes. Unlike the ``/futures/data/*`` endpoints, the klines endpoints do
-       support historical windows, so a future caller passing ``start_date``/
-       ``end_date`` could make this backtest-safe; today it is live-only.
     """
     canonical = normalize_symbol_for_venue(symbol, "binance_spot")
     # Cap the window like the other perp daily series; older rows add noise.
     limit = max(1, min(int(look_back_days), _LSR_LIMIT_CAP))
 
-    # Window: the last `limit` days ending now (UTC). Both venues queried over
-    # the same [start_ms, end_ms] so the closes align by date.
-    end_dt = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(days=limit)
+    # Window: explicit dates (PIT-clamped) or the last `limit` days ending at
+    # the PIT-clamped "now". Both venues queried over the same [start_ms,
+    # end_ms] so the closes align by date.
+    if end_date:
+        end_date = current_pit_end(end_date) or end_date
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    else:
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        end_date = current_pit_end(now_iso) or now_iso
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    if start_date:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    else:
+        start_dt = end_dt - timedelta(days=limit)
     start_ms = int(start_dt.timestamp() * 1000)
-    end_ms = int(end_dt.timestamp() * 1000)
+    end_ms = int((end_dt.timestamp() + 86399) * 1000)  # end-of-day inclusive
 
     # Perp leg — fapi host/budget (defaults).
     perp_rows = _paginate_history(
@@ -1195,6 +1389,7 @@ def get_binance_spot_perp_basis(symbol: str, look_back_days: int = 7) -> str:
     df = pd.DataFrame.from_records(records)
     vlabel = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
     header = f"# Spot-perp basis for {vlabel} (last {limit} days)\n"
+    header += f"# window through {end_date} (end inclusive)\n"
     header += f"# Total records: {len(df)}\n"
     header += ("# basis = perpClose - spotClose; positive = perp rich vs spot "
                "(long premium), negative = discount (short pressure).\n")

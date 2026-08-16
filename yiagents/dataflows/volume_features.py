@@ -48,12 +48,14 @@ def obv(df: pd.DataFrame) -> pd.Series:
 def relative_volume(df: pd.DataFrame, window: int = 20) -> pd.Series:
     """Today's volume vs the mean of the PRIOR ``window`` sessions (today
     excluded, the conventional relative-volume read: is *today* unusual
-    against the recent norm?). Warm-up rows are NaN."""
+    against the recent norm?). Warm-up rows are NaN. A zero prior mean
+    (suspended/new listings with no prints) also yields NaN, not ``inf`` —
+    "unmeasurable", not "infinitely unusual"."""
     if df is None or df.empty or window <= 1:
         return pd.Series(dtype=float)
     vol = pd.to_numeric(df["Volume"], errors="coerce")
     base = vol.shift(1).rolling(window, min_periods=window).mean()
-    return vol / base
+    return vol / base.replace(0.0, np.nan)
 
 
 def volume_divergence(

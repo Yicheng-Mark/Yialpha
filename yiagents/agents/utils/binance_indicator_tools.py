@@ -6,6 +6,12 @@ pair), so trend/momentum/volatility readings were read by eye from raw
 candles. This tool computes the same stockstats battery the stock path uses,
 on the actual Binance candles (perp or spot venue), closing the gap. Derived
 features (vol estimators) dispatch through the shared feature registry.
+
+Two bindings share one implementation: ``get_binance_indicators`` (venue
+defaults to perp) and ``get_binance_spot_indicators`` (venue defaults to
+spot). The default matters because the tool is stateless — it cannot see the
+run's asset_type — and a spot run silently computing on perp candles (or vice
+versa) is exactly the wrong-market failure the venue split exists to prevent.
 """
 
 from __future__ import annotations
@@ -29,24 +35,43 @@ BINANCE_INDICATOR_DEFAULTS: tuple[str, ...] = (
 )
 
 #: Calendar days fetched per lookback row (crypto trades daily, weekends
-#: included, but a margin keeps SMA-200 warm at modest lookbacks).
+#: included, but a margin makes SMA-200 warm at modest lookbacks).
 _FETCH_MARGIN = 1.3
 
 
-@tool
-def get_binance_indicators(
-    symbol: Annotated[str, "Binance pair symbol, e.g. BTCUSDT"],
-    curr_date: Annotated[str, "The current trading date you are trading on, YYYY-mm-dd"],
-    look_back_days: Annotated[int, "how many daily bars of indicator history to show"] = 15,
-    venue: Annotated[str, "'perp' for USDT-M perpetual, 'spot' for the spot pair"] = "perp",
-    indicators: Annotated[str, "comma-separated indicator names (default: the crypto battery)"] = "",
+def _fmt_val(value: object) -> str:
+    """Format a price/indicator value with decimals adaptive to magnitude.
+
+    Binance pairs span 1e-5 (PEPE) to 1e5 (BTC); a fixed ``.2f`` zeroes
+    sub-cent prices — the display twin of the round(2) data bug — and hides
+    real differences between indicator readings on low-price contracts.
+    """
+    try:
+        v = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "N/A"
+    if pd.isna(v):
+        return "N/A"
+    a = abs(v)
+    if a >= 100:
+        return f"{v:,.2f}"
+    if a >= 1:
+        return f"{v:.4f}"
+    if a >= 0.01:
+        return f"{v:.6f}"
+    if a >= 1e-6:
+        return f"{v:.8f}"
+    return f"{v:.10f}"
+
+
+def _indicators_core(
+    symbol: str,
+    curr_date: str,
+    look_back_days: int,
+    venue: str,
+    indicators: str,
 ) -> str:
-    """
-    Classic technical indicators (SMA/EMA, MACD, RSI, KDJ, CCI, ADX,
-    SuperTrend, Bollinger, ATR, realized vol) computed on Binance klines for
-    the actual pair — perp or spot venue. Use for any exact indicator claim;
-    the funding/OI/positioning tools remain the perp-native signals.
-    """
+    """Shared implementation behind the perp/spot indicator tools."""
     names = (
         [n.strip() for n in indicators.split(",") if n.strip()]
         if indicators
@@ -89,13 +114,14 @@ def get_binance_indicators(
             f"{curr_date}; indicators not computable."
         )
 
-    sdf = wrap(frame.copy().reset_index())
+    frame_reset = frame.reset_index()
+    sdf = wrap(frame_reset.copy())
     columns: dict[str, pd.Series] = {}
     skipped: list[str] = []
     for name in names:
         try:
             if name in DERIVED_FEATURES:
-                derived = compute_derived(frame.reset_index(), name)
+                derived = compute_derived(frame_reset.copy(), name)
                 if derived is None:
                     raise RuntimeError("registry miss")
                 columns[name] = derived
@@ -111,8 +137,7 @@ def get_binance_indicators(
         )
 
     rows_out = max(1, min(int(look_back_days), 30))
-    dates = pd.to_datetime(frame.reset_index()["Date"]).dt.strftime("%Y-%m-%d")
-    closes = frame["Close"].round(2)
+    dates = pd.to_datetime(frame_reset["Date"]).dt.strftime("%Y-%m-%d")
     lines = [
         f"## Binance {venue} indicators for {symbol.upper()} "
         f"(daily klines, as of {curr_date})",
@@ -121,15 +146,15 @@ def get_binance_indicators(
         "|---|---:|" + "---:|" * (2 + len(columns)),
     ]
     for i in range(len(frame) - rows_out, len(frame)):
-        cells = [str(dates.iloc[i]), f"{closes.iloc[i]:.2f}"]
+        cells = [str(dates.iloc[i]), _fmt_val(frame["Close"].iloc[i])]
         for _, col in columns.items():
             value = col.iloc[i] if i < len(col) else float("nan")
-            cells.append("N/A" if pd.isna(value) else f"{value:.2f}")
+            cells.append(_fmt_val(value))
         lines.append("| " + " | ".join(cells) + " |")
 
     last_i = len(frame) - 1
     summary = ", ".join(
-        f"{n}={'N/A' if pd.isna(c.iloc[last_i]) else f'{c.iloc[last_i]:.2f}'}"
+        f"{n}={_fmt_val(c.iloc[last_i]) if last_i < len(c) else 'N/A'}"
         for n, c in columns.items()
     )
     lines += ["", f"Latest ({dates.iloc[last_i]}): {summary}."]
@@ -140,3 +165,40 @@ def get_binance_indicators(
         "positioning claims cite their own perp tools."
     )
     return "\n".join(lines)
+
+
+@tool
+def get_binance_indicators(
+    symbol: Annotated[str, "Binance pair symbol, e.g. BTCUSDT"],
+    curr_date: Annotated[str, "The current trading date you are trading on, YYYY-mm-dd"],
+    look_back_days: Annotated[int, "how many daily bars of indicator history to show"] = 15,
+    venue: Annotated[str, "'perp' (default, USDT-M perpetual) or 'spot' for the spot pair"] = "perp",
+    indicators: Annotated[str, "comma-separated indicator names (default: the crypto battery)"] = "",
+) -> str:
+    """
+    Classic technical indicators (SMA/EMA, MACD, RSI, KDJ, CCI, ADX,
+    SuperTrend, Bollinger, ATR, realized vol) computed on Binance klines for
+    the actual pair — venue defaults to the USDT-M PERPETUAL (pass
+    venue='spot' only when you deliberately want the spot pair). Use for any
+    exact indicator claim; the funding/OI/positioning tools remain the
+    perp-native signals.
+    """
+    return _indicators_core(symbol, curr_date, look_back_days, venue, indicators)
+
+
+@tool
+def get_binance_spot_indicators(
+    symbol: Annotated[str, "Binance pair symbol, e.g. BTCUSDT"],
+    curr_date: Annotated[str, "The current trading date you are trading on, YYYY-mm-dd"],
+    look_back_days: Annotated[int, "how many daily bars of indicator history to show"] = 15,
+    venue: Annotated[str, "'spot' (default, the spot pair) or 'perp' for the USDT-M perpetual"] = "spot",
+    indicators: Annotated[str, "comma-separated indicator names (default: the crypto battery)"] = "",
+) -> str:
+    """
+    Classic technical indicators (SMA/EMA, MACD, RSI, KDJ, CCI, ADX,
+    SuperTrend, Bollinger, ATR, realized vol) computed on Binance klines for
+    the actual pair — venue defaults to the SPOT pair (pass venue='perp' only
+    when you deliberately want the perpetual). Use for any exact indicator
+    claim on a crypto_spot run.
+    """
+    return _indicators_core(symbol, curr_date, look_back_days, venue, indicators)

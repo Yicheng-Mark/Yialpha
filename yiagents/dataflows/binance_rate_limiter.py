@@ -7,9 +7,10 @@ on every reply, so the client can track the budget *as the server sees it* and
 back off before tripping a 429 — instead of only reacting to one. This module
 owns that tracking; :mod:`yiagents.dataflows.binance` consults it.
 
-One limiter per product line (``"fapi"`` for USDT-M perpetuals today; spot will
-be a separate budget when that vendor lands — Binance counts spot and futures
-weight independently against the same IP). The limiter is shared across every
+One limiter per product line (``"fapi"`` for USDT-M perpetuals at the
+documented 2400/min budget, ``"spot"`` for /api/v3 at 6000/min — Binance
+counts spot and futures weight independently against the same IP). The
+limiter is shared across every
 worker graph in the process, so K batch workers drawing on one IP count against
 ONE budget rather than K. It is thread-safe (``batch_concurrency=true`` runs K
 market analysts in a thread pool) but NOT cross-process — ``run_robust``'s
@@ -126,26 +127,39 @@ class BinanceWeightLimiter:
 
 
 # Process-wide registry: one limiter per product line. Binance's IP-weight
-# budget is per-IP, so separate limiters per worker graph would each draw on the
-# same budget and still trip 429 together — hence the process-global shared
+# budget is per-IP, so separate limiters per worker graph would each draw on
+# the same budget and still trip 429 together — hence the process-global shared
 # instance, mirroring yiagents/llm_clients/rate_limiter.py.
 _limiters: dict[str, BinanceWeightLimiter] = {}
 _guard = threading.Lock()
+
+# Documented per-product rolling 1-min IP weight budgets: USDT-M futures
+# (fapi) is 2400/min; SPOT (api/v3) is 6000/min (rest-api.md LIMITS). The two
+# product lines are counted independently against the same IP, so a shared
+# 2400 default for spot was merely over-conservative — this corrects it
+# without touching the fapi behaviour.
+_DEFAULT_WEIGHT_LIMITS: dict[str, int] = {"fapi": 2400, "spot": 6000}
 
 
 def get_binance_weight_limiter(product: str = "fapi") -> BinanceWeightLimiter:
     """Return the process-wide limiter for ``product``, creating it once.
 
-    Thread-safe and idempotent. Reads ``binance_weight_threshold`` from config at
-    creation time (lazy — first request, not import — so this module stays
+    Thread-safe and idempotent. Reads ``binance_weight_threshold`` from config
+    at creation time (lazy — first request, not import — so this module stays
     import-side-effect-free and a config change is honoured for a fresh product
-    key without re-importing). The created instance is reused for every later
-    caller in the process so the weight budget is shared, not multiplied.
+    key without re-importing); an explicit config value overrides BOTH product
+    defaults, otherwise the per-product documented default applies. The created
+    instance is reused for every later caller in the process so the weight
+    budget is shared, not multiplied.
     """
     with _guard:
         lim = _limiters.get(product)
         if lim is None:
-            limit = int(get_config().get("binance_weight_threshold", 2400))
+            configured = get_config().get("binance_weight_threshold")
+            limit = (
+                int(configured) if configured
+                else _DEFAULT_WEIGHT_LIMITS.get(product, 2400)
+            )
             lim = BinanceWeightLimiter(limit)
             _limiters[product] = lim
         return lim

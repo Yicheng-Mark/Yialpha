@@ -62,12 +62,13 @@ _ELEVATED_SIGMA = 2.5
 def resolve_market_benchmark(ticker: str) -> str:
     """Resolve a market benchmark symbol for ``ticker``.
 
-    Replicates ``yiagents.graph.trading_graph._resolve_benchmark`` at the
-    dataflow layer (this module has no graph instance): ``benchmark_ticker``
-    overrides everything; otherwise the suffix map in config matches the
-    ticker's exchange suffix; the empty-suffix entry (SPY by default) is the
-    fallback. Note: crypto tickers have no suffix and therefore resolve to SPY
-    — a cross-asset risk-on/off proxy. Set ``benchmark_ticker`` for a
+    The single implementation of the benchmark-resolution rule (the graph's
+    ``YiAgentsGraph._resolve_benchmark`` delegates here since 2026-08-16 —
+    it was a verbatim copy before): ``benchmark_ticker`` overrides
+    everything; otherwise the suffix map in config matches the ticker's
+    exchange suffix; the empty-suffix entry (SPY by default) is the
+    fallback. Note: crypto tickers have no suffix and therefore resolve to
+    SPY — a cross-asset risk-on/off proxy. Set ``benchmark_ticker`` for a
     crypto-native benchmark (e.g. BTCUSDT).
     """
     config = get_config()
@@ -133,42 +134,15 @@ def compute_turbulence(
     return delta * delta / var
 
 
-def format_market_regime(
-    ticker: str,
-    curr_date: str,
-    *,
-    window: int = _DEFAULT_WINDOW,
-    min_periods: int = _DEFAULT_MIN_PERIODS,
-) -> str | None:
-    """Resolve the benchmark for ``ticker`` and return a one-line stress reading.
-
-    Returns ``None`` (→ caller omits the line) when turbulence can't be
-    computed. Example output::
-
-        Market turbulence index (SPY, 252d): 6.12 (≈2.5σ rolling) — elevated
-    """
-    benchmark = resolve_market_benchmark(ticker)
-    turb = compute_turbulence(
-        benchmark, curr_date, window=window, min_periods=min_periods
-    )
-
-    if turb is None:
-        return None
-
-    sigma = math.sqrt(turb) if turb > 0 else 0.0
-    label = "elevated" if sigma >= _ELEVATED_SIGMA else "normal"
-    return (
-        f"Market turbulence index ({benchmark}, {window}d): "
-        f"{turb:.2f} (≈{sigma:.1f}σ rolling) — {label}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Composite regime context (2026-08-15 expansion): trend + volatility states
 # on the analyzed ticker, plus the existing benchmark turbulence and (A-share
 # live runs only) whole-market breadth. One structured line the market
 # analyst and the conservative debater can weigh — advisory, fail-soft per
 # component, and gated by the ``regime_context`` config key.
+# (The pre-expansion turbulence-only renderer ``format_market_regime`` was
+# removed 2026-08-16: format_regime_context is its strict superset and its
+# only remaining callers were its own tests.)
 # ---------------------------------------------------------------------------
 
 #: Rows required for the 200-SMA/ADX trend state to be meaningful.
@@ -255,9 +229,9 @@ def _a_share_breadth_part(ticker: str, curr_date: str) -> str | None:
     if not is_a_stock(ticker) or is_historical_date(curr_date):
         return None
     try:
-        from .akshare_vendor import fetch_a_share_breadth_counts
+        from .akshare_vendor import _cached_breadth_counts
 
-        counts = fetch_a_share_breadth_counts()
+        counts = _cached_breadth_counts()
     except Exception:  # noqa: BLE001 — advisory, must never break the run
         return None
     if not counts:

@@ -12,6 +12,8 @@ from yiagents.agents.utils.agent_utils import (
     get_binance_klines,
     get_binance_long_short_ratio,
     get_binance_open_interest,
+    get_binance_premium_index,
+    get_binance_spot_indicators,
     get_binance_spot_klines,
     get_binance_spot_perp_basis,
     get_binance_spot_ticker24,
@@ -56,9 +58,12 @@ _PERP_NUDGE = (
     "the perp-native sentiment signal and it frequently contradicts funding/OI "
     "inferences, so reconcile them explicitly. Call get_binance_taker_buy_sell "
     "(order-flow aggression) and, where available, get_binance_basis "
-    "(perp-vs-index premium/discount) to round out the positioning picture; if "
-    "a tool returns a sentinel/unavailable marker, say so plainly rather than "
-    "inventing values."
+    "(perp-vs-index premium/discount) to round out the positioning picture. "
+    "Call get_binance_premium_index for the mark-price snapshot and anchor ALL "
+    "liquidation-distance claims to its markPrice (Binance liquidates on the "
+    "mark price, not the last traded price) and use its lastFundingRate as the "
+    "currently-effective rate. If a tool returns a sentinel/unavailable marker, "
+    "say so plainly rather than inventing values."
 )
 
 _PERP_HISTORICAL_NUDGE = (
@@ -79,7 +84,7 @@ _SPOT_NUDGE = (
     " This is a Binance SPOT pair (crypto_spot), not a perpetual and not a "
     "Yahoo pair. Use get_binance_spot_klines for the spot OHLCV (the actual "
     "Binance spot book) and get_binance_spot_ticker24 for the 24h snapshot. "
-    "get_binance_indicators (venue='spot') computes the classic indicator "
+    "get_binance_spot_indicators computes the classic indicator "
     "battery on those same Binance candles — prefer it for exact indicator "
     "claims on this pair. There is no funding rate, open interest, leverage, "
     "or liquidation for a spot pair — do not discuss them. Call "
@@ -312,6 +317,7 @@ def create_market_analyst(llm):
                         get_binance_long_short_ratio,
                         get_binance_taker_buy_sell,
                         get_binance_basis,
+                        get_binance_premium_index,
                     ]
                 )
         elif state.get("asset_type") == "crypto_spot":
@@ -319,13 +325,15 @@ def create_market_analyst(llm):
             # via Yahoo (BTCUSDT -> BTC-USD), so get_indicators /
             # get_verified_market_snapshot are kept — they price the same spot
             # market. The spot-native klines + 24h ticker are bound to the
-            # actual Binance spot book, get_binance_indicators computes on
-            # those same Binance candles, and the cross-venue spot-perp basis
+            # actual Binance spot book, get_binance_spot_indicators computes
+            # on those same Binance candles (venue defaults to spot — the
+            # plain perp-default tool would silently price the perpetual if
+            # the LLM omitted venue), and the cross-venue spot-perp basis
             # tool exposes the perpetual's premium/discount vs this spot
             # reference. Stock/crypto/perp branches are untouched.
             tools = [
                 get_binance_spot_klines,
-                get_binance_indicators,
+                get_binance_spot_indicators,
                 get_indicators,
                 get_verified_market_snapshot,
             ]

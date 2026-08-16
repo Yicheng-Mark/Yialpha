@@ -66,6 +66,15 @@ def resample_weekly(daily: pd.DataFrame, curr_date: str | None = None) -> pd.Dat
             # Drop the still-open week: its Friday label is in the future
             # relative to the analysis date, so the bin is incomplete.
             weekly = weekly[weekly.index <= cutoff]
+        else:
+            # Fail-visible: an unparseable curr_date must not silently keep
+            # the trailing incomplete week (a look-ahead-style weekly close).
+            # Upstream load_ohlcv would have raised on such a date already;
+            # this branch guards direct callers of a PIT-safe public API.
+            raise ValueError(
+                f"curr_date {curr_date!r} is not a parseable YYYY-MM-DD date; "
+                "refusing to resample with an unknown PIT cutoff"
+            )
 
     return weekly.reset_index()
 
