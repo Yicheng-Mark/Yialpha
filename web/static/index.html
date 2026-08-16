@@ -4,42 +4,51 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>YiAgents</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <!-- Apply persisted theme before first paint to avoid a dark→light flash. -->
   <script src="/static/theme-init.js?v=1"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=4" />
+  <link rel="stylesheet" href="/static/styles.css?v=6" />
 </head>
 <body>
+  <button id="skip-link" class="skip-link" data-i18n="common_skip">跳到主内容</button>
   <header class="topbar">
     <div class="topbar-left">
-      <a class="brand" href="#/"><span class="logo"></span>YiAgents</a>
-      <nav class="nav">
+      <a class="brand" href="#/"><span class="logo" aria-hidden="true"></span>YiAgents</a>
+      <nav class="nav" aria-label="YiAgents">
         <a href="#/" data-i18n="nav_home">历史报告</a>
+        <a href="#/compare" data-i18n="nav_compare">评级对比</a>
         <a href="#/new" data-i18n="nav_new">提交新分析</a>
         <a href="#/health" data-i18n="nav_health">环境自检</a>
       </nav>
     </div>
     <div class="topbar-right">
-      <button id="theme-toggle" class="btn btn-icon" title="主题"></button>
-      <button id="lang-toggle" class="btn btn-ghost" data-i18n="lang_btn">🌐 EN</button>
+      <button id="theme-toggle" class="btn btn-icon" title="主题 / theme" aria-label="切换主题 / toggle theme"></button>
+      <button id="lang-toggle" class="btn btn-ghost" data-i18n="lang_btn" aria-label="切换语言 / switch language">🌐 EN</button>
     </div>
   </header>
 
-  <main id="view" class="container">
-    <p class="muted" data-i18n="common_loading">加载中…</p>
+  <main id="view" class="container" tabindex="-1">
+    <p class="muted" role="status" data-i18n="common_loading">加载中…</p>
   </main>
+
+  <noscript>
+    <p class="muted" data-i18n="noscript_msg">本页面需要启用 JavaScript 才能查看报告。</p>
+  </noscript>
 
   <footer class="footer">
     <span class="muted">YiAgents · <span data-i18n="footer_note">报告语言跟随 🌐 切换</span></span>
   </footer>
 
+  <!-- Shared helpers (escapeHTML / verdictTilt / fmtK / countMatches). -->
+  <script src="/static/common.js?v=1"></script>
   <!-- Offline HTML sanitizer (DOMPurify 3.4.13, Apache-2.0/MPL-2.0). -->
   <script src="/static/vendor/purify.min.js"></script>
   <!-- Offline markdown renderer (marked v15, MIT). No CDN at runtime. -->
   <script src="/static/vendor/marked.min.js"></script>
   <!-- ECharts 5.5 (Apache-2.0), vendored locally — offline, no CDN. -->
   <script src="/static/vendor/echarts.min.js"></script>
-  <script src="/static/i18n.js?v=4"></script>
-  <script src="/static/charts.js?v=4"></script>
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/i18n.js?v=6"></script>
+  <script src="/static/charts.js?v=5"></script>
+  <script src="/static/app.js?v=7"></script>
 </body>
 </html>

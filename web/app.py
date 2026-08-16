@@ -190,6 +190,12 @@ def api_run(ticker: str, date: str):
     return run
 
 
+@app.get("/api/compare")
+def api_compare():
+    """Per-ticker rating series for the compare view (single disk scan)."""
+    return store.list_compare()
+
+
 @app.get("/api/health")
 def api_health():
     # sync def → Starlette threadpools it; the yfinance/DeepSeek probes block

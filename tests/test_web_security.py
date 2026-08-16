@@ -63,3 +63,65 @@ def test_index_has_no_inline_script_and_loads_external_theme_initializer():
     html = INDEX.read_text(encoding="utf-8")
     assert '<script src="/static/theme-init.js?v=1"></script>' in html
     assert "<script>" not in html
+
+
+@pytest.mark.unit
+def test_app_templates_carry_no_inline_style_attributes():
+    # Layout values live in styles.css (scoped classes); app.js only sets
+    # dynamic properties via el.style.* after render, never style="..."
+    # attributes in template strings.
+    source = APP.read_text(encoding="utf-8")
+    assert 'style="' not in source
+
+
+@pytest.mark.unit
+def test_index_links_svg_favicon_and_css_declares_color_scheme():
+    html = INDEX.read_text(encoding="utf-8")
+    assert '<link rel="icon" type="image/svg+xml" href="/static/favicon.svg"' in html
+    css = (ROOT / "web" / "static" / "styles.css").read_text(encoding="utf-8")
+    # Native widgets (date picker / select / scrollbar) must follow the theme.
+    assert "color-scheme: dark" in css
+    assert "color-scheme: light" in css
+
+
+@pytest.mark.unit
+def test_shared_helpers_live_in_common_and_templates_reference_it():
+    common = (ROOT / "web" / "static" / "common.js").read_text(encoding="utf-8")
+    assert "window.YiUtil" in common
+    assert "verdictTilt" in common
+    # app.js and charts.js must alias YiUtil, not re-define the helpers.
+    assert "window.YiUtil.escapeHTML" in APP.read_text(encoding="utf-8")
+    assert "window.YiUtil.escapeHTML" in CHARTS.read_text(encoding="utf-8")
+    assert "function escapeHTML(" not in APP.read_text(encoding="utf-8")
+    assert "function escapeHTML(" not in CHARTS.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_i18n_keys_added_by_the_frontend_optimization_are_paired():
+    # Every user-visible string must exist in BOTH dictionaries (zh + en) —
+    # a key present once renders as the raw key in the other language.
+    i18n = (ROOT / "web" / "static" / "i18n.js").read_text(encoding="utf-8")
+    for key in (
+        "nav_compare:",
+        "common_retry:",
+        "common_skip:",
+        "noscript_msg:",
+        "home_filter_ph:",
+        "home_filter_label:",
+        "home_filter_none:",
+        "task_progress:",
+        "compare_title:",
+        "compare_sub:",
+        "compare_empty:",
+        "compare_chart_title:",
+        "compare_table_title:",
+        "tip_action:",
+        "tip_weight:",
+        "tip_stop:",
+        "tip_entry:",
+        "tip_regime:",
+        "detail_report_file:",
+        "detail_rep_incomplete:",
+        "detail_view_report:",
+    ):
+        assert i18n.count(key) == 2, f"i18n key not in both zh+en: {key}"

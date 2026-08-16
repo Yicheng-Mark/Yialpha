@@ -17,12 +17,16 @@
       nav_home: "历史报告",
       nav_new: "提交新分析",
       nav_health: "环境自检",
+      nav_compare: "评级对比",
       lang_btn: "🌐 EN",
       footer_note: "报告语言跟随 🌐 切换",
 
       common_loading: "加载中…",
       common_error: "出错了",
       common_back: "← 返回",
+      common_retry: "重试",
+      common_skip: "跳到主内容",
+      noscript_msg: "本页面需要启用 JavaScript 才能查看报告。请改用 CLI（run_robust）读取分析结果。",
 
       // home
       home_title: "历史分析报告",
@@ -35,13 +39,18 @@
       home_stat_latest: "最近分析日期",
       home_latest: "最近",
       home_runs: "次分析",
+      home_filter_ph: "筛选 ticker…",
+      home_filter_label: "按 ticker 筛选",
+      home_filter_none: "没有匹配的标的。",
 
       // detail
       detail_dates: "分析日期",
       detail_reports: "报告目录（下载）",
       detail_no_reports: "无报告目录",
       detail_no_dates: "该 ticker 无已落盘的完整分析。",
-      detail_pick_date: "选择左侧日期查看报告",
+      detail_report_file: "完整报告",
+      detail_rep_incomplete: "（不完整）",
+      detail_view_report: "查看完整报告 →",
 
       // report
       report_company: "标的",
@@ -68,6 +77,11 @@
       sub_risk_judge: "风控裁决 Risk Judge",
       report_perf_total: "总耗时",
       report_rationale: "理由",
+      tip_action: "量化风控叠加层对当前持仓的建议动作",
+      tip_weight: "叠加风控约束后的目标仓位权重",
+      tip_stop: "建议止损价（触发即退出）",
+      tip_entry: "参考入场价位",
+      tip_regime: "波动率状态机当前状态（如 calm / stress / crash）",
       dist_tickers: "个标的",
       debate_chars: "字符",
       debate_rounds: "发言段数",
@@ -106,6 +120,15 @@
       task_attempt: "尝试",
       task_view_report: "查看报告 →",
       task_log_tail: "run_robust 日志尾",
+      task_progress: "任务进度",
+
+      // compare view
+      compare_title: "评级对比",
+      compare_sub: "多标的评级阶梯对比；点击图例切换系列，点击数据点跳转对应日期的报告。",
+      compare_empty: "暂无可对比的评级数据（需要至少一次带评级的完整分析）。",
+      compare_chart_title: "评级阶梯对比",
+      compare_table_title: "评级矩阵",
+      compare_series: "系列",
 
       // health
       health_title: "环境自检",
@@ -128,12 +151,16 @@
       nav_home: "Reports",
       nav_new: "New Analysis",
       nav_health: "Health Check",
+      nav_compare: "Compare",
       lang_btn: "🌐 中",
       footer_note: "report language follows the 🌐 toggle",
 
       common_loading: "Loading…",
       common_error: "Something went wrong",
       common_back: "← Back",
+      common_retry: "Retry",
+      common_skip: "Skip to content",
+      noscript_msg: "This page needs JavaScript to display reports. Use the CLI (run_robust) to read analysis results instead.",
 
       home_title: "Past Analyses",
       home_sub: "Click a ticker to browse its runs; dates on the left, downloadable raw reports on the right.",
@@ -145,12 +172,17 @@
       home_stat_latest: "Latest run",
       home_latest: "latest",
       home_runs: "runs",
+      home_filter_ph: "Filter tickers…",
+      home_filter_label: "Filter by ticker",
+      home_filter_none: "No matching tickers.",
 
       detail_dates: "Analysis dates",
       detail_reports: "Report dirs (download)",
       detail_no_reports: "no report dirs",
       detail_no_dates: "No completed analysis on disk for this ticker.",
-      detail_pick_date: "Pick a date on the left to view its report",
+      detail_report_file: "Full report",
+      detail_rep_incomplete: " (incomplete)",
+      detail_view_report: "View full report →",
 
       report_company: "Ticker",
       report_overlay: "Quantitative Risk Overlay",
@@ -176,6 +208,11 @@
       sub_risk_judge: "Risk Judge Verdict",
       report_perf_total: "total",
       report_rationale: "Rationale",
+      tip_action: "Suggested position action from the risk overlay",
+      tip_weight: "Target portfolio weight after the risk overlay",
+      tip_stop: "Suggested stop-loss price (exit when triggered)",
+      tip_entry: "Reference entry price zone",
+      tip_regime: "Current volatility-regime state (e.g. calm / stress / crash)",
       dist_tickers: "tickers",
       debate_chars: "chars",
       debate_rounds: "segments",
@@ -212,6 +249,15 @@
       task_attempt: "Attempt",
       task_view_report: "View report →",
       task_log_tail: "run_robust log tail",
+      task_progress: "Task progress",
+
+      // compare view
+      compare_title: "Rating Comparison",
+      compare_sub: "Step-line rating comparison across tickers; legend toggles series, click a point to open that date's report.",
+      compare_empty: "No comparable rating data yet (needs at least one completed run with a rating).",
+      compare_chart_title: "Rating step comparison",
+      compare_table_title: "Rating matrix",
+      compare_series: "series",
 
       health_title: "Environment Check",
       health_sub: "Replicates the 5 preflight checks (deps / key / proxy / yfinance / DeepSeek). Network probes take a few seconds.",
