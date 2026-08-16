@@ -26,6 +26,7 @@ from yiagents.dataflows.binance import binance_klines_frame
 from yiagents.dataflows.feature_registry import DERIVED_FEATURES, compute_derived
 from yiagents.dataflows.indicator_catalog import INDICATORS
 from yiagents.dataflows.stockstats_utils import compute_indicator
+from yiagents.dataflows.vol_estimators import CRYPTO_TRADING_DAYS_PER_YEAR
 
 #: Default battery for crypto: trend + momentum + volatility groups (the
 #: perp-appropriate set; positioning/funding live in their own perp tools).
@@ -127,7 +128,12 @@ def _indicators_core(
                 # internally; rvol/ewma_vol/rel_vol_20 are read-only) — the
                 # old per-name full-frame copy was one DataFrame copy per
                 # derived indicator, ~12 per tool call.
-                derived = compute_derived(frame_reset, name)
+                # Crypto candles are a 24/7 daily series: annualize the vol
+                # estimators with 365 — the 252 equity default understates
+                # every vol reading by sqrt(252/365) ≈ 0.83 (P1, 2026-08-16).
+                derived = compute_derived(
+                    frame_reset, name, periods_per_year=CRYPTO_TRADING_DAYS_PER_YEAR,
+                )
                 if derived is None:
                     raise RuntimeError("registry miss")
                 columns[name] = derived

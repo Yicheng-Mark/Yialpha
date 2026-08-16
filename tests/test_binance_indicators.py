@@ -150,6 +150,63 @@ class TestBinanceIndicatorsTool:
         assert close_cells, "no data rows found in table"
         assert all(v > 1e-7 for v in close_cells), close_cells[:5]
 
+    def test_rvol_annualizes_with_365_on_crypto_candles(self, monkeypatch):
+        """Crypto candles are a 24/7 daily series: rvol_20 must annualize
+        with 365, not the 252 equity default (P1 fix, 2026-08-16).
+
+        The rendered Latest rvol_20 must equal the 365-annualized value and
+        differ from the 252 one by exactly sqrt(365/252) ≈ 1.204.
+        """
+        import re
+
+        from yiagents.dataflows.vol_estimators import (
+            CRYPTO_TRADING_DAYS_PER_YEAR,
+            TRADING_DAYS_PER_YEAR,
+            close_to_close_vol,
+        )
+
+        n = 400
+        rng = np.random.default_rng(42)
+        closes = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.02, n)))
+        idx = pd.bdate_range("2024-06-01", periods=n)
+        frame = pd.DataFrame(
+            {
+                "Open": closes * 0.999, "High": closes * 1.01, "Low": closes * 0.99,
+                "Close": closes, "Adj Close": closes,
+                "Volume": np.full(n, 1000.0),
+            },
+            index=idx,
+        )
+        frame.index.name = "Date"
+        monkeypatch.setattr(bit, "binance_klines_frame", lambda *a, **k: frame)
+
+        out = bit.get_binance_indicators.invoke({
+            "symbol": "BTCUSDT", "curr_date": "2025-08-05",
+            "indicators": "rvol_20",
+        })
+        assert "DATA_UNAVAILABLE" not in out and not out.startswith("ERROR")
+
+        m = re.search(r"Latest \([^)]*\): rvol_20=([0-9]*\.?[0-9]+)", out)
+        assert m, out[-300:]
+        rendered = float(m.group(1))
+
+        reset = frame.reset_index()
+        expected_365 = float(
+            close_to_close_vol(
+                reset, window=20, periods_per_year=CRYPTO_TRADING_DAYS_PER_YEAR
+            ).iloc[-1]
+        )
+        expected_252 = float(
+            close_to_close_vol(
+                reset, window=20, periods_per_year=TRADING_DAYS_PER_YEAR
+            ).iloc[-1]
+        )
+        assert rendered == pytest.approx(expected_365, rel=5e-3)
+        assert rendered != pytest.approx(expected_252, rel=5e-3)
+        assert rendered / expected_252 == pytest.approx(
+            (365.0 / 252.0) ** 0.5, rel=5e-3
+        )
+
 
 def _recorder(fn, calls):
     def wrapper(symbol, start_date, end_date, interval="1d", venue="binance_perp"):

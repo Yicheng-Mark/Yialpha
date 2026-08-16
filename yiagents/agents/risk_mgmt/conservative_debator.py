@@ -34,7 +34,8 @@ def create_conservative_debator(llm):
             if trade_date:
                 try:
                     reading = format_regime_context(
-                        state["company_of_interest"], trade_date
+                        state["company_of_interest"], trade_date,
+                        asset_type=state.get("asset_type"),
                     )
                 except Exception:  # noqa: BLE001 — fail-soft advisory cue
                     reading = None
