@@ -85,6 +85,18 @@ def test_fundamentals_toolnode_registers_flag_gated_tools():
     )
 
 
+@pytest.mark.unit
+def test_news_toolnode_registers_web_search():
+    """The news analyst binds web_search whenever web_search_enabled is on
+    (default): it must be executable in the news ToolNode or every call dies
+    with "not a valid tool" (same wiring-gap class as the round-5 audit)."""
+    news_tools = set(_tool_nodes()["news"].tools_by_name)
+    assert "web_search" in news_tools, (
+        "web_search is bound to the news analyst but not registered in the "
+        "news ToolNode, so the model's call fails."
+    )
+
+
 def _tool_nodes() -> dict:
     # _create_tool_nodes needs only self.quick_thinking_llm (the PoT tool
     # closure); a stub keeps this a pure-construction unit test.

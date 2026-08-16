@@ -60,6 +60,7 @@ from yiagents.agents.utils.agent_utils import (
     get_verified_market_snapshot,
     get_volume_features,
     resolve_instrument_identity,
+    web_search,
 )
 from yiagents.agents.utils.memory import TradingMemoryLog
 from yiagents.agents.utils.pot_tool import make_pot_compute_tool
@@ -420,6 +421,12 @@ class YiAgentsGraph:
                     # is simply an extra entry in ToolNode's name->tool map (same
                     # dormant contract as the fundamentals A-share tools).
                     get_a_share_news_native,
+                    # Open-web search (Tavily). Gated on the analyst side by
+                    # web_search_enabled; the vendor itself degrades to a
+                    # WEB_SEARCH_UNAVAILABLE sentinel + quality event when the
+                    # key is missing / budget is exhausted, so registering it
+                    # here is always safe (never aborts a run).
+                    web_search,
                 ]
             ),
             "fundamentals": ToolNode(
@@ -999,6 +1006,12 @@ class YiAgentsGraph:
         from yiagents.dataflows import quality
 
         quality.ensure_run_context()
+        # Fresh per-run Tavily search budget (same ContextVar semantics as the
+        # quality ledger above): a worker process serving many runs must not
+        # carry one run's spent web-search calls into the next.
+        from yiagents.dataflows import tavily as tavily_vendor
+
+        tavily_vendor.reset_run_budget()
 
         try:
             # Initialize state — inject memory log context for PM and the

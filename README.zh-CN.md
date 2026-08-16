@@ -53,10 +53,10 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 | ------ | ------ | ------ |
 | Market Analyst | 技术面：从 28 个指标目录（趋势 / 动量 / 波动率 / 成交量四类）按市况选最多 8 个互补指标；另常绑 5 个证据工具——周线级别、支撑/阻力、量价特征、K 线形态、基准相对强度 | yfinance / Alpha Vantage |
 | Sentiment Analyst | 社交情绪 | Reddit、StockTwits（仅当前日期分析） |
-| News Analyst | 个股新闻 + 宏观/全球新闻（美联储、地缘、央行政策等） | yfinance / Alpha Vantage News |
+| News Analyst | 个股新闻 + 宏观/全球新闻（美联储、地缘、央行政策等）+ 开放网络检索（定性上下文） | yfinance / Alpha Vantage News / Tavily |
 | Fundamentals Analyst | 财务基本面 | yfinance / Alpha Vantage |
 
-宏观数据走 FRED（美联储），事件概率走 Polymarket（预测市场），另类数据可走浏览器采集。没有可靠 as-of 参数的数据源会在历史分析中被省略，不再用“今天的数据”冒充历史数据。
+宏观数据走 FRED（美联储），事件概率走 Polymarket（预测市场），另类数据可走浏览器采集。新闻分析师还可搜索开放网络（Tavily 免费档）补充新闻源覆盖薄的动态——prompt 已约束：搜索片段仅作带 URL 引用的定性上下文，数字一律以结构化数据源为准。没有可靠 as-of 参数的数据源会在历史分析中被省略，不再用“今天的数据”冒充历史数据。
 
 ### 加密货币分析模式
 
@@ -123,7 +123,7 @@ complete_report.md           ← 汇总报告；数据质量降级时顶部有 "
 ## 架构
 
 ```text
-数据层 (yfinance / Alpha Vantage / FRED / Polymarket / Reddit / StockTwits / Binance)
+数据层 (yfinance / Alpha Vantage / FRED / Polymarket / Reddit / StockTwits / Binance / Tavily)
         │
    ┌────▼───── Analyst Team（串行，或开并行的标志位）──────────┐
    │  Market · Sentiment · News · Fundamentals                 │
@@ -200,6 +200,7 @@ ZHIPU_CN_API_KEY=...            # GLM（BigModel 国内）
 MINIMAX_API_KEY=...             # MiniMax（全球）
 ALPHA_VANTAGE_API_KEY=...       # Alpha Vantage
 FRED_API_KEY=...                # 美联储宏观数据
+TAVILY_API_KEY=...              # 开放网络搜索（免费档，tvly-dev- 前缀）
 ```
 
 **推荐的 DeepSeek 分工** —— 重裁决走 deep 通道，轻量多轮走 quick 通道（单 ticker 墙钟 ~8–10 分钟）：

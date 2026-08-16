@@ -1218,6 +1218,11 @@ def run_analysis(checkpoint: bool | None = None):
         # recorded by vendor routers inside nodes would never be visible to
         # finalize_streamed_run below and the DEGRADED evidence chain goes dead.
         quality.ensure_run_context()
+        # Mirror propagate()'s run contract for the per-run Tavily search
+        # budget: fresh counter per CLI run, never inherited from a prior one.
+        from yiagents.dataflows import tavily as tavily_vendor
+
+        tavily_vendor.reset_run_budget()
         # Resolve the instrument identity once here so all agents anchor to
         # the real company (#814); the CLI builds state directly rather than
         # going through propagate(), so this must happen on the CLI path too.
@@ -1591,16 +1596,30 @@ def config_check():
     _AV = "ALPHA_VANTAGE" + "_API_KEY"
     _TUSHARE = "TUSHARE" + "_TOKEN"
     _KIMI = "MOONSHOT" + "_API_KEY"
+    _TAVILY = "TAVILY" + "_API_KEY"
     optional_keys = {
         _FRED: "macro data (rates/inflation)",
         _AV: "stock/fundamentals vendor",
         _TUSHARE: "China A-share data",
         _KIMI: "Kimi/Moonshot (if provider=kimi)",
+        _TAVILY: "open-web search for the news analyst",
     }
     console.print("\n[dim]Optional data sources:[/dim]")
     for env_var, desc in optional_keys.items():
         status = "[green]SET[/green]" if os.environ.get(env_var) else "[yellow]unset[/yellow]"
         console.print(f"  • {env_var}: {status} [dim]({desc})[/dim]")
+
+    # web_search is advertised to the news analyst whenever web_search_enabled
+    # is on (default): a missing key degrades each call to a sentinel rather
+    # than failing the run, but the analyst still spends turns discovering
+    # that — surface it here so the operator can fix .env before running.
+    from yiagents.dataflows.config import get_config as _get_config
+
+    if _get_config().get("web_search_enabled", True) and not os.environ.get(_TAVILY):
+        console.print(
+            f"  [yellow]⚠[/yellow] web_search_enabled is on but {_TAVILY} is unset — "
+            "every web_search call will degrade to WEB_SEARCH_UNAVAILABLE"
+        )
 
     # -- Known risk items -----------------------------------------------------
     console.print("\n[dim]Risk items:[/dim]")
