@@ -492,6 +492,15 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # YIAGENTS_TAVILY_BUDGET_SPLIT) is exhausted, so enabling it never
     # aborts a run. Set False for byte-for-byte pre-Tavily prompts.
     "web_search_enabled": True,
+    # Binance Square feed (crypto-native retail sentiment) injected into the
+    # sentiment analyst's prompt. Live crypto runs only (asset_type
+    # crypto/crypto_spot/crypto_perp): the feed is a current snapshot with no
+    # as-of parameter, so historical replays omit it; stock runs never see it
+    # (byte-identical three-source prompts). Free and keyless — an anonymous
+    # device id is generated per process. Transport/parse failures degrade to
+    # a placeholder + data_quality event, never aborting a run. Set False for
+    # byte-for-byte pre-Binance-Square prompts.
+    "binance_square_enabled": True,
     # Data vendor configuration
     # Category-level configuration (default for all tools in category).
     # The configured value is the exact vendor chain — requests are NOT silently

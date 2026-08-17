@@ -52,7 +52,7 @@ Give YiAgents a **ticker + date** and it analyzes from four angles, runs multipl
 | Analyst | Dimension | Data source |
 | ------ | ------ | ------ |
 | Market Analyst | Technical: picks up to 8 complementary indicators from a 28-name catalog (trend / momentum / volatility / volume) by market regime; five evidence tools always bound — weekly timeframe, support/resistance, volume features, candlestick patterns, benchmark relative strength | yfinance / Alpha Vantage |
-| Sentiment Analyst | Social sentiment | Reddit, StockTwits (current-date analysis only) |
+| Sentiment Analyst | Social sentiment | Reddit, StockTwits, Binance Square (crypto runs; current-date analysis only) |
 | News Analyst | Ticker news + macro/global news (Fed, geopolitics, central-bank policy …) + open-web search for qualitative context | yfinance / Alpha Vantage News / Tavily |
 | Fundamentals Analyst | Financial fundamentals | yfinance / Alpha Vantage |
 
@@ -91,7 +91,7 @@ Every entry point — interactive `yiagents analyze`, `yiagents batch`, and the 
 | # | Stage | Who | Produces |
 | --- | --- | --- | --- |
 | 1 | Input & PIT context | `propagate()` | State seeded: the analysis date pins the vendor-layer as-of clamp (no future data leaks in), instrument identity resolved deterministically, past memory-log lessons injected (opt-in, off by default) |
-| 2 | Analyst team | Market / Sentiment / News / Fundamentals Analyst | Each analyst loops against its own tool set (`analyst ⇄ ToolNode`) until it emits its report; serial by default, collapsed into one parallel fan-out node behind `analyst_parallel`. Exception: the Sentiment Analyst pre-fetches Reddit / StockTwits / Yahoo headlines directly, no tool loop |
+| 2 | Analyst team | Market / Sentiment / News / Fundamentals Analyst | Each analyst loops against its own tool set (`analyst ⇄ ToolNode`) until it emits its report; serial by default, collapsed into one parallel fan-out node behind `analyst_parallel`. Exception: the Sentiment Analyst pre-fetches Reddit / StockTwits / Yahoo headlines directly (plus the Binance Square crypto feed on live crypto runs), no tool loop |
 | 3 | Research debate | Bull ⇄ Bear Researchers | Multi-round structured debate, `max_debate_rounds` (default 2 → 4 speeches) |
 | 4 | Research verdict | Research Manager (deep LLM) | Structured `ResearchPlan` |
 | 5 | Trade proposal | Trader | `TraderProposal` — three-tier Buy / Hold / Sell |
@@ -475,7 +475,7 @@ One-line telemetry: `python scripts/run_baseline.py --smoke --profile --ticker <
 YiAgents is LLM-driven: **two runs of the same ticker + date may differ** — an inherent property of language-model research, not a bug. Sources:
 
 - **Model sampling non-determinism**: even at a fixed temperature, providers do not guarantee byte-identical output; reasoning models sample over their internal reasoning and vary more.
-- **Current-date data drifts**: news / StockTwits / Reddit return different content over time. Historical runs omit current-only social, prediction-market, rolling ticker, and positioning feeds; dated sources are still subject to vendor corrections and coverage changes.
+- **Current-date data drifts**: news / StockTwits / Reddit / Binance Square return different content over time. Historical runs omit current-only social, prediction-market, rolling ticker, and positioning feeds; dated sources are still subject to vendor corrections and coverage changes.
 
 Mitigations: lower `temperature` (`YIAGENTS_TEMPERATURE`), or pick a non-reasoning model explicitly. Already deterministic: company identity is resolved from the ticker and locked before any agent runs; the market analyst's exact prices / indicators come from a verified data snapshot.
 
@@ -500,7 +500,7 @@ Every key mechanism in YiAgents maps to published research, not invention. The t
 | Backtest rigor | FinCAD (2025) · CPCV · Deflated Sharpe (Lopez de Prado) | [backtest/](yiagents/backtest/): parameterized look-ahead-bias correction + DSR |
 | Adversarial robustness | MemMorph (2025) · SMSR (2025) · Spotlighting (2025) | Tool-call / memory-poisoning / prompt-injection defenses (roadmap) |
 | Cost engineering | GPTCache · model cascading · DAG orchestration (2025) | Multi-provider routing + checkpoint resume + four-stage cost-ascending validation |
-| Sentiment & alternative data | FinAgent (KDD 2024) · Few-shot stock prediction (Deng 2024) | [dataflows/](yiagents/dataflows/): Reddit / StockTwits / Polymarket / browser |
+| Sentiment & alternative data | FinAgent (KDD 2024) · Few-shot stock prediction (Deng 2024) | [dataflows/](yiagents/dataflows/): Reddit / StockTwits / Binance Square / Polymarket / browser |
 | Explainability | CFA XAI report (2025) · CoT visualization | Structured reports + [dashboard](yiagents/monitoring/dashboard.py) + decision log |
 | Compliance & security | EU AI Act · AIBOM (2025) · Zero-trust architecture | `YIAGENTS_KILL_SWITCH` + research-only disclaimer |
 
