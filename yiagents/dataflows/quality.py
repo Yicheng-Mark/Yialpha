@@ -21,16 +21,48 @@ path.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any
 
-#: Sentinel kinds, mirroring the router's two degradation outcomes.
+logger = logging.getLogger(__name__)
+
+#: Sentinel kinds, mirroring the router's degradation outcomes.
 KIND_NO_DATA = "no_data"                    # core category: NO_DATA_AVAILABLE
 KIND_OPTIONAL_UNAVAILABLE = "optional_unavailable"  # optional: DATA_UNAVAILABLE
 KIND_STALE_CACHE = "stale_cache"            # vendor failed; stale disk cache served
+KIND_CORE_ERROR = "core_error"              # core category: every vendor errored
+
+#: Counted into ``core_sentinel_count`` alongside :data:`KIND_NO_DATA` — both
+#: mean "the analysis decided without this core category's data".
+_CORE_SENTINEL_KINDS = frozenset({KIND_NO_DATA, KIND_CORE_ERROR})
+
+_POLICY_REJECT = "reject"
+_POLICY_WARN = "warn"
+
+
+class DataVacuumError(RuntimeError):
+    """Raised when ``data_vacuum_policy=reject`` and a run reached the decision
+    stage with zero successful core-category data calls.
+
+    Every core vendor either errored or reported no data — the run would have
+    produced a "data vacuum HOLD" (a report that looks normal but was decided
+    without any market/fundamental/news data). Rejecting it here keeps the
+    failure typed and visible instead of silently degrading.
+    """
+
 
 _events_var: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "yiagents_data_quality_events", default=None
+)
+
+# Distinct CORE-category methods that returned data this run. Set in the
+# submitting context (same contract as _events_var) so node contexts mutate the
+# shared object the parent reads back. Only the router records successes —
+# direct-connect tools do not participate in the vacuum verdict.
+_success_var: ContextVar[set[str] | None] = ContextVar(
+    "yiagents_data_quality_core_successes", default=None
 )
 
 
@@ -47,10 +79,11 @@ def ensure_run_context() -> None:
     the parent reads back. Appends are GIL-atomic and recording stays
     append-only, so concurrent node contexts are safe.
 
-    Always installs a fresh list: a crashed prior run in the same worker
-    context cannot leak its events into this one.
+    Always installs a fresh list (and a fresh core-success set): a crashed
+    prior run in the same worker context cannot leak its events into this one.
     """
     _events_var.set([])
+    _success_var.set(set())
 
 
 def record_sentinel(method: str, kind: str, detail: str = "") -> None:
@@ -72,32 +105,154 @@ def record_sentinel(method: str, kind: str, detail: str = "") -> None:
         pass
 
 
+def record_success(method: str) -> None:
+    """Record that a CORE-category router call returned data this run.
+
+    The success side of the vacuum verdict: a run is a *data vacuum* only when
+    core calls were attempted (sentinels exist) yet none succeeded. Never
+    raises — same contract as :func:`record_sentinel`.
+    """
+    try:
+        methods = _success_var.get()
+        if methods is None:
+            methods = set()
+            _success_var.set(methods)
+        methods.add(str(method))
+    except Exception:  # noqa: BLE001 -- evidence must never break the run
+        pass
+
+
 def snapshot_quality() -> list[dict[str, Any]]:
     """Copy the current run's sentinel events (empty list when none)."""
     events = _events_var.get()
     return [dict(e) for e in events] if events else []
 
 
+def snapshot_core_successes() -> set[str]:
+    """Copy the core-category methods that returned data this run."""
+    methods = _success_var.get()
+    return set(methods) if methods else set()
+
+
 def reset_quality() -> None:
     """Clear the current context's events (call after consuming a snapshot)."""
     _events_var.set(None)
+    _success_var.set(None)
 
 
-def summarize_quality(events: list[dict[str, Any]] | None) -> dict[str, Any]:
-    """Build the ``data_quality`` block written into full_states_log.
+def is_data_vacuum(
+    events: list[dict[str, Any]] | None,
+    core_successes: set[str] | None = None,
+) -> bool:
+    """True when core calls were attempted but none returned data.
 
-    ``core_sentinel_count`` counts core-category ``NO_DATA_AVAILABLE``
-    events — the ones that mean "the analysis decided without this data",
-    as opposed to optional enrichment categories that were simply absent.
+    ``attempted`` means at least one core sentinel was recorded; without one
+    (e.g. a context where no core tool ran) there is no evidence of a vacuum,
+    so the verdict is False — the gate must not reject runs it cannot judge.
     """
     events = events or []
+    core_sentinels = [e for e in events if e.get("kind") in _CORE_SENTINEL_KINDS]
+    if not core_sentinels:
+        return False
+    return not (core_successes or set())
+
+
+def summarize_quality(
+    events: list[dict[str, Any]] | None,
+    core_successes: set[str] | None = None,
+) -> dict[str, Any]:
+    """Build the ``data_quality`` block written into full_states_log.
+
+    ``core_sentinel_count`` counts core-category degradation events — both
+    ``no_data`` (clean "no usable data") and ``core_error`` (every vendor
+    errored) — the ones that mean "the analysis decided without this data",
+    as opposed to optional enrichment categories that were simply absent.
+    ``degraded_count`` additionally folds in stale-cache serves for reporting;
+    the vacuum verdict itself stays on core evidence only.
+    """
+    events = events or []
+    core_successes = core_successes or set()
+    core_sentinel_count = sum(
+        1 for e in events if e.get("kind") in _CORE_SENTINEL_KINDS
+    )
+    stale_cache_count = sum(1 for e in events if e.get("kind") == KIND_STALE_CACHE)
     return {
         "sentinels": events,
-        "core_sentinel_count": sum(1 for e in events if e.get("kind") == KIND_NO_DATA),
+        "core_sentinel_count": core_sentinel_count,
+        "core_error_count": sum(
+            1 for e in events if e.get("kind") == KIND_CORE_ERROR
+        ),
+        "core_ok_count": len(core_successes),
         "optional_sentinel_count": sum(
             1 for e in events if e.get("kind") == KIND_OPTIONAL_UNAVAILABLE
         ),
-        "stale_cache_count": sum(
-            1 for e in events if e.get("kind") == KIND_STALE_CACHE
-        ),
+        "stale_cache_count": stale_cache_count,
+        "degraded_count": core_sentinel_count + stale_cache_count,
+        "data_vacuum": core_sentinel_count > 0 and not core_successes,
     }
+
+
+def _vacuum_policy() -> str:
+    """Resolve ``data_vacuum_policy`` from config; unknown values fail closed.
+
+    An unrecognized value resolves to ``reject`` with a loud warning: treating
+    a typo as "warn" would let data-vacuum runs slip through silently — the
+    exact failure mode this gate exists to close. ``config-check`` validates
+    the value up front so operators see the typo there first.
+    """
+    from yiagents.dataflows.config import get_config  # local: avoid import cycle
+
+    try:
+        raw = get_config().get("data_vacuum_policy", _POLICY_REJECT)
+    except Exception:  # noqa: BLE001 -- config unavailable: fail closed
+        return _POLICY_REJECT
+    policy = str(raw or _POLICY_REJECT).strip().lower()
+    if policy not in (_POLICY_REJECT, _POLICY_WARN):
+        logger.warning(
+            "Invalid data_vacuum_policy=%r (expected 'reject' or 'warn'); "
+            "failing closed to 'reject'.", raw,
+        )
+        return _POLICY_REJECT
+    return policy
+
+
+def check_data_vacuum() -> None:
+    """Enforce ``data_vacuum_policy`` against the current run's evidence.
+
+    Called at the decision stage (Trader node entry). Under ``reject`` a data
+    vacuum raises :class:`DataVacuumError` carrying the sentinel evidence, so
+    batch/robust orchestrators record a typed failure instead of a
+    normal-looking HOLD report. Under ``warn`` the vacuum is logged loudly and
+    the run proceeds — the report still ships the DEGRADED banner.
+    """
+    events = snapshot_quality()
+    if not is_data_vacuum(events, snapshot_core_successes()):
+        return
+    core_events = [e for e in events if e.get("kind") in _CORE_SENTINEL_KINDS]
+    evidence = "; ".join(
+        f"{e.get('method')}: {e.get('detail') or e.get('kind')}" for e in core_events
+    )
+    if _vacuum_policy() == _POLICY_REJECT:
+        raise DataVacuumError(
+            "data vacuum: every core data call failed — no market/fundamental/"
+            f"news data reached the decision stage ({evidence}). Set "
+            "data_vacuum_policy=warn to allow degraded runs."
+        )
+    logger.warning(
+        "DATA VACUUM (policy=warn): proceeding without core data — %s", evidence
+    )
+
+
+def gate_on_data_vacuum(handler: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a graph node handler so :func:`check_data_vacuum` runs before it.
+
+    Used at the Trader node: the analysts have finished by then, so the
+    evidence is complete, and no decision-stage LLM call has been billed yet
+    when the gate rejects. The wrapper is transparent for every non-vacuum
+    run (byte-identical state in and out).
+    """
+    def _gated(*args: Any, **kwargs: Any) -> Any:
+        check_data_vacuum()
+        return handler(*args, **kwargs)
+
+    return _gated

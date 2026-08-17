@@ -123,13 +123,25 @@ def _parse_args() -> argparse.Namespace:
         help="报告根目录（默认 $YIAGENTS_RESULTS_DIR/reports，回退 ~/.yiagents/logs/reports）",
     )
     p.add_argument(
+        "--allow-degraded",
+        action="store_true",
+        help="接受降级 run：把子进程的 data_vacuum_policy 降为 warn（数据真空仍产出 "
+        "DEGRADED 报告而非类型化失败），且不再因核心数据降级重跑。这是旧默认行为"
+        "的逃生口；默认（不开）= 质量闸门全开：真空 run 在 trader 节点抛 "
+        "DataVacuumError、退出码非 0，部分降级报告也按失败重跑。",
+    )
+    p.add_argument(
         "--require-data-quality",
         action="store_true",
-        help="把「核心数据类目降级（NO_DATA）的报告」当失败重跑，而不是接受为 "
-        "DEGRADED 成功。默认关闭：退出码语义保持「有新报告即成功」，降级 run "
-        "只在汇总里打 DEGRADED 标记（full_states_log 的 data_quality 块是证据）。",
+        help="（已默认开启，保留兼容；见 --allow-degraded）",
     )
-    return p.parse_args()
+    opts = p.parse_args()
+    # Quality gate is ON by default now: the only way back to the old
+    # "accept a degraded report" semantics is the explicit --allow-degraded
+    # escape hatch. (--require-data-quality stays accepted as a no-op for
+    # compat with existing invocations/docs.)
+    opts.require_data_quality = not opts.allow_degraded
+    return opts
 
 
 def _reports_root(reports_root: str) -> Path:
@@ -352,6 +364,12 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         )
         child_env.setdefault("YIAGENTS_URLOPEN_HARD_TIMEOUT_S", "20")
         child_env.setdefault("YIAGENTS_FAULT_DUMP_S", "0")
+        # --allow-degraded opts the child's data-vacuum gate down to warn as
+        # well: without this the child would still raise DataVacuumError at the
+        # trader node and never produce the degraded report the operator asked
+        # to keep. setdefault — an explicit env var wins over the flag.
+        if opts.allow_degraded:
+            child_env.setdefault("YIAGENTS_DATA_VACUUM_POLICY", "warn")
         # 让 run_batch 子进程 stdout/stderr 实时 flush：崩溃 traceback 不会闷在块缓冲里
         # 丢失（AAPL#1 偶发崩溃时 a1 日志只剩 7 行就是这个盲区）。字节等价——只改
         # flush 时机，不改输出内容；run_batch 的 LLM 决策不读自己的 stdout。

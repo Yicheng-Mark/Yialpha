@@ -23,6 +23,7 @@ import pandas as pd
 from langchain_core.tools import tool
 from stockstats import wrap
 
+from yiagents.dataflows import quality
 from yiagents.dataflows.candlestick_patterns import (
     detect_double_top_bottom,
     scan_candlestick_patterns,
@@ -43,15 +44,31 @@ def _fmt(value: float | int | None, digits: int = 2) -> str:
 
 
 def _load(symbol: str, curr_date: str) -> pd.DataFrame | str:
+    """Shared OHLCV loader for the price-structure tools.
+
+    Degrades to a DATA_UNAVAILABLE sentinel (never raises into the node) and
+    records the degrade in the run's data_quality ledger — these tools bypass
+    the vendor router, so without this the evidence chain has a blind spot.
+    """
     try:
         data = load_ohlcv(symbol, curr_date)
     except Exception as exc:  # noqa: BLE001 — typed degrade, never crash the node
+        quality.record_sentinel(
+            "price_structure_ohlcv",
+            quality.KIND_OPTIONAL_UNAVAILABLE,
+            f"{symbol}: {type(exc).__name__}: {exc}",
+        )
         return (
             f"DATA_UNAVAILABLE: OHLCV for {symbol!r} as of {curr_date} could "
             f"not be loaded ({type(exc).__name__}: {exc}). Report this "
             f"analysis family as unavailable; do not estimate it."
         )
     if data is None or len(data) < 2:
+        quality.record_sentinel(
+            "price_structure_ohlcv",
+            quality.KIND_OPTIONAL_UNAVAILABLE,
+            f"{symbol}: insufficient OHLCV history as of {curr_date}",
+        )
         return (
             f"DATA_UNAVAILABLE: insufficient OHLCV history for {symbol!r} "
             f"as of {curr_date}."
@@ -321,6 +338,11 @@ def get_relative_strength(
     try:
         data = load_ohlcv(symbol, curr_date)
     except Exception as exc:  # noqa: BLE001
+        quality.record_sentinel(
+            "get_relative_strength",
+            quality.KIND_OPTIONAL_UNAVAILABLE,
+            f"{symbol}: {type(exc).__name__}: {exc}",
+        )
         return (
             f"DATA_UNAVAILABLE: OHLCV for {symbol!r} as of {curr_date} could "
             f"not be loaded ({type(exc).__name__}: {exc})."
@@ -333,6 +355,11 @@ def get_relative_strength(
 
     close = _dated_close(data)
     if close.empty:
+        quality.record_sentinel(
+            "get_relative_strength",
+            quality.KIND_OPTIONAL_UNAVAILABLE,
+            f"{symbol}: no OHLCV history as of {curr_date}",
+        )
         return f"DATA_UNAVAILABLE: no OHLCV history for {symbol!r} as of {curr_date}."
     bench_close = _dated_close(bench_data)
 

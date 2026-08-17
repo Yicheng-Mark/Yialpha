@@ -16,6 +16,7 @@ import pandas as pd
 from langchain_core.tools import tool
 from stockstats import wrap
 
+from yiagents.dataflows import quality
 from yiagents.dataflows.ohlcv_resample import weekly_ohlcv
 from yiagents.dataflows.stockstats_utils import compute_indicator
 
@@ -60,6 +61,11 @@ def get_indicators_weekly(
     try:
         weekly = weekly_ohlcv(symbol, curr_date)
     except Exception as exc:  # noqa: BLE001 — typed degrade, never crash the node
+        quality.record_sentinel(
+            "get_indicators_weekly",
+            quality.KIND_OPTIONAL_UNAVAILABLE,
+            f"{symbol}: {type(exc).__name__}: {exc}",
+        )
         return (
             f"DATA_UNAVAILABLE: weekly OHLCV for {symbol!r} could not be "
             f"resampled as of {curr_date} ({type(exc).__name__}: {exc}). "
@@ -67,6 +73,11 @@ def get_indicators_weekly(
         )
 
     if weekly.empty or len(weekly) < 2:
+        quality.record_sentinel(
+            "get_indicators_weekly",
+            quality.KIND_OPTIONAL_UNAVAILABLE,
+            f"{symbol}: fewer than 2 complete weekly bars as of {curr_date}",
+        )
         return (
             f"DATA_UNAVAILABLE: fewer than 2 complete weekly bars for "
             f"{symbol!r} as of {curr_date}; weekly timeframe not assessable."

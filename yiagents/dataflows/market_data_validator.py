@@ -15,6 +15,7 @@ from collections.abc import Iterable
 import pandas as pd
 from stockstats import wrap
 
+from yiagents.dataflows import quality
 from yiagents.dataflows.errors import NoMarketDataError
 from yiagents.dataflows.feature_registry import compute_derived
 from yiagents.dataflows.stockstats_utils import compute_indicator, load_ohlcv
@@ -85,6 +86,11 @@ def build_verified_market_snapshot(
         # Binance klines) and flags that exact-level verification was
         # unavailable, rather than crashing the market node. Success path
         # (vendor returns rows) is unchanged — this only alters recovery.
+        quality.record_sentinel(
+            "build_verified_market_snapshot",
+            quality.KIND_OPTIONAL_UNAVAILABLE,
+            f"{symbol}: {exc}",
+        )
         return (
             f"DATA_UNAVAILABLE: verified market snapshot for {symbol!r} could "
             f"not be retrieved ({exc}). Proceed using the OHLCV / indicator "

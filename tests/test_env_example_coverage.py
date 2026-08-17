@@ -40,6 +40,7 @@ _DIRECT_READ_KEYS = {
     "YIAGENTS_SEC_USER_AGENT",       # dataflows/sec_edgar.py:_user_agent
     "YIAGENTS_FUNDAMENTALS_FILING_LAG_DAYS",  # dataflows/utils.py
     "YIAGENTS_HTTP_TIMEOUT_S",       # dataflows/stockstats_utils.py
+    "YIAGENTS_BAOSTOCK_TIMEOUT_S",   # dataflows/baostock_vendor.py
     "YIAGENTS_LLM_TIMEOUT_S",        # llm_clients/_timeout.py
     "YIAGENTS_SENTIMENT_PARALLEL_FETCH",  # agents/analysts/sentiment_analyst.py
     "YIAGENTS_ROBUST_CHILD_SCRIPT",  # scripts/run_robust.py
