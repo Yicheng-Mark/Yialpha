@@ -50,8 +50,23 @@ jobs:
       - name: Run test suite with coverage
         # Coverage stays local (no upload yet): the term-missing report surfaces
         # untested modules directly in the CI log so the gaps are visible
-        # without a third-party badge service.
-        run: pytest -q --cov=yiagents --cov-report=term-missing
+        # without a third-party badge service. Output is tee'd to pytest.log so
+        # the failure-summary step below can republish the failing test names —
+        # raw logs require a GitHub sign-in even on public repos, but the job
+        # summary is anonymously visible, which is how failures get diagnosed
+        # without repo access.
+        run: pytest -q --cov=yiagents --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
+      - name: Publish failure summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "## Test failures (auto-extracted)"
+            grep -E "^(FAILED|ERROR) " pytest.log || echo "(no FAILED/ERROR lines captured)"
+            echo ""
+            echo "### Tail of pytest output"
+            tail -n 40 pytest.log
+          } >> "$GITHUB_STEP_SUMMARY"
 
   test-weekly-full:
     # Scheduled-only full interpreter matrix: the middle version (3.12) is
@@ -108,7 +123,20 @@ jobs:
           pip install -e ".[dev,web]"
       - name: Run test suite with coverage
         shell: bash
-        run: pytest -q --cov=yiagents --cov-report=term-missing
+        # Same tee + summary pattern as the ubuntu test job: raw logs need a
+        # GitHub sign-in, the job summary does not.
+        run: pytest -q --cov=yiagents --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
+      - name: Publish failure summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "## Test failures (auto-extracted)"
+            grep -E "^(FAILED|ERROR) " pytest.log || echo "(no FAILED/ERROR lines captured)"
+            echo ""
+            echo "### Tail of pytest output"
+            tail -n 40 pytest.log
+          } >> "$GITHUB_STEP_SUMMARY"
 
   typecheck:
     # Gradual typing: mypy is scoped to the money path (execution), risk overlay,
