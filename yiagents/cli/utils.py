@@ -96,9 +96,20 @@ def normalize_ticker_symbol(ticker: str) -> str:
 
 def detect_asset_type(ticker: str) -> AssetType:
     """Classify on the canonical symbol so e.g. BTCUSD and BTC-USDT both read as
-    crypto (#981/#982), matching what the data path will actually fetch."""
+    crypto (#981/#982), matching what the data path will actually fetch.
+
+    Whitelisted bases canonicalize to ``BASE-USD`` (dashed suffixes above),
+    but compact ``<BASE>USDT``/``<BASE>USDC`` forms for bases OUTSIDE the
+    Yahoo crypto whitelist — Binance tokenized-stock perps (MUUSDT, SPCXUSDT)
+    and unlisted alts (PEPEUSDT, 1000PEPEUSDT) — survive normalization
+    unchanged, so they need a second undashed check. No listed stock, index,
+    or futures symbol ends in USDT/USDC, and forex canonicalizes to ``PAIR=X``
+    before this check, so the undashed form cannot misfire.
+    """
     canonical = normalize_ticker_symbol(ticker)
     if canonical.endswith(CRYPTO_SUFFIXES):
+        return AssetType.CRYPTO
+    if canonical.replace("-", "").endswith(("USDT", "USDC")):
         return AssetType.CRYPTO
     return AssetType.STOCK
 

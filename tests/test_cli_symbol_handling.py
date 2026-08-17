@@ -48,6 +48,17 @@ def test_ticker_input_validation(value, ok):
     ("BTC-USDT", AssetType.CRYPTO),
     ("BTC-USD", AssetType.CRYPTO),
     ("ETHUSD", AssetType.CRYPTO),
+    # Compact USDT/USDC forms for bases outside the Yahoo whitelist
+    # (tokenized-stock perps + unlisted alts) must not fall through to STOCK.
+    ("MUUSDT", AssetType.CRYPTO),
+    ("SPCXUSDT", AssetType.CRYPTO),
+    ("PEPEUSDT", AssetType.CRYPTO),
+    ("1000PEPEUSDT", AssetType.CRYPTO),
+    ("pepe-usdc", AssetType.CRYPTO),
+    # Guards: forex canonicalizes to PAIR=X (never ends in USDT/USDC), and
+    # plain equities/indexes/A-shares stay STOCK.
+    ("EURUSD", AssetType.STOCK),
+    ("CHFUSD", AssetType.STOCK),
     ("AAPL", AssetType.STOCK),
     ("GC=F", AssetType.STOCK),
     ("600519.SS", AssetType.STOCK),
