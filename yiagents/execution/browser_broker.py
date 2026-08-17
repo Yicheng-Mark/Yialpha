@@ -37,7 +37,7 @@ import math
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -175,14 +175,14 @@ class LiveExecutionSwitch:
 # ---------------------------------------------------------------------------
 
 
-class OrderAction(str, Enum):
+class OrderAction(StrEnum):
     """Direction of an order. ``str`` mixin so values serialize cleanly."""
 
     BUY = "buy"
     SELL = "sell"
 
 
-class OrderStatus(str, Enum):
+class OrderStatus(StrEnum):
     """Outcome of a :meth:`BrowserBroker.place_order` call.
 
     Only ``SUBMITTED`` implies a live order reached the broker. Everything

@@ -14,7 +14,7 @@ plus the workflow-B news PIT clamps (B9):
 * The Alpha Vantage news vendor applies the same pinned-date clamp to its
   ``time_to`` query parameter.
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -44,7 +44,7 @@ def _epoch(date_str):
     # 2026-08-16 fix), so the synthetic timestamps must be UTC too — a
     # host-local ``time.mktime`` would make every assertion below depend on
     # the machine's timezone.
-    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=UTC)
     return int(dt.timestamp())
 
 
@@ -66,11 +66,11 @@ def test_flat_article_epoch_parsed_as_utc_not_host_wall_clock():
     a UTC-5 host — ``fromtimestamp(ts)`` without tz made the parsed DATE
     follow the host, skewing window inclusion near midnight by the offset.
     """
-    ts = int(datetime(2025, 5, 10, 0, 30, tzinfo=timezone.utc).timestamp())
+    ts = int(datetime(2025, 5, 10, 0, 30, tzinfo=UTC).timestamp())
     data = ynews._extract_article_data(
         {"title": "X", "publisher": "P", "link": "l", "providerPublishTime": ts}
     )
-    assert data["pub_date"] == datetime(2025, 5, 10, 0, 30, tzinfo=timezone.utc)
+    assert data["pub_date"] == datetime(2025, 5, 10, 0, 30, tzinfo=UTC)
     assert data["pub_date"].strftime("%Y-%m-%d") == "2025-05-10"
 
 

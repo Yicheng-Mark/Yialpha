@@ -421,6 +421,15 @@ class PoTExecutor:
                 try:
                     exec(code, sandbox_globals)  # noqa: S102 - intentional restricted exec
                     code_ran = True
+                except _TimeoutError:
+                    # POSIX SIGALRM fires the timeout INSIDE the exec block, so
+                    # without this branch the interrupt is captured below as a
+                    # raw traceback of this private exception — instead of the
+                    # normalized message the thread-watchdog path produces.
+                    run_error = (
+                        f"PoTExecutor: execution timed out after "
+                        f"{self.timeout_seconds}s."
+                    )
                 except BaseException as exc:  # noqa: BLE001 - report any failure
                     run_error = "".join(
                         traceback.format_exception(type(exc), exc, exc.__traceback__)

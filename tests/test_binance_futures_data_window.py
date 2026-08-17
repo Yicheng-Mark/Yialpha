@@ -19,7 +19,7 @@ are the ones actually requested.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -29,12 +29,12 @@ from yiagents.dataflows.utils import set_analysis_date
 
 
 def _days_ago(n: int) -> str:
-    return (datetime.now(timezone.utc) - timedelta(days=n)).strftime("%Y-%m-%d")
+    return (datetime.now(UTC) - timedelta(days=n)).strftime("%Y-%m-%d")
 
 
 def _ts(days_ago: int) -> int:
     """Epoch milliseconds for noon UTC, ``days_ago`` days back."""
-    dt = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    dt = datetime.now(UTC) - timedelta(days=days_ago)
     dt = dt.replace(hour=12, minute=0, second=0, microsecond=0)
     return int(dt.timestamp() * 1000)
 
@@ -122,7 +122,7 @@ def test_end_date_clamped_to_pinned_analysis_date(monkeypatch):
     _, params = cap.calls[0]
     clamped_end_ms = int(
         datetime.strptime(_days_ago(1), "%Y-%m-%d")
-        .replace(tzinfo=timezone.utc)
+        .replace(tzinfo=UTC)
         .timestamp() * 1000
     ) + 86399 * 1000
     assert params["endTime"] <= clamped_end_ms
@@ -158,5 +158,5 @@ def test_past_window_neither_appends_live_row_nor_leaks_future_rows(monkeypatch)
     # trimmed client-side even though the fake vendor returned it.
     assert f"{_days_ago(1)},1000" in out
     assert f"{_days_ago(2)},1000" in out
-    today_row = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_row = datetime.now(UTC).strftime("%Y-%m-%d")
     assert f"{today_row},1000" not in out

@@ -6,10 +6,10 @@ on:
   pull_request:
   schedule:
     # Weekly full-matrix sweep (Sunday 03:15 UTC): push/PR runs cover the
-    # support-floor (3.10) and current (3.13) plus Windows; the two middle
-    # versions only break on interpreter-specific regressions, which this
-    # scheduled run catches within a week instead of burning 2 extra
-    # full-suite runs on every push (the suite ran 5x per push before).
+    # support-floor (3.11) and current (3.13) plus Windows; the middle
+    # version only breaks on interpreter-specific regressions, which this
+    # scheduled run catches within a week instead of burning an extra
+    # full-suite run on every push (the suite ran 5x per push before).
     - cron: "15 3 * * 0"
 
 concurrency:
@@ -23,9 +23,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Push/PR floor + current only; 3.11/3.12 come via the weekly
-        # schedule (and 3.12 via test-windows on every push).
-        python-version: ["3.10", "3.13"]
+        # Push/PR floor + current only; 3.12 comes via the weekly schedule
+        # (and via test-windows on every push). Floor is 3.11 because pandas
+        # 3.x — the line this project develops and locks against — publishes
+        # requires-python >=3.11; a 3.10 job can no longer even install.
+        python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -52,15 +54,15 @@ jobs:
         run: pytest -q --cov=yiagents --cov-report=term-missing
 
   test-weekly-full:
-    # Scheduled-only full interpreter matrix: the middle versions (3.11/3.12)
-    # are covered here weekly instead of on every push.
+    # Scheduled-only full interpreter matrix: the middle version (3.12) is
+    # covered here weekly instead of on every push.
     if: github.event_name == 'schedule'
     name: tests weekly full (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

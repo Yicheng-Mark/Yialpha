@@ -29,6 +29,7 @@ import logging
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import Any, Protocol
 
 import numpy as np
@@ -313,7 +314,7 @@ def _binance_funding_provider(ticker: str, start: str, end: str) -> pd.Series:
     ~3 entries/day; 4h/1h contracts have more). A positive sum means longs
     paid that day — the drag a long-only perp strategy must carry.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from ..dataflows.binance import _FAPI_FUNDING_LIMIT, _paginate_history
     from ..dataflows.symbol_utils import normalize_symbol_for_venue
@@ -326,11 +327,11 @@ def _binance_funding_provider(ticker: str, start: str, end: str) -> pd.Series:
     end = current_pit_end(end) or end
     start_ms = int(
         datetime.strptime(start, "%Y-%m-%d")
-        .replace(tzinfo=timezone.utc).timestamp() * 1000
+        .replace(tzinfo=UTC).timestamp() * 1000
     )
     end_ms = int(
         (
-            datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+            datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
             + 86399
         ) * 1000
     )
@@ -343,7 +344,7 @@ def _binance_funding_provider(ticker: str, start: str, end: str) -> pd.Series:
         if not isinstance(r, dict) or r.get("fundingTime") is None:
             continue
         day = datetime.fromtimestamp(
-            int(r["fundingTime"]) / 1000, tz=timezone.utc
+            int(r["fundingTime"]) / 1000, tz=UTC
         ).strftime("%Y-%m-%d")
         try:
             raw_rate = r.get("fundingRate")

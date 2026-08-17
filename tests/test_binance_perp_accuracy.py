@@ -10,7 +10,7 @@ budget, and the exchangeInfo filter/quantization helpers.
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 from yiagents.dataflows import binance as bn, binance_filters as bf
@@ -30,7 +30,7 @@ def _kline(open_ms: int, o: float, h: float, lo: float, c: float) -> list:
 
 
 def _today_ms() -> int:
-    return int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0,
+    return int(datetime.now(UTC).replace(hour=0, minute=0, second=0,
                                                   microsecond=0).timestamp() * 1000)
 
 
@@ -42,7 +42,7 @@ def _klines_server(all_klines):
 
 
 def _today_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 class LowPricePrecisionTests(unittest.TestCase):
@@ -107,7 +107,7 @@ class MarkPriceKlinesTests(unittest.TestCase):
 
 class FundingCadenceTests(unittest.TestCase):
     def test_4h_cadence_stated_in_header(self):
-        base = int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        base = int(datetime(2026, 8, 1, tzinfo=UTC).timestamp() * 1000)
         rows = [
             {"fundingTime": base + i * 4 * 3_600_000, "fundingRate": "0.0001",
              "symbol": "XYZUSDT"}
@@ -122,7 +122,7 @@ class FundingCadenceTests(unittest.TestCase):
         self.assertIn("6.0", out)  # 24/4 settlements per day in the annualise hint
 
     def test_8h_default_cadence_still_stated(self):
-        base = int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        base = int(datetime(2026, 8, 1, tzinfo=UTC).timestamp() * 1000)
         rows = [
             {"fundingTime": base + i * 8 * 3_600_000, "fundingRate": "0.0001",
              "symbol": "BTCUSDT"}
@@ -142,7 +142,7 @@ class FundingCadenceTests(unittest.TestCase):
         spacing must resolve to the DECLARED value, and the header must say
         where the number came from.
         """
-        base = int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        base = int(datetime(2026, 8, 1, tzinfo=UTC).timestamp() * 1000)
         # Spacing says 8h, fundingInfo says 4h — the endpoint is authoritative.
         rows = [
             {"fundingTime": base + i * 8 * 3_600_000, "fundingRate": "0.0001",
@@ -161,7 +161,7 @@ class FundingCadenceTests(unittest.TestCase):
         self.assertIn("fundingInfo endpoint", out)
 
     def test_fundinginfo_failure_falls_back_to_inference(self):
-        base = int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        base = int(datetime(2026, 8, 1, tzinfo=UTC).timestamp() * 1000)
         rows = [
             {"fundingTime": base + i * 4 * 3_600_000, "fundingRate": "0.0001",
              "symbol": "XYZUSDT"}
@@ -219,7 +219,7 @@ class StalenessGuardTests(unittest.TestCase):
     def test_historical_window_early_end_allowed(self):
         # A backtest window is exempt: an early-ending series is a
         # legitimate input, not a freshness lie.
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         end = (now - timedelta(days=200)).strftime("%Y-%m-%d")
         start = (now - timedelta(days=260)).strftime("%Y-%m-%d")
         base = int(
@@ -245,7 +245,7 @@ class FuturesDataWindowPITTests(unittest.TestCase):
         self.assertEqual(end_iso, "2026-08-01")
         self.assertFalse(reaches_now)
         # endTime must be within the pinned day (2026-08-01 end-of-day UTC).
-        end_dt = datetime.fromtimestamp(extra["endTime"] / 1000, tz=timezone.utc)
+        end_dt = datetime.fromtimestamp(extra["endTime"] / 1000, tz=UTC)
         self.assertEqual(end_dt.date().isoformat(), "2026-08-01")
 
     def test_live_start_only_reaches_now(self):

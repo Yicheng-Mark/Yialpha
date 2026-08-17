@@ -4,7 +4,7 @@ import contextlib
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
@@ -92,7 +92,7 @@ def _extract_article_data(article: dict) -> dict:
         ts = article.get("providerPublishTime")
         if ts:
             with contextlib.suppress(ValueError, OSError, TypeError):
-                pub_date = datetime.fromtimestamp(ts, tz=timezone.utc)
+                pub_date = datetime.fromtimestamp(ts, tz=UTC)
         return {
             "title": article.get("title", "No title"),
             "summary": article.get("summary", ""),
@@ -114,7 +114,7 @@ def _to_naive_utc(pub_date) -> datetime:
     on both sides. Naive datetimes pass through unchanged.
     """
     if getattr(pub_date, "tzinfo", None) is not None:
-        return pub_date.astimezone(timezone.utc).replace(tzinfo=None)
+        return pub_date.astimezone(UTC).replace(tzinfo=None)
     return pub_date
 
 

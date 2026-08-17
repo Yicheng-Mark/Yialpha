@@ -7,7 +7,10 @@ name = "yiagents"
 version = "0.3.0"
 description = "YiAgents: Multi-Agent LLM Financial Analysis Framework"
 readme = "README.md"
-requires-python = ">=3.10"
+# Floor is 3.11, not 3.10: pandas 3.x (the line this project develops and
+# locks against) publishes requires-python >=3.11, so a 3.10 resolution can
+# never satisfy the dependency graph. 3.10 reaches EOL 2026-10 regardless.
+requires-python = ">=3.11"
 dependencies = [
     # Version floors are pinned to the major.minor actually verified by
     # requirements.lock. A fresh `pip install` with loose resolution must not
@@ -114,7 +117,7 @@ show_missing = true
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 extend-exclude = ["results", "worklog"]
 
 [tool.ruff.lint]
@@ -139,7 +142,7 @@ combine-as-imports = true
 # We start permissive (no --strict) and tighten per-module as baselines are
 # cleaned. The CI job scopes mypy to the money path (execution), risk overlay,
 # backtest engine, graph, agents, dataflows, and CLI — see ci.yml.
-python_version = "3.10"
+python_version = "3.11"
 warn_unused_ignores = false
 warn_redundant_casts = true
 warn_return_any = false
@@ -152,7 +155,7 @@ ignore_missing_imports = true
 
 # Skip opening any transitive stub (incl. numpy's PEP 695 `type X = ...` aliases,
 # which require Python 3.12+ and abort the run with a [syntax] error under
-# python_version="3.10"). This mirrors the ``--follow-imports=skip`` CLI flag in
+# python_version="3.11"). This mirrors the ``--follow-imports=skip`` CLI flag in
 # ci.yml. NOTE: --follow-imports=skip alone only handles *transitive* imports.
 # When a checked source file *directly* does ``import numpy`` (as risk/,
 # backtest/, dataflows/ do), mypy still parses numpy's stub and aborts. The real
@@ -164,7 +167,7 @@ follow_imports = "skip"
 [[tool.mypy.overrides]]
 # Forward documentation for the numpy PEP 695 stub issue (numpy>=2.1 ships
 # ``type X = ...`` aliases in numpy/__init__.pyi that require Python 3.12+; we
-# type-check against 3.10 so parsing the stub raises [syntax] and aborts the run
+# type-check against 3.11 so parsing the stub raises [syntax] and aborts the run
 # before any real issues surface). A per-module follow_imports override does NOT
 # prevent the syntax-parse stage from failing (the stub is parsed before follow
 # policy is applied), so this override alone is cosmetic. The real fixes are the

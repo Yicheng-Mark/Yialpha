@@ -33,7 +33,7 @@ import logging
 import math
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 
 import pandas as pd
@@ -504,12 +504,12 @@ def binance_klines_frame(
 
     start_ms = int(
         datetime.strptime(start_date, "%Y-%m-%d")
-        .replace(tzinfo=timezone.utc)
+        .replace(tzinfo=UTC)
         .timestamp()
         * 1000
     )
     end_date = current_pit_end(end_date) or end_date
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=UTC)
     end_ms = int((end_dt.timestamp() + 86399) * 1000)  # end-of-day inclusive
 
     kwargs: dict = {"base": base, "weight_key": weight_key}
@@ -540,7 +540,7 @@ def binance_klines_frame(
         open_ms = int(k[0])
         records.append(
             {
-                "Date": datetime.fromtimestamp(open_ms / 1000, tz=timezone.utc)
+                "Date": datetime.fromtimestamp(open_ms / 1000, tz=UTC)
                 .strftime("%Y-%m-%d" if interval == "1d" else "%Y-%m-%d %H:%M:%S"),
                 "Open": float(k[1]),
                 "High": float(k[2]),
@@ -569,7 +569,7 @@ def binance_klines_frame(
     # rather than silently feed months-old "current" prices to the analyst.
     # Historical windows are exempt: an early-ending series is a legitimate
     # backtest input, not a freshness lie.
-    if (datetime.now(timezone.utc) - end_dt).days <= MAX_OHLCV_STALE_DAYS:
+    if (datetime.now(UTC) - end_dt).days <= MAX_OHLCV_STALE_DAYS:
         _assert_ohlcv_not_stale(df, end_date, symbol, canonical)
     return df
 
@@ -666,13 +666,13 @@ def get_binance_funding_rate(
 
     start_ms = int(
         datetime.strptime(start_date, "%Y-%m-%d")
-        .replace(tzinfo=timezone.utc)
+        .replace(tzinfo=UTC)
         .timestamp()
         * 1000
     )
     # PIT guard: clamp to the analysis date (see get_binance_klines).
     end_date = current_pit_end(end_date) or end_date
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=UTC)
     end_ms = int((end_dt.timestamp() + 86399) * 1000)
 
     rows = _paginate_history(
@@ -703,7 +703,7 @@ def get_binance_funding_rate(
     records = [
         {
             "fundingTime": datetime.fromtimestamp(
-                int(r["fundingTime"]) / 1000, tz=timezone.utc
+                int(r["fundingTime"]) / 1000, tz=UTC
             ).strftime("%Y-%m-%d %H:%M:%S"),
             "fundingRate": r.get("fundingRate"),
             "symbol": r.get("symbol", canonical),
@@ -782,7 +782,7 @@ def get_binance_open_interest(
             records.append(
                 {
                     "time": datetime.fromtimestamp(
-                        int(r["timestamp"]) / 1000, tz=timezone.utc
+                        int(r["timestamp"]) / 1000, tz=UTC
                     ).strftime("%Y-%m-%d"),
                     "openInterest": r.get("sumOpenInterest"),
                     "openInterestValue": r.get("sumOpenInterestValue"),
@@ -892,21 +892,21 @@ def _futures_data_window(
 
     if end_date:
         end_date = current_pit_end(end_date) or end_date
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=UTC)
     else:
         # start_date-only: the nominal end is "now", but a pinned analysis
         # date must clamp it exactly like an explicit end_date — otherwise a
         # backtest would receive positioning rows past its decision point.
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        now_iso = datetime.now(UTC).strftime("%Y-%m-%d")
         end_dt = datetime.strptime(
             current_pit_end(now_iso) or now_iso, "%Y-%m-%d"
-        ).replace(tzinfo=timezone.utc)
+        ).replace(tzinfo=UTC)
     if start_date:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=UTC)
     else:
         start_dt = end_dt - timedelta(days=max(1, int(look_back_days)))
 
-    horizon = datetime.now(timezone.utc) - timedelta(days=_FUTURES_DATA_RETENTION_DAYS)
+    horizon = datetime.now(UTC) - timedelta(days=_FUTURES_DATA_RETENTION_DAYS)
     if end_dt < horizon:
         raise NoMarketDataError(
             symbol, canonical,
@@ -923,7 +923,7 @@ def _futures_data_window(
         "endTime": end_ms,
         "limit": min(days, _FUTURES_DATA_LIMIT_CAP),
     }
-    reaches_now = end_dt.date() >= datetime.now(timezone.utc).date()
+    reaches_now = end_dt.date() >= datetime.now(UTC).date()
     return extra, end_dt.strftime("%Y-%m-%d"), reaches_now
 
 
@@ -1000,7 +1000,7 @@ def get_binance_long_short_ratio(
             records.append({
                 "series": slabel,
                 "time": datetime.fromtimestamp(
-                    int(r["timestamp"]) / 1000, tz=timezone.utc
+                    int(r["timestamp"]) / 1000, tz=UTC
                 ).strftime("%Y-%m-%d"),
                 "longAccount": r.get("longAccount"),
                 "longShortRatio": r.get("longShortRatio"),
@@ -1075,7 +1075,7 @@ def get_binance_taker_buy_sell(
                 continue
             records.append({
                 "time": datetime.fromtimestamp(
-                    int(r["timestamp"]) / 1000, tz=timezone.utc
+                    int(r["timestamp"]) / 1000, tz=UTC
                 ).strftime("%Y-%m-%d"),
                 "buySellRatio": r.get("buySellRatio"),
                 "buyVol": r.get("buyVol"),
@@ -1152,7 +1152,7 @@ def get_binance_basis(
                 continue
             records.append({
                 "time": datetime.fromtimestamp(
-                    int(r["timestamp"]) / 1000, tz=timezone.utc
+                    int(r["timestamp"]) / 1000, tz=UTC
                 ).strftime("%Y-%m-%d"),
                 "basis": r.get("basis"),
                 "futuresPrice": r.get("futuresPrice"),
@@ -1237,12 +1237,12 @@ def get_binance_premium_index(symbol: str) -> str:
             "markVsIndexPct": mark_vs_index_pct,
             "lastFundingRate": data.get("lastFundingRate"),
             "nextFundingTime": (
-                datetime.fromtimestamp(int(nft) / 1000, tz=timezone.utc)
+                datetime.fromtimestamp(int(nft) / 1000, tz=UTC)
                 .strftime("%Y-%m-%d %H:%M:%S UTC")
                 if isinstance(nft, (int, float)) and nft > 0 else None
             ),
             "time": (
-                datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc)
+                datetime.fromtimestamp(int(ts) / 1000, tz=UTC)
                 .strftime("%Y-%m-%d %H:%M:%S UTC")
                 if isinstance(ts, (int, float)) and ts > 0 else None
             ),
@@ -1404,13 +1404,13 @@ def get_binance_spot_perp_basis(
     # end_ms] so the closes align by date.
     if end_date:
         end_date = current_pit_end(end_date) or end_date
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=UTC)
     else:
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        now_iso = datetime.now(UTC).strftime("%Y-%m-%d")
         end_date = current_pit_end(now_iso) or now_iso
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=UTC)
     if start_date:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=UTC)
     else:
         start_dt = end_dt - timedelta(days=limit)
     start_ms = int(start_dt.timestamp() * 1000)
@@ -1447,7 +1447,7 @@ def get_binance_spot_perp_basis(
         for k in rows:
             if not isinstance(k, list) or len(k) < 6:
                 continue
-            d = datetime.fromtimestamp(int(k[0]) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            d = datetime.fromtimestamp(int(k[0]) / 1000, tz=UTC).strftime("%Y-%m-%d")
             try:
                 out[d] = float(k[4])
             except (TypeError, ValueError):
