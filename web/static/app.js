@@ -451,11 +451,18 @@
     const pill = (k, v, sev, tip) => `<div class="kpi-tile" tabindex="0" data-tip="${esc(tip || "")}">
         <div class="k">${esc(k)}</div><span class="pill st-${sev}">${esc(v == null || v === "" ? "—" : v)}</span></div>`;
     const rat = ov.rationale ? `<div class="rationale"><b>${t("report_rationale")}</b> ${esc(ov.rationale)}</div>` : "";
+    // Perp-only tiles (crypto_perp runs render these; absent on stock/spot).
+    const perpTiles = [
+      ov.suggested_leverage && num(t("kpi_leverage"), "≤ " + ov.suggested_leverage + "x", "", t("tip_leverage")),
+      ov.liquidation_price && num(t("kpi_liq"), ov.liquidation_price, "bad", t("tip_liq")),
+      ov.funding_note && num(t("kpi_funding"), ov.funding_note, "", t("tip_funding")),
+    ].filter(Boolean).join("");
     return `<div class="kpi-grid">
       ${pill("Action", ov.action, actionSev(ov.action), t("tip_action"))}
       ${num("Target Weight", ov.target_weight, "accent", t("tip_weight"))}
       ${num("Stop Loss", ov.stop_loss, "", t("tip_stop"))}
       ${num("Entry Reference", ov.entry, "", t("tip_entry"))}
+      ${perpTiles}
       ${pill("Regime", ov.regime, regimeSev(ov.regime), t("tip_regime"))}
       ${rat}
     </div>`;
@@ -558,6 +565,16 @@
     </div>`;
   }
 
+  // Asset-class badge for the report head: stock stays unbadged (the default
+  // visual), crypto venues get a small pill so a BTCUSDT perp run is
+  // distinguishable from its spot twin at a glance.
+  function assetBadge(assetType) {
+    const a = String(assetType || "stock");
+    if (a === "stock") return "";
+    const label = a === "crypto_perp" ? "PERP" : a === "crypto_spot" ? "SPOT" : "CRYPTO";
+    return `<span class="asset-badge" tabindex="0" data-tip="${t("tip_asset_badge")}">${label}</span>`;
+  }
+
   async function renderReport(ticker, date) {
     view().innerHTML = `<div class="sk-card sk-report"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>`;
     let run;
@@ -579,7 +596,7 @@
       <p><a href="#/t/${encodeURIComponent(ticker)}" class="muted">${t("common_back")} ${esc(ticker)}</a></p>
       <div class="report-head">
         <div>
-          <div class="ticker-big">${esc(ticker)}</div>
+          <div class="ticker-big">${esc(ticker)} ${assetBadge(run.asset_type)}</div>
           <div class="company">${esc(run.company_of_interest || "")}</div>
         </div>
         ${ratingBadge(run.rating, "rating-lg")}

@@ -391,3 +391,139 @@ def test_allow_short_requires_perp():
             FakeGraph({"2024-01-01": "Sell"}), "AAPL", ["2024-01-01"],
             price_provider=_rising_prices, allow_short=True,
         )
+
+
+# --------------------------------------------------------------------------- #
+# B6 — mark-price liquidation trigger (Binance liquidates on mark, not last)
+# --------------------------------------------------------------------------- #
+
+
+def _mark_vs_last_frames(monkeypatch, mark_low_on_day: int, last_low: float = 99.0):
+    """Serve synthetic last/mark klines: flat closes at 100, calm LAST lows,
+    and a MARK wick to ``mark_low_on_day`` (index) that pierces a 10x liquidation
+    level (90.4) while the last-price book never does."""
+
+    def fake_frame(symbol, start, end, interval="1d", venue="binance_perp",
+                   price_type="last"):
+        idx = pd.bdate_range(start, end)
+        n = len(idx)
+        calm_low = last_low
+        if price_type == "mark" and mark_low_on_day is not None:
+            lows = [calm_low] * mark_low_on_day + [85.0] + [calm_low] * (
+                n - mark_low_on_day - 1)
+        else:
+            lows = [calm_low] * n
+        return pd.DataFrame(
+            {"Close": [100.0] * n, "Low": lows, "High": [101.0] * n},
+            index=idx,
+        )
+
+    monkeypatch.setattr(
+        "yiagents.dataflows.binance.binance_klines_frame", fake_frame,
+    )
+
+
+_LIQ_KW = {
+    "initial_capital": 100_000.0, "holding_days": 5, "compute_index_alpha": False,
+    "periods_per_year": 365, "cost_bps": 0.0,
+    "asset_type": "crypto_perp", "funding_provider": _funding(0.0),
+    "leverage": 10.0, "brackets_provider": lambda t: _BRACKETS,
+}
+
+
+@pytest.mark.unit
+def test_mark_wick_liquidates_when_last_stays_calm(monkeypatch):
+    """The default perp run triggers liquidation on MARK kline wicks: a mark
+    low of 85 forces the close while the last-price book (low 99) never
+    would have — pricing this on last klines was the old wrong behaviour."""
+    _mark_vs_last_frames(monkeypatch, mark_low_on_day=3)
+    res = run_backtest(
+        FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],
+        **_LIQ_KW,
+    )
+    events = res.config_summary.get("perp_liquidations")
+    assert events, "a MARK wick through the 10x liquidation level must force the close"
+    assert res.config_summary["perp_liq_price_source"] == "mark"
+    assert "mark-price" in res.config_summary["perp_model_note"]
+    # Equity still marks on LAST closes (flat 100), and the forced exit pays
+    # out the isolated-margin remainder at the trigger.
+    assert res.equity[-1] == pytest.approx(
+        100_000.0 * (1.0 - 10.0 * (1.0 - 0.904)), rel=1e-6)
+
+
+@pytest.mark.unit
+def test_last_mode_skips_mark_liquidation_on_same_wick(monkeypatch):
+    """Explicit liquidation_price_type='last': the same mark wick does NOT
+    trigger (single-series behaviour restored)."""
+    _mark_vs_last_frames(monkeypatch, mark_low_on_day=3)
+    res = run_backtest(
+        FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],
+        liquidation_price_type="last", **_LIQ_KW,
+    )
+    assert "perp_liquidations" not in res.config_summary
+    assert res.config_summary["perp_liq_price_source"] == "last"
+
+
+@pytest.mark.unit
+def test_mark_unavailable_falls_back_loudly(monkeypatch):
+    """Mark klines failing -> LAST fallback with a disclosure stamp, never a
+    silent relabel (the difference between mark and last can be liquidation
+    itself)."""
+    import yiagents.backtest.engine  # noqa: F401  — ensures engine module path
+
+    real_frame_calls: list[str] = []
+
+    def fake_frame(symbol, start, end, interval="1d", venue="binance_perp",
+                   price_type="last"):
+        real_frame_calls.append(price_type)
+        if price_type == "mark":
+            raise RuntimeError("mark endpoint down")
+        idx = pd.bdate_range(start, end)
+        n = len(idx)
+        lows = [99.0] * 3 + [85.0] + [99.0] * (n - 4)  # LAST wick pierces
+        return pd.DataFrame(
+            {"Close": [100.0] * n, "Low": lows, "High": [101.0] * n},
+            index=idx,
+        )
+
+    monkeypatch.setattr(
+        "yiagents.dataflows.binance.binance_klines_frame", fake_frame,
+    )
+    res = run_backtest(
+        FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],
+        **_LIQ_KW,
+    )
+    assert "mark" in real_frame_calls, "the engine must have TRIED mark first"
+    assert res.config_summary["perp_liquidations"], (
+        "the LAST-price fallback must still check last wicks"
+    )
+    assert res.config_summary["perp_liq_price_source"] == "last (mark unavailable)"
+
+
+@pytest.mark.unit
+def test_injected_extremes_serve_both_trigger_roles():
+    """An injected extremes provider is the synthetic world: it serves the
+    liquidation AND stop trigger series verbatim (source disclosed)."""
+    from tests.test_perp_stop_simulation import _stop_weight_fn
+
+    res = run_backtest(
+        FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],
+        price_provider=_flat_then_crash, extremes_provider=_crash_lows,
+        weight_fn=_stop_weight_fn(1.0, 95.0), **_LIQ_KW,
+    )
+    assert res.config_summary["perp_liq_price_source"] == "injected"
+
+
+@pytest.mark.unit
+def test_liq_price_type_validation():
+    with pytest.raises(ValueError, match="must be 'mark' or 'last'"):
+        run_backtest(
+            FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],
+            liquidation_price_type="mid", **_LIQ_KW,
+        )
+    with pytest.raises(ValueError, match="crypto_perp-only"):
+        run_backtest(
+            FakeGraph({"2024-01-01": "Buy"}), "AAPL", ["2024-01-01"],
+            price_provider=_rising_prices,
+            liquidation_price_type="mark", leverage=1.0,
+        )

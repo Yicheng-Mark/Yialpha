@@ -418,6 +418,12 @@ def main():
                    help="成交滑点 bps（不利方向折入成交价）")
     p.add_argument("--bnb-discount", action="store_true",
                    help="手续费按 BNB 抵扣 9 折")
+    p.add_argument("--no-simulate-stops", action="store_true",
+                   help="关闭止损触发模拟（默认 crypto_perp 开启：overlay 止损按 GTC "
+                        "stop-market 在 bar 极值触发成交；关闭后止损仅是建议元数据）")
+    p.add_argument("--liq-price-type", default="mark", choices=["mark", "last"],
+                   help="强平触发价格口径（默认 mark：币安按 mark price 强平，K 线计价仍用 "
+                        "last；last 恢复单序列行为；仅 leverage>1 时生效）")
     p.add_argument("--workers", type=int, default=1,
                    help="跨 ticker 并发数 K（1=串行，与今天等价；>1 并发，受 DeepSeek RPM/代理约束）")
     p.add_argument("--profile", action="store_true",
@@ -441,8 +447,14 @@ def main():
             perp_kwargs["slippage_bps"] = args.slippage_bps
         if args.bnb_discount:
             perp_kwargs["bnb_discount"] = True
+        if args.no_simulate_stops:
+            perp_kwargs["simulate_stop_triggers"] = False
+        if args.liq_price_type != "mark":
+            perp_kwargs["liquidation_price_type"] = args.liq_price_type
         print(f"  perp 模式: leverage={args.leverage} short={args.allow_short} "
-              f"slippage={args.slippage_bps}bps bnb9折={args.bnb_discount}")
+              f"slippage={args.slippage_bps}bps bnb9折={args.bnb_discount} "
+              f"止损模拟={'关' if args.no_simulate_stops else '开'} "
+              f"强平口径={args.liq_price_type}")
 
     if args.preflight:
         sys.exit(preflight(args.ticker))

@@ -111,6 +111,103 @@ def test_run_ic_cycle_end_to_end(tmp_path, patched_ohlcv):
 
 
 # --------------------------------------------------------------------------- #
+# Venue awareness: crypto IC measured on the Binance candles it trades
+# --------------------------------------------------------------------------- #
+
+
+def _binance_frame(days: int = 320) -> pd.DataFrame:
+    dates = pd.date_range("2025-01-01", periods=days, freq="D")
+    closes = (100.0 + pd.Series(range(days)) * 0.5).values
+    df = pd.DataFrame(
+        {
+            "Open": closes - 0.2, "High": closes + 0.5,
+            "Low": closes - 0.5, "Close": closes,
+            "Volume": [1_000.0] * days,
+        },
+        index=pd.DatetimeIndex(dates, name="Date"),
+    )
+    return df
+
+
+@pytest.mark.unit
+def test_export_crypto_perp_uses_binance_venue_and_suffix(tmp_path, monkeypatch):
+    from yiagents.backtest.ic_dataset import export_ic_datasets
+
+    calls: list[dict] = []
+
+    def fake_frame(symbol, start, end, interval="1d", venue="binance_perp",
+                   price_type="last"):
+        calls.append({"symbol": symbol, "start": start, "end": end,
+                      "venue": venue})
+        return _binance_frame()
+
+    monkeypatch.setattr(
+        "yiagents.dataflows.binance.binance_klines_frame", fake_frame,
+    )
+    written = export_ic_datasets(
+        ["BTCUSDT"], horizon=5, output_dir=tmp_path,
+        indicators=["rsi"], asset_type="crypto_perp", as_of="2026-01-10",
+    )
+    assert set(written) == {"BTCUSDT"}
+    assert calls and calls[0]["venue"] == "binance_perp"
+    # Wide lookback so SMA-200 batteries are warm (1100 calendar days back).
+    assert calls[0]["start"] == "2023-01-06"
+    assert calls[0]["end"] == "2026-01-10"
+    # Venue-tagged filename: a spot export of the same symbol cannot collide.
+    assert written["BTCUSDT"].name == "BTCUSDT_5d_perp.csv"
+    df = pd.read_csv(written["BTCUSDT"])
+    assert "rsi" in df.columns
+
+
+@pytest.mark.unit
+def test_export_crypto_defaults_to_binance_battery(tmp_path, monkeypatch):
+    from yiagents.agents.utils.binance_indicator_tools import (
+        BINANCE_INDICATOR_DEFAULTS,
+    )
+    from yiagents.backtest.ic_dataset import export_ic_datasets
+
+    monkeypatch.setattr(
+        "yiagents.dataflows.binance.binance_klines_frame",
+        lambda *a, **k: _binance_frame(),
+    )
+    written = export_ic_datasets(
+        ["BTCUSDT"], horizon=5, output_dir=tmp_path,
+        asset_type="crypto_spot",
+    )
+    df = pd.read_csv(written["BTCUSDT"])
+    assert written["BTCUSDT"].name == "BTCUSDT_5d_spot.csv"
+    assert set(BINANCE_INDICATOR_DEFAULTS) <= set(df.columns)
+
+
+@pytest.mark.unit
+def test_indicator_ic_context_filters_by_venue(tmp_path, monkeypatch):
+    from yiagents.agents.analysts.market_analyst import (
+        _format_indicator_ic_context,
+    )
+
+    ic_dir = tmp_path / "ic_data"
+    ic_dir.mkdir()
+    per = {"per_indicator": {"rsi": {"mean_abs_ic": 0.10}}}
+    (ic_dir / "BTCUSDT_5d_perp.csv.prune.json").write_text(
+        json.dumps({**per, "per_indicator": {"rsi": {"mean_abs_ic": 0.10}}}),
+        encoding="utf-8",
+    )
+    (ic_dir / "NVDA_5d.csv.prune.json").write_text(
+        json.dumps({**per, "per_indicator": {"rsi": {"mean_abs_ic": 0.01}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    perp_line = _format_indicator_ic_context("crypto_perp")
+    assert perp_line is not None and "rsi |IC|=0.100" in perp_line
+    stock_line = _format_indicator_ic_context("stock")
+    assert stock_line is not None and "rsi |IC|=0.010" in stock_line
+    # A venue with no verdicts yet falls back to every file (legacy dirs).
+    spot_line = _format_indicator_ic_context("crypto_spot")
+    assert spot_line is not None and "rsi |IC|=0.055" in spot_line
+
+
+# --------------------------------------------------------------------------- #
 # CLI wiring
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit

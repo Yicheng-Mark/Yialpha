@@ -404,6 +404,8 @@ a:hover { color: var(--ink-1); }
 .st-good .pill, .pill.st-good { background: var(--st-good); }
 .st-warn .pill, .pill.st-warn { background: var(--st-warn); color: #1a1407; }
 .st-bad  .pill, .pill.st-bad  { background: var(--st-bad); }
+/* Asset-class badge beside the report ticker (PERP / SPOT / CRYPTO). */
+.asset-badge { background: var(--panel-2); border: 1px solid var(--border-2); color: var(--ink-2); font-size: 10px; font-weight: 700; letter-spacing: .8px; padding: 2px 8px; border-radius: 999px; vertical-align: middle; margin-left: 8px; cursor: help; }
 /* overlay-absent placeholder spans the whole grid */
 .kpi-empty { grid-column: 1 / -1; margin: 4px 0; }
 .rationale { grid-column: 1 / -1; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px 16px; color: var(--ink-2); font-size: 13px; line-height: 1.65; }
