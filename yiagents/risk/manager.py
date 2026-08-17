@@ -124,12 +124,20 @@ class RiskManager:
         cvar_breach: float = -0.05,
         use_atr_stop: bool = True,
         breaker: DrawdownBreaker | None = None,
+        funding_warn_annual: float = 0.30,
+        funding_hard_annual: float = 0.60,
     ):
         self.kelly_fraction = kelly_fraction
         self.atr_mult = atr_mult
         self.cvar_confidence = cvar_confidence
         self.cvar_breach = cvar_breach
         self.use_atr_stop = use_atr_stop
+        # Perp carry gates (deterministic): an annualized funding cost running
+        # strongly AGAINST the held side is a headwind Kelly never priced, so
+        # the weight is scaled down at two disclosed thresholds instead of
+        # silently ignoring the cost of carry.
+        self.funding_warn_annual = funding_warn_annual
+        self.funding_hard_annual = funding_hard_annual
         self.breaker = breaker or DrawdownBreaker(
             warn_drawdown=warn_drawdown,
             no_new_drawdown=no_new_drawdown,
@@ -156,6 +164,8 @@ class RiskManager:
             no_new_drawdown=round(min(hard_stop * 2.0 / 3.0, 0.10), 4),
             hard_stop_drawdown=hard_stop,
             atr_mult=float(config.get("atr_stop_mult", 2.0)),
+            funding_warn_annual=float(config.get("funding_warn_annual", 0.30)),
+            funding_hard_annual=float(config.get("funding_hard_annual", 0.60)),
         )
 
     def decide(
@@ -167,12 +177,16 @@ class RiskManager:
         atr: float | None = None,
         sector: str | None = None,
         date: str | None = None,
+        funding_rate_annualized: float | None = None,
     ) -> RiskDecision:
         """Produce the risk overlay for one decision.
 
         ``price``/``atr`` are optional; when either is missing the ATR stop is
         skipped (the size/breaker logic still runs). ``sector`` enables the
-        sector exposure cap.
+        sector exposure cap. ``funding_rate_annualized`` (perp runs) is the
+        signed annualized funding rate: strongly adverse carry scales the
+        weight down at two disclosed thresholds; neutral or favourable carry
+        leaves sizing untouched. ``None`` (default) skips the gate entirely.
         """
         rating = rating if rating in RATING_TO_CONFIDENCE else "Hold"
 
@@ -214,6 +228,22 @@ class RiskManager:
         # two gates agreeing the risk is high, not a sizing error.
         target_weight = kelly_raw * breaker_state.position_multiplier * cvar_mult
         target_weight = max(0.0, min(target_weight, self.breaker.max_single_position))
+
+        # 5b. Funding-drag gate (perp runs). The manager sizes long-side
+        # weights only (target_weight >= 0 above), so adverse carry means the
+        # LONG PAYS positive annualized funding: >= warn threshold halves the
+        # weight, >= hard threshold quarters it. Favourable carry (negative
+        # funding — longs receive) intentionally does NOT boost size.
+        funding_mult = 1.0
+        if (
+            funding_rate_annualized is not None
+            and target_weight > 0.0
+            and funding_rate_annualized >= self.funding_warn_annual
+        ):
+            funding_mult = (
+                0.25 if funding_rate_annualized >= self.funding_hard_annual else 0.5
+            )
+            target_weight *= funding_mult
 
         # 6. Breaker can block NEW entries outright (existing positions are not
         #    force-added but may be held; hard-stop flattens via multiplier 0).
@@ -266,6 +296,11 @@ class RiskManager:
         rationale = self._rationale(
             rating, action, kelly_raw, target_weight, breaker_state, cvar_mult, exposure_reason,
         )
+        if funding_mult != 1.0:
+            rationale += (
+                f" Funding drag {funding_rate_annualized:+.0%}/yr against the "
+                f"position: size x{funding_mult:.2f}."
+            )
 
         return RiskDecision(
             rating=rating,
@@ -348,6 +383,12 @@ def build_backtest_weight_fn(
                 ctx["risk_warning"] = (
                     "ATR stop unavailable for this backtest decision: provide an "
                     "as-of atr_lookup; no stop was simulated."
+                )
+            elif ctx.get("stop_simulation_mode"):
+                ctx["risk_warning"] = (
+                    "ATR stop armed as a GTC stop-market order; the engine "
+                    "simulates bar-extreme stop-trigger fills at the stop "
+                    "level (slippage + taker fee applied)."
                 )
             else:
                 ctx["risk_warning"] = (

@@ -67,6 +67,55 @@ def test_detect_asset_type(raw, expected):
     assert detect_asset_type(raw) == expected
 
 
+# --- interactive analyze: --asset-type override reaches perp runs ---------
+# crypto_perp is never auto-detected (BTCUSDT -> CRYPTO spot by design), so
+# the override is the ONLY way `yiagents analyze` reaches a perp run.
+
+
+def _mock_interactive(monkeypatch):
+    import yiagents.cli.main as cli_main
+    from yiagents.cli.models import AnalystType
+
+    monkeypatch.setattr(cli_main, "get_ticker", lambda: "BTCUSDT")
+    monkeypatch.setattr(cli_main, "get_analysis_date", lambda: "2026-01-10")
+    monkeypatch.setattr(cli_main, "ask_output_language", lambda: "中文")
+    monkeypatch.setattr(
+        cli_main, "select_analysts",
+        lambda at: [AnalystType.MARKET, AnalystType.SOCIAL, AnalystType.NEWS],
+    )
+    monkeypatch.setattr(cli_main, "select_research_depth", lambda: "quick")
+    monkeypatch.setattr(
+        cli_main, "select_llm_provider",
+        lambda: ("deepseek", "https://api.deepseek.com"),
+    )
+    monkeypatch.setattr(cli_main, "ensure_api_key", lambda p: None)
+    monkeypatch.setenv("YIAGENTS_OUTPUT_LANGUAGE", "中文")
+    monkeypatch.setenv("YIAGENTS_QUICK_THINK_LLM", "deepseek-chat")
+    monkeypatch.setenv("YIAGENTS_DEEP_THINK_LLM", "deepseek-reasoner")
+    return cli_main
+
+
+def test_get_user_selections_asset_type_override_to_perp(monkeypatch):
+    cli_main = _mock_interactive(monkeypatch)
+    selections = cli_main.get_user_selections(asset_type_override="crypto_perp")
+    assert selections["asset_type"] == "crypto_perp"
+
+
+def test_get_user_selections_auto_keeps_detection(monkeypatch):
+    cli_main = _mock_interactive(monkeypatch)
+    selections = cli_main.get_user_selections(asset_type_override="auto")
+    # BTCUSDT detects as the Yahoo spot crypto pair — the historical default.
+    assert selections["asset_type"] == "crypto"
+
+
+def test_get_user_selections_invalid_override_fails_fast(monkeypatch):
+    import typer
+
+    cli_main = _mock_interactive(monkeypatch)
+    with pytest.raises(typer.Exit):
+        cli_main.get_user_selections(asset_type_override="nasdaq_perp")
+
+
 def test_cli_normalize_delegates_to_data_layer():
     # CLI must produce the same canonical symbol the data path will price.
     for raw in ("XAUUSD", "BTCUSD", "btc-usdt", "AAPL"):

@@ -22,6 +22,23 @@ class TradingMemoryLog:
     _DECISION_RE = re.compile(r"DECISION:\n(.*?)(?=\nREFLECTION:|\Z)", re.DOTALL)
     _REFLECTION_RE = re.compile(r"REFLECTION:\n(.*?)$", re.DOTALL)
 
+    @staticmethod
+    def _tag_keyed_fields(fields: list[str]) -> dict[str, str]:
+        """The ``key=value`` fields of a split tag line (``asset=``,
+        ``known=``) — everything that is NOT positional."""
+        out: dict[str, str] = {}
+        for f in fields:
+            if "=" in f:
+                k, v = f.split("=", 1)
+                out[k.strip()] = v.strip()
+        return out
+
+    @staticmethod
+    def _is_pending(fields: list[str]) -> bool:
+        """Pending marker as an exact field — tolerant of trailing keyed
+        fields (``... | pending | asset=crypto_perp]``)."""
+        return any(f == "pending" for f in fields)
+
     def __init__(self, config: dict[str, Any] | None = None):
         cfg = config or {}
         self._log_path: Path | None = None
@@ -53,8 +70,15 @@ class TradingMemoryLog:
         ticker: str,
         trade_date: str,
         final_trade_decision: str,
+        asset_type: str | None = None,
     ) -> None:
-        """Append pending entry at end of propagate(). No LLM call."""
+        """Append pending entry at end of propagate(). No LLM call.
+
+        ``asset_type`` rides the tag as a trailing keyed field
+        (``asset=crypto_perp``) so perp and spot decisions on the SAME ticker
+        stay distinguishable in the log and in the injected past context;
+        omitted keeps the legacy asset-less tag byte-identical.
+        """
         if not self._log_path:
             return
         with self._lock:
@@ -64,10 +88,17 @@ class TradingMemoryLog:
             if self._log_path.exists():
                 raw = self._log_path.read_text(encoding="utf-8")
                 for line in raw.splitlines():
-                    if line.startswith(f"[{trade_date} | {ticker} |") and line.endswith("| pending]"):
-                        return
+                    if not line.startswith(f"[{trade_date} | {ticker} |"):
+                        continue
+                    if line.startswith("[") and line.endswith("]"):
+                        fields = [f.strip() for f in line[1:-1].split("|")]
+                        if self._is_pending(fields):
+                            return
             rating = parse_rating(final_trade_decision)
-            tag = f"[{trade_date} | {ticker} | {rating} | pending]"
+            tag = f"[{trade_date} | {ticker} | {rating} | pending"
+            if asset_type:
+                tag += f" | asset={asset_type}"
+            tag += "]"
             entry = f"{tag}\n\nDECISION:\n{final_trade_decision}{self._SEPARATOR}"
             with open(self._log_path, "a", encoding="utf-8") as f:
                 f.write(entry)
@@ -98,6 +129,7 @@ class TradingMemoryLog:
         n_cross: int = 3,
         *,
         as_of_date: str | None = None,
+        asset_type: str | None = None,
     ) -> str:
         """Return causal past context for agent prompt injection.
 
@@ -107,6 +139,12 @@ class TradingMemoryLog:
         not carry an outcome-availability date, so they are excluded from
         historical runs instead of being trusted and potentially leaking a
         reflection produced with present-day prices.
+
+        ``asset_type`` (when supplied) restricts the SAME-ticker section to
+        entries recorded for that asset: a crypto_perp run of BTCUSDT must not
+        inherit the spot run's lessons (different venue, different funding
+        regime). Legacy entries without an asset tag match any asset type —
+        they predate the split and are the only history that exists.
         """
         entries = [e for e in self.load_entries() if not e.get("pending")]
         if as_of_date is not None:
@@ -145,8 +183,15 @@ class TradingMemoryLog:
         for e in reversed(entries):
             if len(same) >= n_same and len(cross) >= n_cross:
                 break
-            if e["ticker"] == ticker and len(same) < n_same:
-                same.append(e)
+            if e["ticker"] == ticker:
+                entry_asset = e.get("asset")
+                asset_ok = (
+                    asset_type is None
+                    or entry_asset is None
+                    or entry_asset == asset_type
+                )
+                if asset_ok and len(same) < n_same:
+                    same.append(e)
             elif e["ticker"] != ticker and len(cross) < n_cross:
                 cross.append(e)
 
@@ -202,20 +247,31 @@ class TradingMemoryLog:
                 lines = stripped.splitlines()
                 tag_line = lines[0].strip()
 
+                fields = (
+                    [f.strip() for f in tag_line[1:-1].split("|")]
+                    if tag_line.startswith("[") and tag_line.endswith("]")
+                    else []
+                )
                 if (
                     not updated
                     and tag_line.startswith(pending_prefix)
-                    and tag_line.endswith("| pending]")
+                    and self._is_pending(fields)
                 ):
-                    # Parse rating from the existing pending tag
-                    fields = [f.strip() for f in tag_line[1:-1].split("|")]
-                    rating = fields[2]
+                    # Parse rating from the existing pending tag; keep any
+                    # keyed fields (asset=...) so resolution never strips the
+                    # entry's venue identity.
+                    positional = [f for f in fields if "=" not in f]
+                    rating = positional[2] if len(positional) > 2 else ""
+                    keyed = self._tag_keyed_fields(fields)
                     new_tag = (
                         f"[{trade_date} | {ticker} | {rating}"
-                        f" | {raw_pct} | {alpha_pct} | {holding_days}d]"
+                        f" | {raw_pct} | {alpha_pct} | {holding_days}d"
                     )
                     if available_date:
-                        new_tag = new_tag[:-1] + f" | known={available_date}]"
+                        new_tag += f" | known={available_date}"
+                    if keyed.get("asset"):
+                        new_tag += f" | asset={keyed['asset']}"
+                    new_tag += "]"
                     rest = "\n".join(lines[1:])
                     new_blocks.append(
                         f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{reflection}"
@@ -262,20 +318,26 @@ class TradingMemoryLog:
                 matched = False
                 for (trade_date, ticker), upd in list(update_map.items()):
                     pending_prefix = f"[{trade_date} | {ticker} |"
-                    if tag_line.startswith(pending_prefix) and tag_line.endswith("| pending]"):
-                        fields = [f.strip() for f in tag_line[1:-1].split("|")]
-                        rating = fields[2]
+                    fields = (
+                        [f.strip() for f in tag_line[1:-1].split("|")]
+                        if tag_line.startswith("[") and tag_line.endswith("]")
+                        else []
+                    )
+                    if tag_line.startswith(pending_prefix) and self._is_pending(fields):
+                        positional = [f for f in fields if "=" not in f]
+                        rating = positional[2] if len(positional) > 2 else ""
+                        keyed = self._tag_keyed_fields(fields)
                         raw_pct = f"{upd['raw_return']:+.1%}"
                         alpha_pct = f"{upd['alpha_return']:+.1%}"
                         new_tag = (
                             f"[{trade_date} | {ticker} | {rating}"
-                            f" | {raw_pct} | {alpha_pct} | {upd['holding_days']}d]"
+                            f" | {raw_pct} | {alpha_pct} | {upd['holding_days']}d"
                         )
                         if upd.get("available_date"):
-                            new_tag = (
-                                new_tag[:-1]
-                                + f" | known={upd['available_date']}]"
-                            )
+                            new_tag += f" | known={upd['available_date']}"
+                        if keyed.get("asset"):
+                            new_tag += f" | asset={keyed['asset']}"
+                        new_tag += "]"
                         rest = "\n".join(lines[1:])
                         new_blocks.append(
                             f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{upd['reflection']}"
@@ -340,21 +402,22 @@ class TradingMemoryLog:
         if not (tag_line.startswith("[") and tag_line.endswith("]")):
             return None
         fields = [f.strip() for f in tag_line[1:-1].split("|")]
-        if len(fields) < 4:
+        keyed = self._tag_keyed_fields(fields)
+        positional = [f for f in fields if "=" not in f]
+        if len(positional) < 4:
             return None
         entry = {
-            "date": fields[0],
-            "ticker": fields[1],
-            "rating": fields[2],
-            "pending": fields[3] == "pending",
-            "raw": fields[3] if fields[3] != "pending" else None,
-            "alpha": fields[4] if len(fields) > 4 else None,
-            "holding": fields[5] if len(fields) > 5 else None,
-            "available_date": (
-                fields[6].split("=", 1)[1]
-                if len(fields) > 6 and fields[6].startswith("known=")
-                else None
-            ),
+            "date": positional[0],
+            "ticker": positional[1],
+            "rating": positional[2],
+            "pending": positional[3] == "pending",
+            "raw": positional[3] if positional[3] != "pending" else None,
+            "alpha": positional[4] if len(positional) > 4 else None,
+            "holding": positional[5] if len(positional) > 5 else None,
+            # Keyed fields: known= is the PIT outcome-availability date,
+            # asset= is the venue identity (perp vs spot on the same ticker).
+            "available_date": keyed.get("known"),
+            "asset": keyed.get("asset"),
         }
         body = "\n".join(lines[1:]).strip()
         decision_match = self._DECISION_RE.search(body)
@@ -368,6 +431,8 @@ class TradingMemoryLog:
         alpha = e["alpha"] or "n/a"
         holding = e["holding"] or "n/a"
         tag = f"[{e['date']} | {e['ticker']} | {e['rating']} | {raw} | {alpha} | {holding}]"
+        if e.get("asset"):
+            tag = tag[:-1] + f" | asset={e['asset']}]"
         parts = [tag, f"DECISION:\n{e['decision']}"]
         if e["reflection"]:
             parts.append(f"REFLECTION:\n{e['reflection']}")
@@ -375,6 +440,8 @@ class TradingMemoryLog:
 
     def _format_reflection_only(self, e: dict) -> str:
         tag = f"[{e['date']} | {e['ticker']} | {e['rating']} | {e['raw'] or 'n/a'}]"
+        if e.get("asset"):
+            tag = tag[:-1] + f" | asset={e['asset']}]"
         if e["reflection"]:
             return f"{tag}\n{e['reflection']}"
         text = e["decision"][:300]

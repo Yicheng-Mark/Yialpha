@@ -63,3 +63,18 @@ def test_load_run_data_quality_none_when_absent(logs_root):
     run = store.load_run("AAPL", "2026-06-10")
     assert run is not None
     assert run["data_quality"] is None
+
+
+@pytest.mark.unit
+def test_load_run_passes_asset_type_through(logs_root):
+    """The asset_type the graph logs reaches the API payload (drives the
+    venue badge); legacy logs without it read as the stock default."""
+    _write_log(logs_root, "2026-06-10", {"asset_type": "crypto_perp"})
+    run = store.load_run("AAPL", "2026-06-10")
+    assert run is not None
+    assert run["asset_type"] == "crypto_perp"
+
+    _write_log(logs_root, "2026-06-11", {})
+    run2 = store.load_run("AAPL", "2026-06-11")
+    assert run2 is not None
+    assert run2["asset_type"] == "stock"

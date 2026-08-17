@@ -301,14 +301,19 @@ def _system_message() -> str:
     return _legacy_system_message() + get_language_instruction()
 
 
-def _format_indicator_ic_context() -> str | None:
+def _format_indicator_ic_context(asset_type: str = "stock") -> str | None:
     """One advisory line per indicator with its trailing mean |IC|.
 
-    Reads every ``ic_data/*.prune.json`` verdict (the ``yiagents ic-cycle`` /
+    Reads ``ic_data/*.prune.json`` verdicts (the ``yiagents ic-cycle`` /
     prune-CLI output convention) and averages ``per_indicator[].mean_abs_ic``
-    across files. Only catalog indicators are rendered; absent verdicts and
-    unreadable files are skipped — the function returns ``None`` when no
-    usable evidence exists, leaving the prompt untouched.
+    across files. Verdict files carry a venue tag when exported with
+    ``--asset-type`` (``<TICKER>_<h>d_perp.csv.prune.json`` etc.); a crypto
+    run averages ONLY its venue's verdicts and a stock run only untagged
+    ones, so perp/spot/stock evidence never blends. When a venue has no
+    verdicts yet the function falls back to every file (legacy dirs). Only
+    catalog indicators are rendered; unreadable files are skipped — the
+    function returns ``None`` when no usable evidence exists, leaving the
+    prompt untouched.
     """
     import json
     from pathlib import Path
@@ -316,8 +321,29 @@ def _format_indicator_ic_context() -> str | None:
     ic_dir = Path("ic_data")
     if not ic_dir.is_dir():
         return None
+    all_files = sorted(ic_dir.glob("*.prune.json"))
+    suffix = ".csv.prune.json"
+    venue_tag = (
+        "perp" if asset_type == "crypto_perp"
+        else "spot" if asset_type in ("crypto", "crypto_spot")
+        else None
+    )
+
+    def _tagged(p: Path) -> str | None:
+        stem = p.name[: -len(suffix)] if p.name.endswith(suffix) else p.name
+        for tag in ("perp", "spot"):
+            if stem.endswith(f"_{tag}"):
+                return tag
+        return None
+
+    matching = [
+        p for p in all_files
+        if (venue_tag is None and _tagged(p) is None)
+        or (venue_tag is not None and _tagged(p) == venue_tag)
+    ]
+    files = matching or all_files
     values: dict[str, list[float]] = {}
-    for verdict_path in sorted(ic_dir.glob("*.prune.json")):
+    for verdict_path in files:
         try:
             verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
             per = verdict.get("per_indicator") or {}
@@ -481,7 +507,9 @@ def create_market_analyst(llm):
         # byte-equivalent to the A/B baseline; fail-soft (absent/unreadable
         # verdicts are skipped, never fabricated).
         if get_config().get("indicator_ic_context", False):
-            ic_line = _format_indicator_ic_context()
+            ic_line = _format_indicator_ic_context(
+                state.get("asset_type") or "stock",
+            )
             if ic_line:
                 system_message += (
                     f"\n\n{ic_line}\n"

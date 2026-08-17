@@ -1022,3 +1022,100 @@ class TestLegacyRemoval:
         assert len(entries) == 1
         assert entries[0]["ticker"] == "NVDA"
         assert entries[0]["pending"] is True
+
+
+# ---------------------------------------------------------------------------
+# Asset awareness: perp and spot BTCUSDT stay distinguishable (2026-08-17)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_store_decision_tags_asset_and_stays_idempotent(tmp_path):
+    log = make_log(tmp_path)
+    log.store_decision("BTCUSDT", "2026-01-10", DECISION_BUY, asset_type="crypto_perp")
+    log.store_decision("BTCUSDT", "2026-01-10", DECISION_BUY, asset_type="crypto_perp")
+    entries = log.load_entries()
+    assert len(entries) == 1  # idempotency guard tolerant of the asset field
+    assert entries[0]["asset"] == "crypto_perp"
+    assert entries[0]["pending"] is True
+
+    # No asset_type keeps the legacy tag shape (byte-compat for old writers).
+    log.store_decision("AAPL", "2026-01-10", DECISION_BUY)
+    raw = (tmp_path / "trading_memory.md").read_text(encoding="utf-8")
+    assert "[2026-01-10 | AAPL | Buy | pending]" in raw
+
+
+@pytest.mark.unit
+def test_resolution_preserves_asset_field(tmp_path):
+    log = make_log(tmp_path)
+    log.store_decision("BTCUSDT", "2026-01-10", DECISION_BUY, asset_type="crypto_perp")
+    log.update_with_outcome("BTCUSDT", "2026-01-10", 0.05, 0.02, 5,
+                            "Funding regime shifted.", available_date="2026-01-20")
+    entries = log.load_entries()
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["pending"] is False
+    assert e["asset"] == "crypto_perp"
+    assert e["available_date"] == "2026-01-20"
+    assert e["rating"] == "Buy"
+    assert e["raw"] == "+5.0%"
+
+
+@pytest.mark.unit
+def test_batch_resolution_preserves_asset_field(tmp_path):
+    log = make_log(tmp_path)
+    log.store_decision("BTCUSDT", "2026-01-10", DECISION_BUY, asset_type="crypto_perp")
+    log.batch_update_with_outcomes([{
+        "ticker": "BTCUSDT", "trade_date": "2026-01-10",
+        "raw_return": -0.03, "alpha_return": -0.01, "holding_days": 5,
+        "reflection": "Stop was right.", "available_date": "2026-01-20",
+    }])
+    e = log.load_entries()[0]
+    assert e["asset"] == "crypto_perp"
+    assert e["raw"] == "-3.0%"
+
+
+@pytest.mark.unit
+def test_past_context_filters_same_ticker_by_asset(tmp_path):
+    log = make_log(tmp_path)
+    # A resolved SPOT lesson and a resolved PERP lesson on the SAME ticker.
+    log.store_decision("BTCUSDT", "2026-01-01", DECISION_BUY, asset_type="crypto_spot")
+    log.update_with_outcome("BTCUSDT", "2026-01-01", 0.01, 0.0, 5,
+                            "Spot lesson.", available_date="2026-01-08")
+    log.store_decision("BTCUSDT", "2026-01-02", DECISION_SELL, asset_type="crypto_perp")
+    log.update_with_outcome("BTCUSDT", "2026-01-02", 0.02, 0.0, 5,
+                            "Perp funding lesson.", available_date="2026-01-09")
+
+    perp = log.get_past_context("BTCUSDT", as_of_date="2026-06-01",
+                                asset_type="crypto_perp")
+    assert "Perp funding lesson." in perp
+    assert "Spot lesson." not in perp
+
+    spot = log.get_past_context("BTCUSDT", as_of_date="2026-06-01",
+                                asset_type="crypto_spot")
+    assert "Spot lesson." in spot
+    assert "Perp funding lesson." not in spot
+
+    # No asset filter: the whole same-ticker history (legacy callers).
+    both = log.get_past_context("BTCUSDT", as_of_date="2026-06-01")
+    assert "Spot lesson." in both and "Perp funding lesson." in both
+
+    # Legacy entries without an asset tag match any requested asset. (No
+    # as_of_date: the PIT gate excludes legacy resolved entries — no known=
+    # date — from historical runs by design, so exercise the live path.)
+    log2 = make_log(tmp_path, filename="legacy_memory.md")
+    _seed_completed(tmp_path, "BTCUSDT", "2025-12-01", DECISION_BUY,
+                    "Legacy lesson.", filename="legacy_memory.md")
+    legacy = log2.get_past_context("BTCUSDT", asset_type="crypto_perp")
+    assert "Legacy lesson." in legacy
+
+
+@pytest.mark.unit
+def test_formatted_context_shows_asset_tag(tmp_path):
+    log = make_log(tmp_path)
+    log.store_decision("BTCUSDT", "2026-01-02", DECISION_SELL, asset_type="crypto_perp")
+    log.update_with_outcome("BTCUSDT", "2026-01-02", 0.02, 0.0, 5,
+                            "Perp funding lesson.", available_date="2026-01-09")
+    ctx = log.get_past_context("BTCUSDT", as_of_date="2026-06-01",
+                               asset_type="crypto_perp")
+    assert "asset=crypto_perp" in ctx

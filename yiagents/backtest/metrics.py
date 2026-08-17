@@ -275,6 +275,16 @@ class BacktestMetrics:
     event_study_p_value: float | None = None          # two-sided, None without scipy
     event_study_ci: tuple[float, float] | None = None  # bootstrap 95% CI of mean CAR
     event_study_benchmark: str | None = None          # market-model benchmark name
+    # Perp-specific run facts (filled by run_backtest for crypto_perp only;
+    # None otherwise so every non-perp caller is unchanged). liquidation_count
+    # and stop_trigger_count are the forced-exit tallies behind the event
+    # lists in config_summary; funding_paid_total is the signed USDT sum
+    # (positive = paid by longs) and funding_drag_annualized scales the
+    # average daily drag to a per-year rate for comparability across windows.
+    liquidation_count: int | None = None
+    stop_trigger_count: int | None = None
+    funding_paid_total: float | None = None
+    funding_drag_annualized: float | None = None
 
 
 # ---------------------------------------------------------------------------

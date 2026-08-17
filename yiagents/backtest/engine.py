@@ -146,20 +146,25 @@ def _binance_perp_price_provider(price_type: str = "last"):
     return provider
 
 
-def _binance_perp_extremes_provider():
-    """Daily (low, high) series for intrabar liquidation triggers.
+def _binance_perp_extremes_provider(price_type: str = "last"):
+    """Daily (low, high) series for intrabar liquidation/stop triggers.
 
     Liquidation is checked against the bar's adverse extreme (low for longs,
     high for shorts), not only the close — a wick through the liquidation
     price is a forced close even when the bar recovers. Returns a callable
-    ``(ticker, start, end) -> (lows, highs)`` on the same kline data as the
-    price provider.
+    ``(ticker, start, end) -> (lows, highs)`` on the perp's own kline data;
+    ``price_type="mark"`` serves the mark-price wicks Binance actually
+    liquidates against, ``"last"`` (default) the ordinary last-traded book
+    that resting stop orders live on.
     """
 
     def provider(ticker: str, start: str, end: str) -> tuple[pd.Series, pd.Series]:
         from ..dataflows.binance import binance_klines_frame
 
-        df = binance_klines_frame(ticker, start, end, interval="1d", venue="binance_perp")
+        df = binance_klines_frame(
+            ticker, start, end, interval="1d", venue="binance_perp",
+            price_type=price_type,
+        )
         lows = df["Low"].dropna()
         highs = df["High"].dropna()
         lows.index = lows.index.strftime("%Y-%m-%d")
@@ -379,6 +384,8 @@ def run_backtest(
     allow_funding_gaps: bool = False,
     leverage: float = 1.0,
     allow_short: bool = False,
+    simulate_stop_triggers: bool | None = None,
+    liquidation_price_type: str | None = None,
     brackets_provider: Callable[[str], list] | None = None,
     extremes_provider: Callable[[str, str, str], tuple[pd.Series, pd.Series]] | None = None,
     n_trials: int = 1,
@@ -448,6 +455,30 @@ def run_backtest(
         Perp-only opt-in short side: ``Sell`` maps to weight -1.0, positions
         and funding flip sign, and liquidation triggers on the upside. Default
         off keeps the long-only semantics byte-identical.
+    simulate_stop_triggers:
+        Simulate the risk overlay's ATR stop as a GTC stop-market order: a
+        bar whose adverse extreme crosses the stop level force-exits at the
+        stop price (plus adverse slippage and the taker fee), even when the
+        bar closes back through it. ``None`` (default) enables this for
+        ``asset_type="crypto_perp"`` and keeps spot/stock runs byte-identical
+        (the stop stays advisory metadata, as historically). Runs only when a
+        ``weight_fn`` actually supplies ``risk_decision.stop_loss``; the
+        baseline rating→weight table never arms a stop. Liquidation is
+        checked first — a long's stop always sits above its liquidation
+        level, so a bar piercing both is conservatively liquidated. Exits are
+        recorded in ``config_summary["perp_stop_triggers"]``.
+    liquidation_price_type:
+        ``"mark"`` or ``"last"`` — which price series triggers the liquidation
+        check. Binance USDT-M liquidates on the MARK price while the last
+        price is what the equity curve marks on, so ``"mark"`` (the default
+        for crypto_perp) fetches mark-price kline wicks for the trigger while
+        keeping last-price marking; ``"last"`` restores the single-series
+        behaviour. Only meaningful with ``leverage > 1``; an injected
+        ``extremes_provider`` serves as the trigger series verbatim whatever
+        this says. If mark klines cannot be fetched the engine falls back to
+        last-price extremes LOUDLY — warning plus
+        ``config_summary["perp_liq_price_source"]`` disclosure — never
+        silently relabelling a last-price check as mark.
     n_trials:
         Number of independent strategy variants being compared in this research
         run, forwarded to :func:`compute_metrics` for the Deflated Sharpe Ratio
@@ -498,6 +529,16 @@ def run_backtest(
             "allow_short is a crypto_perp-only parameter; shorting spot/stock "
             "involves locate/borrow mechanics this engine does not model"
         )
+    if liquidation_price_type is not None and liquidation_price_type not in ("mark", "last"):
+        raise ValueError(
+            f"liquidation_price_type must be 'mark' or 'last', got "
+            f"{liquidation_price_type!r}"
+        )
+    if liquidation_price_type == "mark" and asset_type != "crypto_perp":
+        raise ValueError(
+            "mark-price liquidation is a crypto_perp-only concept "
+            "(markPriceKlines is a perp endpoint)"
+        )
     if slippage_bps < 0.0 or (taker_bps is not None and taker_bps < 0.0) or cost_bps < 0.0:
         raise ValueError("cost_bps / taker_bps / slippage_bps must be >= 0")
     if periods_per_year is None:
@@ -523,8 +564,10 @@ def run_backtest(
     # way. The benchmark index keeps the ORIGINAL provider: index names are
     # yfinance-shaped (SPY / 000300.SS), never Binance symbols.
     index_price_provider = price_provider
+    price_provider_swapped = False
     if asset_type == "crypto_perp" and price_provider is _yfinance_price_provider:
         price_provider = _binance_perp_price_provider()
+        price_provider_swapped = True
 
     prices = price_provider(ticker, start_date, end_date)
     if prices.empty:
@@ -617,11 +660,33 @@ def run_backtest(
     # available (else the close), exited at the liquidation price or the worse
     # close when the bar gapped through it.
     model_liquidation = asset_type == "crypto_perp" and leverage > 1.0
+    # Stop-trigger simulation defaults ON for perps (a levered strategy whose
+    # overlay publishes a stop must be priced with that stop actually firing)
+    # and OFF everywhere else so spot/stock runs stay byte-identical.
+    simulate_stops = (
+        simulate_stop_triggers
+        if simulate_stop_triggers is not None
+        else asset_type == "crypto_perp"
+    )
+    track_entry_basis = model_liquidation or simulate_stops
+    stop_events: list[dict[str, Any]] = []
     mmr_brackets: list | None = None
     mmr_source = ""
     liq_events: list[dict[str, Any]] = []
-    bar_lows: pd.Series | None = None
+    # Liquidation trigger series vs stop trigger series: Binance USDT-M
+    # liquidates on the MARK price while resting stop orders live on the
+    # last-traded book, and the equity curve marks on last-price closes —
+    # three different observables, so "mark" mode (the perp default) fetches
+    # mark kline wicks for the liquidation check and last kline wicks for
+    # stops instead of conflating them into one series.
+    liq_price_type = liquidation_price_type or (
+        "mark" if asset_type == "crypto_perp" else "last"
+    )
+    liq_price_source = ""
+    bar_lows: pd.Series | None = None      # liquidation trigger series
     bar_highs: pd.Series | None = None
+    stop_lows: pd.Series | None = None     # stop trigger series (last price)
+    stop_highs: pd.Series | None = None
     if model_liquidation:
         from ..dataflows.binance_brackets import (
             default_brackets,
@@ -643,20 +708,66 @@ def run_backtest(
                 )
                 mmr_brackets = default_brackets()
                 mmr_source = "default-ladder"
+
+    def _fetch_extremes_or_none(
+        price_type: str,
+    ) -> tuple[pd.Series, pd.Series] | None:
         try:
-            extremes = (
-                extremes_provider(ticker, start_date, end_date)
-                if extremes_provider is not None
-                else _binance_perp_extremes_provider()(ticker, start_date, end_date)
+            return _binance_perp_extremes_provider(price_type)(
+                ticker, start_date, end_date,
             )
-            bar_lows, bar_highs = extremes[0], extremes[1]
         except Exception as exc:  # noqa: BLE001 — close-only trigger is the fallback
             logger.warning(
-                "bar extremes unavailable for %s (%s: %s); liquidation checks "
-                "run on closes only", ticker, type(exc).__name__, exc,
+                "%s-price bar extremes unavailable for %s (%s: %s); the "
+                "matching trigger checks run on closes only",
+                price_type, ticker, type(exc).__name__, exc,
             )
-            bar_lows = None
-            bar_highs = None
+            return None
+
+    if model_liquidation or simulate_stops:
+        if extremes_provider is not None:
+            # An injected provider IS the synthetic world: it serves both
+            # trigger roles verbatim, whatever liq_price_type says.
+            try:
+                lows, highs = extremes_provider(ticker, start_date, end_date)
+            except Exception as exc:  # noqa: BLE001 — close-only fallback
+                logger.warning(
+                    "bar extremes unavailable for %s (%s: %s); liquidation/"
+                    "stop checks run on closes only",
+                    ticker, type(exc).__name__, exc,
+                )
+            else:
+                bar_lows, bar_highs = lows, highs
+                stop_lows, stop_highs = lows, highs
+                if model_liquidation:
+                    liq_price_source = "injected"
+        elif price_provider_swapped:
+            if simulate_stops:
+                got = _fetch_extremes_or_none("last")
+                if got is not None:
+                    stop_lows, stop_highs = got
+            if model_liquidation:
+                if liq_price_type == "mark":
+                    got = _fetch_extremes_or_none("mark")
+                    if got is not None:
+                        bar_lows, bar_highs = got
+                        liq_price_source = "mark"
+                    else:
+                        # Loud fallback: never relabel a last-price check as
+                        # mark — the config discloses what actually ran.
+                        got = _fetch_extremes_or_none("last")
+                        if got is not None:
+                            bar_lows, bar_highs = got
+                            liq_price_source = "last (mark unavailable)"
+                else:
+                    got = _fetch_extremes_or_none("last")
+                    if got is not None:
+                        bar_lows, bar_highs = got
+                        liq_price_source = "last"
+        # else: an explicitly injected price provider (tests, offline
+        # research) has no matching Binance extremes source — fetching a
+        # real-market low/high series for synthetic prices would be worse
+        # than useless, so extremes stay None and triggers run on closes.
 
     index_prices: pd.Series | None = None
     index_name = ""
@@ -717,6 +828,7 @@ def run_backtest(
     opening_trade: TradeRow | None = None
     opening_equity: float | None = None
     pos_avg_entry = 0.0            # weighted-average fill price of the open position
+    current_stop: float | None = None  # armed GTC stop from the risk overlay
 
     for trade_date, price in prices.items():
         if trade_date < sorted_dates[0]:
@@ -785,6 +897,49 @@ def run_backtest(
                 })
                 shares = 0.0
                 pos_avg_entry = 0.0
+                current_stop = None  # position gone; the resting order dies with it
+
+        # Stop-trigger simulation: the overlay's ATR stop behaves like a GTC
+        # stop-market order — the bar's adverse extreme crossing the level
+        # force-exits AT the stop price with adverse slippage and the taker
+        # fee, even when the bar closes back through it (a gap far beyond the
+        # level fills at the level itself, the same documented bar-level
+        # approximation the liquidation exit makes). Runs AFTER the
+        # liquidation check: a long's stop always sits above its liquidation
+        # level, so a bar piercing both is conservatively liquidated first.
+        # A signal landing on this same bar may still re-enter at the close.
+        if simulate_stops and shares != 0.0 and current_stop is not None:
+            if shares > 0.0:
+                adverse = (
+                    float(stop_lows.get(str(trade_date), px))
+                    if stop_lows is not None else px
+                )
+                hit = adverse <= current_stop
+            else:
+                adverse = (
+                    float(stop_highs.get(str(trade_date), px))
+                    if stop_highs is not None else px
+                )
+                hit = adverse >= current_stop
+            if hit:
+                exit_px = (
+                    current_stop * (1.0 - slip_rate) if shares > 0.0
+                    else current_stop * (1.0 + slip_rate)
+                )
+                stop_fee = abs(shares) * exit_px * fee_rate
+                cash += shares * exit_px - stop_fee
+                stop_events.append({
+                    "date": str(trade_date),
+                    "side": "long" if shares > 0.0 else "short",
+                    "shares": shares,
+                    "entry": pos_avg_entry,
+                    "stop_price": current_stop,
+                    "exit_price": exit_px,
+                    "fee": stop_fee,
+                })
+                shares = 0.0
+                pos_avg_entry = 0.0
+                current_stop = None
 
         # Mark to market at today's completed close before any close-price fill.
         equity = cash + shares * px
@@ -809,6 +964,9 @@ def run_backtest(
                 "execution_price": px,
                 "current_weight": previous_weight,
                 "current_position_value": current_value,
+                # Lets a risk weight_fn state an accurate caveat: whether the
+                # engine will actually simulate the stop it is being handed.
+                "stop_simulation_mode": simulate_stops,
             })
             # Avoid accidentally carrying metadata from an earlier sizing call.
             ctx.pop("risk_decision", None)
@@ -858,19 +1016,60 @@ def run_backtest(
                 # slip=0 and fee=cost_bps this reduces to the historical
                 # (current_value - desired_value) - cost exactly.
                 cash += -delta_shares * fill_px - cost
-                # Weighted-average entry basis for the liquidation level:
-                # extending a position blends fill prices; reducing keeps it;
-                # flipping restarts it at the new fill.
-                if model_liquidation:
-                    if prev_shares == 0.0 or (prev_shares > 0.0) == (delta_shares > 0.0):
-                        if delta_shares != 0.0 and shares != 0.0:
-                            total = abs(prev_shares) + abs(delta_shares)
-                            pos_avg_entry = (
-                                pos_avg_entry * abs(prev_shares)
-                                + fill_px * abs(delta_shares)
-                            ) / total
-                    elif shares != 0.0:
+                # Weighted-average entry basis for the liquidation/stop levels:
+                # extending a position blends fill prices; REDUCING one keeps
+                # the basis (a trim does not change where the surviving
+                # contracts entered); flipping restarts it at the new fill.
+                # (The old condition mis-routed any partial reduction into
+                # the flip branch, resetting the basis to the trim's fill and
+                # shifting the liquidation level after every rebalance-down.)
+                if track_entry_basis:
+                    if prev_shares == 0.0:
+                        if shares != 0.0:
+                            pos_avg_entry = fill_px
+                    elif shares == 0.0:
+                        pos_avg_entry = 0.0
+                    elif (shares > 0.0) != (prev_shares > 0.0):
+                        # flip through zero: restart at the new fill
                         pos_avg_entry = fill_px
+                    elif delta_shares != 0.0 and (delta_shares > 0.0) == (shares > 0.0):
+                        total = abs(prev_shares) + abs(delta_shares)
+                        pos_avg_entry = (
+                            pos_avg_entry * abs(prev_shares)
+                            + fill_px * abs(delta_shares)
+                        ) / total
+                    # else: same-direction reduction — basis unchanged
+
+                # GTC stop semantics: this decision's stop replaces the
+                # resting order while a position stays open; a full close
+                # disarms it. A decision without a stop keeps the previous
+                # level resting (broker GTC behaviour). The direction guard
+                # rejects stops that sit on the wrong side of the entry —
+                # e.g. the overlay's long-formula stop surviving a flip to a
+                # short — instead of arming an instantly-triggering order.
+                if simulate_stops:
+                    candidate = getattr(risk_decision, "stop_loss", None)
+                    # Arm/replace with this decision's stop when it is valid
+                    # for the resulting position.
+                    if candidate is not None and shares != 0.0:
+                        valid = (
+                            candidate < pos_avg_entry if shares > 0.0
+                            else candidate > pos_avg_entry
+                        )
+                        if valid:
+                            current_stop = float(candidate)
+                    # Disarm: position fully closed, or a flip left the old
+                    # stop on the wrong side of the entry.
+                    if current_stop is not None:
+                        if shares == 0.0:
+                            current_stop = None
+                        else:
+                            still_valid = (
+                                current_stop < pos_avg_entry if shares > 0.0
+                                else current_stop > pos_avg_entry
+                            )
+                            if not still_valid:
+                                current_stop = None
 
             total_traded_notional += traded_notional
             equity_after = cash + shares * px
@@ -996,6 +1195,22 @@ def run_backtest(
     _augment_metrics(metrics, trades, equity_curve, equity_dates,
                      total_traded_notional, periods_per_year, ticker)
 
+    # Perp run facts as first-class metrics (None for every non-perp run):
+    # the forced-exit tallies and the signed funding totals behind the
+    # config_summary event lists, so downstream consumers (report, web,
+    # multi-run comparisons) do not have to re-derive them from configs.
+    if asset_type == "crypto_perp":
+        charge_day_count = max(
+            1, sum(1 for d in prices.index if str(d) >= sorted_dates[0]),
+        )
+        metrics.liquidation_count = len(liq_events)
+        metrics.stop_trigger_count = len(stop_events)
+        metrics.funding_paid_total = round(funding_paid_total, 2)
+        metrics.funding_drag_annualized = round(
+            (funding_paid_total / initial_capital) / charge_day_count
+            * periods_per_year, 6,
+        )
+
     # Optional Fama-French factor attribution. Advisory only, fail-open: a
     # missing factor file / failed fit leaves the metrics fields at None and
     # never changes the equity-derived statistics above.
@@ -1060,15 +1275,28 @@ def run_backtest(
                     ),
                     "perp_leverage": leverage,
                     "perp_short": allow_short,
+                    "perp_stop_simulation": simulate_stops,
+                    "perp_stop_trigger_count": len(stop_events),
+                    **(
+                        {"perp_liq_price_source": liq_price_source}
+                        if model_liquidation and liq_price_source else {}
+                    ),
                     "perp_model_note": (
                         "USDT-M perp simulation: daily funding drag (strategy "
                         "and buy-and-hold), taker fees + slippage on fills"
                         + (
                             ", isolated-margin liquidation vs the "
-                            f"{mmr_source} MMR ladder triggered on bar "
-                            "extremes" if model_liquidation
+                            f"{mmr_source} MMR ladder triggered on "
+                            + ("mark-price" if liq_price_source == "mark"
+                               else "bar")
+                            + " extremes" if model_liquidation
                             else "; leverage/margin/liquidation NOT modeled "
                             "(leverage=1x cash sim)"
+                        )
+                        + (
+                            ", overlay stop-losses simulated as GTC stop-market "
+                            "orders triggered on bar extremes" if simulate_stops
+                            else "; stop-losses advisory only (not simulated)"
                         )
                         + (", opt-in short side" if allow_short else
                            "; long-only")
@@ -1079,6 +1307,9 @@ def run_backtest(
             ),
             **(
                 {"perp_liquidations": liq_events} if liq_events else {}
+            ),
+            **(
+                {"perp_stop_triggers": stop_events} if stop_events else {}
             ),
         },
         cached_hits=cached_hits,

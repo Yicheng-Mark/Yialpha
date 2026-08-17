@@ -13,7 +13,11 @@ Fail-closed contract (never silently wrong data) — unchanged from the script:
 - The last ``horizon`` rows have no realizable forward return and are DROPPED.
 - An indicator that fails to compute is skipped with a WARNING — never
   zero-filled.
-- Data comes from ``load_ohlcv`` (per-symbol cache, PIT-filtered to as-of).
+- Data comes from ``load_ohlcv`` (per-symbol cache, PIT-filtered to as-of)
+  for stocks; crypto asset types load the venue's OWN Binance daily candles
+  (perp/spot — the same series the market analyst's crypto battery computes
+  on, with 365-day vol annualization), so a crypto_perp IC is measured on the
+  contract the strategy actually trades instead of the Yahoo spot index.
 
 The cycle half (``run_ic_cycle``) additionally computes the prune verdict per
 ticker using the same ``yiagents.backtest.ic`` math ``prune_indicators_cli``
@@ -47,13 +51,16 @@ def build_ic_frame(
     indicators: list[str],
     as_of: str,
     extra_horizons: Sequence[int] = (),
+    asset_type: str = "stock",
 ) -> tuple[pd.DataFrame, list[str]]:
     """Compute the IC table for one ticker.
 
     Returns ``(frame, skipped_indicators)``. The frame has ``date``,
     ``forward_return`` (Close.shift(-horizon)/Close - 1) and one column per
     computable indicator; tail rows without a realizable forward return are
-    dropped.
+    dropped. ``asset_type`` selects the data venue: stock keeps the historical
+    ``load_ohlcv`` path; crypto types load the Binance candles (perp for
+    ``crypto_perp``, spot otherwise) the crypto battery itself computes on.
     """
     from yiagents.dataflows.feature_registry import compute_derived
     from yiagents.dataflows.stockstats_utils import (
@@ -61,7 +68,26 @@ def build_ic_frame(
         load_ohlcv,
     )
 
-    data = load_ohlcv(ticker, as_of)
+    crypto_venue = (
+        "binance_perp" if asset_type == "crypto_perp"
+        else "binance_spot" if asset_type in ("crypto", "crypto_spot")
+        else None
+    )
+    if crypto_venue is not None:
+        from yiagents.dataflows.binance import binance_klines_frame
+        from yiagents.dataflows.vol_estimators import CRYPTO_TRADING_DAYS_PER_YEAR
+
+        # Wide lookback so SMA-200 (and the rolling windows behind derived
+        # features) are warm at the first scored row.
+        start = (pd.Timestamp(as_of) - pd.Timedelta(days=1100)).strftime("%Y-%m-%d")
+        raw = binance_klines_frame(
+            ticker, start, as_of, interval="1d", venue=crypto_venue,
+        )
+        data = raw.reset_index()  # restore the "Date" column shape
+        derived_kwargs = {"periods_per_year": CRYPTO_TRADING_DAYS_PER_YEAR}
+    else:
+        data = load_ohlcv(ticker, as_of)
+        derived_kwargs = {}
 
     from stockstats import wrap
 
@@ -87,7 +113,7 @@ def build_ic_frame(
         # frame; stockstats names on the wrapped one. Same skip-and-report
         # contract either way — never zero-fill.
         try:
-            derived = compute_derived(data, ind)
+            derived = compute_derived(data, ind, **derived_kwargs)
             if derived is not None:
                 out[ind] = pd.to_numeric(derived, errors="coerce")
                 continue
@@ -111,16 +137,28 @@ def export_ic_datasets(
     as_of: str | None = None,
     output_dir: str | Path = "ic_data",
     extra_horizons: Sequence[int] = (),
+    asset_type: str = "stock",
 ) -> dict[str, Path]:
     """Export one ``<TICKER>_<horizon>d.csv`` per ticker; returns the paths.
 
-    Tickers whose export fails (no data, all indicators skipped) are logged
-    and omitted from the result — the caller decides whether an empty result
-    is fatal (ic-cycle treats it as a typed failure).
+    Crypto asset types write ``<TICKER>_<horizon>d_<venue>.csv`` (perp/spot)
+    so the same symbol exported on two venues never collides, and default to
+    the crypto battery (``BINANCE_INDICATOR_DEFAULTS``) when ``indicators``
+    is None. Tickers whose export fails (no data, all indicators skipped) are
+    logged and omitted from the result — the caller decides whether an empty
+    result is fatal (ic-cycle treats it as a typed failure).
     """
     from yiagents.agents.analysts.market_analyst import INDICATOR_NAMES
 
-    names = sorted(indicators) if indicators else sorted(INDICATOR_NAMES)
+    is_crypto = asset_type in ("crypto", "crypto_spot", "crypto_perp")
+    if indicators is None and is_crypto:
+        from yiagents.agents.utils.binance_indicator_tools import (
+            BINANCE_INDICATOR_DEFAULTS,
+        )
+
+        names = sorted(BINANCE_INDICATOR_DEFAULTS)
+    else:
+        names = sorted(indicators) if indicators else sorted(INDICATOR_NAMES)
     unknown = [n for n in names if n not in INDICATOR_NAMES]
     if unknown:
         raise ValueError(
@@ -130,6 +168,10 @@ def export_ic_datasets(
     if horizon <= 0:
         raise ValueError("horizon must be a positive number of trading days")
 
+    venue_tag = (
+        "perp" if asset_type == "crypto_perp"
+        else "spot" if is_crypto else ""
+    )
     cutoff = as_of or pd.Timestamp.today().strftime("%Y-%m-%d")
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -139,6 +181,7 @@ def export_ic_datasets(
         try:
             frame, skipped = build_ic_frame(
                 ticker, horizon, names, cutoff, extra_horizons=extra_horizons,
+                asset_type=asset_type,
             )
         except Exception as exc:  # noqa: BLE001 -- one bad ticker must not kill the batch
             logger.error("export failed for %s: %s", ticker, exc)
@@ -154,7 +197,10 @@ def export_ic_datasets(
                 "indicator-less CSV", ticker, ", ".join(skipped) or "?",
             )
             continue
-        out_path = out_dir / f"{ticker.replace('.', '_')}_{horizon}d.csv"
+        stem = f"{ticker.replace('.', '_')}_{horizon}d"
+        if venue_tag:
+            stem += f"_{venue_tag}"
+        out_path = out_dir / f"{stem}.csv"
         frame.to_csv(out_path, index=False)
         written[ticker] = out_path
     return written
@@ -236,16 +282,19 @@ def run_ic_cycle(
     output_dir: str | Path = "ic_data",
     as_of: str | None = None,
     indicators: Sequence[str] | None = None,
+    asset_type: str = "stock",
 ) -> dict[str, Any]:
     """export → prune verdict per ticker → ``<csv>.prune.json`` on disk.
 
     Returns ``{"csv": {ticker: path}, "verdict": {ticker: verdict_dict}}``.
-    Applying any prune to the live ``indicator_battery`` stays a HUMAN step
-    (fail-closed); this function never edits config.
+    ``asset_type`` routes the data venue (stock = load_ohlcv; crypto types =
+    the Binance candles the crypto battery computes on). Applying any prune
+    to the live ``indicator_battery`` stays a HUMAN step (fail-closed); this
+    function never edits config.
     """
     csvs = export_ic_datasets(
         tickers, horizon=horizon, as_of=as_of, output_dir=output_dir,
-        indicators=indicators,
+        indicators=indicators, asset_type=asset_type,
     )
     if not csvs:
         raise RuntimeError(

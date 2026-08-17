@@ -499,8 +499,14 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
     layout["footer"].update(Panel(stats_table, border_style="grey50"))
 
 
-def get_user_selections():
-    """Get all user selections before starting the analysis display."""
+def get_user_selections(asset_type_override: str = "auto"):
+    """Get all user selections before starting the analysis display.
+
+    ``asset_type_override`` ("auto" default) lets the CLI flag win over
+    detection: crypto_perp is never auto-detected (BTCUSDT detects as the
+    Yahoo spot pair by design), so without the override the interactive
+    analyze path cannot reach a perp run at all.
+    """
     # Display ASCII art welcome message
     with open(Path(__file__).parent / "static" / "welcome.txt", encoding="utf-8") as f:
         welcome_ascii = f.read()
@@ -579,7 +585,22 @@ def get_user_selections():
     asset_type = detect_asset_type(selected_ticker)
     # Only announce when it's not the default stock path, to avoid printing
     # "stock" on every run.
-    if asset_type.value != "stock":
+    if asset_type_override != "auto":
+        from .models import AssetType
+
+        try:
+            asset_type = AssetType(asset_type_override)
+        except ValueError:
+            valid = ", ".join(m.value for m in AssetType)
+            console.print(
+                f"[red]Invalid --asset-type {asset_type_override!r} "
+                f"(valid: auto, {valid}).[/red]"
+            )
+            raise typer.Exit(code=2) from None
+        console.print(
+            f"[green]Asset type (--asset-type):[/green] {asset_type.value}"
+        )
+    elif asset_type.value != "stock":
         console.print(
             f"[green]Detected asset type:[/green] {asset_type.value}"
         )
@@ -688,7 +709,7 @@ def get_user_selections():
 
         # For Ollama, surface the resolved endpoint (OLLAMA_BASE_URL vs default)
         # before model selection so it's obvious where we're connecting.
-        if selected_llm_provider == "ollama":
+        if selected_llm_provider == "ollama" and backend_url:
             confirm_ollama_endpoint(backend_url)
 
         # Confirm the provider's API key is present; prompt the user to paste
@@ -1080,9 +1101,9 @@ def _store_cli_decision(
     )
 
 
-def run_analysis(checkpoint: bool | None = None):
+def run_analysis(checkpoint: bool | None = None, asset_type: str = "auto"):
     # First get all user selections
-    selections = get_user_selections()
+    selections = get_user_selections(asset_type_override=asset_type)
 
     config = _build_run_config(selections, checkpoint)
 
@@ -1241,6 +1262,7 @@ def run_analysis(checkpoint: bool | None = None):
         past_context = graph.memory_log.get_past_context(
             selections["ticker"],
             as_of_date=str(selections["analysis_date"]),
+            asset_type=selections["asset_type"],
         )
         instrument_context = graph.resolve_instrument_context(
             selections["ticker"], selections["asset_type"],
@@ -1474,13 +1496,20 @@ def analyze(
         "--clear-checkpoints",
         help="Delete all saved checkpoints before running (force fresh start).",
     ),
+    asset_type: str = typer.Option(
+        "auto",
+        "--asset-type",
+        help="stock | crypto | crypto_spot | crypto_perp | auto (auto = infer "
+        "from the ticker; crypto_perp = Binance USDT-M perpetual analysis — "
+        "explicit opt-in, never auto-detected).",
+    ),
 ):
     if clear_checkpoints:
         from yiagents.graph.checkpointer import clear_all_checkpoints
         n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
         console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
     _warn_config_drift()
-    run_analysis(checkpoint=checkpoint)
+    run_analysis(checkpoint=checkpoint, asset_type=asset_type)
 
 
 @app.command()
@@ -2026,6 +2055,12 @@ def ic_cycle(
         "ic_data", "--output-dir", help="Where the CSVs + verdicts land.",
     ),
     as_of: str = typer.Option("", "--as-of", help="PIT cutoff YYYY-MM-DD (default: today)."),
+    asset_type: str = typer.Option(
+        "stock", "--asset-type",
+        help="stock | crypto | crypto_spot | crypto_perp — routes the data "
+        "venue (crypto types measure IC on the Binance candles the crypto "
+        "battery computes on; default battery = BINANCE_INDICATOR_DEFAULTS).",
+    ),
 ) -> None:
     """Run the IC cycle: export datasets → prune verdicts → suggestion.
 
@@ -2047,6 +2082,7 @@ def ic_cycle(
             min_observations=min_observations,
             output_dir=output_dir,
             as_of=as_of or None,
+            asset_type=asset_type,
         )
     except RuntimeError as exc:
         console.print(f"[red]❌ {exc}[/red]")

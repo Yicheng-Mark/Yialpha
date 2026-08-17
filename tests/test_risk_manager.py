@@ -240,3 +240,62 @@ def test_risk_adapter_treats_hold_as_no_order():
     assert result.trades[0].is_rebalance is True
     assert all(t.target_weight is None for t in result.trades[1:])
     assert all(t.is_rebalance is False for t in result.trades[1:])
+
+
+# ---------------------------------------------------------------------------
+# Funding-drag gate (perp carry awareness, 2026-08-17)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_adverse_funding_scales_weight_at_both_tiers():
+    rm = RiskManager()
+    state = PortfolioState(cash=100_000, equity=100_000)
+    base = rm.decide("BTCUSDT", "Buy", state, price=100.0, atr=2.0)
+    assert base.target_weight > 0.0
+
+    warn = rm.decide("BTCUSDT", "Buy", state, price=100.0, atr=2.0,
+                     funding_rate_annualized=0.50)
+    assert warn.target_weight == pytest.approx(base.target_weight * 0.5)
+    assert "Funding drag +50%/yr" in warn.rationale
+
+    hard = rm.decide("BTCUSDT", "Buy", state, price=100.0, atr=2.0,
+                     funding_rate_annualized=0.80)
+    assert hard.target_weight == pytest.approx(base.target_weight * 0.25)
+
+
+@pytest.mark.unit
+def test_favourable_or_neutral_funding_leaves_sizing_alone():
+    rm = RiskManager()
+    state = PortfolioState(cash=100_000, equity=100_000)
+    base = rm.decide("BTCUSDT", "Buy", state, price=100.0, atr=2.0)
+
+    favourable = rm.decide("BTCUSDT", "Buy", state, price=100.0, atr=2.0,
+                           funding_rate_annualized=-0.40)  # longs receive
+    assert favourable.target_weight == pytest.approx(base.target_weight)
+    assert "Funding drag" not in favourable.rationale
+
+    mild = rm.decide("BTCUSDT", "Buy", state, price=100.0, atr=2.0,
+                     funding_rate_annualized=0.10)  # below warn threshold
+    assert mild.target_weight == pytest.approx(base.target_weight)
+
+    none_gate = rm.decide("BTCUSDT", "Buy", state, price=100.0, atr=2.0,
+                          funding_rate_annualized=None)
+    assert none_gate.target_weight == pytest.approx(base.target_weight)
+
+
+@pytest.mark.unit
+def test_funding_gate_skips_flat_positions_and_honors_config():
+    rm = RiskManager(funding_warn_annual=0.10, funding_hard_annual=0.20)
+    state = PortfolioState(cash=100_000, equity=100_000)
+    # Custom thresholds: 0.15 now sits between warn(0.10) and hard(0.20).
+    d = rm.decide("BTCUSDT", "Buy", state, price=100.0, atr=2.0,
+                  funding_rate_annualized=0.15)
+    base = rm.decide("BTCUSDT", "Buy", state, price=100.0, atr=2.0)
+    assert d.target_weight == pytest.approx(base.target_weight * 0.5)
+
+    # A flat decision (Sell) has no carry to price — gate must not touch it.
+    flat = rm.decide("BTCUSDT", "Sell", state, price=100.0, atr=2.0,
+                     funding_rate_annualized=0.90)
+    assert flat.target_weight == 0.0
+    assert "Funding drag" not in flat.rationale

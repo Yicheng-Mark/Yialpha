@@ -89,16 +89,43 @@ logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=4096)
-def _memoized_close_and_atr(ticker: str, trade_date: str) -> tuple[float, float]:
+def _memoized_close_and_atr(
+    ticker: str, trade_date: str, asset_type: str = "stock",
+) -> tuple[float, float]:
     """Load and compute the deterministic PIT ``(close, atr)`` for one date.
 
-    Module-level LRU keyed by ``(ticker, trade_date)`` — see
+    Module-level LRU keyed by ``(ticker, trade_date, asset_type)`` — see
     ``YiAgentsGraph._latest_close_and_atr`` for the PIT-safety argument.
     Raises on any failure so failures are never cached (the caller converts
     them to ``(None, None)`` and retries on the next run).
+
+    ``asset_type`` selects the price venue. A crypto_perp run must not price
+    its overlay (entry reference / ATR stop / position value) on the Yahoo
+    series ``load_ohlcv`` normalizes BTCUSDT into (BTC-USD spot): that is a
+    different instrument trading at a different basis than the Binance
+    perp the rest of the run analyzes, so a stop computed from it sits at
+    the wrong level. Perp runs load the perp's own daily candles via
+    ``binance_klines_frame`` (PIT-clamped by the same analysis-date
+    ContextVar the graph pins in ``_run_graph``) and compute the identical
+    14-period ATR on them. All other asset types keep the historical
+    ``load_ohlcv`` path byte-for-byte (crypto spot deliberately stays on
+    the Yahoo index source it has always used).
     """
-    from yiagents.dataflows.stockstats_utils import load_ohlcv
     from yiagents.risk.atr_stop import latest_atr_from_frame
+
+    if asset_type == "crypto_perp":
+        from datetime import datetime, timedelta
+
+        from yiagents.dataflows.binance import binance_klines_frame
+
+        lookback = (
+            datetime.strptime(str(trade_date), "%Y-%m-%d") - timedelta(days=120)
+        ).strftime("%Y-%m-%d")
+        frame = binance_klines_frame(ticker, lookback, str(trade_date))
+        close, atr = latest_atr_from_frame(frame)
+        return float(close), float(atr)
+
+    from yiagents.dataflows.stockstats_utils import load_ohlcv
 
     frame = load_ohlcv(ticker, str(trade_date))
     close, atr = latest_atr_from_frame(frame)
@@ -510,24 +537,26 @@ class YiAgentsGraph:
             self._risk_overlay_degraded = True
             return None
 
-    def _latest_close_and_atr(self, ticker, trade_date):
+    def _latest_close_and_atr(self, ticker, trade_date, asset_type: str = "stock"):
         """Best-effort (close, atr) as of ``trade_date`` for the risk overlay.
 
-        PIT-safe: reuses the project's cached, date-truncated OHLCV loader. Any
-        failure returns ``(None, None)`` so the overlay still runs without a
-        stop rather than aborting the decision.
+        PIT-safe: reuses the project's cached, date-truncated OHLCV loader.
+        Any failure returns ``(None, None)`` so the overlay still runs without
+        a stop rather than aborting the decision.
 
-        Memoized per ``(ticker, trade_date)`` at module level: the 14-period
-        stockstats ATR for a fixed PIT date is deterministic, and backtests
-        hit the same (ticker, date) repeatedly (A/B legs, multi-run
-        distributions). The date being part of the key is what keeps this
-        PIT-safe — a new analysis date re-computes rather than reusing a
-        prior day's value. Failures are NOT memoized (an lru_cache on a
-        raising function re-invokes next call), so a transient vendor fault
-        still retries on the next run.
+        Memoized per ``(ticker, trade_date, asset_type)`` at module level: the
+        14-period stockstats ATR for a fixed PIT date is deterministic, and
+        backtests hit the same key repeatedly (A/B legs, multi-run
+        distributions). ``asset_type`` is part of the key so the same ticker
+        on different venues (BTCUSDT perp vs Yahoo BTC-USD spot) never
+        cross-contaminates cache entries. The date being part of the key is
+        what keeps this PIT-safe — a new analysis date re-computes rather
+        than reusing a prior day's value. Failures are NOT memoized (an
+        lru_cache on a raising function re-invokes next call), so a transient
+        vendor fault still retries on the next run.
         """
         try:
-            return _memoized_close_and_atr(ticker, str(trade_date))
+            return _memoized_close_and_atr(ticker, str(trade_date), asset_type)
         except Exception as exc:  # noqa: BLE001
             logger.warning("risk overlay could not load price/ATR for %s on %s: %s",
                            ticker, trade_date, exc)
@@ -549,7 +578,10 @@ class YiAgentsGraph:
             "Treat the position sizing in the decision above with caution.\n"
         )
 
-    def _apply_risk_overlay(self, company_name, trade_date, final_state, portfolio_state):
+    def _apply_risk_overlay(
+        self, company_name, trade_date, final_state, portfolio_state,
+        asset_type: str = "stock",
+    ):
         """Append the deterministic risk overlay to the PM's final decision.
 
         The LLM keeps the rating and the thesis; this layer overrides size,
@@ -599,10 +631,21 @@ class YiAgentsGraph:
         # throughout this codebase (the historical parameter name predates the
         # ticker/company split); every data loader below keys on it as such.
         ticker = company_name
-        close, atr = self._latest_close_and_atr(ticker, trade_date)
+        close, atr = self._latest_close_and_atr(ticker, trade_date, asset_type)
+        # Perp carry input for the risk gate AND the ticket's funding note —
+        # ONE fetch feeds both. Live runs only: a historical run must not pay
+        # a network call per decision, and the gate stays skipped (None)
+        # there by design.
+        funding_total_7d: float | None = None
+        if asset_type == "crypto_perp":
+            funding_total_7d = self._trailing_funding_total(ticker, str(trade_date))
+        funding_annualized = (
+            funding_total_7d / 7.0 * 365.0 if funding_total_7d is not None else None
+        )
         try:
             decision = self.risk_manager.decide(
                 ticker, rating, state, price=close, atr=atr, date=str(trade_date),
+                funding_rate_annualized=funding_annualized,
             )
         except Exception as exc:  # noqa: BLE001 -- overlay must never break a run
             logger.warning("risk overlay failed for %s on %s: %s", ticker, trade_date, exc)
@@ -634,6 +677,15 @@ class YiAgentsGraph:
                 "- **⚠️ Stop-loss not set**: price/ATR data unavailable; this "
                 "position has no ATR-based stop protection.\n"
             )
+        # Perp advisory ticket: deterministic leverage / liquidation-price
+        # math — the same formulas scripts/trade_ticket.py uses, extracted to
+        # yiagents.risk.perp_ticket so the runtime overlay and the post-hoc
+        # ticket can never drift apart. The LLM never fills these numbers.
+        if asset_type == "crypto_perp":
+            overlay += self._render_perp_ticket(
+                ticker, str(trade_date), rating, decision, close, atr,
+                funding_total_7d=funding_total_7d,
+            )
         overlay += (
             f"- **Drawdown Regime**: {decision.breaker.regime}"
             f" ({decision.breaker.current_drawdown:.1%})\n"
@@ -654,6 +706,129 @@ class YiAgentsGraph:
             else "risk_overlay_no_price"
         )
         return final_state
+
+    @staticmethod
+    def _render_perp_ticket(
+        ticker: str,
+        trade_date: str,
+        rating: str,
+        decision,
+        close: float | None,
+        atr: float | None,
+        funding_total_7d: float | None = None,
+    ) -> str:
+        """Deterministic perp advisory bullets for the risk overlay.
+
+        Direction comes from the overlay's own final weight (never the LLM's
+        prose): positive → long, negative → short, flat → no ticket. Leverage
+        is the min of the four perp_ticket caps; the liquidation estimate is
+        the isolated-margin zero-MMR level (conservatively nearer than the
+        exchange's real trigger). ``funding_total_7d`` is the SAME trailing
+        7-day settlement sum the risk gate priced (fetched once by the
+        caller); None formats as an explicit n/a. Failures degrade to a
+        missing bullet, never a broken overlay.
+        """
+        if close is None or close <= 0.0 or atr is None or atr <= 0.0:
+            return ""
+        weight = decision.target_weight
+        if weight == 0.0:
+            return ""
+        direction = "long" if weight > 0.0 else "short"
+        entry = decision.entry_price if decision.entry_price else close
+
+        from yiagents.risk.perp_ticket import (
+            ATR_STOP_MULT,
+            RATING_STRENGTH,
+            compute_leverage,
+            liquidation_price,
+        )
+
+        strength = RATING_STRENGTH.get(rating, 0)
+        stop = decision.stop_loss
+        if direction == "short" or stop is None:
+            # The ATR stop module implements the long stop only; mirror it for
+            # shorts (and construct one when the overlay ran without it).
+            stop = (entry - ATR_STOP_MULT * atr if direction == "long"
+                    else entry + ATR_STOP_MULT * atr)
+        stop_dist = abs(entry - stop) / entry
+        atr_pct = atr / entry
+        lev, detail = compute_leverage(
+            stop_dist, atr_pct, "crypto_perp", strength,
+        )
+
+        def _p(x: float) -> str:
+            return f"{x:.6g}"
+
+        lines = [
+            "- **Suggested Leverage**: ≤ "
+            f"{lev:.1f}x (liq-dist {detail['L_liq']:.1f}x · vol "
+            f"{detail['L_vol']:.1f}x · conviction {detail['L_conv']:.1f}x · "
+            f"hard {detail['L_hard']:.0f}x)\n"
+        ]
+        liq = liquidation_price(entry, lev, direction, "crypto_perp")
+        if liq is not None:
+            off = abs(liq / entry - 1.0)
+            lines.append(
+                f"- **Est. Liquidation Price**: {_p(liq)} "
+                f"({off:.1%} from entry; the stop at {_p(stop)} "
+                "fires first by design)\n"
+            )
+        lines.append(
+            "- **Funding (7d)**: "
+            + YiAgentsGraph._format_funding_note(funding_total_7d, trade_date)
+            + "\n"
+        )
+        return "".join(lines)
+
+    @staticmethod
+    def _trailing_funding_total(ticker: str, trade_date: str) -> float | None:
+        """Trailing-7d funding settlement sum (PIT-clamped), or None.
+
+        None for historical runs (explicit no-fetch policy — a backtest must
+        not pay one vendor call per decision) and for fetch failures (the
+        caller degrades, never blocks). The single fetch feeds both the risk
+        gate (annualized) and the funding-note bullet.
+        """
+        from datetime import date, datetime, timedelta
+
+        try:
+            dt = datetime.strptime(trade_date, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+        if dt < date.today() - timedelta(days=3):
+            return None
+        try:
+            from yiagents.backtest.engine import _binance_funding_provider
+
+            start = (dt - timedelta(days=7)).strftime("%Y-%m-%d")
+            series = _binance_funding_provider(ticker, start, trade_date)
+            if series is None or series.empty:
+                return None
+            return float(series.sum())
+        except Exception as exc:  # noqa: BLE001 — advisory input only
+            logger.warning("funding lookup unavailable for %s: %s", ticker, exc)
+            return None
+
+    @staticmethod
+    def _format_funding_note(total_7d: float | None, trade_date: str) -> str:
+        """Render the trailing-7d funding sum; None explains WHY it is absent.
+
+        Distinguishes the two None causes explicitly — a historical run did
+        not fetch by policy, a live fetch failed — instead of one opaque n/a.
+        """
+        if total_7d is None:
+            from datetime import date, datetime, timedelta
+
+            try:
+                dt = datetime.strptime(trade_date, "%Y-%m-%d").date()
+            except ValueError:
+                return "n/a (unreadable date)"
+            if dt < date.today() - timedelta(days=3):
+                return "n/a (historical run; not fetched)"
+            return "n/a (fetch failed)"
+        direction = "longs pay" if total_7d > 0 else (
+            "longs receive" if total_7d < 0 else "flat")
+        return f"{total_7d:+.3%} net over 7d ({direction})"
 
     def _fetch_returns(
         self, ticker: str, trade_date: str, holding_days: int = 5,
@@ -914,6 +1089,7 @@ class YiAgentsGraph:
             past_context = self.memory_log.get_past_context(
                 company_name,
                 as_of_date=str(trade_date),
+                asset_type=asset_type,
             )
             instrument_context = self.resolve_instrument_context(
                 company_name, asset_type, trade_date=str(trade_date),
@@ -957,9 +1133,12 @@ class YiAgentsGraph:
                 final_state = self._invoke_or_stream(init_agent_state, args)
 
             # Phase 1: deterministically override size / stop / exposure (LLM kept
-            # the direction). No-op when risk_enabled is off.
+            # the direction). No-op when risk_enabled is off. asset_type routes
+            # the overlay's price source (perp runs price on the perp's own
+            # Binance candles, not the Yahoo spot series).
             final_state = self._apply_risk_overlay(
                 company_name, trade_date, final_state, portfolio_state,
+                asset_type=asset_type,
             )
 
             # Store current state for reflection.
@@ -992,6 +1171,7 @@ class YiAgentsGraph:
                 ticker=company_name,
                 trade_date=trade_date,
                 final_trade_decision=decision_for_memory,
+                asset_type=asset_type,
             )
 
             # Clear checkpoint on successful completion to avoid stale state.
@@ -1042,7 +1222,10 @@ class YiAgentsGraph:
         basis = final_state.get("price_at_decision_basis")
         if basis is None:
             close, _atr = (
-                self._latest_close_and_atr(self.ticker, trade_date)
+                self._latest_close_and_atr(
+                    self.ticker, trade_date,
+                    final_state.get("asset_type") or "stock",
+                )
                 if self.ticker else (None, None)
             )
             price, basis = (

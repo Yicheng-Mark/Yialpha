@@ -229,6 +229,10 @@ def load_run(ticker: str, date: str) -> dict | None:
         "ticker": ticker,
         "trade_date": state.get("trade_date", date),
         "rating": rating,
+        # Asset class the run analyzed (stock default matches pre-asset_type
+        # logs) — drives the venue badge on the report page so a BTCUSDT perp
+        # run is visually distinguishable from its spot twin.
+        "asset_type": state.get("asset_type") or "stock",
         "company_of_interest": state.get("company_of_interest", "") or "",
         "sections": {
             "market_report": state.get("market_report", "") or "",

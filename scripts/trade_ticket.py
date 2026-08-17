@@ -37,44 +37,26 @@ with contextlib.suppress(Exception):
 # ---------------------------------------------------------------------------
 # 资产类型 / 方向 / 评级 常量
 # ---------------------------------------------------------------------------
+# 杠杆/爆仓/止盈核心数学已抽到 yiagents/risk/perp_ticket.py（运行时风险
+# overlay 复用同一套公式）；本脚本保留展示用的本地常量与报告解析。
 
-#: 各资产类型的「硬顶杠杆」（监管 / sane ceiling）
-HARD_CEILING = {
-    "crypto_perp": 20.0,   # 永续合约 sane 上限（币安零售档）
-    "crypto_spot": 1.0,    # 现货无杠杆
-    "us_stock": 5.0,       # 美股 CFD / 融资实际档（Reg-T 隔夜 2×，日内高些）
-    "hk_stock": 5.0,       # 港股融资融券
-    "cn_stock": 1.5,       # A 股两融维持担保比约束；做空通道极受限
-}
-
-#: 方向强度（|值| 决定信心杠杆上限）：Buy/Sell 强方向=2，Overweight/Underweight 倾斜=1，Hold=0
-RATING_STRENGTH = {
-    "Buy": 2, "Overweight": 1, "Hold": 0, "Underweight": -1, "Sell": -2,
-}
-
-#: 信心杠杆上限（按风险偏好 × 方向强度）
-CONV_CAP = {
-    2: {"conservative": 5.0, "moderate": 10.0, "aggressive": 15.0},
-    1: {"conservative": 3.0, "moderate": 5.0, "aggressive": 8.0},
-}
-
-#: 波动率杠杆系数 K：L_vol = K / ATR%
-VOL_K = {"crypto_perp": 0.30, "crypto_spot": 0.20, "us_stock": 0.20,
-         "hk_stock": 0.20, "cn_stock": 0.15}
+from yiagents.risk.perp_ticket import (  # noqa: E402
+    ATR_STOP_MULT,
+    LIQ_SAFETY,
+    RATING_STRENGTH,
+    VOL_K,
+    compute_leverage,
+    liquidation_price,
+    take_profits,
+)
 
 #: 单笔风险预算（占资金比例）
 RISK_FRAC = {"conservative": 0.010, "moderate": 0.015, "aggressive": 0.025}
-
-#: ATR 止损乘数（与框架 risk/atr_stop.py 默认 mult=2.0 对齐）
-ATR_STOP_MULT = 2.0
 
 #: 框架的评级→信心映射（仅作透明展示，不直接驱动杠杆；杠杆用方向强度）
 RATING_TO_CONFIDENCE = {
     "Buy": 0.90, "Overweight": 0.72, "Hold": 0.55, "Underweight": 0.35, "Sell": 0.12,
 }
-
-#: 爆仓安全倍数：爆仓距离必须 ≥ 爆仓安全倍数 × 止损距离（让止损先于爆仓触发）
-LIQ_SAFETY = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -297,53 +279,6 @@ def resolve_levels(parsed_trader, parsed_pm, parsed_market, direction):
         stop = entry - ATR_STOP_MULT * atr if direction == "long" else entry + ATR_STOP_MULT * atr
 
     return entry, stop, atr
-
-
-def compute_leverage(stop_dist, atr_pct, asset_type, strength, profile):
-    """
-    杠杆 = min(四个上限)。返回 (L, 各上限明细)。
-      L_liq  = 1 / (爆仓安全倍数 × stop_dist)   —— 爆仓距离 ≥ 安全倍数 × 止损距离
-      L_vol  = K / atr_pct                       —— 高波动降杠杆
-      L_conv = 信心上限（方向强度 × 风险偏好）
-      L_hard = 资产类型硬顶
-    """
-    hard = HARD_CEILING.get(asset_type, 5.0)
-
-    l_liq = 1.0 / (LIQ_SAFETY * stop_dist) if stop_dist and stop_dist > 0 else hard
-    l_vol = VOL_K.get(asset_type, 0.20) / atr_pct if atr_pct and atr_pct > 0 else hard
-    l_conv = CONV_CAP.get(abs(strength), {}).get(profile, 5.0) if strength else 0.0
-
-    L = max(1.0, min(l_liq, l_vol, l_conv, hard))
-    return L, {"L_liq": l_liq, "L_vol": l_vol, "L_conv": l_conv, "L_hard": hard}
-
-
-def liquidation_price(entry, L, direction, asset_type):
-    """隔离保证金爆仓价估算（忽略维持保证金/费率，保守略近）。None 表示不适用。"""
-    if asset_type == "crypto_spot" or L <= 1.0:
-        return None
-    if direction == "long":
-        return entry * (1.0 - 1.0 / L)
-    if direction == "short":
-        return entry * (1.0 + 1.0 / L)
-    return None
-
-
-def take_profits(entry, stop, direction):
-    """
-    R 倍数止盈（R = |entry−stop|）：TP1 = 1.5R, TP2 = 3R, TP3 = 5R。
-    纯 R 倍数，结构位另作参考提示（见 render），不硬钳 —— 突破阻力后常有 runner，
-    硬钳到阻力位会把三档止盈压成同一个值，反而失去分批意义。
-    """
-    if entry is None or stop is None:
-        return []
-    R = abs(entry - stop)
-    if R <= 0:
-        return []
-    out = []
-    for mult in (1.5, 3.0, 5.0):
-        tp = entry + mult * R if direction == "long" else entry - mult * R
-        out.append(round(tp, 6))
-    return out
 
 
 def build_ticket(report_dir: Path, capital: float, profile: str) -> dict:

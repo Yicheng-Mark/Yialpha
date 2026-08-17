@@ -117,12 +117,26 @@ def _perp_section(result: BacktestResult) -> list[str]:
         f"Side: {'long + short' if cs.get('perp_short') else 'long-only'}  |  "
         f"Fill quantization: {cs.get('perp_fill_quantization', 'n/a')}"
     )
+    liq_source = cs.get("perp_liq_price_source")
+    if liq_source:
+        lines.append(f"- Liquidation trigger source: {liq_source}")
+    m = result.metrics
     funding = cs.get("perp_funding_paid_total")
     if funding is not None:
         # Signed: positive = net paid (long-biased drag), negative = net
         # received (short-biased runs collect when funding is positive).
         direction = "net paid (drag)" if funding >= 0 else "net received"
-        lines.append(f"- Funding over the window: {funding:+.2f} USDT ({direction})")
+        drag = getattr(m, "funding_drag_annualized", None) if m else None
+        drag_txt = f"  |  ~{drag:+.2%}/yr of initial capital" if drag else ""
+        lines.append(
+            f"- Funding over the window: {funding:+.2f} USDT ({direction})"
+            f"{drag_txt}"
+        )
+    stops = cs.get("perp_stop_triggers") or []
+    if stops:
+        lines.append(f"- Stop-trigger exits: {len(stops)}")
+    elif cs.get("perp_stop_simulation"):
+        lines.append("- Stop-trigger exits: 0")
     liqs = cs.get("perp_liquidations") or []
     if liqs:
         lines.append(f"- ⚠️ Liquidation events: {len(liqs)}")

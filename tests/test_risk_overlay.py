@@ -44,7 +44,7 @@ def test_overlay_disabled_is_noop():
 @pytest.mark.unit
 def test_overlay_appends_section_and_preserves_rating(monkeypatch):
     g = _make_graph(risk_enabled=True)
-    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (190.0, 3.0))
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (190.0, 3.0))
 
     state = {"final_trade_decision": "**Rating**: Buy\n\nStrong momentum thesis."}
     out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
@@ -62,7 +62,7 @@ def test_overlay_appends_section_and_preserves_rating(monkeypatch):
 @pytest.mark.unit
 def test_overlay_sell_has_no_stop(monkeypatch):
     g = _make_graph(risk_enabled=True)
-    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (190.0, 3.0))
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (190.0, 3.0))
     state = {"final_trade_decision": "**Rating**: Sell"}
     out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
     md = out["final_trade_decision"]
@@ -74,7 +74,7 @@ def test_overlay_sell_has_no_stop(monkeypatch):
 def test_overlay_survives_missing_price(monkeypatch):
     """No price/ATR available -> overlay still runs, just without a stop."""
     g = _make_graph(risk_enabled=True)
-    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (None, None))
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (None, None))
     state = {"final_trade_decision": "**Rating**: Overweight"}
     out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
     md = out["final_trade_decision"]
@@ -94,7 +94,7 @@ def test_overlay_marks_missing_atr_warning(monkeypatch):
     ``test_overlay_decide_failure_marks_decision``.
     """
     g = _make_graph(risk_enabled=True)
-    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (None, None))
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (None, None))
     state = {"final_trade_decision": "**Rating**: Buy\n\nThesis."}
     out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
     md = out["final_trade_decision"]
@@ -112,7 +112,7 @@ def test_overlay_marks_missing_atr_warning(monkeypatch):
 def test_overlay_no_marker_when_price_available(monkeypatch):
     """Price loaded normally -> no false-positive missing-stop marker."""
     g = _make_graph(risk_enabled=True)
-    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (190.0, 3.0))
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (190.0, 3.0))
     state = {"final_trade_decision": "**Rating**: Buy"}
     out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
     md = out["final_trade_decision"]
@@ -124,7 +124,7 @@ def test_overlay_no_marker_when_price_available(monkeypatch):
 def test_overlay_no_marker_for_sell_without_price(monkeypatch):
     """Sell (target_weight <= 0) + no price -> no marker (no stop expected anyway)."""
     g = _make_graph(risk_enabled=True)
-    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (None, None))
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (None, None))
     state = {"final_trade_decision": "**Rating**: Sell"}
     out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
     md = out["final_trade_decision"]
@@ -145,7 +145,7 @@ def test_overlay_marks_stop_computation_failure(monkeypatch, caplog):
 
     g = _make_graph(risk_enabled=True)
     # close valid, atr negative -> atr_stop_from_values raises ValueError.
-    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (190.0, -1.0))
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (190.0, -1.0))
     state = {"final_trade_decision": "**Rating**: Buy\n\nThesis."}
     with caplog.at_level(logging.WARNING, logger="yiagents.risk.manager"):
         out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
@@ -162,7 +162,7 @@ def test_overlay_marks_stop_computation_failure(monkeypatch, caplog):
 @pytest.mark.unit
 def test_overlay_coerces_dict_portfolio_state(monkeypatch):
     g = _make_graph(risk_enabled=True)
-    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (100.0, 2.0))
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (100.0, 2.0))
     portfolio = {
         "cash": 50_000, "equity": 120_000,
         "positions": {"AAPL": 70_000}, "sectors": {"Tech": 70_000},
@@ -176,7 +176,7 @@ def test_overlay_coerces_dict_portfolio_state(monkeypatch):
 @pytest.mark.unit
 def test_overlay_drawdown_regime_recorded(monkeypatch):
     g = _make_graph(risk_enabled=True)
-    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (100.0, 2.0))
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (100.0, 2.0))
     # Deep drawdown: equity 80k vs a 100k peak forces hard-stop via the breaker.
     portfolio = {"equity": 80_000, "cash": 80_000}
     # Prime the breaker by deciding once at the lower equity so it tracks peak.
@@ -212,7 +212,7 @@ def test_overlay_build_failure_marks_decision():
 def test_overlay_decide_failure_marks_decision(monkeypatch):
     """When decide() throws, the decision gets a visible DISABLED warning."""
     g = _make_graph(risk_enabled=True)
-    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (190.0, 3.0))
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (190.0, 3.0))
     # Force decide() to raise.
     original_decide = g.risk_manager.decide
     g.risk_manager.decide = lambda *a, **k: (_ for _ in ()).throw(
@@ -259,7 +259,7 @@ def test_overlay_prefers_structured_pm_rating(monkeypatch):
         captured["rating"] = rating
         return original_decide(ticker, rating, *a, **kw)
 
-    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (190.0, 3.0))
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (190.0, 3.0))
     monkeypatch.setattr(g.risk_manager, "decide", spy_decide)
     # Markdown says "Sell" but pm_rating says "Buy" — the structured value wins.
     state = {
@@ -282,10 +282,216 @@ def test_overlay_falls_back_to_parse_rating_when_pm_rating_empty(monkeypatch):
         captured["rating"] = rating
         return original_decide(ticker, rating, *a, **kw)
 
-    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d: (190.0, 3.0))
+    monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (190.0, 3.0))
     monkeypatch.setattr(g.risk_manager, "decide", spy_decide)
     # pm_rating absent (free-text fallback / old checkpoint) -> parse markdown.
     state = {"final_trade_decision": "**Rating**: Hold\n\nThesis."}
     out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
     assert captured["rating"] == "Hold"
     assert "Quantitative Risk Overlay" in out["final_trade_decision"]
+
+
+@pytest.mark.unit
+def test_overlay_threads_asset_type_into_price_loader(monkeypatch):
+    """crypto_perp runs must price the overlay on the perp venue.
+
+    ``_apply_risk_overlay`` receives ``asset_type`` from ``_run_graph`` and
+    forwards it to the close/ATR loader; a perp that fell back to the Yahoo
+    path would compute its entry reference / ATR stop on the wrong
+    instrument (BTC-USD spot instead of the BTCUSDT perp book).
+    """
+    g = _make_graph(risk_enabled=True)
+    seen: list[str] = []
+
+    def capture(ticker, date, asset_type="stock"):
+        seen.append(asset_type)
+        return (65000.0, 900.0)
+
+    monkeypatch.setattr(g, "_latest_close_and_atr", capture)
+    state = {"final_trade_decision": "**Rating**: Buy\n\nThesis.", "pm_rating": "Buy"}
+    g._apply_risk_overlay(
+        "BTCUSDT", "2026-06-01", state, {"equity": 100_000}, asset_type="crypto_perp",
+    )
+    assert seen == ["crypto_perp"]
+
+    # Default stays the historical stock path (byte-stable for non-perp runs).
+    seen.clear()
+    g._apply_risk_overlay("AAPL", "2026-06-01", state, {"equity": 100_000})
+    assert seen == ["stock"]
+
+
+# --------------------------------------------------------------------------- #
+# Perp advisory ticket: deterministic leverage / liquidation bullets
+# --------------------------------------------------------------------------- #
+
+
+def _perp_overlay_md(g, ticker="BTCUSDT", rating="Buy", weight=None):
+    """Run the overlay on a perp-shaped decision and return the markdown."""
+    state = {
+        "final_trade_decision": f"**Rating**: {rating}\n\nThesis.",
+        "pm_rating": rating,
+    }
+    out = g._apply_risk_overlay(
+        ticker, "2020-01-15", state, {"equity": 100_000},
+        asset_type="crypto_perp",
+    )
+    return out["final_trade_decision"]
+
+
+@pytest.mark.unit
+def test_perp_run_renders_ticket_bullets(monkeypatch):
+    g = _make_graph(risk_enabled=True)
+    monkeypatch.setattr(
+        g, "_latest_close_and_atr",
+        lambda t, d, at="stock": (100.0, 2.0),
+    )
+    md = _perp_overlay_md(g)
+    assert "**Suggested Leverage**" in md
+    assert "**Est. Liquidation Price**" in md
+    assert "**Funding (7d)**: n/a (historical run; not fetched)" in md
+    # 2020-01-15 is far in the past: the funding note must NOT have hit the
+    # network — the n/a text is the explicit historical marker.
+    # Deterministic math: entry 100, atr 2 -> atr_pct 2%, strength Buy=2.
+    # L_vol = 0.30/0.02 = 15x; L_conv(2, conservative) = 5x -> L = 5x.
+    assert "≤ 5.0x" in md
+    # Liq at 100*(1-1/5) = 80; stop = 100-2*2 = 96 fires first by design.
+    assert "80" in md and "96" in md
+
+
+@pytest.mark.unit
+def test_perp_ticket_short_side_mirrors():
+    # Force a negative overlay weight: Sell rating + allow-short semantics via
+    # a spied manager would be heavy; instead render through the static helper
+    # with a synthesized decision-shaped object.
+    from types import SimpleNamespace
+
+    from yiagents.graph.trading_graph import YiAgentsGraph
+
+    decision = SimpleNamespace(
+        rating="Sell", action="exit", target_weight=-0.10,
+        stop_loss=None, entry_price=100.0,
+    )
+    out = YiAgentsGraph._render_perp_ticket(
+        "BTCUSDT", "2020-01-15", "Sell", decision, 100.0, 2.0,
+    )
+    assert "**Suggested Leverage**" in out
+    # Short: stop mirrored to 100+2*2=104; liq above entry.
+    assert "104" in out
+
+
+@pytest.mark.unit
+def test_stock_run_has_no_perp_bullets(monkeypatch):
+    g = _make_graph(risk_enabled=True)
+    monkeypatch.setattr(
+        g, "_latest_close_and_atr", lambda t, d, at="stock": (190.0, 3.0),
+    )
+    state = {"final_trade_decision": "**Rating**: Buy\n\nThesis.", "pm_rating": "Buy"}
+    out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
+    md = out["final_trade_decision"]
+    assert "Suggested Leverage" not in md
+    assert "Liquidation Price" not in md
+    assert "Funding (7d)" not in md
+
+
+@pytest.mark.unit
+def test_perp_ticket_skipped_without_price_or_atr(monkeypatch):
+    g = _make_graph(risk_enabled=True)
+    monkeypatch.setattr(
+        g, "_latest_close_and_atr", lambda t, d, at="stock": (None, None),
+    )
+    md = _perp_overlay_md(g)
+    assert "Suggested Leverage" not in md
+    # The pre-existing no-stop warning still fires for the sized position.
+    assert "Stop-loss not set" in md
+
+
+@pytest.mark.unit
+def test_perp_ticket_math_module_pinned():
+    """The extracted module reproduces the script's documented caps exactly."""
+    from yiagents.risk.perp_ticket import (
+        compute_leverage,
+        liquidation_price,
+        take_profits,
+    )
+
+    L, detail = compute_leverage(0.04, 0.03, "crypto_perp", 2, "conservative")
+    assert pytest.approx(5.0) == L  # conviction cap binds
+    assert detail["L_liq"] == pytest.approx(12.5)
+    assert detail["L_vol"] == pytest.approx(10.0)
+    assert detail["L_hard"] == pytest.approx(20.0)
+
+    assert liquidation_price(100.0, 5.0, "long", "crypto_perp") == pytest.approx(80.0)
+    assert liquidation_price(100.0, 5.0, "short", "crypto_perp") == pytest.approx(120.0)
+    assert liquidation_price(100.0, 1.0, "long", "crypto_perp") is None
+    assert liquidation_price(100.0, 5.0, "long", "crypto_spot") is None
+
+    assert take_profits(100.0, 96.0, "long") == pytest.approx([106.0, 112.0, 120.0])
+    assert take_profits(100.0, 104.0, "short") == pytest.approx([94.0, 88.0, 80.0])
+    assert take_profits(None, 96.0, "long") == []
+
+
+@pytest.mark.unit
+def test_perp_live_run_funding_gate_scales_overlay(monkeypatch):
+    """A live perp run feeds trailing funding into the risk gate: strongly
+    adverse carry halves the overlay's target weight and says so in the
+    rationale; the funding-note bullet reads the same number."""
+    from datetime import date
+
+    g = _make_graph(risk_enabled=True)
+    monkeypatch.setattr(
+        g, "_latest_close_and_atr", lambda t, d, at="stock": (100.0, 2.0),
+    )
+    today = date.today().strftime("%Y-%m-%d")
+
+    # Adverse 50%/yr carry: 7-day sum = 0.50 * 7 / 365. The closure switch
+    # lets the historical twin flip the fetch off without re-patching.
+    fetch = {"total": 0.50 * 7 / 365}
+    monkeypatch.setattr(
+        g, "_trailing_funding_total", lambda t, d: fetch["total"],
+    )
+    state = {"final_trade_decision": "**Rating**: Buy\n\nThesis.", "pm_rating": "Buy"}
+    out = g._apply_risk_overlay(
+        "BTCUSDT", today, state, {"equity": 100_000}, asset_type="crypto_perp",
+    )
+    md = out["final_trade_decision"]
+    assert "Funding drag +50%/yr" in md
+    assert "Funding (7d)" in md and "longs pay" in md
+
+    # Same setup with the funding fetch unavailable (historical twin): full
+    # weight and an explicit n/a note. Fresh state dict — the overlay mutates
+    # its input in place, so reusing `state` would stack both overlays.
+    fetch["total"] = None
+    out2 = g._apply_risk_overlay(
+        "BTCUSDT", today,
+        {"final_trade_decision": "**Rating**: Buy\n\nThesis.", "pm_rating": "Buy"},
+        {"equity": 100_000}, asset_type="crypto_perp",
+    )
+    md2 = out2["final_trade_decision"]
+    assert "Funding drag" not in md2
+    assert "n/a (fetch failed)" in md2
+    # The gate halved the first run's target weight relative to this twin.
+    import re
+
+    def _weight(text):
+        m = re.search(r"\*\*Target Weight\*\*:\s*([0-9.]+)%", text)
+        return float(m.group(1))
+
+    assert _weight(md) == pytest.approx(_weight(md2) * 0.5, rel=1e-6)
+
+
+@pytest.mark.unit
+def test_stock_run_never_fetches_funding(monkeypatch):
+    g = _make_graph(risk_enabled=True)
+    calls = {"n": 0}
+
+    def boom(t, d):
+        calls["n"] += 1
+        raise AssertionError("stock runs must not touch the funding vendor")
+
+    monkeypatch.setattr(g, "_trailing_funding_total", boom)
+    monkeypatch.setattr(
+        g, "_latest_close_and_atr", lambda t, d, at="stock": (190.0, 3.0),
+    )
+    state = {"final_trade_decision": "**Rating**: Buy\n\nThesis.", "pm_rating": "Buy"}
+    g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
+    assert calls["n"] == 0
