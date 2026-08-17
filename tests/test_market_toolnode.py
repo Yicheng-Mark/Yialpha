@@ -97,6 +97,27 @@ def test_news_toolnode_registers_web_search():
     )
 
 
+@pytest.mark.unit
+def test_market_and_fundamentals_toolnodes_register_web_search():
+    """Scoped-budget allocation (2026-08-17): the market and fundamentals
+    analysts bind their own web_search instances on live dates — each must
+    be executable in its ToolNode. All instances share the tool NAME
+    "web_search"; each ToolNode holds its own scope-charging instance, so
+    one registry entry per node is the correct shape."""
+    nodes = _tool_nodes()
+    market_tools = set(nodes["market"].tools_by_name)
+    fundamentals_tools = set(nodes["fundamentals"].tools_by_name)
+    assert "web_search" in market_tools, (
+        "web_search is bound to the market analyst (live runs) but not "
+        "registered in the market ToolNode, so the model's call fails."
+    )
+    assert "web_search" in fundamentals_tools, (
+        "web_search is bound to the fundamentals analyst (live runs) but "
+        "not registered in the fundamentals ToolNode, so the model's call "
+        "fails."
+    )
+
+
 def _tool_nodes() -> dict:
     # _create_tool_nodes needs only self.quick_thinking_llm (the PoT tool
     # closure); a stub keeps this a pure-construction unit test.

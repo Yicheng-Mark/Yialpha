@@ -28,6 +28,7 @@ from yiagents.agents.utils.agent_utils import (
     get_support_resistance,
     get_verified_market_snapshot,
     get_volume_features,
+    web_search_market,
 )
 from yiagents.agents.utils.prompt_builder import build_collaborator_prompt, build_fincot_prompt
 from yiagents.dataflows import indicator_catalog
@@ -136,6 +137,23 @@ _A_SHARE_MARKET_NUDGE = (
     "tool returns 'data not available' or 'no coverage found', report that "
     "honestly and do not estimate northbound holdings, sector flows, or "
     "breadth."
+)
+
+# Appended to the market system prompt when web_search is bound (config
+# web_search_enabled, default ON, live dates only). The vendor degrades to a
+# WEB_SEARCH_UNAVAILABLE sentinel + data_quality event on key-missing /
+# budget-exhausted, so advertising it is always run-safe; the market instance
+# charges its own Tavily budget scope and never competes with the news or
+# fundamentals analysts' calls.
+_WEB_SEARCH_NUDGE = (
+    " Optionally use web_search(query) for open-web context the structured "
+    "market tools cannot surface (macro and sector regime shifts, regulatory "
+    "actions moving whole sectors, index/ETF flow narratives). Web-search "
+    "grounding rules: cite the source URL for every claim drawn from its "
+    "results, and treat snippets as qualitative context ONLY — any prices or "
+    "figures appearing in them are unverified text and must never be "
+    "reported as data values (numbers come exclusively from the structured "
+    "data tools)."
 )
 
 # The indicator catalog the analyst selects from. Shared by both prompt forms so
@@ -420,6 +438,19 @@ def create_market_analyst(llm):
                 get_a_share_market_breadth_native,
             ])
 
+        # Open-web search (config: web_search_enabled, on by default). Live
+        # dates only — Tavily has no as-of parameter, so binding it on a
+        # historical replay date would leak future web context (same PIT
+        # contract as the news analyst's prediction-markets gate). Applies to
+        # every asset branch above because it is appended after they settle.
+        # Byte-equivalent when the flag is off or the date is historical: no
+        # tool, no nudge.
+        bind_web_search = (
+            get_config().get("web_search_enabled", True) and not historical
+        )
+        if bind_web_search:
+            tools.append(web_search_market)
+
         system_message = _system_message()
 
         # Composite regime context (config: regime_context, default ON;
@@ -476,6 +507,11 @@ def create_market_analyst(llm):
         # tools do (byte-equivalent when off or non-A-share).
         if get_config().get("a_share_native") and is_a_stock(ticker):
             system_message = system_message + _A_SHARE_MARKET_NUDGE
+
+        # Web-search nudge uses the SAME gate (flag AND live date) as the
+        # tool extension above, so the prompt only changes when the tools do.
+        if bind_web_search:
+            system_message = system_message + _WEB_SEARCH_NUDGE
 
         prompt = build_collaborator_prompt(include_tools=True)
 

@@ -482,11 +482,15 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "ECB Bank of England BOJ central bank policy",
         "oil commodities supply chain energy",
     ],
-    # Open-web search (Tavily) for the news analyst. On by default: the tool
-    # degrades to a WEB_SEARCH_UNAVAILABLE sentinel + data_quality event when
-    # TAVILY_API_KEY is missing or the per-run budget
-    # (YIAGENTS_TAVILY_MAX_CALLS_PER_RUN, default 6) is exhausted, so enabling
-    # it never aborts a run. Set False for byte-for-byte pre-Tavily prompts.
+    # Open-web search (Tavily) for the news/market/fundamentals analysts
+    # (live dates only — historical replays never see the tool, since Tavily
+    # has no as-of parameter). On by default: the tool degrades to a
+    # WEB_SEARCH_UNAVAILABLE sentinel + data_quality event when no key is
+    # set (TAVILY_API_KEYS pool or single TAVILY_API_KEY) or the per-run
+    # budget (YIAGENTS_TAVILY_MAX_CALLS_PER_RUN, default 15 total; split
+    # news:8/market:5/fundamentals:2, override with
+    # YIAGENTS_TAVILY_BUDGET_SPLIT) is exhausted, so enabling it never
+    # aborts a run. Set False for byte-for-byte pre-Tavily prompts.
     "web_search_enabled": True,
     # Data vendor configuration
     # Category-level configuration (default for all tools in category).

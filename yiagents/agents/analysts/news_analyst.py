@@ -28,9 +28,10 @@ _A_SHARE_NATIVE_NUDGE = (
 )
 
 # Appended to the news system prompt when config web_search_enabled is on
-# (default). The tool itself degrades to a WEB_SEARCH_UNAVAILABLE sentinel +
-# data_quality event when TAVILY_API_KEY is missing or the per-run budget is
-# exhausted, so advertising it is always run-safe.
+# (default) AND the run date is live. The tool itself degrades to a
+# WEB_SEARCH_UNAVAILABLE sentinel + data_quality event when TAVILY_API_KEY is
+# missing or the per-run budget is exhausted, so advertising it is always
+# run-safe.
 _WEB_SEARCH_INSTRUCTION = (
     " Optionally use web_search(query) for open-web context on recent "
     "developments the news vendors may cover thinly (regulatory actions, "
@@ -59,12 +60,18 @@ def create_news_analyst(llm):
                 "market-implied probabilities of forward-looking events "
                 "(e.g. Fed decisions, geopolitics, or sector events)."
             )
-        # Open-web search (config: web_search_enabled, on by default). The
-        # vendor handles key-missing / budget-exhausted degradation itself
-        # (sentinel + data_quality event), so the gate here only decides
-        # whether the analyst sees the tool at all.
+        # Open-web search (config: web_search_enabled, on by default). Live
+        # dates only: Tavily returns today's web with no as-of parameter, so
+        # advertising it on a historical replay date would leak future
+        # information — same PIT contract as get_prediction_markets above.
+        # The vendor handles key-missing / budget-exhausted degradation
+        # itself (sentinel + data_quality event), so the gate here only
+        # decides whether the analyst sees the tool at all.
         web_search_instruction = ""
-        if get_config().get("web_search_enabled", True):
+        if (
+            get_config().get("web_search_enabled", True)
+            and not is_historical_date(current_date)
+        ):
             tools.append(web_search)
             web_search_instruction = _WEB_SEARCH_INSTRUCTION
         # Native A-share news (env: YIAGENTS_A_SHARE_NATIVE, off by default).

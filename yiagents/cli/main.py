@@ -1732,24 +1732,51 @@ def config_check():
         _AV: "stock/fundamentals vendor",
         _TUSHARE: "China A-share data",
         _KIMI: "Kimi/Moonshot (if provider=kimi)",
-        _TAVILY: "open-web search for the news analyst",
+        _TAVILY: "open-web search (news/market/fundamentals analysts)",
     }
     console.print("\n[dim]Optional data sources:[/dim]")
     for env_var, desc in optional_keys.items():
         status = "[green]SET[/green]" if os.environ.get(env_var) else "[yellow]unset[/yellow]"
         console.print(f"  • {env_var}: {status} [dim]({desc})[/dim]")
 
-    # web_search is advertised to the news analyst whenever web_search_enabled
-    # is on (default): a missing key degrades each call to a sentinel rather
-    # than failing the run, but the analyst still spends turns discovering
-    # that — surface it here so the operator can fix .env before running.
+    # web_search is advertised to the news/market/fundamentals analysts
+    # whenever web_search_enabled is on (default) and the run date is live:
+    # a missing key degrades each call to a sentinel rather than failing the
+    # run, but the analysts still spend turns discovering that — surface it
+    # here so the operator can fix .env before running.
+    from yiagents.dataflows import tavily as _tavily
     from yiagents.dataflows.config import get_config as _get_config
 
-    if _get_config().get("web_search_enabled", True) and not os.environ.get(_TAVILY):
+    _tavily_pool = _tavily.api_key_pool()
+    if _get_config().get("web_search_enabled", True) and not _tavily_pool:
         console.print(
-            f"  [yellow]⚠[/yellow] web_search_enabled is on but {_TAVILY} is unset — "
-            "every web_search call will degrade to WEB_SEARCH_UNAVAILABLE"
+            f"  [yellow]⚠[/yellow] web_search_enabled is on but no Tavily key "
+            f"is set (neither {_tavily.KEYS_POOL_ENV} nor {_TAVILY}) — every "
+            "web_search call will degrade to WEB_SEARCH_UNAVAILABLE"
         )
+    elif len(_tavily_pool) > 1:
+        console.print(
+            f"  [green]✅[/green] Tavily key pool: {len(_tavily_pool)} keys "
+            "[dim](round-robin; a 401/403/429 key rotates out within the run)[/dim]"
+        )
+
+    # Scoped budget split: parseable or unset. Malformed values fall back to
+    # the default split at runtime (warned there too) — surface it here so a
+    # batch never runs with the wrong allocation.
+    _SPLIT = "YIAGENTS_TAVILY_BUDGET" + "_SPLIT"
+    _split_raw = os.environ.get(_SPLIT)
+    if _split_raw is not None:
+        if _tavily.parse_budget_split(_split_raw) is None:
+            console.print(
+                f"  [yellow]⚠[/yellow] {_SPLIT}={_split_raw!r} is malformed — "
+                "runtime falls back to the default split "
+                "(news:8, market:5, fundamentals:2)"
+            )
+        else:
+            console.print(
+                f"  [green]✅[/green] {_SPLIT}={_split_raw!r}"
+                + " [dim](per-analyst web-search call caps)[/dim]"
+            )
 
     # -- Data-quality gate + vendor chains -------------------------------------
     policy = str(_get_config().get("data_vacuum_policy", "reject") or "").strip().lower()

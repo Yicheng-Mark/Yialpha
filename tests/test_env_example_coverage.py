@@ -43,6 +43,7 @@ _DIRECT_READ_KEYS = {
     "YIAGENTS_BAOSTOCK_TIMEOUT_S",   # dataflows/baostock_vendor.py
     "YIAGENTS_LLM_TIMEOUT_S",        # llm_clients/_timeout.py
     "YIAGENTS_SENTIMENT_PARALLEL_FETCH",  # agents/analysts/sentiment_analyst.py
+    "YIAGENTS_TAVILY_BUDGET_SPLIT",  # dataflows/tavily.py:_budget_split
     "YIAGENTS_ROBUST_CHILD_SCRIPT",  # scripts/run_robust.py
     "YIAGENTS_TIMEOUT_SHIM_DIR",     # scripts/run_robust.py
     "YIAGENTS_EXECUTION_ENABLED",    # execution/binance_gateway.py (legacy gate)

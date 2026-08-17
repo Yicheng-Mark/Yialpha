@@ -22,7 +22,19 @@ so replaying a stale response would defeat the purpose.
 
 A per-run call budget (ContextVar, like the quality ledger, so concurrent
 batch workers keep separate counters) caps credits: the LLM tool loop cannot
-burn the free tier from inside one analysis.
+burn the free tier from inside one analysis. The budget is split by *scope*
+(one per analyst that binds a web_search instance — news / market /
+fundamentals) so a search-happy analyst cannot starve the others; the split
+defaults to news:8 / market:5 / fundamentals:2 (sum = the total cap) and is
+tunable via ``YIAGENTS_TAVILY_BUDGET_SPLIT``.
+
+Key pool: ``TAVILY_API_KEYS`` (comma-separated) plus the single
+``TAVILY_API_KEY`` form a round-robin pool — multiple free-tier keys
+multiply the monthly credit allowance. A key answering 401/403/429 is
+removed from the pool for the rest of the run (revived on the next run) and
+the call immediately retries on the next key; only when every key is
+unavailable does the sentinel fire. Key rotation is recorded in the quality
+ledger (capacity degradation must stay visible, never silent).
 """
 
 from __future__ import annotations
@@ -42,10 +54,19 @@ TAVILY_API_BASE = "https://api.tavily.com"
 
 #: Default network timeout (seconds); override with YIAGENTS_TAVILY_TIMEOUT_S.
 DEFAULT_TIMEOUT_S = 20
-#: Default per-run search-call cap; override with YIAGENTS_TAVILY_MAX_CALLS_PER_RUN.
-#: 6 covers a news analyst doing 2-3 angles plus a follow-up without letting
-#: a looping model drain the monthly free credits in one batch.
-DEFAULT_MAX_CALLS_PER_RUN = 6
+#: Default per-run search-call cap (TOTAL across scopes); override with
+#: YIAGENTS_TAVILY_MAX_CALLS_PER_RUN.
+#: 15 assumes the multi-key pool (TAVILY_API_KEYS: ~5,000 free credits/
+#: month); a single-key setup may want 6 — the cap exists so a looping model
+#: cannot drain the monthly credits from inside one analysis.
+DEFAULT_MAX_CALLS_PER_RUN = 15
+#: Default per-scope split of the total cap (news / market / fundamentals
+#: analysts, one web_search instance each). Sum == DEFAULT_MAX_CALLS_PER_RUN;
+#: overriding only the total rescales this split proportionally, while
+#: YIAGENTS_TAVILY_BUDGET_SPLIT replaces it wholesale (scopes omitted get 0).
+DEFAULT_BUDGET_SPLIT: dict[str, int] = {"news": 8, "market": 5, "fundamentals": 2}
+#: Comma-separated extra keys pooled with the single TAVILY_API_KEY.
+KEYS_POOL_ENV = "TAVILY_API_KEYS"
 #: Cap on Tavily's max_results (API allows more; more would flood context).
 MAX_RESULTS_CEILING = 10
 #: Per-result content snippet cap — snippets arrive pre-chunked by Tavily but
@@ -56,17 +77,175 @@ _SNIPPET_CHAR_CAP = 900
 #: Router-style method tag used in quality events for every sentinel below.
 _METHOD = "web_search"
 
-_calls_var: ContextVar[int] = ContextVar("yiagents_tavily_calls", default=0)
+#: Per-scope charged-call counts for the current run. Default None (mutable
+# ContextVar defaults are a shared-state hazard — B039); initialized to a
+# per-context dict on first use. Copy-on-write from there, which keeps
+# concurrent batch workers' counters independent.
+_calls_var: ContextVar[dict[str, int] | None] = ContextVar(
+    "yiagents_tavily_calls", default=None
+)
+
+
+def _calls_map() -> dict[str, int]:
+    calls = _calls_var.get()
+    if calls is None:
+        calls = {}
+        _calls_var.set(calls)
+    return calls
+
+
+#: Round-robin cursor and the set of keys removed from this run's pool
+#: (401/403/429). Both reset with the budget at run start — a quota-dead key
+#: may recover by the next run, and each run should start its rotation
+#: deterministically.
+_key_cursor_var: ContextVar[int] = ContextVar("yiagents_tavily_key_cursor", default=0)
+_dead_keys_var: ContextVar[frozenset[int] | None] = ContextVar(
+    "yiagents_tavily_dead_keys", default=None
+)
+
+
+def api_key_pool() -> list[str]:
+    """Active key pool: ``TAVILY_API_KEYS`` entries + ``TAVILY_API_KEY``.
+
+    Order-stable, exact-duplicate-removed. Public so ``config-check`` can
+    show the pool size (never the values) and tests can pin the parse.
+    """
+    keys: list[str] = []
+    raw_pool = os.getenv(KEYS_POOL_ENV)
+    if raw_pool:
+        keys.extend(k.strip() for k in raw_pool.split(",") if k.strip())
+    single = (os.getenv("TAVILY_API_KEY") or "").strip()
+    if single and single not in keys:
+        keys.append(single)
+    return keys
+
+
+def _dead_keys() -> frozenset[int]:
+    return _dead_keys_var.get() or frozenset()
+
+
+def _mark_key_dead(key_idx: int, pool_size: int, status: object) -> None:
+    _dead_keys_var.set(_dead_keys() | {key_idx})
+    detail = (
+        f"key #{key_idx + 1}/{pool_size} returned HTTP {status}; "
+        "removed from this run's pool and rotating to the next key"
+    )
+    # Capacity degradation is still degradation — keep it in the ledger so a
+    # shrunken pool is visible in data_quality, never silent.
+    record_sentinel(_METHOD, KIND_OPTIONAL_UNAVAILABLE, detail)
+    logger.warning("tavily: %s", detail)
+
+
+def _pick_key(keys: list[str]) -> tuple[str, int] | None:
+    """Round-robin pick among the pool, skipping keys dead this run."""
+    n = len(keys)
+    dead = _dead_keys()
+    for _ in range(n):
+        idx = _key_cursor_var.get() % n
+        _key_cursor_var.set(_key_cursor_var.get() + 1)
+        if idx not in dead:
+            return keys[idx], idx
+    return None
 
 
 def reset_run_budget() -> None:
-    """Zero the per-run call counter.
+    """Zero the per-run per-scope call counters and revive the key pool.
 
     Called wherever ``quality.ensure_run_context()`` is bound (graph run +
     CLI), so a long-lived worker process cannot carry one run's budget into
-    the next and starve it of searches.
+    the next and starve it of searches, and a key that went quota-dead mid-run
+    gets retried on the next run (free-tier quotas recover monthly, and 401s
+    may be transient key-management fixes).
     """
-    _calls_var.set(0)
+    _calls_var.set({})
+    _key_cursor_var.set(0)
+    _dead_keys_var.set(frozenset())
+
+
+def run_usage() -> dict[str, int]:
+    """Per-scope charged-call counts for the current run (0-filled).
+
+    Read by the graph's state logger so ``full_states_log_*.json`` answers
+    "did web_search actually fire, and for which analyst" without replaying
+    message logs. Counts calls that passed the budget gate — including ones
+    that later degraded on transport/API errors (those are visible in the
+    quality ledger instead).
+    """
+    calls = _calls_var.get() or {}
+    return {scope: calls.get(scope, 0) for scope in DEFAULT_BUDGET_SPLIT}
+
+
+def _charge(scope: str) -> None:
+    calls = dict(_calls_map())
+    calls[scope] = calls.get(scope, 0) + 1
+    _calls_var.set(calls)
+
+
+def parse_budget_split(raw: str) -> dict[str, int] | None:
+    """Parse a ``"scope:count,scope:count"`` budget-split string.
+
+    Returns ``None`` (after a warning) when malformed — callers fall back to
+    the default split, mirroring the non-numeric env fallbacks elsewhere.
+    Public so ``yiagents config-check`` validates the same parse the runtime
+    uses.
+    """
+    split: dict[str, int] = {}
+    try:
+        for part in raw.split(","):
+            name, sep, count = part.partition(":")
+            name = name.strip()
+            if not name or not sep:
+                raise ValueError(part)
+            n = int(count.strip())
+            if n < 0:
+                raise ValueError(part)
+            split[name] = n
+        if not split:
+            raise ValueError(raw)
+        return split
+    except ValueError:
+        logger.warning(
+            "Ignoring malformed YIAGENTS_TAVILY_BUDGET_SPLIT=%r; expected "
+            "'scope:count' pairs, e.g. 'news:3,market:2,fundamentals:1'.",
+            raw,
+        )
+        return None
+
+
+def _scaled_default_split(total: int) -> dict[str, int]:
+    """Scale DEFAULT_BUDGET_SPLIT so the per-scope caps sum to ``total``.
+
+    Largest-remainder rounding; ties break toward the heavier scope, so the
+    sum always equals the total cap exactly.
+    """
+    if total <= 0:
+        return dict.fromkeys(DEFAULT_BUDGET_SPLIT, 0)
+    denom = sum(DEFAULT_BUDGET_SPLIT.values())
+    split = {
+        scope: total * weight // denom
+        for scope, weight in DEFAULT_BUDGET_SPLIT.items()
+    }
+    leftover = total - sum(split.values())
+    by_shortfall = sorted(
+        DEFAULT_BUDGET_SPLIT,
+        key=lambda s: (
+            -(total * DEFAULT_BUDGET_SPLIT[s] % denom),
+            -DEFAULT_BUDGET_SPLIT[s],
+        ),
+    )
+    for scope in by_shortfall[:leftover]:
+        split[scope] += 1
+    return split
+
+
+def _budget_split(total: int) -> dict[str, int]:
+    """Effective per-scope caps: explicit env split, else scaled default."""
+    raw = os.getenv("YIAGENTS_TAVILY_BUDGET_SPLIT")
+    if raw is not None:
+        explicit = parse_budget_split(raw)
+        if explicit is not None:
+            return explicit
+    return _scaled_default_split(total)
 
 
 def _max_calls_per_run() -> int:
@@ -103,39 +282,63 @@ def _sentinel(detail: str) -> str:
     )
 
 
-def get_web_search(query: str, max_results: int = 5) -> str:
+def get_web_search(
+    query: str, max_results: int = 5, scope: str = "news"
+) -> str:
     """Search the open web via Tavily and format results as a cited digest.
 
     Args:
         query: Free-text search query (company developments, industry events,
             analyst commentary — anything the vendor news tools miss).
         max_results: Number of results to request (clamped to 1..10).
+        scope: Budget scope charging this call — one of the analysts that
+            binds a web_search instance ("news" / "market" / "fundamentals").
+            Default "news" keeps pre-scoping callers unchanged.
 
     Returns:
         A markdown digest: one numbered entry per result with title, source
         URL, and a content snippet. On any degradation (missing key, exhausted
-        per-run budget, timeout, API error) returns a ``WEB_SEARCH_UNAVAILABLE``
-        sentinel string and records an optional-category quality event — this
-        tool never raises into the agent loop.
+        per-run budget — this scope's cap or the run total —, timeout, API
+        error) returns a ``WEB_SEARCH_UNAVAILABLE`` sentinel string and
+        records an optional-category quality event — this tool never raises
+        into the agent loop.
     """
     query = (query or "").strip()
     if not query:
         return _sentinel("empty query.")
 
-    used = _calls_var.get()
-    cap = _max_calls_per_run()
-    if used >= cap:
+    total_cap = _max_calls_per_run()
+    calls = _calls_map()
+    split = _budget_split(total_cap)
+    scope_cap = split.get(scope)
+    if scope_cap is None:
         return _sentinel(
-            f"per-run search budget exhausted ({used}/{cap} calls used; "
-            "raise YIAGENTS_TAVILY_MAX_CALLS_PER_RUN if more angles are needed)."
+            f"scope '{scope}' has no budget allocation in "
+            f"YIAGENTS_TAVILY_BUDGET_SPLIT (allocated scopes: "
+            f"{', '.join(sorted(split))}); ask the operator to allocate it."
         )
-    _calls_var.set(used + 1)
-
-    api_key = os.getenv("TAVILY_API_KEY")
-    if not api_key:
+    scope_used = calls.get(scope, 0)
+    if scope_used >= scope_cap:
         return _sentinel(
-            "TAVILY_API_KEY is not set. Get a free key at "
-            "https://app.tavily.com and put it in .env."
+            f"per-run search budget exhausted for the {scope} analyst "
+            f"({scope_used}/{scope_cap} calls used; raise "
+            "YIAGENTS_TAVILY_BUDGET_SPLIT or YIAGENTS_TAVILY_MAX_CALLS_PER_RUN "
+            "if more angles are needed)."
+        )
+    total_used = sum(calls.values())
+    if total_used >= total_cap:
+        return _sentinel(
+            f"per-run total search budget exhausted ({total_used}/{total_cap} "
+            "calls used across analysts; raise "
+            "YIAGENTS_TAVILY_MAX_CALLS_PER_RUN if more angles are needed)."
+        )
+    _charge(scope)
+
+    keys = api_key_pool()
+    if not keys:
+        return _sentinel(
+            "Neither TAVILY_API_KEYS nor TAVILY_API_KEY is set. Get a free "
+            "key at https://app.tavily.com and put it in .env."
         )
 
     n_results = max(1, min(int(max_results), MAX_RESULTS_CEILING))
@@ -146,30 +349,60 @@ def get_web_search(query: str, max_results: int = 5) -> str:
         # no better for the analyst's headline-angle use case.
     }
 
-    def _http() -> requests.Response:
-        # Plain requests.post -> fresh Session with trust_env=True, so the
-        # shared HTTP(S)_PROXY SOCKS5 route applies (US-hosted API).
-        response = requests.post(
-            f"{TAVILY_API_BASE}/search",
-            json=payload,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=_timeout_s(),
-        )
-        response.raise_for_status()
-        return response
+    response = None
+    last_key_status: object = "?"
+    for _ in range(len(keys)):
+        picked = _pick_key(keys)
+        if picked is None:
+            break  # every key is dead this run
+        api_key, key_idx = picked
 
-    try:
-        response = with_transient_retry(
-            _http, vendor="tavily",
-            retry_on=(requests.exceptions.ConnectionError, requests.exceptions.Timeout),
+        def _http(api_key: str = api_key) -> requests.Response:
+            # Default-arg binding: this closure is created inside a loop.
+            # Plain requests.post -> fresh Session with trust_env=True, so
+            # the shared HTTP(S)_PROXY SOCKS5 route applies (US-hosted API).
+            response_ = requests.post(
+                f"{TAVILY_API_BASE}/search",
+                json=payload,
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=_timeout_s(),
+            )
+            response_.raise_for_status()
+            return response_
+
+        try:
+            response = with_transient_retry(
+                _http, vendor="tavily",
+                retry_on=(
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                ),
+            )
+            break
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else "?"
+            last_key_status = status
+            logger.warning("tavily: HTTP %s for query %r", status, query[:80])
+            if status in (401, 403, 429) and len(keys) > 1:
+                # Key/quota problem on THIS key — drop it for the rest of
+                # the run and retry the same call on the next key.
+                _mark_key_dead(key_idx, len(keys), status)
+                continue
+            return _sentinel(f"Tavily API returned HTTP {status}.")
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ) as exc:
+            # Transport-level (proxy down): rotating keys cannot help.
+            logger.warning("tavily: transport failure (%r)", exc)
+            return _sentinel(f"Tavily unreachable ({exc.__class__.__name__}).")
+
+    if response is None:
+        return _sentinel(
+            f"all {len(keys)} Tavily keys are unavailable this run "
+            f"(last: HTTP {last_key_status}). Get fresh keys at "
+            "https://app.tavily.com and update TAVILY_API_KEYS."
         )
-    except requests.exceptions.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "?"
-        logger.warning("tavily: HTTP %s for query %r", status, query[:80])
-        return _sentinel(f"Tavily API returned HTTP {status}.")
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-        logger.warning("tavily: transport failure (%r)", exc)
-        return _sentinel(f"Tavily unreachable ({exc.__class__.__name__}).")
 
     try:
         results = (response.json() or {}).get("results") or []

@@ -61,6 +61,8 @@ from yiagents.agents.utils.agent_utils import (
     get_volume_features,
     resolve_instrument_identity,
     web_search,
+    web_search_fundamentals,
+    web_search_market,
 )
 from yiagents.agents.utils.memory import TradingMemoryLog
 from yiagents.agents.utils.pot_tool import make_pot_compute_tool
@@ -369,6 +371,16 @@ class YiAgentsGraph:
                     get_a_share_sector_flow_native,
                     get_a_share_realtime_quote_native,
                     get_a_share_market_breadth_native,
+                    # Open-web search (Tavily), market-scoped instance. The
+                    # market analyst binds it only when web_search_enabled is
+                    # on AND the run date is live (PIT: Tavily has no as-of
+                    # parameter), so it sits dormant otherwise. The vendor
+                    # degrades to a WEB_SEARCH_UNAVAILABLE sentinel + quality
+                    # event on key-missing / budget-exhausted, so registering
+                    # it here is always safe (never aborts a run). Same tool
+                    # NAME as the news/fundamentals instances — each analyst's
+                    # ToolNode holds its own scope-charging instance.
+                    web_search_market,
                 ]
             ),
             "social": ToolNode(
@@ -450,6 +462,11 @@ class YiAgentsGraph:
                     # routed calls execute with the configured model.
                     get_valuation_metrics,
                     make_pot_compute_tool(self.quick_thinking_llm),
+                    # Open-web search (Tavily), fundamentals-scoped instance.
+                    # Same dormant contract as web_search_market above: bound
+                    # by the analyst only when web_search_enabled is on AND
+                    # the run date is live; always safe to register.
+                    web_search_fundamentals,
                 ]
             ),
         }
@@ -997,17 +1014,23 @@ class YiAgentsGraph:
 
         Includes the structured evidence block the self-improvement loop
         consumes: ``pm_rating`` (the Portfolio Manager's structured rating,
-        previously flattened into markdown only) and ``data_quality`` (the
+        previously flattened into markdown only), ``data_quality`` (the
         router's sentinel events for this run, so a degraded report is
-        machine-distinguishable from a fully-fed one). Both are additive —
-        older readers ignore unknown keys.
+        machine-distinguishable from a fully-fed one), and
+        ``web_search_usage`` (per-scope Tavily call counts). All are
+        additive — older readers ignore unknown keys.
         """
         from yiagents.dataflows import quality
+        from yiagents.dataflows import tavily as tavily_vendor  # isort: skip
 
         quality_block = quality.summarize_quality(
             quality.snapshot_quality(), quality.snapshot_core_successes()
         )
         quality.reset_quality()
+        # Snapshot the scoped web-search usage BEFORE anything else in this
+        # method could run another charge; the counters themselves were reset
+        # at run start (_run_graph), so this is the run's final tally.
+        web_search_usage = tavily_vendor.run_usage()
 
         # Price-at-decision: normally set by _apply_risk_overlay (the close the
         # decision anchored on). When the overlay did not run (risk disabled /
@@ -1068,6 +1091,12 @@ class YiAgentsGraph:
             "price_at_decision_basis": basis,
             "asset_type": final_state.get("asset_type") or "stock",
             "data_quality": quality_block,
+            # Per-scope Tavily call counts for this run (news / market /
+            # fundamentals, 0-filled): answers "did web_search actually fire
+            # and for which analyst" straight from the log, without replaying
+            # message histories. Charged calls only; degradations live in
+            # data_quality above. Additive like its neighbours.
+            "web_search_usage": web_search_usage,
         }
         # Write-and-drop: nothing downstream reads PAST dates from this dict
         # (the on-disk JSON below is the durable record), but a multi-date
