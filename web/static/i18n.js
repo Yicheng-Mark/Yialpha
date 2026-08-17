@@ -18,6 +18,7 @@
       nav_new: "提交新分析",
       nav_health: "环境自检",
       nav_compare: "评级对比",
+      nav_accuracy: "评级准确率",
       lang_btn: "🌐 EN",
       footer_note: "报告语言跟随 🌐 切换",
 
@@ -130,6 +131,23 @@
       compare_table_title: "评级矩阵",
       compare_series: "系列",
 
+      // accuracy view
+      accuracy_title: "评级准确率",
+      accuracy_sub: "评级对照已实现前向收益；由 yiagents verify-history 离线计算，本页只读展示。",
+      accuracy_empty_title: "尚无准确率报告",
+      accuracy_empty: "先在终端运行 yiagents verify-history（会为每个决策日期拉取前向价格并生成报告）。",
+      accuracy_direction: "方向命中率（Buy / Overweight / Sell / Underweight）",
+      accuracy_hold: "Hold 条目：n={n}，平均前向收益 {ret}（机会成本视角，不计方向）",
+      accuracy_by_rating: "分评级",
+      accuracy_by_ticker: "分标的",
+      accuracy_scanned: "扫描 {total} 次运行｜已评分 {scored}｜未到期 {pending}｜horizon {days} 个交易日",
+      accuracy_col_rating: "评级 / 标的",
+      accuracy_col_n: "样本数",
+      accuracy_col_mean: "平均前向收益",
+      accuracy_col_dirn: "方向样本",
+      accuracy_col_hitrate: "命中率",
+      accuracy_generated: "报告生成时间",
+
       // health
       health_title: "环境自检",
       health_sub: "复刻 preflight 五项（依赖 / key / 代理 / yfinance / DeepSeek）。含网络探测，稍等数秒。",
@@ -152,6 +170,7 @@
       nav_new: "New Analysis",
       nav_health: "Health Check",
       nav_compare: "Compare",
+      nav_accuracy: "Accuracy",
       lang_btn: "🌐 中",
       footer_note: "report language follows the 🌐 toggle",
 
@@ -258,6 +277,23 @@
       compare_chart_title: "Rating step comparison",
       compare_table_title: "Rating matrix",
       compare_series: "series",
+
+      // accuracy view
+      accuracy_title: "Rating Accuracy",
+      accuracy_sub: "Ratings vs realized forward returns; computed offline by yiagents verify-history, this page is read-only.",
+      accuracy_empty_title: "No accuracy report yet",
+      accuracy_empty: "Run yiagents verify-history in a terminal first — it fetches the forward price for every decision date.",
+      accuracy_direction: "Directional hit rate (Buy / Overweight / Sell / Underweight)",
+      accuracy_hold: "Hold entries: n={n}, mean forward return {ret} (opportunity-cost view, not scored)",
+      accuracy_by_rating: "By rating",
+      accuracy_by_ticker: "By ticker",
+      accuracy_scanned: "{total} runs scanned | {scored} scored | {pending} pending | {days}-session horizon",
+      accuracy_col_rating: "Rating / ticker",
+      accuracy_col_n: "n",
+      accuracy_col_mean: "mean fwd ret",
+      accuracy_col_dirn: "directional n",
+      accuracy_col_hitrate: "hit rate",
+      accuracy_generated: "report generated",
 
       health_title: "Environment Check",
       health_sub: "Replicates the 5 preflight checks (deps / key / proxy / yfinance / DeepSeek). Network probes take a few seconds.",

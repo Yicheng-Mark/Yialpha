@@ -737,18 +737,24 @@ class TestDeferredReflection:
 
     # YiAgentsGraph._resolve_pending_entries
 
-    def test_resolve_skips_other_tickers(self, tmp_path):
+    def test_resolve_skips_other_tickers(self, tmp_path, monkeypatch):
         """Pending AAPL entry is not resolved when the run is for NVDA."""
         log = make_log(tmp_path)
         log.store_decision("AAPL", "2026-01-10", DECISION_BUY)
         mock_graph = MagicMock(spec=YiAgentsGraph)
         mock_graph.memory_log = log
-        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+        mock_graph.reflector = MagicMock()
+        mock_graph._resolve_benchmark.return_value = "SPY"
+        # The resolution core lives in memory_resolution and fetches via
+        # accuracy.fetch_returns_yf — stub that seam (the graph's
+        # _fetch_returns is itself a thin delegate to it now).
+        fetch = MagicMock(return_value=(0.05, 0.02, 5))
+        monkeypatch.setattr("yiagents.accuracy.fetch_returns_yf", fetch)
         YiAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
-        mock_graph._fetch_returns.assert_not_called()
+        fetch.assert_not_called()
         assert len(log.get_pending_entries()) == 1
 
-    def test_resolve_marks_entry_completed(self, tmp_path):
+    def test_resolve_marks_entry_completed(self, tmp_path, monkeypatch):
         """After resolve, get_pending_entries() is empty and the entry has a REFLECTION."""
         log = make_log(tmp_path)
         log.store_decision("NVDA", "2026-01-05", DECISION_BUY)
@@ -757,7 +763,11 @@ class TestDeferredReflection:
         mock_graph = MagicMock(spec=YiAgentsGraph)
         mock_graph.memory_log = log
         mock_graph.reflector = mock_reflector
-        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+        mock_graph._resolve_benchmark.return_value = "SPY"
+        monkeypatch.setattr(
+            "yiagents.accuracy.fetch_returns_yf",
+            MagicMock(return_value=(0.05, 0.02, 5)),
+        )
         YiAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
         assert log.get_pending_entries() == []
         entries = log.load_entries()
@@ -767,7 +777,7 @@ class TestDeferredReflection:
         assert "+5.0%" in entries[0]["raw"]
         assert "+2.0%" in entries[0]["alpha"]
 
-    def test_resolve_is_bounded_by_historical_run_date(self, tmp_path):
+    def test_resolve_is_bounded_by_historical_run_date(self, tmp_path, monkeypatch):
         log = make_log(tmp_path)
         log.store_decision("NVDA", "2020-01-02", DECISION_BUY)
         log.store_decision("NVDA", "2020-02-02", DECISION_BUY)
@@ -777,7 +787,8 @@ class TestDeferredReflection:
         mock_reflector.reflect_on_final_decision.return_value = "Causal lesson."
         mock_graph.reflector = mock_reflector
         mock_graph._resolve_benchmark.return_value = "SPY"
-        mock_graph._fetch_returns.return_value = (0.05, 0.02, 5)
+        fetch = MagicMock(return_value=(0.05, 0.02, 5))
+        monkeypatch.setattr("yiagents.accuracy.fetch_returns_yf", fetch)
 
         YiAgentsGraph._resolve_pending_entries(
             mock_graph,
@@ -785,10 +796,11 @@ class TestDeferredReflection:
             as_of_date="2020-01-15",
         )
 
-        mock_graph._fetch_returns.assert_called_once_with(
+        fetch.assert_called_once_with(
             "NVDA",
             "2020-01-02",
             benchmark="SPY",
+            holding_days=5,
             as_of_date="2020-01-15",
         )
         entries = log.load_entries()

@@ -179,6 +179,22 @@ def list_compare() -> dict:
     return {"tickers": out}
 
 
+def load_accuracy_report() -> dict:
+    """Serve the ``yiagents verify-history`` artifact (read-only).
+
+    Scoring fetches forward prices per record — a CLI job, not a request
+    handler. Until the operator runs it, the honest payload is
+    ``available=False`` plus the command hint (never a fabricated empty
+    report that would read as "100% accuracy with no data").
+    """
+    path = LOGS_ROOT / "accuracy" / "accuracy_report.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"available": False, "hint": "yiagents verify-history"}
+    return {"available": True, **data}
+
+
 def load_node_perf(ticker: str, date: str) -> dict | None:
     """Per-node wall-clock + token telemetry, if ``--profile`` wrote it."""
     path = _strategy_dir(ticker) / f"node_perf_{date}.json"

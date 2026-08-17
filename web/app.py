@@ -207,6 +207,18 @@ def api_compare():
     return store.list_compare()
 
 
+@app.get("/api/accuracy")
+def api_accuracy():
+    """Rating↔outcome accuracy report (serves the verify-history artifact).
+
+    The scoring itself fetches per-record forward prices — that belongs in the
+    CLI (``yiagents verify-history``), not inside a request handler. This
+    endpoint serves the artifact it wrote; ``available=false`` + the hint is
+    the honest answer until the operator runs it.
+    """
+    return store.load_accuracy_report()
+
+
 @app.get("/api/health")
 def api_health():
     # sync def → Starlette threadpools it; the yfinance/DeepSeek probes block
