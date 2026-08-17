@@ -175,6 +175,7 @@
     if (parts[0] === "new") return renderNew();
     if (parts[0] === "health") return renderHealth();
     if (parts[0] === "compare") return renderCompare();
+    if (parts[0] === "accuracy") return renderAccuracy();
     if (parts[0] === "task" && parts[1]) return renderTask(decodeURIComponent(parts[1]));
     if (parts[0] === "t" && parts[1]) {
       const ticker = decodeURIComponent(parts[1]);
@@ -711,6 +712,77 @@
         location.hash = "#/t/" + encodeURIComponent(ticker) + "/" + encodeURIComponent(date);
       });
     }
+  }
+
+  // Rating↔outcome accuracy: serves the verify-history artifact. Every number
+  // is shown WITH its sample size — a hit rate without n misleads.
+  // Backend contract: GET /api/accuracy → {available, direction, hold_*,
+  // by_rating, by_ticker, total_runs, scored, pending, holding_days, ...}.
+  async function renderAccuracy() {
+    view().innerHTML = `<p class="muted" role="status">${t("common_loading")}</p>`;
+    let data;
+    try { data = await fetchJSON("/api/accuracy"); }
+    catch (e) { renderError(e); return; }
+
+    if (!data.available) {
+      view().innerHTML = `
+        <p><a href="#/" class="muted">${t("common_back")}</a></p>
+        <div class="empty-state">
+          <div class="empty-icon" aria-hidden="true">🎯</div>
+          <p class="empty-title">${t("accuracy_empty_title")}</p>
+          <p class="empty-desc">${t("accuracy_empty")}</p>
+          <p><code>yiagents verify-history</code></p>
+        </div>`;
+      return;
+    }
+
+    const pct = (x) => (x == null ? "—" : (100 * x).toFixed(1) + "%");
+    const sgn = (x) => (x == null ? "—" : (x >= 0 ? "+" : "") + (100 * x).toFixed(2) + "%");
+    const d = data.direction || {};
+    const header = `
+      <tr>
+        <th>${esc(t("accuracy_col_rating"))}</th>
+        <th>${esc(t("accuracy_col_n"))}</th>
+        <th>${esc(t("accuracy_col_mean"))}</th>
+        <th>${esc(t("accuracy_col_dirn"))}</th>
+        <th>${esc(t("accuracy_col_hitrate"))}</th>
+      </tr>`;
+    const row = (label, b) => `
+      <tr>
+        <th>${esc(label)}</th>
+        <td>${b.n}</td>
+        <td>${sgn(b.mean_return)}</td>
+        <td>${b.directional_n}</td>
+        <td>${b.directional_n ? pct(b.hit_rate) : "—"}</td>
+      </tr>`;
+
+    const ratingRows = Object.entries(data.by_rating || {}).map(([k, b]) => row(k, b)).join("");
+    const tickerRows = Object.entries(data.by_ticker || {}).map(([k, b]) => row(k, b)).join("");
+    const scanned = t("accuracy_scanned")
+      .replace("{total}", data.total_runs).replace("{scored}", data.scored)
+      .replace("{pending}", data.pending).replace("{days}", data.holding_days);
+    const holdLine = data.hold_n
+      ? "<p>" + t("accuracy_hold").replace("{n}", data.hold_n).replace("{ret}", sgn(data.hold_mean_return)) + "</p>"
+      : "";
+
+    view().innerHTML = `
+      <p><a href="#/" class="muted">${t("common_back")}</a></p>
+      <h1 class="page-title">${t("accuracy_title")}</h1>
+      <p class="page-sub">${t("accuracy_sub")}</p>
+      <p class="muted">${esc(scanned)} · ${esc(t("accuracy_generated"))}: ${esc(data.generated_at || "—")}</p>
+      <div class="card">
+        <div class="subhead">${t("accuracy_direction")}</div>
+        <p><strong>${d.hits || 0}/${d.n || 0} (${pct(d.hit_rate)})</strong></p>
+        ${holdLine}
+      </div>
+      <div class="cmp-table-wrap">
+        <div class="subhead">${t("accuracy_by_rating")}</div>
+        <table class="cmp-table"><thead>${header}</thead><tbody>${ratingRows}</tbody></table>
+      </div>
+      <div class="cmp-table-wrap">
+        <div class="subhead">${t("accuracy_by_ticker")}</div>
+        <table class="cmp-table"><thead>${header}</thead><tbody>${tickerRows}</tbody></table>
+      </div>`;
   }
 
   // ----------------------------- new analysis -----------------------------

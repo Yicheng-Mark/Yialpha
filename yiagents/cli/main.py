@@ -1086,6 +1086,14 @@ def run_analysis(checkpoint: bool | None = None):
 
     config = _build_run_config(selections, checkpoint)
 
+    # Interactive path: a human is watching the live display, so soften the
+    # data-vacuum gate from reject to warn — the run still completes with the
+    # DEGRADED banner + data_quality evidence for the human to judge. An
+    # explicit YIAGENTS_DATA_VACUUM_POLICY wins over this default (someone who
+    # sets it deliberately wants the typed failure even interactively).
+    if "YIAGENTS_DATA_VACUUM_POLICY" not in os.environ:
+        config["data_vacuum_policy"] = "warn"
+
     # Create stats callback handler for tracking LLM/tool calls
     stats_handler = StatsCallbackHandler()
 
@@ -1555,6 +1563,128 @@ def batch(
         raise typer.Exit(code=1)
 
 
+@app.command("verify-history")
+def verify_history_cmd(
+    holding_days: int = typer.Option(
+        5, "--holding-days", help="Forward horizon in sessions to score against.",
+    ),
+    results_dir: str = typer.Option(
+        "", "--results-dir",
+        help="Results dir to scan (default: results_dir from config).",
+    ),
+):
+    """Score archived ratings against realized forward returns.
+
+    Scans every ``full_states_log_<date>.json`` under the results dir, fetches
+    the PIT forward return per (ticker, date, rating), and writes
+    ``accuracy/accuracy_report.{json,md}`` — directional hit rate, per-rating
+    and per-ticker tables (all with sample sizes). Decisions whose horizon
+    has not fully elapsed are counted as pending, never scored.
+    """
+    from yiagents.accuracy import verify_history as run_verify
+
+    report, json_path, md_path = run_verify(
+        results_dir or None, holding_days=holding_days
+    )
+    d = report["direction"]
+    if d["hit_rate"] is not None:
+        console.print(
+            f"[bold]Directional hit rate:[/bold] {d['hits']}/{d['n']} "
+            f"({d['hit_rate']:.1%}) over {report['holding_days']}d"
+        )
+    else:
+        console.print("[yellow]No fully-elapsed directional decisions yet.[/yellow]")
+    console.print(
+        f"Runs: {report['total_runs']} scanned | {report['scored']} scored | "
+        f"{report['pending']} pending"
+    )
+    console.print(f"[dim]JSON: {json_path}[/dim]")
+    console.print(f"[dim]Markdown: {md_path}[/dim]")
+
+
+@app.command("memory-resolve")
+def memory_resolve_cmd(
+    tickers: list[str] = typer.Option(
+        None, "--ticker", "-t",
+        help="Only resolve these tickers (repeatable). Default: all pending.",
+    ),
+    as_of: str = typer.Option(
+        "", "--as-of",
+        help="Resolve as of this date YYYY-MM-DD (default: today). Outcomes "
+        "are PIT-clamped to it.",
+    ),
+):
+    """Resolve pending memory-log entries WITHOUT running a full analysis.
+
+    Pending entries normally only resolve when their ticker is analyzed
+    again; entries for tickers you stopped analyzing stayed pending forever.
+    This sweeps them on demand — one reflection LLM call per resolved entry
+    (the same resolution the graph runs at the start of a same-ticker run).
+    """
+    import copy as _copy
+    from pathlib import Path as _Path
+
+    from yiagents.agents.utils.memory import TradingMemoryLog
+    from yiagents.dataflows.market_regime import resolve_market_benchmark
+    from yiagents.graph.memory_resolution import resolve_pending_entries
+    from yiagents.graph.reflection import Reflector
+    from yiagents.llm_clients import create_llm_client
+
+    config = _copy.deepcopy(DEFAULT_CONFIG)
+    # The memory log is opt-in at run time; resolution reads + updates the
+    # SAME file, so force-enable the path — but only proceed if it exists
+    # (nothing to resolve otherwise; never create a log from here).
+    config["memory_enabled"] = True
+    memory_log = TradingMemoryLog(config)
+    pending_all = memory_log.get_pending_entries()
+    if not pending_all:
+        console.print("[green]No pending memory entries.[/green]")
+        return
+    if memory_log._log_path is None or not _Path(memory_log._log_path).is_file():  # noqa: SLF001
+        console.print(
+            "[yellow]Memory log file not found — pending entries require "
+            "memory_enabled at analysis time to have been written.[/yellow]"
+        )
+        raise typer.Exit(code=2)
+
+    wanted = {t.upper() for t in tickers} if tickers else None
+    pending = [
+        e for e in pending_all
+        if wanted is None or str(e.get("ticker", "")).upper() in wanted
+    ]
+    tickers_to_sweep = sorted({str(e["ticker"]) for e in pending})
+    if not tickers_to_sweep:
+        console.print("[green]No pending entries match the given ticker filter.[/green]")
+        return
+
+    llm = create_llm_client(
+        provider=config["llm_provider"],
+        model=config["quick_think_llm"],
+        base_url=config.get("backend_url"),
+    ).get_llm()
+    reflector = Reflector(llm)
+
+    from yiagents.dataflows.config import set_config as _set_config
+
+    _set_config(config)
+    total = 0
+    table = Table(title="memory-resolve", box=box.SIMPLE)
+    table.add_column("ticker")
+    table.add_column("pending")
+    table.add_column("resolved")
+    for ticker in tickers_to_sweep:
+        n_pending = sum(1 for e in pending if e["ticker"] == ticker)
+        benchmark = config.get("benchmark_ticker") or resolve_market_benchmark(ticker)
+        resolved = resolve_pending_entries(
+            memory_log, reflector, ticker,
+            benchmark=benchmark, as_of_date=as_of or None,
+        )
+        total += resolved
+        table.add_row(ticker, str(n_pending), str(resolved))
+    console.print(table)
+    console.print(f"[bold]{total} entr{'y' if total == 1 else 'ies'} resolved.[/bold]")
+
+
 @app.command("config-check")
 def config_check():
     """Validate runtime configuration (.env / environment variables) before a run.
@@ -1619,6 +1749,47 @@ def config_check():
         console.print(
             f"  [yellow]⚠[/yellow] web_search_enabled is on but {_TAVILY} is unset — "
             "every web_search call will degrade to WEB_SEARCH_UNAVAILABLE"
+        )
+
+    # -- Data-quality gate + vendor chains -------------------------------------
+    policy = str(_get_config().get("data_vacuum_policy", "reject") or "").strip().lower()
+    if policy not in ("reject", "warn"):
+        console.print(
+            f"  [red]❌[/red] data_vacuum_policy={policy!r} is invalid "
+            "(expected 'reject' or 'warn') — at runtime an invalid value "
+            "fails closed to 'reject'"
+        )
+    else:
+        console.print(
+            f"  [green]✅[/green] data_vacuum_policy={policy!r}"
+            + (
+                " — data-vacuum runs fail at the trader node (typed)"
+                if policy == "reject"
+                else " — data-vacuum runs degrade to a DEGRADED report"
+            )
+        )
+
+    vendors = _get_config().get("data_vendors", {}) or {}
+    chained = {
+        cat: [v.strip() for v in str(chain).split(",")]
+        for cat, chain in vendors.items()
+        if len(str(chain).split(",")) > 1
+    }
+    if chained:
+        console.print(
+            "  [green]✅[/green] multi-vendor fallback chains: "
+            + "; ".join(f"{cat}={' -> '.join(vs)}" for cat, vs in chained.items())
+        )
+        if any("alpha_vantage" in vs for vs in chained.values()) and not os.environ.get(_AV):
+            console.print(
+                f"  [yellow]⚠[/yellow] a vendor chain includes alpha_vantage but "
+                f"{_AV} is unset — the fallback leg will degrade to "
+                "VendorNotConfiguredError and the chain collapses to yfinance"
+            )
+    else:
+        console.print(
+            "  [dim]• no multi-vendor chains configured — single-vendor "
+            "categories have no fallback[/dim]"
         )
 
     # -- Known risk items -----------------------------------------------------
@@ -1715,8 +1886,23 @@ def snapshot_record(
     are written atomically to <data_cache_dir>/config_history/. Recording a
     snapshot never edits the live config.
     """
+    from pathlib import Path as _P
+
     from yiagents.config_snapshot import record_config_snapshot
     from yiagents.dataflows.config import get_config
+
+    # Evidence hygiene: a path-looking --evidence that does not exist is
+    # almost certainly a typo'd artifact path — the audit trail would then
+    # point at nothing. Warn loudly but do not block (free-text descriptions
+    # are legitimate evidence too).
+    ev = evidence.strip()
+    if ev and len(ev.split()) == 1 and ev.lower().endswith(
+        (".json", ".csv", ".md", ".txt", ".log", ".yaml", ".yml")
+    ) and not _P(ev).exists():
+        console.print(
+            f"[yellow]⚠ --evidence looks like a file path but {ev} does not "
+            "exist — the snapshot will reference a missing artifact.[/yellow]"
+        )
 
     path = record_config_snapshot(get_config(), reason=reason, evidence=evidence)
     console.print(f"[green]✅[/green] Snapshot recorded: {path}")
@@ -1772,6 +1958,117 @@ def snapshot_list(
             str(s["git_commit"] or "-"), str(s["reason"]),
         )
     console.print(table)
+
+
+# --------------------------------------------------------------------------- #
+# ic-cycle — one command for the mechanical half of the IC pruning loop
+# --------------------------------------------------------------------------- #
+# The manual flow (export_ic_dataset.py → prune_indicators_cli.py → human
+# review → edit indicator_battery → snapshot record) stays fail-closed: this
+# command runs export + verdict mechanically and prints the suggestion, but
+# NEVER edits the live config. The human review step is the contract.
+
+IC_CYCLE_DEFAULT_TICKERS = ("NVDA", "AMD", "MSFT")
+
+
+@app.command("ic-cycle")
+def ic_cycle(
+    tickers: list[str] = typer.Option(
+        list(IC_CYCLE_DEFAULT_TICKERS), "--ticker", "-t",
+        help="Tickers to evaluate (repeatable; default: "
+        + " ".join(IC_CYCLE_DEFAULT_TICKERS) + ").",
+    ),
+    horizon: int = typer.Option(5, "--horizon", help="Forward horizon (trading rows)."),
+    window: int = typer.Option(60, "--window", help="Rolling IC window."),
+    min_abs_ic: float = typer.Option(0.03, "--min-abs-ic", help="|IC| prune threshold."),
+    min_consecutive: int = typer.Option(
+        30, "--min-consecutive", help="Consecutive low-IC rows required to prune.",
+    ),
+    min_observations: int = typer.Option(
+        30, "--min-observations", help="Minimum finite IC windows to prune.",
+    ),
+    output_dir: str = typer.Option(
+        "ic_data", "--output-dir", help="Where the CSVs + verdicts land.",
+    ),
+    as_of: str = typer.Option("", "--as-of", help="PIT cutoff YYYY-MM-DD (default: today)."),
+) -> None:
+    """Run the IC cycle: export datasets → prune verdicts → suggestion.
+
+    One command for what used to be three manual steps (export → prune CLI →
+    manual reading). Writes ``<TICKER>_<horizon>d.csv`` and the same CSV's
+    ``.prune.json`` verdict per ticker, then prints the suggested
+    ``indicator_battery`` and the snapshot command that documents applying it.
+    **Never edits the live config — review, then apply by hand.**
+    """
+    from yiagents.backtest.ic_dataset import run_ic_cycle
+
+    try:
+        result = run_ic_cycle(
+            tickers,
+            horizon=horizon,
+            window=window,
+            min_abs_ic=min_abs_ic,
+            min_consecutive=min_consecutive,
+            min_observations=min_observations,
+            output_dir=output_dir,
+            as_of=as_of or None,
+        )
+    except RuntimeError as exc:
+        console.print(f"[red]❌ {exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    keep_all: dict[str, list[str]] = {}
+    for ticker, verdict in result["verdict"].items():
+        keep_all[ticker] = list(verdict["keep"])
+        pruned = verdict["prune"]
+        table = Table(title=f"{ticker} — verdict", box=box.SIMPLE)
+        table.add_column("verdict")
+        table.add_column("indicator")
+        table.add_column("mean|IC|", justify="right")
+        table.add_column("finite windows", justify="right")
+        for name, stats in verdict["per_indicator"].items():
+            mic = stats["mean_abs_ic"]
+            table.add_row(
+                stats["verdict"],
+                name,
+                f"{mic:.3f}" if mic is not None else "—",
+                str(stats["finite_windows"]),
+            )
+        console.print(table)
+        console.print(
+            f"[dim]verdict JSON: {result['csv'][ticker]}.prune.json[/dim]"
+            + (
+                f"\n[yellow]{len(pruned)} indicator(s) suggested for pruning:[/yellow] "
+                f"{', '.join(pruned)}"
+                if pruned else ""
+            )
+        )
+
+    # The unified suggestion: intersection of keeps across tickers is what a
+    # single global indicator_battery could safely become (a per-ticker
+    # battery is not supported). Tickers may disagree — that disagreement is
+    # itself review material, so show both the intersection and the diffs.
+    common = None
+    for keeps in keep_all.values():
+        common = set(keeps) if common is None else (common & set(keeps))
+    if common is not None and any(v["prune"] for v in result["verdict"].values()):
+        console.print("\n[bold]Config suggestion (REVIEW BEFORE APPLYING)[/bold]")
+        console.print(
+            f"indicator_battery (intersection across {len(keep_all)} tickers):"
+        )
+        console.print(f"```python\n{sorted(common)}\n```")
+        console.print(
+            "[yellow]⚠ Suggestion only — verify out-of-sample, then edit "
+            "default_config.py by hand and record the change:[/yellow]"
+        )
+        first_json = next(iter(result["csv"].values()))
+        console.print(
+            f"[dim]yiagents snapshot record --reason 'IC prune <date>' "
+            f"--evidence {first_json}.prune.json[/dim]"
+        )
+    else:
+        console.print("\n[green]No indicator meets the prune thresholds — "
+                      "battery unchanged.[/green]")
 
 
 if __name__ == "__main__":
