@@ -111,12 +111,14 @@ Every entry point — interactive `yiagents analyze`, `yiagents batch`, and the 
 complete_report.md           ← consolidated; "⚠ DEGRADED RUN" banner on top if data quality tripped
 
 ~/.yiagents/logs/<TICKER>/YiAgentsStrategy_logs/full_states_log_<date>.json
-   ← machine-readable full state (evidence, data_quality, per-node telemetry); Web history reads this file
+   ← machine-readable full state (evidence, data_quality, price_at_decision, per-node telemetry); Web history reads this file
 ```
 
-> **Data quality ships with the report.** Data vendors record degradation sentinels (`no_data` / `optional_unavailable` / `stale_cache`) into a `data_quality` block on every run; a run that lost core data is flagged `DEGRADED` in both the report banner and the Web UI — it never silently pretends nothing happened. Exact prices and indicator values cited by the Market Analyst must come from the verified market-data snapshot, so every numeric claim has a checkable source.
+> **Data quality ships with the report — and a data vacuum fails the run.** Data vendors record degradation sentinels (`no_data` / `core_error` / `optional_unavailable` / `stale_cache`) into a `data_quality` block on every run; a run that lost core data is flagged `DEGRADED` in both the report banner and the Web UI. A run whose core data calls **all** failed (a "data vacuum" HOLD) is rejected by default before the trader node (`data_vacuum_policy=reject`, typed `DataVacuumError`; set `warn` or `run_robust --allow-degraded` to keep degraded reports). Core categories fall back through a vendor chain (`yfinance → alpha_vantage` → `sec_edgar` for fundamentals) so a single-vendor outage degrades instead of vacuuming. Exact prices and indicator values cited by the Market Analyst must come from the verified market-data snapshot, so every numeric claim has a checkable source.
 
 Two optional loops close the cycle after a run: the causal memory log (`memory_enabled`, off by default — see [Persistence & recovery](#persistence--recovery)) resolves past same-ticker decisions against realized returns and injects lessons into the next run, and the offline self-improvement chain (IC pruning → config snapshot → validation gate — see [Backtest & validation gate](#backtest--validation-gate)).
+
+> **Was the report right? `yiagents verify-history` answers it.** Scan every archived rating, fetch its PIT forward return (spot via yfinance, perps via Binance klines), and get a directional hit rate plus per-rating / per-ticker tables — every number carries its sample size, horizons that have not fully elapsed count as pending, never scored. The report lands in `accuracy/accuracy_report.{json,md}` and the Web UI serves it read-only at the *Accuracy* view (`GET /api/accuracy`). Companion command `yiagents memory-resolve` sweeps pending memory-log entries for ALL tickers without re-running an analysis (previously only a same-ticker rerun resolved them).
 
 ---
 
@@ -293,7 +295,7 @@ python web/app.py                # serves http://127.0.0.1:8000
 
 - **Browse**: ticker grid → per-ticker dates → full report view (rating badge, quantitative risk-overlay card, 5 collapsible sections, optional node-perf bar chart), plus a rating-comparison view (`#/compare`) across tickers and dates.
 - **Submit**: a form spawns `scripts/run_robust.py` (the same watchdog-backed path the CLI uses); the UI polls every 4 s and links the finished report. One analysis at a time (409 while one is running).
-- **API**: `GET /api/tickers`, `GET /api/tickers/{t}/runs[/{date}]`, `GET /api/compare`, `POST /api/analyze`, `GET /api/tasks/{id}`, `GET /api/health`.
+- **API**: `GET /api/tickers`, `GET /api/tickers/{t}/runs[/{date}]`, `GET /api/compare`, `GET /api/accuracy`, `POST /api/analyze`, `GET /api/tasks/{id}`, `GET /api/health`.
 
 See [web/README.md](web/README.md) for the architecture and the full endpoint reference.
 
@@ -386,7 +388,7 @@ Daily signals execute on the **next available bar**, never on the completed bar 
 - **Leverage / liquidation**: `--leverage > 1` enables isolated-margin modeling — bar-extreme (high/low) liquidation triggers, MMR ladder from `leverageBracket`, liquidation events recorded in the run summary. Default is 1× long-only.
 - **Shorts**: `--allow-short` opts in (Sell → −1×, receiving funding); perp-only.
 
-**Indicator self-improvement loop (offline, no LLM):** the market analyst's 28-name catalog can be pruned by evidence — `scripts/export_ic_dataset.py` derives a `date, forward_return, <indicator>…` table straight from the PIT-filtered OHLCV cache, `scripts/prune_indicators_cli.py` ranks rolling IC and prints a keep/prune report (never auto-applied), and the reviewed list lands in the `indicator_battery` config key, validated by `yiagents config-check`. `yiagents snapshot record` keeps the change on an append-only audit trail.
+**Indicator self-improvement loop (offline, no LLM):** the market analyst's 28-name catalog can be pruned by evidence — `scripts/export_ic_dataset.py` derives a `date, forward_return, <indicator>…` table straight from the PIT-filtered OHLCV cache, `scripts/prune_indicators_cli.py` ranks rolling IC and prints a keep/prune report (never auto-applied), and the reviewed list lands in the `indicator_battery` config key, validated by `yiagents config-check`. `yiagents snapshot record` keeps the change on an append-only audit trail. `yiagents ic-cycle` runs the mechanical half (export → verdict → suggestion) in one command, a weekly GitHub workflow archives the evidence as artifacts, and `indicator_ic_context` (default off) feeds the trailing mean |IC| back into the market analyst's prompt as advisory context.
 
 ```text
 [AAPL] gate verdict: ✅ PASS | DSR 1.42 | beats B&H True

@@ -96,8 +96,31 @@ IC 剪枝结论的**真实落地路径**（此前 `prune_indicators_cli.py --sug
 - **IC 数据集导出器 `scripts/export_ic_dataset.py`**（此前最上游断点：prune CLI 需要的 `date, forward_return, <指标>` CSV 只能人手拼）：从 OHLCV 缓存 + stockstats 直接算指标列 + `shift(-N)` 前瞻收益（末尾 N 行 drop——不伪造未实现的 forward_return），产出的 CSV 直接喂 prune CLI。指标名对 `INDICATOR_NAMES` 白名单校验；算不出的指标 skip + WARNING（绝不零填充）。
 - **prune CLI `--json-out`**（此前建议只 print 到 stdout）：写结构化 verdict（params + keep/prune + 每指标 mean|IC|/finite_windows/longest_low_run），下游工具无需解析 markdown。
 - **数据质量结构化落盘**（此前"全数据源失败仍产出 HOLD 报告"只有 LLM 散文说明）：router 每发一个 `NO_DATA_AVAILABLE`/`DATA_UNAVAILABLE` 哨兵就记一条 `{method, kind, detail}`（`dataflows/quality.py`，ContextVar per-run）；`_log_state` 把 `pm_rating`（PM 结构化评级，此前被拍平进 markdown）+ `data_quality` 块写进 `full_states_log_<date>.json`。
-- **run_robust DEGRADED 判定**（此前"有新 complete_report.md 即成功"）：成功后读 full_states_log 的 `data_quality.core_sentinel_count`，>0 打 DEGRADED 标记（默认不改 exit code 语义）；`--require-data-quality` 升级为失败重跑。旧版日志（无该字段）读作 None=未知，绝不误判为 0。
+- **run_robust DEGRADED 判定**（此前"有新 complete_report.md 即成功"）：成功后读 full_states_log 的 `data_quality.core_sentinel_count`，>0 打 DEGRADED 标记；质量闸门**默认开启**（2026-08-16 反转：降级报告按失败重跑），`--allow-degraded` 是回到旧行为的逃生口（同时把子进程 `YIAGENTS_DATA_VACUUM_POLICY` 降为 warn）；旧 `--require-data-quality` 保留为 no-op 兼容。旧版日志（无该字段）读作 None=未知，绝不误判为 0。
 - 完整人工流程：`export_ic_dataset.py NVDA --horizon 5` → `prune_indicators_cli.py ic_data/NVDA_5d.csv --json-out ...` → 人工审查 → 人工改 `indicator_battery` → `snapshot record` → A/B → `snapshot diff`。
+
+### 数据真空闸门 + 证据账本补盲（2026-08-16 T0 批）
+
+此前"核心数据全超时仍产出正常样子的 HOLD 报告"是头号信任问题；本批把它从"可检测"升级为"默认不可通过"：
+
+- **`data_vacuum_policy` 配置**（env `YIAGENTS_DATA_VACUUM_POLICY`，默认 `reject`）：`quality.check_data_vacuum()` 在 **Trader 节点入口**执行（`graph/setup.py` 用 `gate_on_data_vacuum` 包装，证据在分析师全部跑完后即完整，且在任何决策阶段 LLM 计费之前）；**真空判定 = 有核心哨兵事件且 `record_success` 集合为空**（"尝试过且零成功"，比"全 sentineled"更精确）。`reject` 抛类型化 `DataVacuumError`（BatchRunner 逐 ticker 捕获 → 表格 + 退出码 1；run_robust 子进程非零退出 → 重跑/失败）；`warn` 维持旧行为。非法取值**fail-closed 到 reject**。交互式 `yiagents analyze` 自动降为 warn（有人在看实时面板），显式 env 优先。
+- **证据账本补盲（7 处）**：router 核心类 `raise first_error` 前记 `KIND_CORE_ERROR`（新 kind，**计入 `core_sentinel_count`**）；4 个直连工具（market_data_validator / price_structure / weekly_indicators / binance_indicator_tools）的 `DATA_UNAVAILABLE` 全部记 `KIND_OPTIONAL_UNAVAILABLE`（它们绕过 router，此前是账本盲区）；reddit 真降级记证据（OAuth 拿不到 token / OAuth 失败退 RSS / RSS 自身失败 / 全程零帖），**无凭据走 RSS 是设计内默认、不记**（否则每个无 key run 都是噪声）。
+- **`record_success(method)`**（同 record_sentinel 契约，永不抛异常）：router 成功返回且类目非 OPTIONAL 时记录；`summarize_quality` 新增 `core_ok_count` / `core_error_count` / `degraded_count`（= core 哨兵 + stale-cache，仅报告用，真空判定仍只看核心证据）/ `data_vacuum` 布尔。
+- **默认多源链**（T0-3）：`data_vendors` 四个核心类目默认 `yfinance,alpha_vantage`（fundamentals 另加 `sec_edgar`）；**yfinance 永远在链首**（无 key 无限流），AV 免费档限流只作链尾；`config-check` 对"链含 AV 但 key 缺失"打 ⚠。
+- **超时默认开**：`YIAGENTS_HTTP_TIMEOUT_S` 默认 30s（原 opt-in；`0` 显式关闭）；BaoStock 裸 TCP 新增 `YIAGENTS_BAOSTOCK_TIMEOUT_S`（默认 30s，`_BaostockSession` 生命周期内 save/restore `socket.setdefaulttimeout`，requests 层 shim 够不到裸 socket）。
+- **决策时价格入档**（T0-5）：`full_states_log` 新增 `price_at_decision` / `price_at_decision_basis` / `asset_type`（`_apply_risk_overlay` 结尾挂 `decision.entry_price`；overlay 未跑时 `_log_state` 兜底直调记忆化的 `_latest_close_and_atr`）；旧日志缺字段向后兼容，Web 的 overlay 正则回捞保留。这是评级↔结果验证闭环（verify-history / /api/accuracy）的锚点。
+
+### 评级↔结果验证闭环 + memory-resolve（2026-08-16 T2 批）
+
+- **`yiagents verify-history`**（`yiagents/accuracy.py`）：扫全部 full_states_log → 每 (ticker, 日期, 评级) 取 PIT 前向收益（现货 `get_YFin_history_cached`，perp/spot 走 `binance_klines_frame`，按 `asset_type` 分流；旧日志缺 asset_type 时 USDT 后缀推断为 perp 且在报告里标注）→ 方向命中率（Buy/Overweight/Sell/Underweight）+ Hold 机会成本均值 + 分评级/分标的表（**全部带 n**）；horizon 未走完 = pending 绝不计分。产物 `accuracy/accuracy_report.{json,md}`；`GET /api/accuracy` + Web「评级准确率」视图只读服务该产物（未生成时诚实地 `available:false` + 命令提示，绝不伪造空报告）。
+- **`yiagents memory-resolve`**：按需清扫全部 ticker 的 pending 记忆条目（此前只有同 ticker 重跑才解析）。解析核心下沉到 `yiagents/graph/memory_resolution.py`（graph 的 `_resolve_pending_entries` 委托它），收益计算下沉到 `yiagents/accuracy.fetch_returns_yf`（graph 的 `_fetch_returns` 同步改为薄委托——两处不再可能漂移）。每条解析一次反思 LLM 调用。
+
+### IC 闭环半自动化 + indicator_ic_context（2026-08-16 T1 批）
+
+- **`yiagents ic-cycle`**：一条命令跑完 export → prune 判定 → 打印建议。数据集构建下沉到包内 `yiagents/backtest/ic_dataset.py`（`build_ic_frame`/`export_ic_datasets`/`prune_verdict_for_csv`/`run_ic_cycle`；export 脚本变薄委托，argv 契约不变——脚本不在 wheel 里，CLI 只能调包内实现）。判定 JSON 与 prune CLI 的 `--json-out` 同构；输出各 ticker 判定表 + 跨 ticker `indicator_battery` 交集建议 + `snapshot record --evidence <prune.json>` 提示。**永不自动改 live config**（人审是契约）。
+- **`.github/workflows/ic-cycle.yml`**：每周六 04:30 UTC（+手动 dispatch），独立 concurrency group（CI 组会被 push 取消），ic_data/ 作 90 天 artifact；空数据集 = 任务失败（空 artifact 冒充证据更糟）。
+- **`snapshot record --evidence` 卫生**：path 形态（单 token + 熟知后缀）但文件不存在 → 大声警告不阻断；自由文本描述合法不响。
+- **`indicator_ic_context`**（env `YIAGENTS_INDICATOR_IC_CONTEXT`，**默认关** = prompt 与 A/B 基线字节等价）：开启后 market analyst 系统消息追加一条 advisory——各指标 trailing mean |IC|（`ic_data/*.prune.json` 的 `per_indicator.mean_abs_ic` 跨文件平均，只渲染目录内已知指标；无 verdict → 不追加）。**`.prune.json` 第一次有了运行时消费者**。
 
 ## Binance 资产类型（crypto_perp / crypto_spot）
 

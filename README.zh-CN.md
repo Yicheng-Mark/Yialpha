@@ -111,12 +111,14 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 complete_report.md           ← 汇总报告；数据质量降级时顶部有 "⚠ DEGRADED RUN" 横幅
 
 ~/.yiagents/logs/<TICKER>/YiAgentsStrategy_logs/full_states_log_<date>.json
-   ← 机器可读全状态（证据、data_quality、节点级遥测）；Web 历史页读取此文件
+   ← 机器可读全状态（证据、data_quality、price_at_decision、节点级遥测）；Web 历史页读取此文件
 ```
 
-> **数据质量随报告一起交付。** 数据源在每次运行中记录降级哨兵（`no_data` / `optional_unavailable` / `stale_cache`）并汇入 `data_quality` 区块；核心数据缺失的运行会在报告横幅与 Web UI 中标记 `DEGRADED`——绝不静默装作无事发生。Market Analyst 引用的精确价格与指标值必须来自已校验的市场数据快照，每个数值论断都有可核查的来源。
+> **数据质量随报告一起交付——数据真空则默认拒绝运行。** 数据源在每次运行中记录降级哨兵（`no_data` / `core_error` / `optional_unavailable` / `stale_cache`）并汇入 `data_quality` 区块；核心数据缺失的运行会在报告横幅与 Web UI 中标记 `DEGRADED`。核心数据调用**全部失败**的运行（"数据真空 HOLD"）默认在 trader 节点前被拒绝（`data_vacuum_policy=reject`，抛类型化 `DataVacuumError`；设 `warn` 或 `run_robust --allow-degraded` 可保留降级报告）。四个核心类目走供应商回退链（`yfinance → alpha_vantage`，基本面再加 `sec_edgar`），单供应商故障只会降级而不会真空。Market Analyst 引用的精确价格与指标值必须来自已校验的市场数据快照，每个数值论断都有可核查的来源。
 
 运行结束后有两个可选闭环：因果记忆日志（`memory_enabled`，默认关闭——见[持久化与恢复](#持久化与恢复)）用已实现收益回溯过往同标的决策、把教训注入下一次运行；离线自我改进链（IC 剪枝 → 配置快照 → 验证闸门——见[回测与验证闸门](#回测与验证闸门)）。
+
+> **报告到底对不对？`yiagents verify-history` 给出可计算的答案。** 扫描每一份存档评级、拉取对应的 PIT 前向收益（现货走 yfinance，永续走 Binance klines），产出方向命中率 + 分评级 / 分标的表——所有数字都带样本量，horizon 未走完的决策记为 pending、绝不半程计分。报告落 `accuracy/accuracy_report.{json,md}`，Web UI 的「评级准确率」视图只读展示（`GET /api/accuracy`）。配套命令 `yiagents memory-resolve` 无需重跑分析即可清扫全部 ticker 的 pending 记忆条目（此前只有同 ticker 重跑才会解析）。
 
 ---
 
@@ -292,7 +294,7 @@ python web/app.py                # 启动 http://127.0.0.1:8000
 
 - **浏览**：ticker 网格 → 每只的日期 → 完整报告视图（评级徽章 + 量化风控 overlay 卡片 + 5 个可折叠章节 + 可选 node-perf 柱状图），另有跨票跨日期的评级对比视图（`#/compare`）。
 - **提交**：表单 spawn `scripts/run_robust.py`（与 CLI 同一条看门狗路径）；前端每 4 秒轮询并链接完成的报告。同一时刻只允许一个分析（运行中返回 409）。
-- **API**：`GET /api/tickers`、`GET /api/tickers/{t}/runs[/{date}]`、`GET /api/compare`、`POST /api/analyze`、`GET /api/tasks/{id}`、`GET /api/health`。
+- **API**：`GET /api/tickers`、`GET /api/tickers/{t}/runs[/{date}]`、`GET /api/compare`、`GET /api/accuracy`、`POST /api/analyze`、`GET /api/tasks/{id}`、`GET /api/health`。
 
 架构与完整端点说明见 [web/README.md](web/README.md)。
 
@@ -385,7 +387,7 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 - **杠杆 / 强平**：`--leverage > 1` 启用逐仓建模——按 K 线极值（最高/最低价）触发强平、MMR 阶梯取自 `leverageBracket`，强平事件记入运行摘要。默认 1 倍、仅多头。
 - **做空**：`--allow-short` 显式开启（Sell → −1×，收资金费）；仅永续可用。
 
-**指标自改进环（离线、无 LLM）：** Market 分析师的 28 个指标目录可按证据剪枝——`scripts/export_ic_dataset.py` 直接从 PIT 过滤后的 OHLCV 缓存导出 `date, forward_return, <指标>…` 表，`scripts/prune_indicators_cli.py` 按滚动 IC 排名并输出保留/剪枝报告（绝不自动应用），人工审核后的名单落入 `indicator_battery` 配置键，由 `yiagents config-check` 校验；`yiagents snapshot record` 把变更记入追加式审计轨迹。
+**指标自改进环（离线、无 LLM）：** Market 分析师的 28 个指标目录可按证据剪枝——`scripts/export_ic_dataset.py` 直接从 PIT 过滤后的 OHLCV 缓存导出 `date, forward_return, <指标>…` 表，`scripts/prune_indicators_cli.py` 按滚动 IC 排名并输出保留/剪枝报告（绝不自动应用），人工审核后的名单落入 `indicator_battery` 配置键，由 `yiagents config-check` 校验；`yiagents snapshot record` 把变更记入追加式审计轨迹。 `yiagents ic-cycle` 一条命令跑完机械部分（导出 → 判定 → 建议），每周的 GitHub workflow 把证据归档为 artifact，`indicator_ic_context`（默认关）把 trailing mean |IC| 作为 advisory 上下文回灌给 market analyst。
 
 ```text
 [AAPL] 闸门判定: ✅ PASS | DSR 1.42 | 跑赢B&H True

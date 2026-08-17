@@ -10,6 +10,90 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+
+- **Data-vacuum gate (`data_vacuum_policy`, default `reject`).** A run whose
+  core data calls ALL failed — the "data vacuum HOLD" that looked like a
+  normal report — now raises a typed `DataVacuumError` at the trader node
+  before any decision-stage LLM call is billed. The verdict is
+  "core calls were attempted and none succeeded" (router successes tracked
+  via `quality.record_success`), so partial degradations still produce a
+  DEGRADED report while total vacuums fail loudly. Interactive `analyze`
+  softens to `warn` (a human is watching); batch / `run_robust` inherit
+  `reject`; `run_robust --allow-degraded` is the escape hatch back to the
+  old semantics. Invalid policy values fail closed to `reject`.
+- **Evidence-ledger blind spots closed (7 sites).** The router's
+  core-category hard-error branch records `KIND_CORE_ERROR` before raising
+  (counted into `core_sentinel_count`); the four direct-connect tools
+  (market-data validator, price-structure, weekly indicators, Binance
+  indicators) record their `DATA_UNAVAILABLE` degrades; Reddit records
+  genuine degrades (OAuth token unavailable / OAuth failure → RSS / RSS
+  failure / zero posts) while the keyless RSS default stays silent.
+  `summarize_quality` adds `core_error_count` / `core_ok_count` /
+  `degraded_count` / `data_vacuum`.
+- **Decision-time price archived.** `full_states_log` now carries
+  `price_at_decision`, `price_at_decision_basis` and `asset_type` (from the
+  risk overlay's entry price, with a memoized-loader fallback when the
+  overlay did not run) — the anchor the upcoming rating↔outcome accuracy
+  loop needs. Older logs simply lack the fields (readers stay compatible).
+- **Rating↔outcome verification loop.** `yiagents verify-history` scans
+  every archived rating, fetches its PIT forward return (spot via yfinance,
+  Binance perps/spot via their klines frames) and writes
+  `accuracy/accuracy_report.{json,md}`: directional hit rate
+  (Buy/Overweight/Sell/Underweight), Hold opportunity-cost mean, per-rating
+  and per-ticker tables — all with sample sizes; not-yet-elapsed horizons are
+  pending, never scored; legacy logs without asset_type get a visible
+  USDT-suffix inference. `GET /api/accuracy` + the Web *Accuracy* view serve
+  the artifact read-only (`available:false` + hint until the CLI runs).
+- **`yiagents memory-resolve`.** Resolves pending memory-log entries for ALL
+  tickers on demand — previously an entry only resolved when its ticker was
+  analyzed again. The resolution core moved to
+  `yiagents/graph/memory_resolution.py` (graph delegates), and the shared
+  return-fetch lives in `yiagents/accuracy.fetch_returns_yf`
+  (`YiAgentsGraph._fetch_returns` is now a thin delegate to it).
+- **Decision-time price archived** (see above) anchors the whole loop.
+- **`yiagents ic-cycle` — the IC loop's mechanical half in one command.**
+  Runs export → prune verdict per ticker (same `yiagents.backtest.ic` math
+  the prune CLI uses) → writes `<TICKER>_<h>d.csv` + its `.prune.json`,
+  prints per-ticker verdict tables, the cross-ticker `indicator_battery`
+  intersection suggestion, and the `snapshot record` command that documents
+  applying it. The dataset builder moved into the package
+  (`yiagents/backtest/ic_dataset.py`; the export script is now a thin CLI
+  wrapper, its argv contract unchanged). NEVER edits the live config.
+- **Weekly IC evidence workflow** (`.github/workflows/ic-cycle.yml`): Saturday
+  04:30 UTC cron + manual dispatch, own concurrency group, uploads `ic_data/`
+  artifacts for 90 days; an empty dataset fails the job rather than shipping
+  an empty artifact.
+- **`snapshot record --evidence` hygiene**: a path-looking evidence value
+  that does not exist warns loudly (the audit trail would point at nothing);
+  free-text descriptions stay silent.
+- **`indicator_ic_context` (default off)**: when enabled, the market analyst
+  gets one advisory line per indicator with its trailing mean |IC| averaged
+  over `ic_data/*.prune.json` — the runtime consumer of the pruning evidence,
+  and the first reader of the `.prune.json` format. Off = prompt
+  byte-equivalent to the A/B baseline.
+
+
+
+- **Default multi-vendor fallback chains.** The four core categories chain
+  `yfinance,alpha_vantage` (fundamentals additionally `sec_edgar`), with
+  keyless unlimited yfinance always first and rate-limited Alpha Vantage as
+  tail-only fallback. `config-check` warns when a chain includes
+  alpha_vantage without `ALPHAVANTAGE_API_KEY`.
+
+### Changed
+
+- **HTTP timeouts on by default.** `YIAGENTS_HTTP_TIMEOUT_S` (yfinance)
+  defaults to 30s — was opt-in/off; explicit `0` still disables. BaoStock's
+  raw TCP session (unreachable by the requests-level shim) gets
+  `YIAGENTS_BAOSTOCK_TIMEOUT_S`, default 30s, scoped to the session
+  lifetime via save/restore `socket.setdefaulttimeout`.
+- **`run_robust` quality gate inverted to default-ON.** A degraded report
+  now counts as a failure and retries; `--allow-degraded` restores the old
+  "accept + mark DEGRADED" behaviour (and downgrades the child's vacuum
+  policy to `warn`). The old `--require-data-quality` flag is a no-op kept
+  for compatibility.
+
 ### Fixed
 
 - **P0: Binance OHLC no longer rounded to 2 decimals.**

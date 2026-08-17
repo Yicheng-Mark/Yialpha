@@ -75,6 +75,7 @@ scripts/run_robust.py --tickers <T> --date <D> [--asset-type <X>] --workers 1
 | `GET /api/tickers/{t}/runs` | `{ticker, dates:[…], date_ratings:[…], reports:[{dir, mtime, complete}]}` |
 | `GET /api/tickers/{t}/runs/{date}` | rating + overlay + 5 sections + `node_perf?` |
 | `GET /api/compare` | `{tickers:[{ticker, date_ratings:[{date, rating}]}]}` (skips all-unreadable tickers) |
+| `GET /api/accuracy` | serves the `yiagents verify-history` artifact (`{available:false, hint}` until run) |
 | `GET /api/health` | preflight (deps / key / proxy / yfinance / DeepSeek) — shared implementation with `run_baseline.py --preflight` |
 | `POST /api/analyze` | `{ticker, date, asset_type, language?}` → `{task_id, started_at}` (409 if busy) |
 | `GET /api/tasks/{task_id}` | `{status, elapsed_s, attempt, max_attempts, report_url, …}` |
