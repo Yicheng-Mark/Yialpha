@@ -44,7 +44,11 @@ from .binance_rate_limiter import get_binance_weight_limiter
 from .config import get_config
 from .errors import NoMarketDataError, VendorRateLimitError
 from .stockstats_utils import MAX_OHLCV_STALE_DAYS, _assert_ohlcv_not_stale
-from .symbol_utils import normalize_symbol_for_venue
+from .symbol_utils import (
+    _EQUITY_PERP_SEED_BASES,
+    normalize_symbol_for_venue,
+    tokenized_stock_perp_underlying,
+)
 from .utils import current_pit_end, proxy_map
 
 logger = logging.getLogger(__name__)
@@ -1488,3 +1492,109 @@ def get_binance_spot_perp_basis(
                "(long premium), negative = discount (short pressure).\n")
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     return header + df.to_csv(index=False)
+
+
+# --- Tokenized US-equity perp resolution -------------------------------------
+#
+# Binance exchangeInfo types every USDT-M contract with an ``underlyingType``
+# ("COIN" / "EQUITY" / "HK_EQUITY" / "KR_EQUITY" / "CN_EQUITY" / "COMMODITY" /
+# "PREMARKET" / "INDEX"), which is the authoritative answer to "is this perp a
+# tokenized stock?". The set is fetched ONCE per run by an explicit warm call
+# (CLI selection / graph propagate) and then read cache-only: mid-graph and
+# test-path resolvers are network-free and deterministic (seed snapshot when
+# unwamed). Only US EQUITY is resolved — HK/KR/CN equity bases have no
+# rule-based mapping to their Yahoo listings, and commodities / pre-IPO
+# contracts have no company fundamentals at all.
+
+_EQUITY_PERP_BASES_LOCK = threading.Lock()
+_EQUITY_PERP_BASES_CACHE: frozenset[str] | None = None
+
+
+def refresh_equity_perp_bases() -> None:
+    """Drop the equity-perp base cache (tests / forced re-warm): back to seed."""
+    global _EQUITY_PERP_BASES_CACHE
+    with _EQUITY_PERP_BASES_LOCK:
+        _EQUITY_PERP_BASES_CACHE = None
+
+
+def equity_perp_bases() -> frozenset[str]:
+    """Current US-equity perp base set — cache-only, NEVER fetches.
+
+    Returns the warmed exchangeInfo snapshot when available, else the static
+    seed snapshot from :mod:`yiagents.dataflows.symbol_utils`. Keeping this
+    fetch-free means every resolver call (instrument context, analyst filter,
+    tool remap) is network-free and deterministic — freshness comes from the
+    ONE explicit :func:`warm_equity_perp_bases` call at perp-run start.
+    """
+    with _EQUITY_PERP_BASES_LOCK:
+        if _EQUITY_PERP_BASES_CACHE is not None:
+            return _EQUITY_PERP_BASES_CACHE
+    return _EQUITY_PERP_SEED_BASES
+
+
+def warm_equity_perp_bases() -> frozenset[str]:
+    """Fetch the live EQUITY perp listing once (perp-run start only).
+
+    exchangeInfo -> underlyingType == EQUITY, status TRADING. On ANY failure
+    (network, rate limit, parse, empty universe) falls back to the static seed
+    with a WARNING — fundamentals-analyst eligibility then rides on seed
+    freshness, which is exactly the degraded mode the seed exists for. The
+    listing snapshot is current-state (no as-of date): it gates analyst
+    ELIGIBILITY only, never data content — the fundamentals vendors
+    themselves remain PIT-correct by date.
+    """
+    global _EQUITY_PERP_BASES_CACHE
+    with _EQUITY_PERP_BASES_LOCK:
+        if _EQUITY_PERP_BASES_CACHE is not None:
+            return _EQUITY_PERP_BASES_CACHE
+        try:
+            payload = _http_get(
+                "/fapi/v1/exchangeInfo",
+                {},
+                symbol_for_error="EQUITY_PERP_BASES",
+                canonical="EQUITY_PERP_BASES",
+            )
+            symbols = (
+                payload.get("symbols", []) if isinstance(payload, dict) else []
+            )
+            bases = frozenset(
+                s["symbol"][: -len(s["quoteAsset"])]
+                for s in symbols
+                if isinstance(s, dict)
+                and s.get("underlyingType") == "EQUITY"
+                and s.get("status") == "TRADING"
+                and s.get("quoteAsset") in ("USDT", "USDC")
+            )
+            if not bases:
+                # A 200 with zero EQUITY rows would silently disable the
+                # fundamentals analyst for every stock perp — treat it as a
+                # failed fetch rather than an empty universe.
+                raise NoMarketDataError(
+                    "EQUITY_PERP_BASES", "EQUITY_PERP_BASES",
+                    "exchangeInfo returned no TRADING EQUITY symbols",
+                )
+        except Exception as exc:  # noqa: BLE001 — fail-open floor, any failure
+            logger.warning(
+                "warm_equity_perp_bases: exchangeInfo fetch failed (%s); "
+                "falling back to the static seed snapshot (%d bases)",
+                exc, len(_EQUITY_PERP_SEED_BASES),
+            )
+            bases = _EQUITY_PERP_SEED_BASES
+        _EQUITY_PERP_BASES_CACHE = bases
+        return _EQUITY_PERP_BASES_CACHE
+
+
+def stock_perp_underlying(ticker: str) -> str | None:
+    """Tokenized-stock-perp resolver: Yahoo-ready underlying or None.
+
+    Thin wrapper over the pure matcher in symbol_utils against the current
+    base set (warmed snapshot or seed — never a fetch). The cheap syntactic
+    pre-check short-circuits anything without a USDT/USDC quote before the
+    set is even consulted.
+    """
+    if not isinstance(ticker, str):
+        return None
+    compact = ticker.strip().upper().replace("-", "")
+    if not compact.endswith(("USDT", "USDC")):
+        return None
+    return tokenized_stock_perp_underlying(ticker, equity_perp_bases())

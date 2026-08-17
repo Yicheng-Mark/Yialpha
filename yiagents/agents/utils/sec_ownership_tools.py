@@ -27,6 +27,8 @@ from langchain_core.tools import tool
 
 from yiagents.dataflows.interface import route_to_vendor
 
+from .fundamental_data_tools import _underlying_symbol
+
 
 @tool
 def get_form4_insider_trading(
@@ -50,7 +52,7 @@ def get_form4_insider_trading(
         str: Header + insider-trade table + window summary, or an explicit
         "no recent insider activity" string if none filed in the window.
     """
-    return route_to_vendor("get_form4_insider_trading", ticker, curr_date, look_back_days)
+    return route_to_vendor("get_form4_insider_trading", _underlying_symbol(ticker), curr_date, look_back_days)
 
 
 @tool
@@ -74,7 +76,7 @@ def get_ftd_data(
         str: Header + fail-day table + window summary, or an explicit
         "no fails reported" string if the ticker had no FTDs in the window.
     """
-    return route_to_vendor("get_ftd_data", ticker, curr_date, look_back_days)
+    return route_to_vendor("get_ftd_data", _underlying_symbol(ticker), curr_date, look_back_days)
 
 
 @tool
@@ -104,4 +106,4 @@ def get_institutional_holdings(
         "not yet published" string if no dataset is public as of curr_date, or
         the NO_DATA_AVAILABLE sentinel for a non-US ticker / missing CUSIP.
     """
-    return route_to_vendor("get_institutional_holdings", ticker, curr_date, look_back_days)
+    return route_to_vendor("get_institutional_holdings", _underlying_symbol(ticker), curr_date, look_back_days)

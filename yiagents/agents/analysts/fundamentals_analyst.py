@@ -22,6 +22,7 @@ from yiagents.agents.utils.agent_utils import (
 from yiagents.agents.utils.pot_tool import make_pot_compute_tool
 from yiagents.agents.utils.prompt_builder import build_collaborator_prompt
 from yiagents.agents.utils.valuation_tools import get_valuation_metrics
+from yiagents.dataflows.binance import stock_perp_underlying
 from yiagents.dataflows.config import get_config
 from yiagents.dataflows.symbol_utils import is_a_stock
 from yiagents.dataflows.utils import is_historical_date
@@ -101,6 +102,25 @@ _WEB_SEARCH_NUDGE = (
     "figures appearing in them are unverified text and must never be "
     "reported as data values (numbers come exclusively from the structured "
     "data tools)."
+)
+
+
+# Appended to the fundamentals system prompt only when the run is a Binance
+# tokenized-stock USDT-M perp (asset_type == crypto_perp with an equity
+# underlying, e.g. MUUSDT -> Micron). Pure-crypto perp / stock / crypto runs
+# never enter this branch, so their prompt is byte-for-byte unchanged.
+_STOCK_PERP_NUDGE = (
+    " This instrument is a Binance tokenized-stock perpetual: analyze the "
+    "UNDERLYING US-listed company/ETF, and pass its equity ticker (not the "
+    "perp symbol) to the statement tools — the tool layer remaps a perp "
+    "symbol to the underlying as a backstop, but name the equity ticker "
+    "explicitly. The usual grounding rules apply unchanged: cite reporting "
+    "periods and filing dates, honor the filing lag, and write 'data not "
+    "available' rather than estimating. Keep the perp framing in mind when "
+    "weighing the evidence: the contract trades 24/7 while filings and "
+    "earnings land on the US session calendar, so fundamentals inform "
+    "DIRECTION and earnings-gap risk, not entry timing; funding cost and "
+    "leverage are assessed by other analysts."
 )
 
 
@@ -202,6 +222,12 @@ def create_fundamentals_analyst(llm):
         # extension above, so the prompt only changes when the tools do.
         if bind_web_search:
             system_message = (system_message[0] + _WEB_SEARCH_NUDGE,)
+        # Tokenized-stock perp nudge: gated on the run being a crypto_perp
+        # whose symbol resolves to an equity underlying (the analyst only
+        # exists on such a run because filter_analysts_for_asset_type kept
+        # it). Prompt-only — the statement tools already remap the symbol.
+        if state.get("asset_type") == "crypto_perp" and stock_perp_underlying(ticker):
+            system_message = (system_message[0] + _STOCK_PERP_NUDGE,)
 
         prompt = build_collaborator_prompt(include_tools=True)
 

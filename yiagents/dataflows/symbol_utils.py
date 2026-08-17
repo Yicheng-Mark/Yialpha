@@ -79,6 +79,78 @@ _YAHOO_SAFE = re.compile(r"^[A-Za-z0-9._\-\^=]+$")
 # match before the ``USD`` substring.
 _CRYPTO_QUOTES = ("USDT", "USDC", "USD")
 
+# Binance USDT-M lists tokenized US-equity perpetuals (``underlyingType ==
+# "EQUITY"`` in exchangeInfo): the contract tracks a real listed company or
+# ETF, so the underlying's fundamentals ARE analyzable through the normal
+# stock vendors even though the perp itself is a crypto instrument. This seed
+# is a verified snapshot (2026-08-17, fapi /exchangeInfo, status TRADING) and
+# the static FAIL-OPEN floor: the live resolver in
+# :func:`yiagents.dataflows.binance.equity_perp_bases` supersedes it with the
+# runtime exchangeInfo listing, so extend this set only to raise the floor
+# (new listings do NOT require a code change).
+_EQUITY_PERP_SEED_BASES = frozenset(
+    {
+        "AAOI", "AAPL", "ADBE", "ALAB", "AMAT", "AMD",
+        "AMZN", "APP", "ARM", "ASML", "ASTS", "AVGO",
+        "AXTI", "BABA", "BBX", "BE", "BITO", "BMNR",
+        "BNC", "BOT", "BRKB", "BSP", "BX", "CAT",
+        "CBRS", "CIEN", "COHR", "COIN", "COST", "CRCL",
+        "CRDO", "CRM", "CRWD", "CRWV", "CSCO", "DELL",
+        "DIS", "DKNG", "DRAM", "EBAY", "EWJ", "EWT",
+        "EWY", "EWZ", "FLEX", "FLNC", "FWDI", "GDX",
+        "GEV", "GLW", "GME", "GOOGL", "GS", "HD",
+        "HIMS", "HOOD", "HPE", "IBM", "INTC", "INTW",
+        "IREN", "IWM", "JPM", "KLAC", "KO", "KORU",
+        "KSTR", "LITE", "LLY", "LRCX", "LYTE", "META",
+        "MRVL", "MSFT", "MSTR", "MU", "MUU", "MVLL",
+        "NBIS", "NET", "NFLX", "NOK", "NOW", "NVDA",
+        "NVO", "ONDS", "ORCL", "PANW", "PAYP", "PENG",
+        "PLTR", "PYPL", "QCOM", "QNTX", "QQQ", "RDDT",
+        "RIVN", "RKLB", "SHAZ", "SHOP", "SKHY", "SMCI",
+        "SMH", "SNDK", "SNOW", "SNXX", "SOFI", "SONY",
+        "SOXL", "SOXS", "SPCX", "SPY", "SQQQ", "STRC",
+        "STXX", "TBT", "TER", "TMF", "TQQQ", "TSLA",
+        "TSM", "TTWO", "TXN", "TZA", "UBER", "URNM",
+        "USAR", "UVXY", "V", "VRT", "VST", "WDC",
+        "WEN", "WMT", "XBI", "XLE", "ZM",
+    }
+)
+
+# Binance base symbols whose Yahoo equivalent is not the identity. Binance
+# drops the class-share separator; Yahoo wants the dashed form.
+_EQUITY_BASE_YAHOO_ALIASES = {
+    "BRKB": "BRK-B",
+}
+
+
+def tokenized_stock_perp_underlying(
+    ticker: str, equity_perp_bases: frozenset[str] | None = None
+) -> str | None:
+    """Return the Yahoo-ready US-equity symbol if ``ticker`` is a Binance
+    tokenized-stock USDT-M perp, else None.
+
+    Purely syntactic against the supplied base set — no network calls — so it
+    is safe in tests and on hot paths. ``equity_perp_bases`` defaults to the
+    static seed snapshot; pass the live set from
+    :func:`yiagents.dataflows.binance.equity_perp_bases` for current-listing
+    freshness. Accepts dashed or compact forms and USDT/USDC quotes
+    (``MUUSDT``/``MU-USDT``/``MUUSDC`` -> ``MU``). Bases with a Yahoo spelling
+    exception are mapped (``BRKBUSDT`` -> ``BRK-B``). Pure-crypto perps
+    (``BTCUSDT``), unlisted alts (``PEPEUSDT``), and anything without a
+    stablecoin quote (``MU``, ``600519.SS``) return None.
+    """
+    if not isinstance(ticker, str) or not ticker.strip():
+        return None
+    compact = ticker.strip().upper().replace("-", "")
+    for quote in ("USDT", "USDC"):
+        if compact.endswith(quote):
+            base = compact[: -len(quote)]
+            bases = _EQUITY_PERP_SEED_BASES if equity_perp_bases is None else equity_perp_bases
+            if base in bases:
+                return _EQUITY_BASE_YAHOO_ALIASES.get(base, base)
+            return None
+    return None
+
 
 def _normalize_crypto(s: str) -> str | None:
     """Return ``<BASE>-USD`` if ``s`` is a known crypto quoted in USD/USDT/USDC.

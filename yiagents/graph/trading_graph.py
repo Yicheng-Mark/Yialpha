@@ -67,6 +67,7 @@ from yiagents.agents.utils.agent_utils import (
 from yiagents.agents.utils.memory import TradingMemoryLog
 from yiagents.agents.utils.pot_tool import make_pot_compute_tool
 from yiagents.agents.utils.valuation_tools import get_valuation_metrics
+from yiagents.dataflows.binance import stock_perp_underlying, warm_equity_perp_bases
 from yiagents.dataflows.config import set_config
 from yiagents.dataflows.utils import safe_ticker_component, set_analysis_date
 from yiagents.default_config import DEFAULT_CONFIG
@@ -895,7 +896,15 @@ class YiAgentsGraph:
         ``.info`` snapshot (company name / sector / exchange) is refused and
         the context degrades to ticker-only, the same as a yfinance failure.
         """
-        identity = resolve_instrument_identity(ticker, trade_date)
+        # Tokenized US-equity perps anchor to the UNDERLYING company's
+        # identity (MUUSDT -> Micron via MU): resolving the perp symbol itself
+        # fails on Yahoo and degrades to ticker-only exactly where the company
+        # context matters most. Pure-crypto perps keep the perp symbol (the
+        # lookup fails harmlessly and degrades to ticker-only as before).
+        identity_ticker = ticker
+        if asset_type == "crypto_perp":
+            identity_ticker = stock_perp_underlying(ticker) or ticker
+        identity = resolve_instrument_identity(identity_ticker, trade_date)
         return build_instrument_context(ticker, asset_type, identity)
 
     def _run_signature(self, asset_type: str) -> str:
@@ -936,6 +945,13 @@ class YiAgentsGraph:
         when ``risk_enabled`` is set in config.
         """
         self.ticker = company_name
+
+        # Perp runs: warm the EQUITY-perp listing once (one exchangeInfo
+        # fetch, fail-open to the static seed with a WARNING) so instrument-
+        # context / identity / tool remaps all see the same fresh universe.
+        # Stock/crypto runs skip this entirely — zero new network for them.
+        if asset_type == "crypto_perp":
+            warm_equity_perp_bases()
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
         self._resolve_pending_entries(company_name, as_of_date=str(trade_date))
