@@ -186,7 +186,9 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
         # 2026-08-15 technical-analysis expansion: the baseline trio gains the
         # weekly-timeframe context, the three price-structure evidence tools
         # (S/R levels, volume confirmation/divergence, candlestick patterns),
-        # and benchmark relative strength.
+        # and benchmark relative strength. Live runs additionally bind the
+        # market-scoped web_search (2026-08-17 scoped-budget allocation;
+        # live dates only).
         self.assertEqual(
             self._tool_names("stock"),
             [
@@ -198,6 +200,7 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
                 "get_volume_features",
                 "get_candlestick_patterns",
                 "get_relative_strength",
+                "web_search",
             ],
         )
 
@@ -213,6 +216,7 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
                 "get_volume_features",
                 "get_candlestick_patterns",
                 "get_relative_strength",
+                "web_search",
             ],
         )
 
@@ -230,8 +234,9 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
         # classic stockstats battery on the actual perp klines — the indicator
         # capability perp runs previously lacked entirely — and
         # get_binance_premium_index (2026-08-16): the mark-price snapshot that
-        # liquidation-distance claims must anchor to.
-        self.assertEqual(len(names), 8)
+        # liquidation-distance claims must anchor to. Live runs add the
+        # market-scoped web_search (9th).
+        self.assertEqual(len(names), 9)
         self.assertEqual(
             sorted(names),
             [
@@ -243,18 +248,22 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
                 "get_binance_open_interest",
                 "get_binance_premium_index",
                 "get_binance_taker_buy_sell",
+                "web_search",
             ],
         )
 
     def test_historical_perp_omits_current_positioning_and_order_flow(self):
+        names = self._tool_names("crypto_perp", "2020-01-02")
         self.assertEqual(
-            sorted(self._tool_names("crypto_perp", "2020-01-02")),
+            sorted(names),
             [
                 "get_binance_funding_rate",
                 "get_binance_indicators",
                 "get_binance_klines",
             ],
         )
+        # PIT gate: historical replays never bind web_search.
+        self.assertNotIn("web_search", names)
 
     def test_perp_nudge_waives_unbound_prompt_mandates(self):
         """Round-5: the base prompt mandates get_stock_data / weekly /

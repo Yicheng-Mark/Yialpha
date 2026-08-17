@@ -169,7 +169,8 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
 
     def test_stock_binds_baseline_plus_expansion_tools(self):
         # 2026-08-15 technical-analysis expansion (weekly + price-structure
-        # + relative strength).
+        # + relative strength). Live runs additionally bind the market-scoped
+        # web_search (2026-08-17 scoped-budget allocation; live dates only).
         self.assertEqual(
             self._tool_names("stock"),
             [
@@ -181,6 +182,7 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
                 "get_volume_features",
                 "get_candlestick_patterns",
                 "get_relative_strength",
+                "web_search",
             ],
         )
 
@@ -196,6 +198,7 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
                 "get_volume_features",
                 "get_candlestick_patterns",
                 "get_relative_strength",
+                "web_search",
             ],
         )
 
@@ -207,7 +210,8 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
         # tools plus get_binance_spot_indicators (2026-08-15; spot-default
         # binding 2026-08-16): the classic battery computed on the Binance
         # candles, defaulting to the SPOT venue so an omitted venue arg can
-        # never price the perpetual.
+        # never price the perpetual. Live runs also bind the market-scoped
+        # web_search (live dates only — historical replays never see it).
         self.assertEqual(
             sorted(names),
             [
@@ -223,6 +227,7 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
                 "get_support_resistance",
                 "get_verified_market_snapshot",
                 "get_volume_features",
+                "web_search",
             ],
         )
         # Spot must NOT bind the perp-native tools (including the perp-default
@@ -232,8 +237,9 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
         self.assertNotIn("get_binance_indicators", names)
 
     def test_historical_spot_omits_rolling_current_snapshots(self):
+        names = self._tool_names("crypto_spot", "2020-01-02")
         self.assertEqual(
-            sorted(self._tool_names("crypto_spot", "2020-01-02")),
+            sorted(names),
             [
                 "get_binance_spot_indicators",
                 "get_binance_spot_klines",
@@ -247,6 +253,9 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
                 "get_volume_features",
             ],
         )
+        # PIT gate: Tavily has no as-of parameter, so historical replays
+        # never bind web_search (would leak today's web into a past date).
+        self.assertNotIn("web_search", names)
 
 
 def _kline(day_iso: str, close: float) -> list:

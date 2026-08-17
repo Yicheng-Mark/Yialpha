@@ -68,7 +68,11 @@ from yiagents.agents.utils.sec_ownership_tools import (
     get_institutional_holdings,
 )
 from yiagents.agents.utils.technical_indicators_tools import get_indicators
-from yiagents.agents.utils.web_search_tools import web_search
+from yiagents.agents.utils.web_search_tools import (
+    web_search,
+    web_search_fundamentals,
+    web_search_market,
+)
 from yiagents.agents.utils.weekly_indicators_tools import get_indicators_weekly
 
 # Public surface: the data tools are imported here so agents and the graph
@@ -76,6 +80,8 @@ from yiagents.agents.utils.weekly_indicators_tools import get_indicators_weekly
 __all__ = [
     "get_stock_data",
     "web_search",
+    "web_search_market",
+    "web_search_fundamentals",
     "get_indicators",
     "get_indicators_weekly",
     "get_support_resistance",

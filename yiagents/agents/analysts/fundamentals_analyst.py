@@ -17,12 +17,14 @@ from yiagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
     get_margin_trading,
+    web_search_fundamentals,
 )
 from yiagents.agents.utils.pot_tool import make_pot_compute_tool
 from yiagents.agents.utils.prompt_builder import build_collaborator_prompt
 from yiagents.agents.utils.valuation_tools import get_valuation_metrics
 from yiagents.dataflows.config import get_config
 from yiagents.dataflows.symbol_utils import is_a_stock
+from yiagents.dataflows.utils import is_historical_date
 
 # Appended to the fundamentals system prompt only when YIAGENTS_SEC_OWNERSHIP is
 # on. When off, the analyst's prompt (and tool list) are byte-for-byte unchanged.
@@ -81,6 +83,24 @@ _A_SHARE_NATIVE_NUDGE = (
     "coverage found' for this symbol/date, report that honestly and do not "
     "estimate multiples, prices, capital flow, dragon-tiger activity, or "
     "statement line items."
+)
+
+
+# Appended to the fundamentals system prompt when web_search is bound (config
+# web_search_enabled, default ON, live dates only). The vendor degrades to a
+# WEB_SEARCH_UNAVAILABLE sentinel + data_quality event on key-missing /
+# budget-exhausted, so advertising it is always run-safe; the fundamentals
+# instance charges its own Tavily budget scope and never competes with the
+# news or market analysts' calls.
+_WEB_SEARCH_NUDGE = (
+    " Optionally use web_search(query) for open-web context the statement "
+    "tools cannot surface (earnings-call color, guidance revisions, M&A and "
+    "buyback announcements, industry supply/demand narrative). Web-search "
+    "grounding rules: cite the source URL for every claim drawn from its "
+    "results, and treat snippets as qualitative context ONLY — any prices or "
+    "figures appearing in them are unverified text and must never be "
+    "reported as data values (numbers come exclusively from the structured "
+    "data tools)."
 )
 
 
@@ -144,6 +164,18 @@ def create_fundamentals_analyst(llm):
                 get_a_share_balance_sheet_native,
                 get_a_share_cashflow_statement_native,
             ])
+        # Open-web search (config: web_search_enabled, on by default). Live
+        # dates only — Tavily has no as-of parameter, so binding it on a
+        # historical replay date would leak future web context (same PIT
+        # contract as the news analyst's prediction-markets gate).
+        # Byte-equivalent when the flag is off or the date is historical: no
+        # tool, no nudge.
+        bind_web_search = (
+            get_config().get("web_search_enabled", True)
+            and not is_historical_date(current_date)
+        )
+        if bind_web_search:
+            tools.append(web_search_fundamentals)
 
         system_message = (
             "You are a researcher tasked with analyzing fundamental information over the past week about a company. Please write a comprehensive report of the company's fundamental information such as financial documents, company profile, basic company financials, and company financial history to gain a full view of the company's fundamental information to inform traders. Focus on the most decision-relevant figures rather than exhaustive detail, and tie every claim to a specific number and reporting period pulled from the tools. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
@@ -166,6 +198,10 @@ def create_fundamentals_analyst(llm):
         # its tool extension above, so the prompt only changes when the tools do.
         if get_config().get("a_share_native") and is_a_stock(ticker):
             system_message = (system_message[0] + _A_SHARE_NATIVE_NUDGE,)
+        # Web-search nudge uses the SAME gate (flag AND live date) as the tool
+        # extension above, so the prompt only changes when the tools do.
+        if bind_web_search:
+            system_message = (system_message[0] + _WEB_SEARCH_NUDGE,)
 
         prompt = build_collaborator_prompt(include_tools=True)
 
