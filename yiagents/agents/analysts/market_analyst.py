@@ -283,6 +283,46 @@ def _system_message() -> str:
     return _legacy_system_message() + get_language_instruction()
 
 
+def _format_indicator_ic_context() -> str | None:
+    """One advisory line per indicator with its trailing mean |IC|.
+
+    Reads every ``ic_data/*.prune.json`` verdict (the ``yiagents ic-cycle`` /
+    prune-CLI output convention) and averages ``per_indicator[].mean_abs_ic``
+    across files. Only catalog indicators are rendered; absent verdicts and
+    unreadable files are skipped — the function returns ``None`` when no
+    usable evidence exists, leaving the prompt untouched.
+    """
+    import json
+    from pathlib import Path
+
+    ic_dir = Path("ic_data")
+    if not ic_dir.is_dir():
+        return None
+    values: dict[str, list[float]] = {}
+    for verdict_path in sorted(ic_dir.glob("*.prune.json")):
+        try:
+            verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+            per = verdict.get("per_indicator") or {}
+        except (OSError, json.JSONDecodeError):
+            logger.debug("Skipping unreadable IC verdict %s", verdict_path)
+            continue
+        for name, stats in per.items():
+            mic = stats.get("mean_abs_ic") if isinstance(stats, dict) else None
+            if isinstance(mic, (int, float)):
+                values.setdefault(name, []).append(float(mic))
+    if not values:
+        return None
+    known = set(INDICATOR_NAMES)
+    parts = sorted(
+        (name, sum(v) / len(v))
+        for name, v in values.items() if name in known
+    )
+    if not parts:
+        return None
+    rendered = ", ".join(f"{name} |IC|={avg:.3f}" for name, avg in parts)
+    return f"Trailing mean |IC| by indicator: {rendered}"
+
+
 def create_market_analyst(llm):
 
     def market_analyst_node(state):
@@ -399,6 +439,25 @@ def create_market_analyst(llm):
                     "(Advisory regime context — deterministic computation. "
                     "Weigh it in your read and say so when your conclusion "
                     "disagrees with it.)"
+                )
+
+        # Trailing-IC context (config: indicator_ic_context, default OFF;
+        # env YIAGENTS_INDICATOR_IC_CONTEXT=true to enable). Renders one
+        # advisory line per indicator with its trailing mean |IC| from the
+        # latest ic_data/*.prune.json verdicts — the evidence half of the
+        # self-improvement loop, so the analyst can weigh indicators the IC
+        # math says carry (or lack) signal. Off by default to keep the prompt
+        # byte-equivalent to the A/B baseline; fail-soft (absent/unreadable
+        # verdicts are skipped, never fabricated).
+        if get_config().get("indicator_ic_context", False):
+            ic_line = _format_indicator_ic_context()
+            if ic_line:
+                system_message += (
+                    f"\n\n{ic_line}\n"
+                    "(Advisory trailing-IC context — offline evidence from the "
+                    "IC pruning loop. Use it to weight how much you lean on "
+                    "each indicator; low-|IC| indicators deserve weaker "
+                    "claims.)"
                 )
 
         # Perp/spot-only system-message append; other asset types leave

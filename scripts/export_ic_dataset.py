@@ -9,7 +9,10 @@ the OHLCV cache + stockstats, so the evidence chain is now fully mechanical:
     python scripts/export_ic_dataset.py NVDA AMD --horizon 5 \
         && python scripts/prune_indicators_cli.py ic_data/NVDA_5d.csv --json-out ic_data/NVDA_5d.prune.json
 
-Fail-closed contract (never silently wrong data):
+Fail-closed contract (never silently wrong data) — enforced by the package
+implementation this delegates to (:mod:`yiagents.backtest.ic_dataset`,
+extracted 2026-08-16 so ``yiagents ic-cycle`` can share it):
+
 - Unknown indicator names are rejected upfront (validated against the market
   analyst's INDICATOR_NAMES — the same battery the LLM selects from).
 - The last ``horizon`` rows have no realizable forward return and are DROPPED
@@ -27,7 +30,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
@@ -42,75 +44,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from yiagents.agents.analysts.market_analyst import INDICATOR_NAMES  # noqa: E402
-from yiagents.dataflows.feature_registry import compute_derived  # noqa: E402
-from yiagents.dataflows.stockstats_utils import (  # noqa: E402
-    compute_indicator,
-    load_ohlcv,
-)
-
-
-def build_ic_frame(
-    ticker: str,
-    horizon: int,
-    indicators: list[str],
-    as_of: str,
-    extra_horizons: Sequence[int] = (),
-) -> tuple[pd.DataFrame, list[str]]:
-    """Compute the IC table for one ticker.
-
-    Returns ``(frame, skipped_indicators)``. The frame has ``date``,
-    ``forward_return`` (Close.shift(-horizon)/Close - 1) and one column per
-    computable indicator; tail rows without a realizable forward return are
-    dropped.
-
-    ``extra_horizons`` adds one ``fwd_ret_<h>d`` column per additional
-    forward horizon (for the IC-decay analysis in prune_indicators_cli).
-    Each extra column keeps its own honest NaN tail — rows realizable at the
-    primary horizon but not at 20d stay, with the 20d cell NaN; the IC math
-    drops non-finite pairs per horizon, so nothing is ever fabricated.
-    """
-    data = load_ohlcv(ticker, as_of)
-
-    from stockstats import wrap
-
-    wrapped = wrap(data.copy())
-    closes = pd.to_numeric(data["Close"], errors="coerce")
-
-    out = pd.DataFrame(
-        {"date": pd.to_datetime(data["Date"]).dt.strftime("%Y-%m-%d")}
-    )
-    # Forward return over the NEXT `horizon` trading rows. The final
-    # `horizon` rows get NaN and are dropped below — their "future" has not
-    # happened yet, and fabricating it would poison the IC tail windows.
-    out["forward_return"] = closes.shift(-horizon) / closes - 1.0
-
-    for h in sorted({int(h) for h in extra_horizons if int(h) != horizon}):
-        if h <= 0:
-            raise ValueError(f"extra horizons must be positive; got {h}")
-        out[f"fwd_ret_{h}d"] = closes.shift(-h) / closes - 1.0
-
-    skipped: list[str] = []
-    for ind in indicators:
-        # Derived features (vol estimators, OBV, ...) compute on the raw
-        # frame; stockstats names on the wrapped one. Same skip-and-report
-        # contract either way — never zero-fill.
-        try:
-            derived = compute_derived(data, ind)
-            if derived is not None:
-                out[ind] = pd.to_numeric(derived, errors="coerce")
-                continue
-            # compute_indicator (not a bare wrapped[ind]) so the vendor-scale
-            # fixes (e.g. mfi 0-1 -> 0-100) apply here too — the IC must be
-            # computed on the same scale every other consumer emits.
-            series = compute_indicator(wrapped, ind)
-        except Exception as exc:  # noqa: BLE001 -- skip-and-report, never zero-fill
-            logger.warning("indicator %s failed to compute for %s: %s", ind, ticker, exc)
-            skipped.append(ind)
-            continue
-        out[ind] = pd.to_numeric(series, errors="coerce")
-
-    out = out.dropna(subset=["forward_return"]).reset_index(drop=True)
-    return out, skipped
+from yiagents.backtest.ic_dataset import export_ic_datasets  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -164,54 +98,30 @@ def main(argv: list[str] | None = None) -> int:
             f"INDICATOR_NAMES: {sorted(INDICATOR_NAMES)}"
         )
 
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # Package-side implementation (shared with `yiagents ic-cycle`); this
+    # wrapper keeps the script's argv contract and per-ticker "next:" hints.
+    written = export_ic_datasets(
+        args.tickers,
+        horizon=args.horizon,
+        indicators=args.indicators,
+        as_of=args.as_of,
+        output_dir=args.output_dir,
+        extra_horizons=extra,
+    )
 
-    failures = 0
-    for ticker in args.tickers:
-        try:
-            frame, skipped = build_ic_frame(
-                ticker, args.horizon, indicators, args.as_of,
-                extra_horizons=extra,
-            )
-        except Exception as exc:  # noqa: BLE001 -- one bad ticker must not kill the batch
-            logger.error("export failed for %s: %s", ticker, exc)
-            failures += 1
-            continue
-
-        if frame.empty:
-            logger.error("no usable rows for %s (empty frame after tail drop)", ticker)
-            failures += 1
-            continue
-
-        n_extra_fwd = sum(1 for c in frame.columns if c.startswith("fwd_ret_"))
-        n_indicator_cols = len(frame.columns) - 2 - n_extra_fwd
-        if n_indicator_cols == 0:
-            # date + forward_return(s) only: every indicator was skipped. The
-            # prune CLI rejects this CSV ("at least one indicator column"), so
-            # writing it with a success verdict and a "next:" hint would send
-            # the operator into a guaranteed failure.
-            logger.error(
-                "all indicators skipped for %s (%s); not writing an "
-                "indicator-less CSV", ticker, ", ".join(skipped) or "?",
-            )
-            failures += 1
-            continue
-
-        out_path = out_dir / f"{ticker.replace('.', '_')}_{args.horizon}d.csv"
-        frame.to_csv(out_path, index=False)
+    for ticker, out_path in written.items():
+        with open(out_path, encoding="utf-8") as fh:
+            frame_rows = sum(1 for _ in fh) - 1
         print(
-            f"[{ticker}] wrote {out_path}: {len(frame)} rows, "
-            f"{n_indicator_cols} indicator column(s)"
-            + (f", {n_extra_fwd} extra forward-horizon column(s)" if n_extra_fwd else "")
-            + (f" (skipped: {', '.join(skipped)})" if skipped else "")
+            f"[{ticker}] wrote {out_path}: {frame_rows} rows "
+            "(see WARNINGs above for any skipped indicators)"
         )
         print(
             f"[{ticker}] next: python scripts/prune_indicators_cli.py {out_path} "
             f"--window 60 --json-out {out_path}.prune.json"
         )
 
-    return 1 if failures else 0
+    return 0 if len(written) == len(args.tickers) else 1
 
 
 if __name__ == "__main__":
