@@ -21,6 +21,7 @@ from yiagents.agents import (
     create_trader,
 )
 from yiagents.agents.utils.agent_states import AgentState
+from yiagents.dataflows import quality
 
 from .analyst_execution import build_analyst_execution_plan
 from .conditional_logic import ConditionalLogic
@@ -141,7 +142,17 @@ class GraphSetup:
         bull_researcher_node = create_bull_researcher(self.debate_llm)
         bear_researcher_node = create_bear_researcher(self.debate_llm)
         research_manager_node = create_research_manager(self.deep_thinking_llm)
-        trader_node = create_trader(self.quick_thinking_llm)
+        # Data-vacuum gate at the decision boundary: by the time the trader
+        # runs, every analyst has fired, so the data_quality ledger is
+        # complete. Under data_vacuum_policy=reject a run with zero successful
+        # core data calls raises here — before any decision-stage LLM call is
+        # billed — instead of producing a HOLD report decided in a vacuum.
+        # Wrapping inside _wrap_node keeps the gate inside the telemetry
+        # wrapper, so a rejection shows up as a Trader-node failure in perf
+        # telemetry rather than vanishing between nodes.
+        trader_node = quality.gate_on_data_vacuum(
+            create_trader(self.quick_thinking_llm)
+        )
 
         # Create risk analysis nodes. The three risk debators likewise run on
         # the debate-tier model: multi-round, multi-opponent free-text rebuttal

@@ -22,6 +22,7 @@ import pandas as pd
 from langchain_core.tools import tool
 from stockstats import wrap
 
+from yiagents.dataflows import quality
 from yiagents.dataflows.binance import binance_klines_frame
 from yiagents.dataflows.feature_registry import DERIVED_FEATURES, compute_derived
 from yiagents.dataflows.indicator_catalog import INDICATORS
@@ -103,6 +104,11 @@ def _indicators_core(
             venue="binance_perp" if venue == "perp" else "binance_spot",
         )
     except Exception as exc:  # noqa: BLE001 — typed degrade, never crash the node
+        quality.record_sentinel(
+            "get_binance_indicators",
+            quality.KIND_OPTIONAL_UNAVAILABLE,
+            f"{symbol} ({venue}): {type(exc).__name__}: {exc}",
+        )
         return (
             f"DATA_UNAVAILABLE: Binance klines for {symbol!r} ({venue}) up to "
             f"{curr_date} could not be fetched ({type(exc).__name__}: {exc}). "
@@ -110,6 +116,11 @@ def _indicators_core(
         )
 
     if frame.empty or len(frame) < 30:
+        quality.record_sentinel(
+            "get_binance_indicators",
+            quality.KIND_OPTIONAL_UNAVAILABLE,
+            f"{symbol} ({venue}): fewer than 30 daily bars up to {curr_date}",
+        )
         return (
             f"DATA_UNAVAILABLE: fewer than 30 daily bars for {symbol!r} up to "
             f"{curr_date}; indicators not computable."
@@ -143,6 +154,11 @@ def _indicators_core(
             skipped.append(name)
 
     if not columns:
+        quality.record_sentinel(
+            "get_binance_indicators",
+            quality.KIND_OPTIONAL_UNAVAILABLE,
+            f"{symbol} ({venue}): no requested indicator computable",
+        )
         return (
             f"DATA_UNAVAILABLE: none of {names} could be computed on Binance "
             f"klines for {symbol!r}."

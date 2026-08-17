@@ -40,7 +40,22 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from yiagents.dataflows import quality
+
 logger = logging.getLogger(__name__)
+
+
+def _record_degrade(detail: str) -> None:
+    """Record a Reddit-source degradation in the run's data-quality ledger.
+
+    Only genuine degrades are recorded — OAuth configured but unavailable, an
+    OAuth/RSS fetch failure, or zero posts across every subreddit. The
+    no-creds RSS default is a designed path, not a degrade, and stays silent
+    (a sentinel on every keyless run would be pure noise in the evidence).
+    """
+    quality.record_sentinel(
+        "fetch_reddit_posts", quality.KIND_OPTIONAL_UNAVAILABLE, detail
+    )
 
 # Public JSON search endpoint — reliably WAF-blocked (HTTP 403) for non-OAuth
 # clients (issue #862). Kept for reference; the OAuth path uses _OAUTH_API on
@@ -146,11 +161,13 @@ def _fetch_subreddit_rss(
             time.sleep(wait)
             return _fetch_subreddit_rss(ticker, sub, limit, timeout, _retry=False)
         logger.warning("Reddit RSS fetch failed for r/%s · %s: %s", sub, ticker, exc)
+        _record_degrade(f"r/{sub} RSS failed for {ticker}: {exc}")
         return []
     except (OSError, http.client.HTTPException, ET.ParseError) as exc:
         # OSError covers URLError/TimeoutError/connection resets; HTTPException
         # covers chunked-transfer errors (IncompleteRead/BadStatusLine, #1024).
         logger.warning("Reddit RSS fetch failed for r/%s · %s: %s", sub, ticker, exc)
+        _record_degrade(f"r/{sub} RSS failed for {ticker}: {exc}")
         return []
 
     posts = []
@@ -284,6 +301,10 @@ def _fetch_subreddit_json(
     """
     token = _get_oauth_token(timeout)
     if not token:
+        # Creds are configured (this path is only reached when they are), so a
+        # missing token means the token endpoint failed or is negative-cached —
+        # a real degrade from the richer OAuth feed down to RSS.
+        _record_degrade(f"r/{sub} OAuth token unavailable for {ticker}; using RSS")
         return _fetch_subreddit_rss(ticker, sub, limit, timeout)
     url = _OAUTH_API.format(sub=sub, qs=_search_qs(ticker, limit))
     req = Request(
@@ -321,6 +342,7 @@ def _fetch_subreddit_json(
             "Reddit OAuth JSON fetch failed for r/%s · %s: %s — falling back to RSS feed.",
             sub, ticker, exc,
         )
+        _record_degrade(f"r/{sub} OAuth JSON failed for {ticker}: {exc}; using RSS")
         return _fetch_subreddit_rss(ticker, sub, limit, timeout)
 
 
@@ -396,6 +418,14 @@ def fetch_reddit_posts(
         blocks.append("\n".join(lines))
 
     if total_posts == 0:
+        # Zero posts across EVERY subreddit is evidence worth keeping: for a
+        # liquid ticker it usually means fetch-level trouble, for an obscure
+        # one honest no-data. Either way the ledger should show the sentiment
+        # enrichment came back empty.
+        _record_degrade(
+            f"zero Reddit posts for {ticker.upper()} across "
+            f"{', '.join(f'r/{s}' for s in subreddits)}"
+        )
         return (
             f"<no Reddit posts found mentioning {ticker.upper()} across "
             f"{', '.join(f'r/{s}' for s in subreddits)} in the past 7 days>"

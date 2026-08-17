@@ -21,7 +21,10 @@ class DataflowsConfigIsolationTests(unittest.TestCase):
         cfg["tool_vendors"]["get_stock_data"] = "alpha_vantage"
 
         fresh = get_config()
-        self.assertEqual(fresh["data_vendors"]["core_stock_apis"], "yfinance")
+        # Default is the multi-vendor fallback chain (T0-3), not bare yfinance.
+        self.assertEqual(
+            fresh["data_vendors"]["core_stock_apis"], "yfinance,alpha_vantage"
+        )
         self.assertNotIn("get_stock_data", fresh["tool_vendors"])
 
     def test_set_config_does_not_alias_caller_nested_dicts(self):
@@ -49,9 +52,17 @@ class DataflowsConfigIsolationTests(unittest.TestCase):
 
         fresh = get_config()
         self.assertEqual(fresh["data_vendors"]["core_stock_apis"], "alpha_vantage")
-        self.assertEqual(fresh["data_vendors"]["technical_indicators"], "yfinance")
-        self.assertEqual(fresh["data_vendors"]["fundamental_data"], "yfinance")
-        self.assertEqual(fresh["data_vendors"]["news_data"], "yfinance")
+        # Untouched nested keys keep their multi-vendor fallback-chain defaults.
+        self.assertEqual(
+            fresh["data_vendors"]["technical_indicators"], "yfinance,alpha_vantage"
+        )
+        self.assertEqual(
+            fresh["data_vendors"]["fundamental_data"],
+            "yfinance,alpha_vantage,sec_edgar",
+        )
+        self.assertEqual(
+            fresh["data_vendors"]["news_data"], "yfinance,alpha_vantage"
+        )
 
     def test_nested_dict_updates_merge_one_level_deep(self):
         set_config({"tool_vendors": {"get_stock_data": "alpha_vantage"}})

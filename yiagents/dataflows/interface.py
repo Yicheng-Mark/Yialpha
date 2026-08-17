@@ -476,7 +476,7 @@ def route_to_vendor(method: str, *args: Any, **kwargs: Any) -> str:
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
 
         try:
-            return impl_func(*args, **kwargs)
+            result = impl_func(*args, **kwargs)
         except VendorRateLimitError as e:
             # Surface the rate-limit if no other vendor can serve the call:
             # an optional category (e.g. binance_perp) then degrades to a
@@ -503,6 +503,14 @@ def route_to_vendor(method: str, *args: Any, **kwargs: Any) -> str:
             if first_error is None:
                 first_error = e
             continue
+
+        # A core-category call returned data — the success side of the data
+        # vacuum verdict (router successes only; direct-connect tools do not
+        # participate). Data served from a vendor's stale disk cache also
+        # lands here: the data exists, so it is not a vacuum.
+        if category not in OPTIONAL_CATEGORIES:
+            quality.record_success(method)
+        return result
 
     # If any vendor reported "no data", the symbol is genuinely unavailable.
     # Return one explicit, instructive sentinel rather than a vendor-specific
@@ -559,6 +567,11 @@ def route_to_vendor(method: str, *args: Any, **kwargs: Any) -> str:
                 f"DATA_UNAVAILABLE: optional {category} could not be retrieved "
                 f"({first_error}). Proceed without it; do not fabricate values."
             )
+        # Evidence BEFORE the raise: if the caller swallows this error into a
+        # degraded report, the ledger still shows why every core call failed —
+        # without it a vacuum run could crash the trader or surface as a
+        # zero-evidence HOLD ("no data AND no proof there was no data").
+        quality.record_sentinel(method, quality.KIND_CORE_ERROR, str(first_error))
         raise first_error
 
     raise RuntimeError(f"No available vendor for '{method}'")

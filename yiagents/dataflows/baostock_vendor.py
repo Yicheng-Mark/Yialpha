@@ -51,6 +51,8 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
+import socket
 from datetime import date, timedelta
 from functools import lru_cache
 from typing import NamedTuple
@@ -69,6 +71,30 @@ logger = logging.getLogger(__name__)
 # One ``bs.login()`` opens a TCP socket; keep the connect/disconnect off the
 # hot path by caching the full daily series per ticker (PIT-filtered per call),
 # mirroring how eastmoney caches the raw JSON once and filters per call.
+# Socket timeout (seconds) for the raw TCP session to baostock.com:9001,
+# scoped to _BaostockSession's lifetime. BaoStock is not HTTP, so the
+# requests-level timeout shim cannot reach it — without this a hung
+# connection was bounded only by run_robust's OS-level watchdog.
+# YIAGENTS_BAOSTOCK_TIMEOUT_S=0 disables it explicitly (0 = no timeout).
+_BS_TIMEOUT_ENV = os.environ.get("YIAGENTS_BAOSTOCK_TIMEOUT_S")
+BS_SOCKET_TIMEOUT: float | None = 30.0
+if _BS_TIMEOUT_ENV is not None and _BS_TIMEOUT_ENV != "":
+    try:
+        _parsed = float(_BS_TIMEOUT_ENV)
+        if _parsed > 0:
+            BS_SOCKET_TIMEOUT = _parsed
+        elif _parsed == 0:
+            BS_SOCKET_TIMEOUT = None
+        else:
+            logger.warning(
+                "YIAGENTS_BAOSTOCK_TIMEOUT_S=%r is not positive; using the "
+                "default 30s instead", _BS_TIMEOUT_ENV,
+            )
+    except ValueError:
+        logger.warning(
+            "YIAGENTS_BAOSTOCK_TIMEOUT_S=%r is not a number; using the "
+            "default 30s instead", _BS_TIMEOUT_ENV,
+        )
 _CACHE_TTL_S = 86_400.0  # 1 day (historical analysis dates)
 # Same-day refresh TTL (seconds): when the analysis date is today (or live
 # mode), the series gains the day's bar after the post-close publication, so a
@@ -138,21 +164,40 @@ class _BaostockSession:
 
     Serializes logins (the public service frowns on reconnect storms) and
     reuses a single login for all queries inside the ``with`` block.
+
+    Every network call in this module happens inside this session (login,
+    ``query_history_k_data_plus``, the quarterly statement queries, row
+    iteration), so the BaoStock socket timeout is scoped to exactly the
+    session lifetime: ``socket.setdefaulttimeout`` is set in ``__enter__``
+    before login and restored in ``__exit__`` after logout. BaoStock speaks a
+    raw TCP protocol to baostock.com:9001 — the requests-level timeout shim
+    cannot reach it, so without this a hung connection was bounded only by
+    run_robust's OS-level watchdog. Same scoped-setdefault pattern and same
+    concurrent-race trade-off as stockstats_utils' ``_scoped_yf_socket_timeout``.
     """
 
     def __init__(self):
         self.bs = _require_baostock()
+        self._prev_timeout: float | None = None
 
     def __enter__(self):
         # A modest serial spacing between BaoStock logins; per-call queries
         # share one login.
         _login_throttle.wait()
-        # login() returns a result object with .error_code / .error_msg; a
-        # non-zero code means the TCP handshake to baostock.com:9001 failed.
-        lg = self.bs.login()
-        if getattr(lg, "error_code", "0") != "0":
-            raise NoMarketDataError(
-                "baostock", detail=f"login failed: {getattr(lg, 'error_msg', '?')}")
+        self._prev_timeout = socket.getdefaulttimeout()
+        if BS_SOCKET_TIMEOUT is not None:
+            socket.setdefaulttimeout(BS_SOCKET_TIMEOUT)
+        try:
+            # login() returns a result object with .error_code / .error_msg; a
+            # non-zero code means the TCP handshake to baostock.com:9001 failed.
+            lg = self.bs.login()
+            if getattr(lg, "error_code", "0") != "0":
+                raise NoMarketDataError(
+                    "baostock",
+                    detail=f"login failed: {getattr(lg, 'error_msg', '?')}")
+        except BaseException:
+            socket.setdefaulttimeout(self._prev_timeout)
+            raise
         return self.bs
 
     def __exit__(self, exc_type, exc, tb):
@@ -160,6 +205,8 @@ class _BaostockSession:
             self.bs.logout()
         except Exception:  # noqa: BLE001 -- logout is best-effort
             logger.debug("baostock: logout raised", exc_info=True)
+        finally:
+            socket.setdefaulttimeout(self._prev_timeout)
         return False
 
 

@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from contextlib import AbstractContextManager
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -81,9 +81,9 @@ from .signal_processing import SignalProcessor
 
 logger = logging.getLogger(__name__)
 
-#: A pending memory-log entry older than this (in days) that still cannot be
-#: resolved is logged at WARNING so it does not silently accumulate forever.
-STALE_PENDING_DAYS = 7
+# Stale-pending observability for the memory log lives in
+# yiagents.graph.memory_resolution (extracted with the resolution core so the
+# graph and the `yiagents memory-resolve` CLI share one implementation).
 
 
 @lru_cache(maxsize=4096)
@@ -101,35 +101,6 @@ def _memoized_close_and_atr(ticker: str, trade_date: str) -> tuple[float, float]
     frame = load_ohlcv(ticker, str(trade_date))
     close, atr = latest_atr_from_frame(frame)
     return float(close), float(atr)
-
-
-def _entry_precedes_cutoff(entry: dict[str, Any], cutoff: datetime) -> bool:
-    """Fail-closed date gate for pending reflection outcomes."""
-    try:
-        return datetime.strptime(str(entry["date"])[:10], "%Y-%m-%d") < cutoff
-    except (KeyError, TypeError, ValueError):
-        return False
-
-
-def _warn_if_stale_pending(ticker: str, trade_date: str, now: datetime) -> None:
-    """Log a WARNING when a pending entry is old enough to be concerning.
-
-    Pending entries that can never resolve (delisted ticker, permanent data
-    gap) previously accumulated indefinitely with no signal. This makes the
-    silent-stuck state observable without changing the log format.
-    """
-    try:
-        entry_date = datetime.strptime(trade_date, "%Y-%m-%d")
-    except (ValueError, TypeError):
-        return
-    age_days = (now - entry_date).days
-    if age_days > STALE_PENDING_DAYS:
-        logger.warning(
-            "Pending memory-log entry for %s @ %s is %d days old and still "
-            "unresolved (price data unavailable). It may be stuck due to "
-            "delisting or a permanent data gap.",
-            ticker, trade_date, age_days,
-        )
 
 
 class YiAgentsGraph:
@@ -653,6 +624,18 @@ class YiAgentsGraph:
         )
 
         final_state["final_trade_decision"] = decision_md + overlay
+        # Structured price-at-decision for the rating↔outcome verification
+        # loop (verify-history / /api/accuracy): the rating was decided against
+        # THIS close. Keys ride on final_state into full_states_log via
+        # _log_state; the markdown "Entry Reference" line stays the
+        # human-facing view (web/overlay_fields regex remains the fallback for
+        # logs predating these fields).
+        final_state["price_at_decision"] = decision.entry_price
+        final_state["price_at_decision_basis"] = (
+            "risk_overlay_close"
+            if decision.entry_price is not None
+            else "risk_overlay_no_price"
+        )
         return final_state
 
     def _fetch_returns(
@@ -666,77 +649,18 @@ class YiAgentsGraph:
         caller via ``_resolve_benchmark``). Returns ``(raw_return, alpha_return,
         actual_holding_days)`` or ``(None, None, None)`` if price data is
         unavailable (too recent, delisted, or network error).
+
+        Thin delegation to :func:`yiagents.accuracy.fetch_returns_yf` — the
+        standalone ``memory-resolve`` CLI runs the same resolution without a
+        graph instance, so the implementation lives where both callers share
+        it (extracted verbatim; the graph's tests pin the semantics).
         """
-        from yiagents.dataflows.symbol_utils import normalize_symbol
-        from yiagents.dataflows.y_finance import get_YFin_history_cached
+        from yiagents.accuracy import fetch_returns_yf
 
-        try:
-            start = datetime.strptime(trade_date, "%Y-%m-%d")
-            end = start + timedelta(days=holding_days + 7)  # buffer for weekends/holidays
-            cutoff = None
-            if as_of_date is not None:
-                cutoff = datetime.strptime(str(as_of_date)[:10], "%Y-%m-%d")
-                if cutoff <= start:
-                    return None, None, None
-                # yfinance's end is exclusive.  Never request observations
-                # beyond the simulated date, even when today's vendor has them.
-                end = min(end, cutoff + timedelta(days=1))
-            end_str = end.strftime("%Y-%m-%d")
-
-            # Normalize so the realized-return lookup hits the same instrument
-            # the analysis priced (e.g. XAUUSD -> GC=F) (#984). The benchmark is
-            # already a canonical Yahoo symbol from ``_resolve_benchmark``.
-            # Both legs go through the vendor layer's ~24h cached history
-            # wrapper (same window, same frame as the direct .history call):
-            # a batch run over N tickers would otherwise re-download the SAME
-            # benchmark window once per ticker.
-            stock = get_YFin_history_cached(
-                normalize_symbol(ticker), trade_date, end_str)
-            bench = get_YFin_history_cached(benchmark, trade_date, end_str)
-
-            if cutoff is not None:
-                # Belt-and-suspenders PIT guard: vendors and test doubles can
-                # ignore the requested end boundary, so trim dated frames again
-                # on the client before calculating any outcome.
-                def _through_cutoff(frame):
-                    try:
-                        return frame[frame.index.date <= cutoff.date()]
-                    except (AttributeError, TypeError):
-                        return frame
-
-                stock = _through_cutoff(stock)
-                bench = _through_cutoff(bench)
-
-            if len(stock) < 2 or len(bench) < 2:
-                return None, None, None
-
-            if cutoff is not None:
-                # A reflection labelled as a five-session outcome must not be
-                # produced from a partial horizon merely because the historical
-                # run date falls two sessions after the decision.
-                if len(stock) <= holding_days or len(bench) <= holding_days:
-                    return None, None, None
-                actual_days = holding_days
-            else:
-                # Backwards-compatible library behaviour for callers that do
-                # not request an as-of boundary.
-                actual_days = min(holding_days, len(stock) - 1, len(bench) - 1)
-            raw = float(
-                (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
-                / stock["Close"].iloc[0]
-            )
-            bench_ret = float(
-                (bench["Close"].iloc[actual_days] - bench["Close"].iloc[0])
-                / bench["Close"].iloc[0]
-            )
-            alpha = raw - bench_ret
-            return raw, alpha, actual_days
-        except Exception as e:
-            logger.warning(
-                "Could not resolve outcome for %s on %s vs %s (will retry next run): %s",
-                ticker, trade_date, benchmark, e,
-            )
-            return None, None, None
+        return fetch_returns_yf(
+            ticker, trade_date,
+            benchmark=benchmark, holding_days=holding_days, as_of_date=as_of_date,
+        )
 
     def _resolve_pending_entries(
         self,
@@ -745,69 +669,23 @@ class YiAgentsGraph:
     ) -> None:
         """Resolve pending log entries for ticker at the start of a new run.
 
-        Fetches returns for each same-ticker pending entry, generates reflections,
-        then writes all updates in a single atomic batch write to avoid redundant I/O.
-        Skips entries whose price data is not yet available (too recent or delisted).
+        Delegates to :func:`yiagents.graph.memory_resolution.
+        resolve_pending_entries` (extracted so the standalone ``memory-resolve``
+        CLI resolves the same entries without a full analysis run).
 
         Trade-off: only same-ticker entries are resolved per run.  Entries for
-        other tickers accumulate until that ticker is run again.
-
-        Stale-pending observability: an entry whose trade_date is older than
-        ``STALE_PENDING_DAYS`` (7) that still cannot be resolved is logged at
-        WARNING so indefinitely-stuck pending entries are not silent.
+        other tickers accumulate until that ticker is run again — or until
+        ``yiagents memory-resolve`` sweeps them.
         """
-        try:
-            cutoff = (
-                datetime.strptime(str(as_of_date)[:10], "%Y-%m-%d")
-                if as_of_date is not None
-                else datetime.now()
-            )
-        except (TypeError, ValueError):
-            logger.warning("Invalid memory as-of date %r; skipping reflection", as_of_date)
-            return
+        from yiagents.graph.memory_resolution import resolve_pending_entries
 
-        cutoff_str = cutoff.strftime("%Y-%m-%d")
-        pending = [
-            entry
-            for entry in self.memory_log.get_pending_entries()
-            if entry["ticker"] == ticker
-            and _entry_precedes_cutoff(entry, cutoff)
-        ]
-        if not pending:
-            return
-
-        benchmark = self._resolve_benchmark(ticker)
-        updates = []
-        for entry in pending:
-            raw, alpha, days = self._fetch_returns(
-                ticker,
-                entry["date"],
-                benchmark=benchmark,
-                as_of_date=cutoff_str,
-            )
-            if raw is None:
-                # Price not available yet — but if this entry is old, flag it so
-                # it does not silently accumulate forever (delisted / bad data).
-                _warn_if_stale_pending(ticker, entry["date"], cutoff)
-                continue  # price not available yet — try again next run
-            reflection = self.reflector.reflect_on_final_decision(
-                final_decision=entry.get("decision", ""),
-                raw_return=raw,
-                alpha_return=alpha if alpha is not None else 0.0,
-                benchmark_name=benchmark,
-            )
-            updates.append({
-                "ticker": ticker,
-                "trade_date": entry["date"],
-                "raw_return": raw,
-                "alpha_return": alpha,
-                "holding_days": days,
-                "reflection": reflection,
-                "available_date": cutoff_str,
-            })
-
-        if updates:
-            self.memory_log.batch_update_with_outcomes(updates)
+        resolve_pending_entries(
+            self.memory_log,
+            self.reflector,
+            ticker,
+            benchmark=self._resolve_benchmark(ticker),
+            as_of_date=as_of_date,
+        )
 
     def resolve_instrument_context(
         self, ticker: str, asset_type: str = "stock", trade_date: str | None = None,
@@ -1126,8 +1004,28 @@ class YiAgentsGraph:
         """
         from yiagents.dataflows import quality
 
-        quality_block = quality.summarize_quality(quality.snapshot_quality())
+        quality_block = quality.summarize_quality(
+            quality.snapshot_quality(), quality.snapshot_core_successes()
+        )
         quality.reset_quality()
+
+        # Price-at-decision: normally set by _apply_risk_overlay (the close the
+        # decision anchored on). When the overlay did not run (risk disabled /
+        # degraded / decide failed), fall back to the same memoized PIT loader
+        # — a cached hit when the overlay already tried, one fetch when it
+        # didn't — so every log entry carries a verifiable decision price
+        # instead of only the ones where the overlay succeeded.
+        price = final_state.get("price_at_decision")
+        basis = final_state.get("price_at_decision_basis")
+        if basis is None:
+            close, _atr = (
+                self._latest_close_and_atr(self.ticker, trade_date)
+                if self.ticker else (None, None)
+            )
+            price, basis = (
+                (close, "fallback_loader") if close is not None
+                else (None, "unavailable")
+            )
 
         entry = {
             "company_of_interest": final_state["company_of_interest"],
@@ -1160,8 +1058,15 @@ class YiAgentsGraph:
             # Structured decision + data-quality evidence (self-improvement):
             # pm_rating is the PM's typed rating (empty string when absent,
             # e.g. a state produced without the PM node); data_quality carries
-            # the router's sentinel events accumulated during this run.
+            # the router's sentinel events accumulated during this run;
+            # price_at_decision / basis / asset_type anchor the rating to the
+            # close it was decided against, so historical accuracy can be
+            # verified without re-deriving prices. All additive — older
+            # readers ignore unknown keys, and pre-T0.5 logs simply lack them.
             "pm_rating": final_state.get("pm_rating", ""),
+            "price_at_decision": price,
+            "price_at_decision_basis": basis,
+            "asset_type": final_state.get("asset_type") or "stock",
             "data_quality": quality_block,
         }
         # Write-and-drop: nothing downstream reads PAST dates from this dict

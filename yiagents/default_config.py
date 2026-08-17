@@ -194,6 +194,16 @@ _ENV_OVERRIDES = {
     # prompt. The pre-existing YIAGENTS_MARKET_REGIME turbulence-only
     # opt-in for the conservative debater is unchanged.
     "YIAGENTS_REGIME_CONTEXT":               "regime_context",
+    # Data-vacuum gate policy: "reject" (default — a run with zero successful
+    # core data calls fails at the trader node with DataVacuumError instead of
+    # producing a data-vacuum HOLD report) or "warn" (old behaviour: report +
+    # DEGRADED banner). The interactive analyze CLI forces "warn" unless this
+    # env var is explicitly set; batch / run_robust inherit the reject default.
+    "YIAGENTS_DATA_VACUUM_POLICY":           "data_vacuum_policy",
+    # Trailing-IC advisory context for the market analyst (see the
+    # indicator_ic_context comment in DEFAULT_CONFIG). Default off keeps the
+    # prompt byte-equivalent to the A/B baseline.
+    "YIAGENTS_INDICATOR_IC_CONTEXT":         "indicator_ic_context",
 }
 
 
@@ -321,6 +331,13 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # INDICATOR_NAMES in agents/analysts/market_analyst.py and validated by
     # `yiagents config-check`.
     "indicator_battery": None,
+    # Trailing-IC advisory context (env: YIAGENTS_INDICATOR_IC_CONTEXT). Off by
+    # default = the market analyst's prompt is byte-identical to the A/B
+    # baseline. When on, one advisory line per indicator (trailing mean |IC|
+    # averaged over ic_data/*.prune.json verdicts) is appended to the system
+    # message — the runtime consumer of the IC-pruning evidence. Fail-soft:
+    # no verdicts on disk → no line, prompt unchanged.
+    "indicator_ic_context": False,
     # Deterministic valuation tool (env: YIAGENTS_VALUATION_TOOLS). Off by
     # default = the fundamentals analyst's tool list is unchanged (byte-
     # equivalent). When on, a get_valuation_metrics PoT tool is appended so the
@@ -476,17 +493,29 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # The configured value is the exact vendor chain — requests are NOT silently
     # routed to vendors you didn't choose. For ordered fallback, list several,
     # e.g. "yfinance,alpha_vantage". "default" uses all available vendors.
+    # The four core categories chain yfinance -> alpha_vantage (fundamentals
+    # additionally -> sec_edgar) so a single-vendor outage degrades to the
+    # backup instead of a data vacuum; yfinance stays first because it is
+    # keyless and unlimited — alpha_vantage's free tier is rate-limited, so it
+    # must only ever serve as the tail of the chain.
     "data_vendors": {
-        "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance
-        "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
-        "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
-        "news_data": "yfinance",             # Options: alpha_vantage, yfinance
+        "core_stock_apis": "yfinance,alpha_vantage",       # Options: alpha_vantage, yfinance
+        "technical_indicators": "yfinance,alpha_vantage",  # Options: alpha_vantage, yfinance
+        "fundamental_data": "yfinance,alpha_vantage,sec_edgar",  # Options: alpha_vantage, yfinance, sec_edgar
+        "news_data": "yfinance,alpha_vantage",             # Options: alpha_vantage, yfinance
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
         # a_stock tools are single-vendor (eastmoney); the category is optional
         # and only advertised for A-share tickers, so no category-level default
         # is needed — route_to_vendor uses the sole configured vendor.
     },
+    # Data-vacuum gate (env: YIAGENTS_DATA_VACUUM_POLICY). When "reject", a run
+    # whose core data calls ALL failed raises DataVacuumError at the trader
+    # node instead of producing a normal-looking HOLD report decided without
+    # any market/fundamental/news data. "warn" keeps the old behaviour (report
+    # + DEGRADED banner). The interactive CLI degrades this to "warn" on its
+    # own (a human is watching); unattended batch/robust paths inherit reject.
+    "data_vacuum_policy": "reject",
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {
         # Example: "get_stock_data": "alpha_vantage",  # Override category default

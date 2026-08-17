@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 # HTTP read-timeout safety net for yfinance. yfinance has no default read
 # timeout, so under Yahoo rate-limiting a stalled socket blocks forever and
 # hangs the whole batch — the same half-open-socket class as the LLM read
-# timeout in llm_clients/openai_client.py. Two layers, both opt-in via
-# YIAGENTS_HTTP_TIMEOUT_S (seconds), off by default:
+# timeout in llm_clients/openai_client.py. Two layers, both controlled via
+# YIAGENTS_HTTP_TIMEOUT_S (seconds), default 30s ON:
 #   1. a SCOPED socket.setdefaulttimeout, applied by yf_retry() around each
 #      attempt for the yfinance calls that take no per-call timeout
 #      (Ticker.info, get_news, Search). Every other network path here already
@@ -33,24 +33,31 @@ logger = logging.getLogger(__name__)
 #      host process (e.g. a web app embedding this package).
 #   2. timeout= on yf.download — the OHLCV path, the call that actually hangs
 #      the pipeline.
+# The 30s default (2026-08-16) replaces the old off-by-default: the data-vacuum
+# work made "all sources timed out" a first-class outcome, and an unbounded
+# hang defeats even that — set YIAGENTS_HTTP_TIMEOUT_S=0 to disable explicitly.
 _HTTP_TIMEOUT_ENV = os.environ.get("YIAGENTS_HTTP_TIMEOUT_S")
-YF_HTTP_TIMEOUT: float | None = None
-if _HTTP_TIMEOUT_ENV:
+_HTTP_TIMEOUT_DEFAULT = 30.0
+YF_HTTP_TIMEOUT: float | None = _HTTP_TIMEOUT_DEFAULT
+if _HTTP_TIMEOUT_ENV is not None and _HTTP_TIMEOUT_ENV != "":
     try:
         parsed = float(_HTTP_TIMEOUT_ENV)
         if parsed > 0:
             YF_HTTP_TIMEOUT = parsed
+        elif parsed == 0:
+            # Explicit zero = deliberate opt-out of the timeout entirely.
+            YF_HTTP_TIMEOUT = None
         else:
             logger.warning(
-                "YIAGENTS_HTTP_TIMEOUT_S=%r is not positive; ignoring it "
-                "(no HTTP timeout will be applied)", _HTTP_TIMEOUT_ENV,
+                "YIAGENTS_HTTP_TIMEOUT_S=%r is not positive; using the default "
+                "%.0fs instead", _HTTP_TIMEOUT_ENV, _HTTP_TIMEOUT_DEFAULT,
             )
     except ValueError:
         # Same contract as the LLM timeout (llm_clients/_timeout.py): a bad
         # value must be visible, never silently swallowed.
         logger.warning(
-            "YIAGENTS_HTTP_TIMEOUT_S=%r is not a number; ignoring it "
-            "(no HTTP timeout will be applied)", _HTTP_TIMEOUT_ENV,
+            "YIAGENTS_HTTP_TIMEOUT_S=%r is not a number; using the default "
+            "%.0fs instead", _HTTP_TIMEOUT_ENV, _HTTP_TIMEOUT_DEFAULT,
         )
 
 
