@@ -1778,6 +1778,14 @@ def config_check():
                 + " [dim](per-analyst web-search call caps)[/dim]"
             )
 
+    # Binance Square (crypto sentiment) is keyless: nothing to warn about when
+    # enabled — just show the operator it is active for crypto runs.
+    if _get_config().get("binance_square_enabled", True):
+        console.print(
+            "  [green]✅[/green] Binance Square sentiment: enabled "
+            "[dim](keyless; live crypto runs only, 5-min feed cache)[/dim]"
+        )
+
     # -- Data-quality gate + vendor chains -------------------------------------
     policy = str(_get_config().get("data_vacuum_policy", "reject") or "").strip().lower()
     if policy not in ("reject", "warn"):

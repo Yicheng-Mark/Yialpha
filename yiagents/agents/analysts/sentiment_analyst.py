@@ -13,6 +13,16 @@ the LLM is invoked and injects them into the prompt as structured blocks:
                            user-labeled Bullish/Bearish sentiment tags
   3. Reddit posts        — r/wallstreetbets, r/stocks, r/investing
 
+For CRYPTO targets (asset_type crypto/crypto_spot/crypto_perp, live dates
+only, ``binance_square_enabled``) a fourth block is added:
+
+  4. Binance Square posts — crypto-native social feed filtered for the
+                            target coin, ranked by engagement
+
+Stock runs never see the fourth block (the prompt stays byte-identical to
+the three-source version); historical replays never see ANY of the three
+social feeds (they are current-snapshot APIs with no as-of boundary).
+
 The agent does not use tool-calling; the data is in the prompt from
 turn 0. Output uses the structured-output pattern (json_schema for
 OpenAI/xAI, response_schema for Gemini, tool-use for Anthropic), falling
@@ -39,7 +49,8 @@ from yiagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
-from yiagents.dataflows.config import submit_with_context
+from yiagents.dataflows.binance_square import fetch_binance_square_block
+from yiagents.dataflows.config import get_config, submit_with_context
 from yiagents.dataflows.reddit import fetch_reddit_posts
 from yiagents.dataflows.stocktwits import fetch_stocktwits_messages
 from yiagents.dataflows.utils import is_historical_date
@@ -61,6 +72,21 @@ _HISTORICAL_REDDIT_UNAVAILABLE = (
     "<unavailable: Reddit search/RSS exposes current retrieval results without "
     "a trustworthy historical as-of boundary; omitted from this historical analysis>"
 )
+_HISTORICAL_BINANCE_SQUARE_UNAVAILABLE = (
+    "<unavailable: Binance Square exposes a current feed without a trustworthy "
+    "historical as-of boundary; omitted from this historical analysis>"
+)
+
+#: Asset types that get the Binance Square crypto-sentiment block. Stock runs
+#: keep the byte-identical three-source prompt.
+_CRYPTO_ASSET_TYPES = frozenset({"crypto", "crypto_spot", "crypto_perp"})
+
+
+def _binance_square_enabled(asset_type: str | None) -> bool:
+    """Whether this run's sentiment prompt should carry the Square block."""
+    return asset_type in _CRYPTO_ASSET_TYPES and bool(
+        get_config().get("binance_square_enabled", True)
+    )
 
 
 def _seven_days_back(trade_date: str) -> str:
@@ -80,17 +106,30 @@ def _get_news_impl(ticker: str, start_date: str, end_date: str) -> str:
     return get_news(ticker, start_date, end_date)  # type: ignore[operator]
 
 
-def _fetch_sentiment_sources(ticker: str, start_date: str, end_date: str) -> tuple[str, str, str]:
-    """Fetch the three sentiment sources, returning (news, stocktwits, reddit).
+def _fetch_sentiment_sources(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    asset_type: str | None = None,
+) -> tuple[str, str, str, str | None]:
+    """Fetch the sentiment sources, returning (news, stocktwits, reddit, square).
 
     Sequential by default; fanned out on a thread pool when
     ``YIAGENTS_SENTIMENT_PARALLEL_FETCH`` is on. Byte-equivalent -- each block
     is returned to a fixed slot, so completion order does not affect the result.
     Fetchers degrade to a string and do not raise, so the parallel path
     preserves the sequential semantics.
+
+    The fourth slot is the Binance Square crypto-sentiment block: populated
+    only for crypto asset types with ``binance_square_enabled`` (live runs),
+    an explicit historical-unavailable placeholder for crypto historical
+    runs, and ``None`` for stock runs (whose prompt stays byte-identical to
+    the three-source version).
     """
+    square_enabled = _binance_square_enabled(asset_type)
+
     if is_historical_date(end_date):
-        # News is queried with explicit date bounds.  The two social endpoints
+        # News is queried with explicit date bounds.  The social endpoints
         # are latest-feed APIs; filtering their current response after download
         # cannot reconstruct what was discoverable on a past date, so omit them
         # instead of contaminating a backtest prompt with today's narratives.
@@ -98,12 +137,13 @@ def _fetch_sentiment_sources(ticker: str, start_date: str, end_date: str) -> tup
             _get_news_impl(ticker, start_date, end_date),
             _HISTORICAL_STOCKTWITS_UNAVAILABLE,
             _HISTORICAL_REDDIT_UNAVAILABLE,
+            _HISTORICAL_BINANCE_SQUARE_UNAVAILABLE if square_enabled else None,
         )
 
     if _SENTIMENT_PARALLEL_FETCH:
         # Lambdas preserve each call's exact form so the result is byte-
         # identical to the sequential path; only fetch order differs.
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        with ThreadPoolExecutor(max_workers=4 if square_enabled else 3) as pool:
             fut_news = submit_with_context(
                 pool, _get_news_impl, ticker, start_date, end_date
             )
@@ -111,11 +151,22 @@ def _fetch_sentiment_sources(ticker: str, start_date: str, end_date: str) -> tup
                 pool, fetch_stocktwits_messages, ticker, limit=30
             )
             fut_reddit = submit_with_context(pool, fetch_reddit_posts, ticker)
-            return fut_news.result(), fut_stocktwits.result(), fut_reddit.result()
+            fut_square = (
+                submit_with_context(pool, fetch_binance_square_block, ticker)
+                if square_enabled
+                else None
+            )
+            return (
+                fut_news.result(),
+                fut_stocktwits.result(),
+                fut_reddit.result(),
+                fut_square.result() if fut_square is not None else None,
+            )
     return (
         _get_news_impl(ticker, start_date, end_date),
         fetch_stocktwits_messages(ticker, limit=30),
         fetch_reddit_posts(ticker),
+        fetch_binance_square_block(ticker) if square_enabled else None,
     )
 
 
@@ -135,11 +186,14 @@ def create_sentiment_analyst(llm):
         start_date = _seven_days_back(end_date)
         instrument_context = get_instrument_context_from_state(state)
 
-        # Pre-fetch all three sources. Each fetcher degrades gracefully and
-        # returns a string (no exceptions surface from here), so the LLM
-        # always sees something — either real data or a clear placeholder.
-        news_block, stocktwits_block, reddit_block = _fetch_sentiment_sources(
-            ticker, start_date, end_date
+        # Pre-fetch the sources. Each fetcher degrades gracefully and returns
+        # a string (no exceptions surface from here), so the LLM always sees
+        # something — either real data or a clear placeholder. The Square
+        # block is None unless this is a live crypto run.
+        news_block, stocktwits_block, reddit_block, binance_square_block = (
+            _fetch_sentiment_sources(
+                ticker, start_date, end_date, asset_type=state.get("asset_type")
+            )
         )
 
         system_message = _build_system_message(
@@ -149,6 +203,7 @@ def create_sentiment_analyst(llm):
             news_block=news_block,
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
+            binance_square_block=binance_square_block,
         )
 
         prompt = build_collaborator_prompt(include_tools=False)
@@ -186,9 +241,36 @@ def _build_system_message(
     news_block: str,
     stocktwits_block: str,
     reddit_block: str,
+    binance_square_block: str | None = None,
 ) -> str:
-    """Assemble the sentiment-analyst system message with structured data blocks."""
-    return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
+    """Assemble the sentiment-analyst system message with structured data blocks.
+
+    ``binance_square_block=None`` (stock runs, disabled config, or a caller
+    predating the fourth source) reproduces the three-source prompt
+    byte-for-byte: the source-count word, the Square section, and guidance
+    item 9 all collapse to the empty string at fixed interpolation points.
+    """
+    source_count = "four" if binance_square_block is not None else "three"
+    square_section = (
+        f"""
+### Binance Square posts — crypto-native social feed (current snapshot)
+Crypto-native retail chatter from Binance Square, filtered for the target asset and ranked by view/like counts, plus feed-wide hot-coin mentions for overall market mood. Posts are opinions (frequently shilling or sarcasm), not data.
+
+<start_of_binance_square>
+{binance_square_block}
+<end_of_binance_square>
+"""
+        if binance_square_block is not None
+        else ""
+    )
+    square_guidance = (
+        """
+9. **Treat Binance Square as crypto-native retail chatter.** Weight posts by their view/like counts (a 200k-view post reflects real attention; a 300-view post is noise), stay alert to shilling and sarcasm, and read it against the news framing — Square posts are opinion, never price data. If the block reports zero posts for the target asset, say so explicitly instead of generalizing from the hot-coin list.
+"""
+        if binance_square_block is not None
+        else ""
+    )
+    return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on {source_count} complementary data sources that have already been collected for you.
 
 ## Data sources (pre-fetched, in this prompt)
 
@@ -212,7 +294,7 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 <start_of_reddit>
 {reddit_block}
 <end_of_reddit>
-
+{square_section}
 ## How to analyze this data (best practices)
 
 1. **Read the StockTwits Bullish/Bearish ratio as a leading retail-sentiment signal.** A 70/30 bullish/bearish split is moderately bullish; ≥90/10 may indicate over-extension and contrarian risk; 50/50 is uncertainty. Sample size matters — base rates on the actual message count, not percentages alone.
@@ -230,7 +312,7 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 7. **Identify catalysts and risks** that emerge across sources — news of upcoming earnings, product launches, competitive threats, macro headlines, etc.
 
 8. **Past sentiment is not predictive.** Frame your conclusions as signal for the trader to weigh alongside fundamentals and technicals, not as a price call.
-
+{square_guidance}
 ## Output fields
 
 Fill the following fields:

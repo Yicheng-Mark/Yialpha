@@ -52,7 +52,7 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 | 分析师 | 维度 | 数据来源 |
 | ------ | ------ | ------ |
 | Market Analyst | 技术面：从 28 个指标目录（趋势 / 动量 / 波动率 / 成交量四类）按市况选最多 8 个互补指标；另常绑 5 个证据工具——周线级别、支撑/阻力、量价特征、K 线形态、基准相对强度 | yfinance / Alpha Vantage |
-| Sentiment Analyst | 社交情绪 | Reddit、StockTwits（仅当前日期分析） |
+| Sentiment Analyst | 社交情绪 | Reddit、StockTwits、币安广场 Binance Square（加密标的；仅当前日期分析） |
 | News Analyst | 个股新闻 + 宏观/全球新闻（美联储、地缘、央行政策等）+ 开放网络检索（定性上下文） | yfinance / Alpha Vantage News / Tavily |
 | Fundamentals Analyst | 财务基本面 | yfinance / Alpha Vantage |
 
@@ -91,7 +91,7 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 | # | 阶段 | 参与节点 | 产出 |
 | --- | --- | --- | --- |
 | 1 | 输入与 PIT 上下文 | `propagate()` | 播种状态：分析日期钉死 vendor 层 as-of 截断（杜绝未来数据泄漏），确定性解析 instrument identity，注入历史记忆教训（可选，默认关闭） |
-| 2 | 分析师团队 | Market / Sentiment / News / Fundamentals Analyst | 每个分析师在自己的工具集上循环（`analyst ⇄ ToolNode`）直到产出报告；默认串行，开 `analyst_parallel` 后合并为一个并行 fan-out 节点。例外：Sentiment Analyst 直接预取 Reddit / StockTwits / Yahoo 头条，不走工具循环 |
+| 2 | 分析师团队 | Market / Sentiment / News / Fundamentals Analyst | 每个分析师在自己的工具集上循环（`analyst ⇄ ToolNode`）直到产出报告；默认串行，开 `analyst_parallel` 后合并为一个并行 fan-out 节点。例外：Sentiment Analyst 直接预取 Reddit / StockTwits / Yahoo 头条（加密标的在实盘日期另加币安广场 Binance Square 情绪流），不走工具循环 |
 | 3 | 多空研究辩论 | Bull ⇄ Bear Researcher | 多轮结构化辩论，`max_debate_rounds`（默认 2 → 4 次发言） |
 | 4 | 研究裁决 | Research Manager（deep LLM） | 结构化 `ResearchPlan` |
 | 5 | 交易提案 | Trader | `TraderProposal`——三档 Buy / Hold / Sell |
@@ -474,7 +474,7 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 YiAgents 是 LLM 驱动的，**同一 ticker + 日期的两次运行可能不同** —— 这是语言模型研究的固有特性，不是缺陷。来源：
 
 - **模型采样非确定性**：即使固定温度，提供商也不保证逐字节一致；推理模型内部推理本身就在采样，波动更大。
-- **当前日期数据在变**：新闻 / StockTwits / Reddit 会随时间变化。历史运行会省略仅支持当前快照的社交、预测市场、滚动行情与持仓流数据；有日期的数据仍可能因供应商修订或覆盖范围改变而变化。
+- **当前日期数据在变**：新闻 / StockTwits / Reddit / 币安广场会随时间变化。历史运行会省略仅支持当前快照的社交、预测市场、滚动行情与持仓流数据；有日期的数据仍可能因供应商修订或覆盖范围改变而变化。
 
 降低波动的手段：调低 `temperature`（`YIAGENTS_TEMPERATURE`），或显式选非推理模型。已确定性化的部分：分析公司身份在 agent 运行前由 ticker 解析锁定；市场分析师的精确价格 / 指标取自已校验的数据快照。
 
@@ -499,7 +499,7 @@ YiAgents 的每一层关键机制都对应已发表的研究成果，而非凭�
 | 回测严谨性 | FinCAD (2025) · CPCV · Deflated Sharpe (Lopez de Prado) | [backtest/](yiagents/backtest/)：参数化前视偏差校正 + DSR |
 | 对抗鲁棒性 | MemMorph (2025) · SMSR (2025) · Spotlighting (2025) | 工具调用 / 记忆投毒 / 提示注入防护（路线图） |
 | 成本工程 | GPTCache · 模型级联 · DAG 编排 (2025) | 多提供商路由 + 检查点续跑 + 四档成本递增验证 |
-| 情绪与另类数据 | FinAgent (KDD 2024) · 少样本股票预测 (Deng 2024) | [dataflows/](yiagents/dataflows/)：Reddit / StockTwits / Polymarket / 浏览器 |
+| 情绪与另类数据 | FinAgent (KDD 2024) · 少样本股票预测 (Deng 2024) | [dataflows/](yiagents/dataflows/)：Reddit / StockTwits / 币安广场 / Polymarket / 浏览器 |
 | 可解释性 | CFA XAI 报告 (2025) · CoT 可视化 | 结构化报告 + [dashboard](yiagents/monitoring/dashboard.py) + 决策日志 |
 | 合规与安全 | EU AI Act · AIBOM (2025) · 零信任架构 | `YIAGENTS_KILL_SWITCH` + 仅研究用途声明 |
 
