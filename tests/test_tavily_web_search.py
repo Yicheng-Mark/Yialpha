@@ -619,3 +619,78 @@ def test_fundamentals_analyst_historical_date_never_binds_web_search():
     )
     assert "web_search" not in tools
     assert "web_search" not in prompt
+
+
+# --------------------------------------------------------------------------- #
+# Context-boundary regression (2026-08-17 first live run): ToolNode executes
+# every tool call in a worker thread under a COPIED context. The copied
+# context shares bound *objects* (so the quality ledger's list appends reach
+# the run root) but not later ContextVar.set() rebinds — the original
+# copy-on-write counters charged only the worker's own context copy, so the
+# first real NVDA run recorded ``web_search_usage: 0`` across all scopes
+# while the news analyst actually made 12 Tavily calls, and the budget gate
+# (which reads the same counters) never fired. These tests drive a REAL
+# StateGraph -> ToolNode -> worker-thread path, mirroring
+# test_quality_context_propagation.py; same-thread unit tests cannot catch
+# this class.
+# --------------------------------------------------------------------------- #
+def _toolnode_graph():
+    from typing import TypedDict
+
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    class _S(TypedDict, total=False):
+        messages: list
+
+    def route(state: _S) -> dict:
+        return {
+            "messages": [
+                AIMessage(
+                    "",
+                    tool_calls=[
+                        {"name": "web_search", "args": {"query": "q"}, "id": "c1"}
+                    ],
+                )
+            ]
+        }
+
+    builder = StateGraph(_S)
+    builder.add_node("route", route)
+    builder.add_node("tools", ToolNode([web_search]))
+    builder.add_edge(START, "route")
+    builder.add_edge("route", "tools")
+    builder.add_edge("tools", END)
+    return builder.compile()
+
+
+def test_run_usage_visible_through_real_toolnode(monkeypatch):
+    _fresh(monkeypatch)
+    graph = _toolnode_graph()
+    with requests_mock_post(_post_returning(_FakeResponse({"results": []}))):
+        out = graph.invoke({"messages": []})
+    assert tavily.run_usage() == {"news": 1, "market": 0, "fundamentals": 0}
+    # The successful call must not fabricate degradation evidence either.
+    assert quality.snapshot_quality() == []
+    tool_msgs = [m for m in out["messages"] if getattr(m, "type", "") == "tool"]
+    assert len(tool_msgs) == 1
+
+
+def test_budget_enforced_across_toolnode_executions(monkeypatch):
+    """Charges must ACCUMULATE across separate ToolNode worker contexts:
+    pre-fix each invocation saw a zeroed copy, so the cap could never fire
+    (12 calls passed a news:8 cap in the first live run)."""
+    _fresh(monkeypatch)
+    monkeypatch.setenv(_SPLIT_ENV, "news:2")
+    graph = _toolnode_graph()
+    with requests_mock_post(_post_returning(_FakeResponse({"results": []}))):
+        graph.invoke({"messages": []})
+        graph.invoke({"messages": []})
+        third = graph.invoke({"messages": []})
+    assert tavily.run_usage()["news"] == 2
+    third_tool = [
+        m for m in third["messages"] if getattr(m, "type", "") == "tool"
+    ][0]
+    assert "budget exhausted" in third_tool.content
+    assert any("budget" in e["detail"] for e in quality.snapshot_quality())

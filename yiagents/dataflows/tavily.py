@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from contextvars import ContextVar
 
 import requests
@@ -78,12 +79,27 @@ _SNIPPET_CHAR_CAP = 900
 _METHOD = "web_search"
 
 #: Per-scope charged-call counts for the current run. Default None (mutable
-# ContextVar defaults are a shared-state hazard — B039); initialized to a
-# per-context dict on first use. Copy-on-write from there, which keeps
-# concurrent batch workers' counters independent.
+#: ContextVar defaults are a shared-state hazard — B039); initialized to a
+#: per-context dict on first use.
+#:
+#: MUTATION CONTRACT (2026-08-17 live-run regression): langchain propagates a
+#: COPIED context into ToolNode's executor threads. A copied context shares the
+#: bound *object* but not later ``set()`` calls — so in-place mutation
+#: (``calls[scope] = calls.get(scope, 0) + 1``) is visible to the run root,
+#: while the copy-on-write rebinding this module used before made every real
+#: run record ``web_search_usage: 0`` while the model actually searched (and
+#: let the budget gate, which reads the same counters, be bypassed — 12 calls
+#: under an 8-call cap in the first live run). Same pattern as the quality
+#: ledger's shared list. Run isolation comes from ``reset_run_budget()``
+#: binding fresh objects in the runner's root context at run start.
 _calls_var: ContextVar[dict[str, int] | None] = ContextVar(
     "yiagents_tavily_calls", default=None
 )
+
+#: Serializes counter/cursor/dead-set updates: parallel tool calls in one
+#: ToolNode batch each hold a context copy sharing these objects, and
+#: read-modify-write on a dict is not atomic under the GIL.
+_state_lock = threading.Lock()
 
 
 def _calls_map() -> dict[str, int]:
@@ -97,11 +113,31 @@ def _calls_map() -> dict[str, int]:
 #: Round-robin cursor and the set of keys removed from this run's pool
 #: (401/403/429). Both reset with the budget at run start — a quota-dead key
 #: may recover by the next run, and each run should start its rotation
-#: deterministically.
-_key_cursor_var: ContextVar[int] = ContextVar("yiagents_tavily_key_cursor", default=0)
-_dead_keys_var: ContextVar[frozenset[int] | None] = ContextVar(
+#: deterministically. Same mutation contract as ``_calls_var``: boxed in
+#: mutable containers because ints/frozensets can only be rebound, and a
+#: rebind inside a ToolNode worker's context copy never reaches the root.
+_key_cursor_var: ContextVar[dict[str, int] | None] = ContextVar(
+    "yiagents_tavily_key_cursor", default=None
+)
+_dead_keys_var: ContextVar[set[int] | None] = ContextVar(
     "yiagents_tavily_dead_keys", default=None
 )
+
+
+def _cursor_box() -> dict[str, int]:
+    box = _key_cursor_var.get()
+    if box is None:
+        box = {"i": 0}
+        _key_cursor_var.set(box)
+    return box
+
+
+def _dead_keys() -> set[int]:
+    dead = _dead_keys_var.get()
+    if dead is None:
+        dead = set()
+        _dead_keys_var.set(dead)
+    return dead
 
 
 def api_key_pool() -> list[str]:
@@ -120,12 +156,9 @@ def api_key_pool() -> list[str]:
     return keys
 
 
-def _dead_keys() -> frozenset[int]:
-    return _dead_keys_var.get() or frozenset()
-
-
 def _mark_key_dead(key_idx: int, pool_size: int, status: object) -> None:
-    _dead_keys_var.set(_dead_keys() | {key_idx})
+    with _state_lock:
+        _dead_keys().add(key_idx)
     detail = (
         f"key #{key_idx + 1}/{pool_size} returned HTTP {status}; "
         "removed from this run's pool and rotating to the next key"
@@ -139,10 +172,12 @@ def _mark_key_dead(key_idx: int, pool_size: int, status: object) -> None:
 def _pick_key(keys: list[str]) -> tuple[str, int] | None:
     """Round-robin pick among the pool, skipping keys dead this run."""
     n = len(keys)
-    dead = _dead_keys()
     for _ in range(n):
-        idx = _key_cursor_var.get() % n
-        _key_cursor_var.set(_key_cursor_var.get() + 1)
+        with _state_lock:
+            box = _cursor_box()
+            idx = box["i"] % n
+            box["i"] += 1
+            dead = _dead_keys()
         if idx not in dead:
             return keys[idx], idx
     return None
@@ -157,9 +192,10 @@ def reset_run_budget() -> None:
     gets retried on the next run (free-tier quotas recover monthly, and 401s
     may be transient key-management fixes).
     """
-    _calls_var.set({})
-    _key_cursor_var.set(0)
-    _dead_keys_var.set(frozenset())
+    with _state_lock:
+        _calls_var.set({})
+        _key_cursor_var.set({"i": 0})
+        _dead_keys_var.set(set())
 
 
 def run_usage() -> dict[str, int]:
@@ -176,9 +212,12 @@ def run_usage() -> dict[str, int]:
 
 
 def _charge(scope: str) -> None:
-    calls = dict(_calls_map())
-    calls[scope] = calls.get(scope, 0) + 1
-    _calls_var.set(calls)
+    # In-place mutation only — never rebind. A rebind inside a ToolNode
+    # worker's context copy is invisible to the run root (see the
+    # MUTATION CONTRACT note at ``_calls_var``).
+    with _state_lock:
+        calls = _calls_map()
+        calls[scope] = calls.get(scope, 0) + 1
 
 
 def parse_budget_split(raw: str) -> dict[str, int] | None:
