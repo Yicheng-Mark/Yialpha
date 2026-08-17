@@ -292,7 +292,11 @@ class TestDerivedDispatchThroughConsumers:
         exporter = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(exporter)
         frame = _frame(list(np.linspace(100, 130, 60)))
-        monkeypatch.setattr(exporter, "load_ohlcv", lambda t, d: frame)
+        # The exporter delegates to yiagents.backtest.ic_dataset (2026-08-16),
+        # whose lazy imports resolve against the real dataflow modules.
+        from yiagents.dataflows import stockstats_utils
+
+        monkeypatch.setattr(stockstats_utils, "load_ohlcv", lambda t, d: frame)
         result = exporter.main([
             "TEST", "--indicators", "rvol_20", "obv", "rsi",
             "--output-dir", str(tmp_path),

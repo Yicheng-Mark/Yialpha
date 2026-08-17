@@ -20,6 +20,13 @@ assert _spec is not None and _spec.loader is not None
 exporter = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(exporter)
 
+# The implementation moved into the package (2026-08-16) so `yiagents
+# ic-cycle` can share it; the script is a thin CLI wrapper. build_ic_frame's
+# lazy imports resolve against the real dataflow modules, so tests stub
+# THOSE (not the script namespace, which no longer carries them).
+from yiagents.backtest.ic_dataset import build_ic_frame  # noqa: E402
+from yiagents.dataflows import feature_registry, stockstats_utils  # noqa: E402
+
 
 def _ohlcv(days: int = 40, start_close: float = 100.0) -> pd.DataFrame:
     dates = pd.date_range("2026-01-01", periods=days, freq="D")
@@ -46,13 +53,13 @@ def patched_ohlcv(monkeypatch):
         served["as_of"] = curr_date
         return _ohlcv()
 
-    monkeypatch.setattr(exporter, "load_ohlcv", fake_load)
+    monkeypatch.setattr(stockstats_utils, "load_ohlcv", fake_load)
     return served
 
 
 @pytest.mark.unit
 def test_column_shape_and_tail_drop(patched_ohlcv):
-    frame, skipped = exporter.build_ic_frame(
+    frame, skipped = build_ic_frame(
         "NVDA", horizon=5, indicators=["close_50_sma", "rsi"], as_of="2026-06-10"
     )
     # 40 rows of data, last 5 cannot have a realizable 5-row forward return.
@@ -68,7 +75,7 @@ def test_column_shape_and_tail_drop(patched_ohlcv):
 
 @pytest.mark.unit
 def test_forward_return_math(patched_ohlcv):
-    frame, _ = exporter.build_ic_frame(
+    frame, _ = build_ic_frame(
         "X", horizon=1, indicators=["rsi"], as_of="2026-06-10"
     )
     # Row i (except the dropped tail) must equal close[i+1]/close[i] - 1.
@@ -92,7 +99,7 @@ def test_uncomputable_indicator_is_skipped_not_zerofilled(patched_ohlcv, caplog)
             return pd.Series([1.0] * 40)
 
     with mock.patch("stockstats.wrap", lambda df: _BrokenWrap()), caplog.at_level("WARNING"):
-        frame, skipped = exporter.build_ic_frame(
+        frame, skipped = build_ic_frame(
             "X", horizon=2, indicators=["macd", "rsi"], as_of="2026-06-10"
         )
     assert skipped == ["macd"]
@@ -147,7 +154,7 @@ def test_cli_extra_horizons_add_decay_columns(tmp_path, patched_ohlcv):
 
 @pytest.mark.unit
 def test_build_ic_frame_extra_horizon_math(patched_ohlcv):
-    frame, _ = exporter.build_ic_frame(
+    frame, _ = build_ic_frame(
         "X", horizon=1, indicators=["rsi"], as_of="2026-06-10",
         extra_horizons=[3],
     )
@@ -173,11 +180,11 @@ def test_cli_all_indicators_skipped_is_a_failure(tmp_path, monkeypatch, capsys):
     def _all_derived_broken(data, name):
         raise RuntimeError("derived feature exploded")
 
-    monkeypatch.setattr(exporter, "load_ohlcv", lambda t, d: _ohlcv())
+    monkeypatch.setattr(stockstats_utils, "load_ohlcv", lambda t, d: _ohlcv())
     # Break BOTH compute paths: stockstats wrap (classic indicators) and the
     # derived-feature registry (rvol_20/ewma_vol/obv/rel_vol_20 don't use
     # wrap, so a broken wrap alone no longer skips the whole battery).
-    monkeypatch.setattr(exporter, "compute_derived", _all_derived_broken)
+    monkeypatch.setattr(feature_registry, "compute_derived", _all_derived_broken)
     with mock.patch("stockstats.wrap", lambda df: _AllBrokenWrap()):
         rc = exporter.main(["NVDA", "--output-dir", str(tmp_path)])
     assert rc == 1

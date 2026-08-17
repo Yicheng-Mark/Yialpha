@@ -1,0 +1,51 @@
+name: ic-cycle
+
+# Weekly IC pruning evidence run (Saturday 04:30 UTC — after Friday's close,
+# before Sunday's CI full-matrix sweep). Produces the ic_data/ CSVs + prune
+# verdicts as artifacts for human review; NEVER edits the live config (the
+# fail-closed contract — applying a prune is a reviewed human step).
+on:
+  schedule:
+    - cron: "30 4 * * 6"
+  workflow_dispatch: {}  # manual trigger for ad-hoc evidence runs
+
+# Own concurrency group: the CI group is keyed on github.ref with
+# cancel-in-progress, which would let a Saturday push cancel a mid-run
+# evidence job. This workflow keys on its own name instead.
+concurrency:
+  group: ic-cycle
+  cancel-in-progress: false
+
+jobs:
+  ic-cycle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.lock
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Run IC cycle (export + prune verdicts)
+        # GH runners have direct network access (no proxy needed — unlike a
+        # dev box behind SOCKS5, yfinance works out of the box here). The
+        # OHLCV cache starts cold each run; the exporter fetches what it
+        # needs. Non-zero exit = no dataset at all, which SHOULD fail the
+        # job (an empty artifact masquerading as evidence is worse).
+        run: |
+          yiagents ic-cycle \
+            --ticker NVDA --ticker AMD --ticker MSFT \
+            --horizon 5 --window 60
+      - name: Upload IC evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ic-data-${{ github.run_id }}
+          path: ic_data/
+          retention-days: 90
+          if-no-files-found: error
