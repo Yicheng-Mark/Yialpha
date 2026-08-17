@@ -5,6 +5,7 @@ import questionary
 from dotenv import find_dotenv, set_key
 from rich.console import Console
 
+from yiagents.dataflows.binance import stock_perp_underlying
 from yiagents.dataflows.utils import safe_ticker_component
 from yiagents.llm_clients.api_key_env import get_api_key_env
 from yiagents.llm_clients.model_catalog import get_model_options
@@ -115,12 +116,18 @@ def detect_asset_type(ticker: str) -> AssetType:
 
 
 def filter_analysts_for_asset_type(
-    analysts: list[AnalystType], asset_type: AssetType
+    analysts: list[AnalystType], asset_type: AssetType, ticker: str = ""
 ) -> list[AnalystType]:
-    # Crypto spot, Binance USDT-M perpetuals, and Binance spot all lack
-    # company fundamentals, so the Fundamentals Analyst is dropped for any of
-    # them. STOCK is not in this set -> returns the full list unchanged
-    # (baseline behavior).
+    # Crypto spot and pure-crypto perps lack company fundamentals, so the
+    # Fundamentals Analyst is dropped for them. A Binance tokenized-stock
+    # perp (exchangeInfo underlyingType == EQUITY, e.g. MUUSDT tracking
+    # Micron) keeps it: the analyst reads the UNDERLYING US equity through
+    # the normal stock vendors (remap + nudge live in the analyst layer).
+    # STOCK is not in the drop set -> returns the full list unchanged
+    # (baseline behavior); ticker defaults to "" so existing callers/tests
+    # that never pass one keep the pre-perp-underlying behavior.
+    if asset_type == AssetType.CRYPTO_PERP and stock_perp_underlying(ticker):
+        return list(analysts)
     if asset_type not in (
         AssetType.CRYPTO,
         AssetType.CRYPTO_PERP,
@@ -167,11 +174,14 @@ def get_analysis_date() -> str:
     return date.strip()
 
 
-def select_analysts(asset_type: AssetType = AssetType.STOCK) -> list[AnalystType]:
+def select_analysts(
+    asset_type: AssetType = AssetType.STOCK, ticker: str = ""
+) -> list[AnalystType]:
     """Select analysts using an interactive checkbox."""
     available_analysts = filter_analysts_for_asset_type(
         [value for _, value in ANALYST_ORDER],
         asset_type,
+        ticker,
     )
     choices = questionary.checkbox(
         "Select Your [Analysts Team]:",

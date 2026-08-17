@@ -68,7 +68,7 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 | Binance 现货 | `crypto_spot` | Binance 现货（`api.binance.com`，可切镜像） | 所有运行：spot_klines + 现货指标 + 有日期的指标/快照/证据工具；当前日期另含 ticker24 / **spot_perp_basis** | 历史分析不会注入滚动 24h 与当前跨市场基差 |
 | Binance 永续 | `crypto_perp` | Binance USDT-M 永续（`fapi.binance.com`） | 所有运行：klines + funding + 指标；当前日期另含 OI / 多空比 / 主动买卖 / basis / mark price 溢价指数 | 仅分析；回测已支持完整永续建模（资金费 / 成本 / 杠杆 / 强平） |
 
-加密模式下 Fundamentals Analyst 会自动剔除（永续 / 现货对无基本面）。所有 Binance 请求为手写 `requests`（**非官方 SDK**），复用已验证的 SOCKS5 代理，按产品线独立限流，并保留反应式 429/418 兜底。
+加密模式下纯币对（无公司基本面）仍会自动剔除 Fundamentals Analyst——但币安**代币化股票永续**（exchangeInfo `underlyingType=EQUITY`，如跟踪美光的 `MUUSDT`）会保留该分析师并分析**标的美股**（符号自动重映射；每 run 预热一次实时上市表，失败回退静态种子快照）。所有 Binance 请求为手写 `requests`（**非官方 SDK**），复用已验证的 SOCKS5 代理，按产品线独立限流，并保留反应式 429/418 兜底。
 
 ### A 股原生数据
 

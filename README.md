@@ -68,7 +68,7 @@ Crypto has three opt-in modes. `crypto` (Yahoo spot) is the default; `crypto_spo
 | Binance spot | `crypto_spot` | Binance spot (`api.binance.com`, optional mirror) | all runs: spot klines + spot indicators + dated indicators / snapshot / evidence tools; current date also: ticker24 / **spot_perp_basis** | Rolling 24h and current cross-venue basis are never injected into historical runs |
 | Binance perpetual | `crypto_perp` | Binance USDT-M perp (`fapi.binance.com`) | all runs: klines + funding + indicators; current date also: OI / long-short / taker flow / basis / mark-price premium index | Analysis only. Backtests supported with full perp modeling (funding / costs / leverage / liquidation) |
 
-In crypto modes the Fundamentals Analyst is dropped automatically (perpetual/spot pairs have no fundamentals). All Binance requests are hand-written `requests` (not the official SDK) over the existing SOCKS5 proxy, with per-product-line rate limiting and reactive 429/418 backstop.
+In crypto modes the Fundamentals Analyst is dropped for pure-crypto pairs (no company fundamentals) — but a Binance **tokenized-stock perp** (exchangeInfo `underlyingType=EQUITY`, e.g. `MUUSDT` tracking Micron) keeps it and analyzes the **underlying US equity** (symbol remapped automatically; the live listing is warmed once per run, with a static seed snapshot as the fail-open fallback). All Binance requests are hand-written `requests` (not the official SDK) over the existing SOCKS5 proxy, with per-product-line rate limiting and reactive 429/418 backstop.
 
 ### A-share native data
 

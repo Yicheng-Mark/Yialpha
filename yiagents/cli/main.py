@@ -637,7 +637,18 @@ def get_user_selections(asset_type_override: str = "auto"):
             "Step 4: Analysts Team", "Select your LLM analyst agents for the analysis"
         )
     )
-    selected_analysts = select_analysts(asset_type)
+    # Step 4: Analysts Team — for a perp run, warm the live EQUITY-perp
+    # listing once so the analyst filter sees fresh listings (a tokenized
+    # stock perp like MUUSDT keeps the Fundamentals Analyst; fetch failure
+    # degrades to the static seed, logged by the vendor).
+    from .models import AssetType as _AssetType
+
+    if asset_type == _AssetType.CRYPTO_PERP:
+        from yiagents.dataflows.binance import warm_equity_perp_bases
+
+        warm_equity_perp_bases()
+
+    selected_analysts = select_analysts(asset_type, selected_ticker)
     console.print(
         f"[green]Selected analysts:[/green] {', '.join(analyst.value for analyst in selected_analysts)}"
     )

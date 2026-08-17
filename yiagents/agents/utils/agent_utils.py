@@ -74,6 +74,7 @@ from yiagents.agents.utils.web_search_tools import (
     web_search_market,
 )
 from yiagents.agents.utils.weekly_indicators_tools import get_indicators_weekly
+from yiagents.dataflows.binance import stock_perp_underlying
 
 # Public surface: the data tools are imported here so agents and the graph
 # import them from one place, plus the instrument/language helpers defined below.
@@ -290,12 +291,27 @@ def build_instrument_context(
         )
 
     if is_perp:
-        context += (
-            " This is a Binance USDT-M perpetual futures contract (crypto_perp). "
-            "Funding rate, open interest, and basis are first-class signals; "
-            "mind leverage and funding-cost drag. Do not assume company "
-            "fundamentals are available."
-        )
+        underlying = stock_perp_underlying(ticker)
+        if underlying:
+            # Tokenized US-equity perp: the contract tracks a real listed
+            # company/ETF, so fundamentals ARE in play — via the underlying
+            # symbol, not the perp symbol (the tool layer remaps as backstop).
+            context += (
+                " This is a Binance USDT-M perpetual on a tokenized US "
+                f"equity; the underlying company/ETF trades as `{underlying}`. "
+                "Funding rate, open interest, and basis are first-class "
+                "signals; mind leverage and funding-cost drag. Company "
+                "fundamentals ARE available: pass the underlying ticker "
+                f"`{underlying}` (not {ticker}) to the fundamentals tools, and "
+                "weigh filings/valuation as you would for the listed stock."
+            )
+        else:
+            context += (
+                " This is a Binance USDT-M perpetual futures contract (crypto_perp). "
+                "Funding rate, open interest, and basis are first-class signals; "
+                "mind leverage and funding-cost drag. Do not assume company "
+                "fundamentals are available."
+            )
     if is_spot:
         context += (
             " This is a Binance SPOT pair (crypto_spot). No funding rate, open "
