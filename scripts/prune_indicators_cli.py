@@ -38,7 +38,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -269,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
                 entry["turnover"] = turnover_by_indicator[name]
             per_indicator[name] = entry
         verdict = {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
             "params": {
                 "window": args.window,
                 "min_abs_ic": args.min_abs_ic,

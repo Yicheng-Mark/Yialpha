@@ -18,6 +18,8 @@ tests mock the fetch so the asserted window is the one actually requested.
 
 from __future__ import annotations
 
+from datetime import UTC
+
 from yiagents.dataflows.utils import (
     clamp_end_date,
     current_pit_end,
@@ -135,9 +137,9 @@ class TestVendorClamp:
             # LLM asks for 2030 — must be clamped to 2020-01-02.
             result = binance_mod.get_binance_klines("BTCUSDT", "2019-12-01", "2030-06-15")
             # end_ms should be end-of-day 2020-01-02, NOT 2030.
-            from datetime import datetime, timezone
+            from datetime import datetime
             clamped_end = datetime.strptime("2020-01-02", "%Y-%m-%d").replace(
-                tzinfo=timezone.utc
+                tzinfo=UTC
             )
             expected_end_ms = int((clamped_end.timestamp() + 86399) * 1000)
             assert captured["end_ms"] == expected_end_ms

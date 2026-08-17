@@ -36,8 +36,14 @@ class TestLoadOhlcvNoPoison(unittest.TestCase):
         with mock.patch.object(stockstats_utils.yf, "download", return_value=empty), \
                 self.assertRaises(NoMarketDataError):
             stockstats_utils.load_ohlcv("FAKE", "2026-01-01")
-        # Nothing should have been written to the cache.
-        self.assertEqual(os.listdir(self._tmp), [])
+        # Nothing should have been written to the cache. The shared FileLock's
+        # OS lockfile (``.csv.lock``) is exempt: filelock leaves the marker
+        # behind on release on Unix and deletes it on Windows, so asserting an
+        # exactly-empty directory only holds on Windows. The lockfile is not a
+        # data artifact.
+        self.assertEqual(
+            [f for f in os.listdir(self._tmp) if not f.endswith(".lock")], []
+        )
 
         # A second call must re-attempt the fetch (no poisoned cache served).
         with mock.patch.object(stockstats_utils.yf, "download", return_value=empty) as dl2:

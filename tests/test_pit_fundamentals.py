@@ -23,6 +23,7 @@ from yiagents.dataflows.alpha_vantage_fundamentals import (
     _filter_reports_by_date,
     get_fundamentals as get_av_fundamentals,
 )
+from yiagents.dataflows.config import set_config
 from yiagents.dataflows.errors import NoMarketDataError
 from yiagents.dataflows.interface import route_to_vendor
 from yiagents.dataflows.stockstats_utils import filter_financials_by_date
@@ -200,9 +201,15 @@ def test_av_get_fundamentals_refuses_past_date():
 
 @pytest.mark.unit
 def test_router_emits_no_data_sentinel_for_past_overview():
-    # End-to-end: both vendors' overview is today-only, so on a past backtest
-    # date both raise NoMarketDataError before any HTTP call and the router
-    # returns its NO_DATA_AVAILABLE sentinel instead of leaking future data.
+    # End-to-end: the two today-only vendors (yfinance / Alpha Vantage) raise
+    # NoMarketDataError before any HTTP call, so on a past backtest date the
+    # router returns its NO_DATA_AVAILABLE sentinel instead of leaking future
+    # data. The chain is pinned to those two vendors because sec_edgar is
+    # PIT-capable: with the default chain it legitimately answers past dates —
+    # via a real network call — which makes the outcome depend on whether the
+    # environment can reach sec.gov (CI runners can; a firewalled dev box
+    # "passes" only because the request fails).
+    set_config({"tool_vendors": {"get_fundamentals": "yfinance,alpha_vantage"}})
     out = route_to_vendor("get_fundamentals", "AAPL", "2024-01-01")
     assert isinstance(out, str)
     assert "NO_DATA_AVAILABLE" in out

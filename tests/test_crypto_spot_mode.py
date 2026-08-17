@@ -9,7 +9,7 @@ LLM cost.
 """
 
 import unittest
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from unittest import mock
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -252,7 +252,7 @@ class MarketAnalystToolBindingSpotTests(unittest.TestCase):
 def _kline(day_iso: str, close: float) -> list:
     """Build a minimal Binance kline 12-tuple for a UTC date + close price."""
     open_ms = int(
-        datetime.strptime(day_iso, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+        datetime.strptime(day_iso, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
         * 1000
     )
     return [open_ms, close, close, close, close, 100.0, open_ms + 86_400_000,

@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -213,7 +213,7 @@ def prune_verdict_for_csv(
             ),
         }
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "params": {
             "window": window,
             "min_abs_ic": min_abs_ic,

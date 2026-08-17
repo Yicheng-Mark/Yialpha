@@ -7,7 +7,7 @@ fake Binance that honors startTime/endTime/limit exactly, then assert the
 public functions page through the full range with no gaps and no truncation.
 """
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest import mock
 
 from yiagents.dataflows import binance
@@ -41,7 +41,7 @@ class TestClosedWindowMemo(unittest.TestCase):
     """
 
     def _rows(self, n=30):
-        base = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        base = int(datetime(2024, 1, 1, tzinfo=UTC).timestamp() * 1000)
         return [
             {"fundingTime": base + i * _FUND_MS, "fundingRate": "0.0001",
              "symbol": "BTCUSDT"}
@@ -60,15 +60,15 @@ class TestClosedWindowMemo(unittest.TestCase):
             binance._paginate_history(
                 "/fapi/v1/fundingRate", {"symbol": "BTCUSDT"}, 1000,
                 lambda r: r["fundingTime"],
-                int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000),
-                int(datetime(2024, 1, 15, tzinfo=timezone.utc).timestamp() * 1000),
+                int(datetime(2024, 1, 1, tzinfo=UTC).timestamp() * 1000),
+                int(datetime(2024, 1, 15, tzinfo=UTC).timestamp() * 1000),
                 "BTCUSDT", "BTCUSDT",
             )
             binance._paginate_history(
                 "/fapi/v1/fundingRate", {"symbol": "BTCUSDT"}, 1000,
                 lambda r: r["fundingTime"],
-                int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000),
-                int(datetime(2024, 1, 15, tzinfo=timezone.utc).timestamp() * 1000),
+                int(datetime(2024, 1, 1, tzinfo=UTC).timestamp() * 1000),
+                int(datetime(2024, 1, 15, tzinfo=UTC).timestamp() * 1000),
                 "BTCUSDT", "BTCUSDT",
             )
         self.assertEqual(len(calls), 1, "closed window must be served from the memo")
@@ -76,7 +76,7 @@ class TestClosedWindowMemo(unittest.TestCase):
     def test_window_touching_present_is_not_cached(self):
         calls = []
         rows = self._rows()
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
 
         def counting_server(path, params, symbol, canonical, **kwargs):
             calls.append(params["startTime"])
@@ -99,7 +99,7 @@ class TestClosedWindowMemo(unittest.TestCase):
             calls.append(params["endTime"])
             return _fake_funding_server(rows)(path, params, symbol, canonical, **kwargs)
 
-        base = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        base = int(datetime(2024, 1, 1, tzinfo=UTC).timestamp() * 1000)
         for end in (base + 10 * _DAY_MS, base + 12 * _DAY_MS):
             with mock.patch.object(binance, "_http_get", counting_server):
                 binance._paginate_history(
@@ -110,7 +110,7 @@ class TestClosedWindowMemo(unittest.TestCase):
 
     def test_memo_returns_a_copy(self):
         rows = self._rows()
-        base = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        base = int(datetime(2024, 1, 1, tzinfo=UTC).timestamp() * 1000)
         end = base + 5 * _DAY_MS
         args = (
             "/fapi/v1/fundingRate", {"symbol": "BTCUSDT"}, 1000,
@@ -131,7 +131,7 @@ class TestKlinesPagination(unittest.TestCase):
     def test_long_range_is_not_truncated(self):
         # 2000 daily bars: the old default-limit (500) and even one 1500-page
         # would drop recent rows. Paging must return all 2000, oldest-first.
-        base = int(datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        base = int(datetime(2020, 1, 1, tzinfo=UTC).timestamp() * 1000)
         all_klines = [
             [base + i * _DAY_MS, "1.0", "2.0", "0.5", "1.5", "100.0"]
             for i in range(2000)
@@ -147,7 +147,7 @@ class TestKlinesPagination(unittest.TestCase):
         self.assertEqual(len(data_lines), 2000)
 
     def test_long_range_is_monotonic_no_gaps(self):
-        base = int(datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        base = int(datetime(2020, 1, 1, tzinfo=UTC).timestamp() * 1000)
         all_klines = [
             [base + i * _DAY_MS, "1.0", "2.0", "0.5", "1.5", "100.0"]
             for i in range(1800)
@@ -168,7 +168,7 @@ class TestKlinesPagination(unittest.TestCase):
 
     def test_short_range_single_page_unchanged(self):
         # A range under one page must return exactly its bars (no over-fetch).
-        base = int(datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        base = int(datetime(2020, 1, 1, tzinfo=UTC).timestamp() * 1000)
         all_klines = [
             [base + i * _DAY_MS, "1.0", "2.0", "0.5", "1.5", "100.0"]
             for i in range(10)
@@ -181,7 +181,7 @@ class TestKlinesPagination(unittest.TestCase):
 class TestFundingPagination(unittest.TestCase):
     def test_long_range_is_not_truncated(self):
         # 2500 funding rows (8h cadence): the old limit=1000 would drop ~1500.
-        base = int(datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        base = int(datetime(2020, 1, 1, tzinfo=UTC).timestamp() * 1000)
         all_rows = [
             {"fundingTime": base + i * _FUND_MS, "fundingRate": "0.0001",
              "symbol": "BTCUSDT"}
@@ -197,7 +197,7 @@ class TestFundingPagination(unittest.TestCase):
         self.assertEqual(len(data_lines), 2500)
 
     def test_long_range_monotonic(self):
-        base = int(datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        base = int(datetime(2020, 1, 1, tzinfo=UTC).timestamp() * 1000)
         all_rows = [
             {"fundingTime": base + i * _FUND_MS, "fundingRate": "0.0001",
              "symbol": "BTCUSDT"}

@@ -12,7 +12,7 @@ outcomes (a "Yes" at 0.76 means the market prices a 76% chance).
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import requests
 
@@ -130,7 +130,7 @@ def get_prediction_markets(topic: str, limit: int | None = None) -> str:
 
     data = _request("public-search", {"q": topic, "limit_per_type": 20})
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     candidates = [
         m
         for event in data.get("events", [])

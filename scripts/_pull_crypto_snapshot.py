@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import io
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 
-_TODAY = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-_START = (datetime.now(timezone.utc) - timedelta(days=130)).strftime("%Y-%m-%d")
+_TODAY = datetime.now(UTC).strftime("%Y-%m-%d")
+_START = (datetime.now(UTC) - timedelta(days=130)).strftime("%Y-%m-%d")
 
 # noqa: E402 — module-level constant assignments (_TODAY/_START) precede this
 # import; reordering would break the timestamp-instantiation pattern.

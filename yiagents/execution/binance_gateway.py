@@ -66,7 +66,7 @@ import secrets
 import threading
 import time
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -880,7 +880,7 @@ class BinanceGateway(BaseGateway):
         update_time = data.get("updateTime")
         if update_time:
             with contextlib.suppress(TypeError, ValueError, OSError):
-                order.datetime = datetime.fromtimestamp(int(update_time) / 1000, tz=timezone.utc)
+                order.datetime = datetime.fromtimestamp(int(update_time) / 1000, tz=UTC)
         return order
 
     def _rejected(self, req: OrderRequest, *, orderid: str = "", reason: str = "") -> OrderData:
