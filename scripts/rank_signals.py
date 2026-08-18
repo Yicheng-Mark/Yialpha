@@ -26,8 +26,10 @@ import sys
 from pathlib import Path
 
 # Windows 控制台是 GBK(cp936)，打印中文/符号会 UnicodeEncodeError —— 强制 UTF-8
+# （stderr 同样：✗/中文错误信息也走错误流，单改 stdout 不够）
 with contextlib.suppress(Exception):
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
 
 # 复用 trade_ticket.py 的全部解析（scripts/ 不是包，sys.path 注入）
 sys.path.insert(0, str(Path(__file__).resolve().parent))

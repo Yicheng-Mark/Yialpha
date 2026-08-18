@@ -1561,7 +1561,12 @@ def batch(
     across a pool of worker graphs; ``--workers 1`` is explicit serial. The
     env switch ``YIAGENTS_BATCH_CONCURRENCY=true`` also enables the pool.
     """
-    from yiagents.batch.runner import BatchInputError, BatchRunner, prepare_batch_run
+    from yiagents.batch.runner import (
+        BatchInputError,
+        BatchRunner,
+        batch_selected_analysts,
+        prepare_batch_run,
+    )
 
     try:
         config, resolved = prepare_batch_run(tickers, date, asset_type, workers)
@@ -1574,7 +1579,12 @@ def batch(
     console.print(
         f"[bold]Batch: {len(tickers)} tickers | date={date} | type={resolved}[/bold]"
     )
-    with BatchRunner(config, workers=workers, progress=False) as runner:
+    with BatchRunner(
+        config,
+        workers=workers,
+        progress=False,
+        selected_analysts=batch_selected_analysts(resolved, tickers),
+    ) as runner:
         results = runner.run(tickers, date, asset_type=resolved)
 
     ok = sum(1 for r in results if r["error"] is None)

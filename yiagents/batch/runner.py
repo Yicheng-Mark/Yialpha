@@ -105,6 +105,50 @@ def prepare_batch_run(
     return config, resolved
 
 
+def batch_selected_analysts(
+    asset_type: str,
+    tickers: list[str],
+    base: tuple = ("market", "social", "news", "fundamentals"),
+) -> tuple:
+    """Interactive-CLI analyst parity for batch frontends.
+
+    The interactive path drops the Fundamentals Analyst for crypto runs (a
+    pure crypto has no company fundamentals) while keeping it for
+    tokenized-stock perps (they read the UNDERLYING US equity). Batch graphs
+    share one analyst tuple across the worker pool, so the per-ticker rule
+    collapses to a union: drop Fundamentals when the batch is crypto-family
+    AND no ticker resolves to a tokenized-stock perp; stock batches and
+    mixed perp batches return ``base`` unchanged (a mixed batch stays
+    over-inclusive — the fundamentals analyst degrades to an honest
+    no-data section for the pure-crypto tickers, exactly as before this
+    helper existed).
+    """
+    from yiagents.cli.models import AnalystType, AssetType
+    from yiagents.cli.utils import filter_analysts_for_asset_type
+
+    try:
+        at = AssetType(asset_type)
+    except ValueError:
+        return tuple(base)
+    try:
+        analysts = [AnalystType(a) for a in base]
+    except ValueError:
+        return tuple(base)
+    if at == AssetType.CRYPTO_PERP:
+        # Same ordering contract as the interactive CLI: warm the live
+        # EQUITY-perp listing BEFORE the filter so tokenized-stock perps
+        # are recognized (fetch failure degrades to the static seed, logged
+        # by the vendor).
+        from yiagents.dataflows.binance import warm_equity_perp_bases
+
+        warm_equity_perp_bases()
+    per_ticker = {
+        tuple(filter_analysts_for_asset_type(analysts, at, t)) for t in tickers
+    }
+    union = [a for a in base if any(AnalystType(a) in kept for kept in per_ticker)]
+    return tuple(union)
+
+
 @contextmanager
 def serialized_run(
     config: dict, ticker: str, trade_date: str, asset_type: str
