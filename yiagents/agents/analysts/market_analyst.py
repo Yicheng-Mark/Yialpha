@@ -7,6 +7,7 @@ from yiagents.agents.utils.agent_utils import (
     get_a_share_realtime_quote_native,
     get_a_share_sector_flow_native,
     get_binance_basis,
+    get_binance_depth_snapshot,
     get_binance_funding_rate,
     get_binance_indicators,
     get_binance_klines,
@@ -18,6 +19,8 @@ from yiagents.agents.utils.agent_utils import (
     get_binance_spot_perp_basis,
     get_binance_spot_ticker24,
     get_binance_taker_buy_sell,
+    get_binance_vision_book_depth,
+    get_binance_vision_metrics,
     get_candlestick_patterns,
     get_indicators,
     get_indicators_weekly,
@@ -63,7 +66,14 @@ _PERP_NUDGE = (
     "Call get_binance_premium_index for the mark-price snapshot and anchor ALL "
     "liquidation-distance claims to its markPrice (Binance liquidates on the "
     "mark price, not the last traded price) and use its lastFundingRate as the "
-    "currently-effective rate. The generic instructions above to call "
+    "currently-effective rate. For execution realism call get_binance_depth_"
+    "snapshot (live book: spread, top-N imbalance — a thin side into the "
+    "price's direction is slippage/liquidation-cascade risk). When regime "
+    "context beyond the 30-day REST retention would strengthen the funding/OI/"
+    "positioning read (e.g. is current OI extreme vs the past year?), call "
+    "get_binance_vision_metrics for the archived deep-history series, and "
+    "get_binance_vision_book_depth for how book depth persisted through past "
+    "moves. The generic instructions above to call "
     "get_stock_data / get_indicators / get_verified_market_snapshot and to "
     "cite get_indicators_weekly / get_support_resistance / "
     "get_volume_features / get_candlestick_patterns / get_relative_strength "
@@ -82,10 +92,15 @@ _PERP_HISTORICAL_NUDGE = (
     "get_indicators_weekly and the price-structure citation rules "
     "(get_support_resistance, get_volume_features, get_candlestick_patterns, "
     "get_relative_strength) are WAIVED — they price a different (Yahoo spot) "
-    "market. Current open-interest snapshots, "
-    "long/short positioning, taker order flow, and basis are intentionally not "
+    "market. CURRENT open-interest snapshots, long/short positioning, taker "
+    "order flow, and basis (the live REST endpoints) are intentionally not "
     "available because they cannot be reconstructed reliably as of that date. "
-    "Do not infer or fabricate those omitted signals."
+    "Positioning AS OF the analysis date IS available from the official "
+    "archives: call get_binance_vision_metrics with date bounds ending on the "
+    "analysis date for the archived open-interest / long-short-ratio / taker "
+    "series (5-minute grain, point-in-time-correct), and get_binance_vision_"
+    "book_depth for archived order-book depth. Do not infer or fabricate any "
+    "signal those tools do not return for the date."
 )
 
 # Appended to the system message ONLY for crypto_spot runs. Spot shares the
@@ -401,10 +416,17 @@ def create_market_analyst(llm):
             # so they stay hidden for perp runs. Classic indicators are NOT
             # lost though: get_binance_indicators (2026-08-15) computes the
             # stockstats battery on the actual perp klines.
+            # The vision archive tools (data.binance.vision) are bound for
+            # BOTH live and historical runs: archive files contain only their
+            # own day's rows, so they are the PIT-correct positioning source
+            # for a replay date (the REST positioning endpoints retain only
+            # 30 days and are live-only below).
             tools = [
                 get_binance_klines,
                 get_binance_funding_rate,
                 get_binance_indicators,
+                get_binance_vision_metrics,
+                get_binance_vision_book_depth,
             ]
             if not historical:
                 tools.extend(
@@ -414,6 +436,7 @@ def create_market_analyst(llm):
                         get_binance_taker_buy_sell,
                         get_binance_basis,
                         get_binance_premium_index,
+                        get_binance_depth_snapshot,
                     ]
                 )
         elif state.get("asset_type") == "crypto_spot":

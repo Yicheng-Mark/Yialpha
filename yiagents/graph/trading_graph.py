@@ -28,6 +28,7 @@ from yiagents.agents.utils.agent_utils import (
     get_a_share_sector_flow_native,
     get_balance_sheet,
     get_binance_basis,
+    get_binance_depth_snapshot,
     get_binance_funding_rate,
     get_binance_indicators,
     get_binance_klines,
@@ -39,6 +40,8 @@ from yiagents.agents.utils.agent_utils import (
     get_binance_spot_perp_basis,
     get_binance_spot_ticker24,
     get_binance_taker_buy_sell,
+    get_binance_vision_book_depth,
+    get_binance_vision_metrics,
     get_candlestick_patterns,
     get_cashflow,
     get_form4_insider_trading,
@@ -379,6 +382,12 @@ class YiAgentsGraph:
                     get_binance_taker_buy_sell,
                     get_binance_basis,
                     get_binance_premium_index,
+                    # Live order book + data.binance.vision archive tools
+                    # (deep-history positioning/depth, PIT-correct for
+                    # historical replay dates). Same dormant contract.
+                    get_binance_depth_snapshot,
+                    get_binance_vision_metrics,
+                    get_binance_vision_book_depth,
                     # Classic indicators on Binance candles, one binding per
                     # venue default (perp / spot); dormant unless the matching
                     # crypto run advertises them.

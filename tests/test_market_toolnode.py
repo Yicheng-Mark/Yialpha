@@ -118,6 +118,25 @@ def test_market_and_fundamentals_toolnodes_register_web_search():
     )
 
 
+@pytest.mark.unit
+def test_market_toolnode_registers_vision_and_depth_tools():
+    """Perp accuracy expansion (2026-08-17): the live order-book snapshot and
+    the two data.binance.vision archive tools are bound by the market analyst
+    for crypto_perp runs (the archive tools for historical replays too) —
+    they must be executable in the market ToolNode or the deep-history
+    positioning evidence silently degrades (same wiring-gap class as the
+    round-5 audit)."""
+    market_tools = set(_tool_nodes()["market"].tools_by_name)
+    missing = {
+        "get_binance_depth_snapshot",
+        "get_binance_vision_metrics",
+        "get_binance_vision_book_depth",
+    } - market_tools
+    assert not missing, (
+        f"Perp accuracy tools bound by the analyst but not executable: {missing}"
+    )
+
+
 def _tool_nodes() -> dict:
     # _create_tool_nodes needs only self.quick_thinking_llm (the PoT tool
     # closure); a stub keeps this a pure-construction unit test.

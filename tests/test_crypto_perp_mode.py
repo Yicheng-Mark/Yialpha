@@ -228,19 +228,22 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
         self.assertNotIn("get_stock_data", names)
         self.assertNotIn("get_indicators", names)
         self.assertNotIn("get_verified_market_snapshot", names)
-        # The 8 perp-native Binance tools: OHLCV/funding/OI (the original
+        # The 11 perp-native Binance tools: OHLCV/funding/OI (the original
         # cost-of-carry & crowding trio) plus the positioning/order-flow/basis
         # trio, plus get_binance_indicators (2026-08-15) which computes the
         # classic stockstats battery on the actual perp klines — the indicator
-        # capability perp runs previously lacked entirely — and
+        # capability perp runs previously lacked entirely —,
         # get_binance_premium_index (2026-08-16): the mark-price snapshot that
-        # liquidation-distance claims must anchor to. Live runs add the
-        # market-scoped web_search (9th).
-        self.assertEqual(len(names), 9)
+        # liquidation-distance claims must anchor to, get_binance_depth_
+        # snapshot (live book) and the two data.binance.vision archive tools
+        # (deep-history positioning metrics / book depth). Live runs add the
+        # market-scoped web_search (12th).
+        self.assertEqual(len(names), 12)
         self.assertEqual(
             sorted(names),
             [
                 "get_binance_basis",
+                "get_binance_depth_snapshot",
                 "get_binance_funding_rate",
                 "get_binance_indicators",
                 "get_binance_klines",
@@ -248,18 +251,28 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
                 "get_binance_open_interest",
                 "get_binance_premium_index",
                 "get_binance_taker_buy_sell",
+                "get_binance_vision_book_depth",
+                "get_binance_vision_metrics",
                 "web_search",
             ],
         )
 
     def test_historical_perp_omits_current_positioning_and_order_flow(self):
         names = self._tool_names("crypto_perp", "2020-01-02")
+        # Historical replays keep klines/funding/indicators (PIT-correct REST
+        # series) plus the two ARCHIVE tools — data.binance.vision files only
+        # contain their own day's rows, so they reconstruct positioning/depth
+        # as of the replay date without lookahead. The LIVE REST positioning /
+        # order-flow / snapshot tools stay unbound (30-day retention, current
+        # state only).
         self.assertEqual(
             sorted(names),
             [
                 "get_binance_funding_rate",
                 "get_binance_indicators",
                 "get_binance_klines",
+                "get_binance_vision_book_depth",
+                "get_binance_vision_metrics",
             ],
         )
         # PIT gate: historical replays never bind web_search.

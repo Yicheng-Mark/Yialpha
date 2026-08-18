@@ -237,24 +237,30 @@ class FuturesDataWindowPITTests(unittest.TestCase):
     def test_start_only_clamps_to_pinned_analysis_date(self):
         set_analysis_date("2026-08-01")
         try:
-            extra, end_iso, reaches_now = bn._futures_data_window(
+            extra, end_iso, reaches_now, end_ms, coverage_note = bn._futures_data_window(
                 "BTCUSDT", "BTCUSDT", 7, "2026-07-25", None,
             )
         finally:
             set_analysis_date(None)
         self.assertEqual(end_iso, "2026-08-01")
         self.assertFalse(reaches_now)
+        # 8 daily rows fit the 500-row cap: no truncation, no note.
+        self.assertEqual(coverage_note, "")
         # endTime must be within the pinned day (2026-08-01 end-of-day UTC).
         end_dt = datetime.fromtimestamp(extra["endTime"] / 1000, tz=UTC)
         self.assertEqual(end_dt.date().isoformat(), "2026-08-01")
+        # end_ms (the ms-based trim anchor) is the same end-of-day instant.
+        self.assertEqual(end_ms, extra["endTime"])
 
     def test_live_start_only_reaches_now(self):
-        extra, end_iso, reaches_now = bn._futures_data_window(
+        extra, end_iso, reaches_now, end_ms, coverage_note = bn._futures_data_window(
             "BTCUSDT", "BTCUSDT", 7, None, None,
         )
         self.assertEqual(extra, {})
         self.assertIsNone(end_iso)
         self.assertTrue(reaches_now)
+        self.assertIsNone(end_ms)
+        self.assertEqual(coverage_note, "")
 
 
 class WeightBudgetTests(unittest.TestCase):

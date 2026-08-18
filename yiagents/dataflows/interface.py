@@ -32,6 +32,7 @@ from .baostock_vendor import (
 )
 from .binance import (
     get_binance_basis,
+    get_binance_depth_snapshot,
     get_binance_funding_rate,
     get_binance_klines,
     get_binance_long_short_ratio,
@@ -41,6 +42,10 @@ from .binance import (
     get_binance_spot_perp_basis,
     get_binance_spot_ticker24,
     get_binance_taker_buy_sell,
+)
+from .binance_vision import (
+    get_binance_vision_book_depth,
+    get_binance_vision_metrics,
 )
 from .config import get_config
 from .eastmoney import get_margin_trading as get_eastmoney_margin_trading
@@ -127,11 +132,15 @@ TOOLS_CATEGORIES = {
     # cost-of-carry and crowding signals. long_short_ratio / taker_buy_sell /
     # basis add the perp-native positioning pillar (the leveraged long/short
     # crowd and order-flow aggression) that social-sentiment sources can't
-    # supply for a *USDT contract. All live behind one optional category so a
+    # supply for a *USDT contract. depth_snapshot adds the live order book
+    # (execution reality); vision_metrics / vision_book_depth are the
+    # data.binance.vision ARCHIVE tools — the same positioning series back
+    # YEARS at 5m grain (the REST family retains only 30 days), PIT-correct
+    # for historical replay dates. All live behind one optional category so a
     # Binance block / rate-limit degrades to a sentinel and the analyst falls
     # back to the Yahoo spot OHLCV rather than aborting the run.
     "binance_perp": {
-        "description": "Binance USDT-M perpetual (klines/funding/openInterest/long_short_ratio/taker_buy_sell/basis/premium_index)",
+        "description": "Binance USDT-M perpetual (klines/funding/openInterest/long_short_ratio/taker_buy_sell/basis/premium_index/depth_snapshot + vision archive metrics/bookDepth)",
         "tools": [
             "get_binance_klines",
             "get_binance_funding_rate",
@@ -140,6 +149,9 @@ TOOLS_CATEGORIES = {
             "get_binance_taker_buy_sell",
             "get_binance_basis",
             "get_binance_premium_index",
+            "get_binance_depth_snapshot",
+            "get_binance_vision_metrics",
+            "get_binance_vision_book_depth",
         ],
     },
     # Binance SPOT (crypto_spot). Spot only carries OHLCV + 24h ticker (no
@@ -306,9 +318,21 @@ VENDOR_METHODS: dict[str, dict[str, Callable[..., Any] | list[Any]]] = {
         "binance": get_binance_basis,
     },
     # Mark-price snapshot (premiumIndex): the liquidation anchor + current
-    # funding rate. Single vendor, same optional-category contract.
+    # funding rate. Live order-book depth (/fapi/v1/depth): execution reality.
+    # Archive tools (data.binance.vision): deep-history positioning metrics +
+    # bookDepth beyond the 30-day REST retention. Single vendor, same
+    # optional-category contract.
     "get_binance_premium_index": {
         "binance": get_binance_premium_index,
+    },
+    "get_binance_depth_snapshot": {
+        "binance": get_binance_depth_snapshot,
+    },
+    "get_binance_vision_metrics": {
+        "binance": get_binance_vision_metrics,
+    },
+    "get_binance_vision_book_depth": {
+        "binance": get_binance_vision_book_depth,
     },
     # binance_spot — single vendor each; the category is optional so a Binance
     # failure (429 / unsupported symbol / no spot listing) degrades to a
