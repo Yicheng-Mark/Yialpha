@@ -91,6 +91,31 @@ def reset_history_memo_for_test() -> None:
 _FUTURES_DATA_RETENTION_DAYS = 30
 # Documented per-request ``limit`` ceiling for /futures/data/* endpoints.
 _FUTURES_DATA_LIMIT_CAP = 500
+# The same family also accepts a ``period`` granularity parameter (5m..1d).
+# Rows-per-day per period — used to translate a day-based window/look-back
+# into a row ``limit`` so an intraday request is not silently truncated to
+# the first 500 (which would drop the most recent rows, the decision-critical
+# ones — the display twin of the pagination gap).
+_FUTURES_DATA_PERIODS: dict[str, int] = {
+    "5m": 288, "15m": 96, "30m": 48, "1h": 24,
+    "2h": 12, "4h": 6, "6h": 4, "12h": 2, "1d": 1,
+}
+
+
+def _futures_period_per_day(period: str) -> int:
+    """Validate a ``period`` granularity and return its rows-per-day count."""
+    per_day = _FUTURES_DATA_PERIODS.get(period)
+    if per_day is None:
+        raise ValueError(
+            f"period must be one of {sorted(_FUTURES_DATA_PERIODS)}, got {period!r}"
+        )
+    return per_day
+
+
+def _fmt_futures_data_ts(ms: int, period: str) -> str:
+    """Format a /futures/data/* row timestamp for its period's granularity."""
+    dt = datetime.fromtimestamp(ms / 1000, tz=UTC)
+    return dt.strftime("%Y-%m-%d" if period == "1d" else "%Y-%m-%d %H:%M")
 
 # ---- Binance SPOT (crypto_spot asset type) ---------------------------------
 # Spot public market data lives under /api/v3/*. Two hosts: the canonical
@@ -488,19 +513,27 @@ def binance_klines_frame(
 
     ``price_type="mark"`` (perp only) switches the endpoint to
     ``/fapi/v1/markPriceKlines`` — the mark price Binance liquidates against —
-    for liquidation-sensitive research; the default ``"last"`` is the ordinary
-    last-traded-price kline.
+    for liquidation-sensitive research; ``price_type="index"`` (perp only)
+    serves ``/fapi/v1/indexPriceKlines`` — the settlement/index-price series
+    (volume is 0 on index klines) — so mark-vs-index displacement can be
+    studied as two aligned series rather than one premium snapshot. The
+    default ``"last"`` is the ordinary last-traded-price kline.
     """
-    if price_type not in ("last", "mark"):
-        raise ValueError(f"price_type must be 'last' or 'mark', got {price_type!r}")
+    if price_type not in ("last", "mark", "index"):
+        raise ValueError(
+            f"price_type must be 'last', 'mark' or 'index', got {price_type!r}"
+        )
     if venue == "binance_spot":
-        if price_type == "mark":
-            raise ValueError("mark-price klines are a perp-only endpoint")
+        if price_type != "last":
+            raise ValueError("mark/index-price klines are perp-only endpoints")
         path, limit, base, weight_key = (
             "/api/v3/klines", _SPOT_KLINES_LIMIT, _spot_host(), "spot",
         )
     else:
-        path = "/fapi/v1/markPriceKlines" if price_type == "mark" else "/fapi/v1/klines"
+        path = {
+            "mark": "/fapi/v1/markPriceKlines",
+            "index": "/fapi/v1/indexPriceKlines",
+        }.get(price_type, "/fapi/v1/klines")
         path, limit, base, weight_key = (
             path, _FAPI_KLINES_LIMIT, None, None,
         )
@@ -593,7 +626,9 @@ def get_binance_klines(
     the downstream stockstats indicator path is reusable. ``interval`` defaults
     to ``"1d"``; the analyst passes it through for intraday if ever needed.
     ``price_type="mark"`` serves mark-price klines (the price Binance
-    liquidates against) for liquidation-sensitive research.
+    liquidates against) for liquidation-sensitive research;
+    ``price_type="index"`` serves index-price klines (the settlement
+    reference; volume column is 0) for mark-vs-index displacement work.
     """
     df = binance_klines_frame(
         symbol, start_date, end_date, interval=interval, venue="binance_perp",
@@ -739,14 +774,20 @@ def get_binance_funding_rate(
 def get_binance_open_interest(
     symbol: str, look_back_days: int = 7,
     start_date: str | None = None, end_date: str | None = None,
+    period: str = "1d",
 ) -> str:
-    """Open-interest snapshot + daily history for a Binance USDT-M perp.
+    """Open-interest snapshot + history for a Binance USDT-M perp.
 
-    Combines the live ``/fapi/v1/openInterest`` snapshot with the daily
+    Combines the live ``/fapi/v1/openInterest`` snapshot with the
     ``/futures/data/openInterestHist`` series into a single ``time,
     openInterest, openInterestValue`` table. Rising OI + rising price confirms
     a trend; rising OI + falling price signals crowded shorts (or longs
     unwinding). ``look_back_days`` rows are requested by default.
+
+    ``period`` selects the series granularity (``"1d"`` default; ``5m``/``15m``
+    /``1h``/``2h``/``4h``/``6h``/``12h`` for intraday OI). Sub-daily rows are
+    timestamped ``YYYY-MM-DD HH:MM`` and the live "latest" row is appended only
+    for period ``1d`` windows reaching the present.
 
     Historical windows: ``start_date``/``end_date`` (``YYYY-MM-DD``, end
     inclusive) are passed through as the endpoint's ``startTime``/``endTime``,
@@ -756,16 +797,19 @@ def get_binance_open_interest(
     window reaches the present. The endpoint retains only the LAST 30 DAYS —
     a window ending further back raises :class:`NoMarketDataError` (the
     router degrades the optional category to a sentinel) instead of returning
-    today's rows as if they were the past. Without explicit dates the call
-    remains the most-recent-``limit`` live form.
+    today's rows as if they were the past; the
+    :func:`get_binance_vision_metrics` archive tool covers deeper history.
+    Without explicit dates the call remains the most-recent-``limit`` live
+    form.
     """
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
-    limit = max(1, int(look_back_days))
+    per_day = _futures_period_per_day(period)
+    limit = max(1, min(int(look_back_days) * per_day, _FUTURES_DATA_LIMIT_CAP))
 
     # Values mix str (symbol/period) and int (limit/startTime/endTime ms).
-    params: dict[str, int | str] = {"symbol": canonical, "period": "1d"}
-    extra, end_iso, reaches_now = _futures_data_window(
-        symbol, canonical, look_back_days, start_date, end_date,
+    params: dict[str, int | str] = {"symbol": canonical, "period": period}
+    extra, end_iso, reaches_now, end_ms, coverage_note = _futures_data_window(
+        symbol, canonical, look_back_days, start_date, end_date, period=period,
     )
     params.update(extra)
     if not extra:
@@ -785,23 +829,26 @@ def get_binance_open_interest(
                 continue
             records.append(
                 {
-                    "time": datetime.fromtimestamp(
-                        int(r["timestamp"]) / 1000, tz=UTC
-                    ).strftime("%Y-%m-%d"),
+                    "_ts": int(r["timestamp"]),
+                    "time": _fmt_futures_data_ts(int(r["timestamp"]), period),
                     "openInterest": r.get("sumOpenInterest"),
                     "openInterestValue": r.get("sumOpenInterestValue"),
                 }
             )
     # Belt-and-suspenders PIT trim: a vendor (or mock) that ignores the
-    # endTime must never leak rows past the requested window end.
-    if end_iso is not None:
-        records = [r for r in records if r["time"] <= end_iso]
+    # endTime must never leak rows past the requested window end. Compares
+    # TIMESTAMP ms (not the formatted string — see _futures_data_window).
+    if end_ms is not None:
+        records = [r for r in records if r["_ts"] <= end_ms]
+    for r in records:
+        r.pop("_ts", None)
 
     # Append the live snapshot so the analyst sees the most current OI too —
-    # but only when the window reaches the present; for a past end_date the
-    # "latest" row is future data for that decision point.
+    # but only for daily windows reaching the present; for a past end_date or
+    # an intraday period the "latest" row is future/other-grain data for that
+    # decision point.
     live_unavailable = False
-    if reaches_now:
+    if reaches_now and period == "1d":
         try:
             live = _http_get(
                 "/fapi/v1/openInterest",
@@ -833,14 +880,20 @@ def get_binance_open_interest(
     df = pd.DataFrame.from_records(records)
 
     label = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
+    scope = "days + live" if period == "1d" else f"{period} rows"
     header = (
-        f"# Perp USDT-M open interest for {label} (last {limit} days + live)\n"
+        f"# Perp USDT-M open interest for {label} (last {limit} {scope})\n"
     )
+    if period != "1d":
+        header += f"# period: {period}\n"
     if end_iso is not None:
         header += (
             f"# window through {end_iso} (endpoint retains the last "
-            f"{_FUTURES_DATA_RETENTION_DAYS} days only)\n"
+            f"{_FUTURES_DATA_RETENTION_DAYS} days only; deeper history: "
+            f"get_binance_vision_metrics)\n"
         )
+    if coverage_note:
+        header += coverage_note
     if live_unavailable:
         header += "# ⚠ live openInterest snapshot unavailable (fetch failed) — history only.\n"
     header += f"# Total records: {len(df)}\n"
@@ -864,18 +917,35 @@ def _futures_data_window(
     look_back_days: int,
     start_date: str | None,
     end_date: str | None,
-) -> tuple[dict, str | None, bool]:
+    period: str = "1d",
+) -> tuple[dict, str | None, bool, int | None, str]:
     """Resolve an explicit historical window for a ``/futures/data/*`` call.
 
-    Returns ``(extra_params, end_iso, reaches_now)``:
+    Returns ``(extra_params, end_iso, reaches_now, end_ms, coverage_note)``:
 
       * ``extra_params`` — ``{"startTime", "endTime", "limit"}`` for the
         endpoint when an explicit window was requested, else ``{}`` (the
         caller keeps its plain most-recent-``limit`` behaviour);
-      * ``end_iso`` — the resolved inclusive end date (``YYYY-MM-DD``) for the
-        belt-and-suspenders client-side trim, ``None`` when unwindowed;
+      * ``end_iso`` — the resolved inclusive end date (``YYYY-MM-DD``) for
+        the header, ``None`` when unwindowed;
       * ``reaches_now`` — whether the window extends to today (gates appending
-        any "latest/live" row, which would be future data for a past end).
+        any "latest/live" row, which would be future data for a past end);
+      * ``end_ms`` — end-of-day ms of the resolved end (``None`` unwindowed)
+        for the belt-and-suspenders client-side trim. The trim MUST compare
+        timestamps, not date strings: an intraday row "2026-08-15 13:00" is
+        lexicographically > "2026-08-15" and a string compare would wrongly
+        drop every row of the end day;
+      * ``coverage_note`` — ``""`` or a header line disclosing that the window
+        exceeded the 500-row endpoint cap and was end-anchored (see below).
+
+    ``period`` scales the row ``limit`` with the granularity (a 7-day 5m
+    window needs 2016 rows, not 7). When the window needs more rows than the
+    500-row endpoint cap, the request is END-anchored — ``startTime`` moves to
+    ``end - 499*period`` — because these endpoints serve rows ascending from
+    ``startTime``: a head-anchored request would return the OLDEST rows and
+    silently drop the tail nearest ``end_date``, the decision-critical part.
+    The truncation is never silent: ``coverage_note`` discloses the dropped
+    head and points at the archive tool for the full window.
 
     PIT + retention rules:
 
@@ -892,7 +962,7 @@ def _futures_data_window(
         ``end_date`` alone defaults the start to ``end - look_back_days``.
     """
     if start_date is None and end_date is None:
-        return {}, None, True
+        return {}, None, True, None, ""
 
     if end_date:
         end_date = current_pit_end(end_date) or end_date
@@ -922,18 +992,41 @@ def _futures_data_window(
     start_ms = int(start_dt.timestamp() * 1000)
     end_ms = int((end_dt.timestamp() + 86399) * 1000)  # end-of-day inclusive
     days = max(1, (end_dt - start_dt).days + 1)
+    per_day = _futures_period_per_day(period)
+    rows = days * per_day
+    coverage_note = ""
+    if rows > _FUTURES_DATA_LIMIT_CAP:
+        # End-anchor the request: rows are served ascending from startTime, so
+        # keeping the window's own start would hand back the OLDEST 500 rows
+        # and silently drop the tail nearest end_date. Anchor one full page
+        # before the last in-window row boundary instead.
+        period_ms = 86_400_000 // per_day
+        last_row_ms = (end_ms // period_ms) * period_ms
+        tail_start_ms = last_row_ms - (_FUTURES_DATA_LIMIT_CAP - 1) * period_ms
+        if tail_start_ms > start_ms:
+            coverage_start = datetime.fromtimestamp(tail_start_ms / 1000, tz=UTC)
+            dropped_days = max(0, (coverage_start.date() - start_dt.date()).days)
+            start_ms = tail_start_ms
+            coverage_note = (
+                f"# ⚠ window truncated to the last {_FUTURES_DATA_LIMIT_CAP} rows "
+                f"(endpoint ceiling): coverage starts "
+                f"{_fmt_futures_data_ts(tail_start_ms, period)}, {dropped_days} "
+                f"day(s) dropped from the head; get_binance_vision_metrics "
+                f"serves the full window\n"
+            )
     extra = {
         "startTime": start_ms,
         "endTime": end_ms,
-        "limit": min(days, _FUTURES_DATA_LIMIT_CAP),
+        "limit": min(rows, _FUTURES_DATA_LIMIT_CAP),
     }
     reaches_now = end_dt.date() >= datetime.now(UTC).date()
-    return extra, end_dt.strftime("%Y-%m-%d"), reaches_now
+    return extra, end_dt.strftime("%Y-%m-%d"), reaches_now, end_ms, coverage_note
 
 
 def get_binance_long_short_ratio(
     symbol: str, look_back_days: int = 7,
     start_date: str | None = None, end_date: str | None = None,
+    period: str = "1d",
 ) -> str:
     """Trader long/short positioning for a Binance USDT-M perp.
 
@@ -956,21 +1049,31 @@ def get_binance_long_short_ratio(
     block still returns the surviving series; only an outright failure of all
     three raises ``NoMarketDataError`` (router then emits a sentinel).
 
+    ``period`` selects the granularity (``"1d"`` default; intraday values
+    ``5m``..``12h`` are timestamped ``YYYY-MM-DD HH:MM``). For ``1d`` the
+    look-back is capped at ``_LSR_LIMIT_CAP`` daily rows; an explicit intraday
+    period scales with its rows-per-day up to the 500-row endpoint cap.
+
     Historical windows: ``start_date``/``end_date`` (end inclusive) are passed
     through as ``startTime``/``endTime`` with ``end_date`` clamped to the run's
     analysis date (PIT; see :func:`_futures_data_window`). The endpoints retain
     only the LAST 30 DAYS — a window ending further back raises
     ``NoMarketDataError`` instead of returning today's positioning as if it
-    were the past. Without explicit dates the call remains the most-recent
-    ``limit`` live form.
+    were the past; :func:`get_binance_vision_metrics` covers deeper history.
+    Without explicit dates the call remains the most-recent ``limit`` live
+    form.
     """
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
-    # Cap so a runaway look_back_days can't request more than the decision-useful
-    # tail (these are daily snapshots; older rows add noise, not signal).
-    limit = max(1, min(int(look_back_days), _LSR_LIMIT_CAP))
+    per_day = _futures_period_per_day(period)
+    if period == "1d":
+        # Cap so a runaway look_back_days can't request more than the
+        # decision-useful tail (daily snapshots; older rows add noise).
+        limit = max(1, min(int(look_back_days), _LSR_LIMIT_CAP))
+    else:
+        limit = max(1, min(int(look_back_days) * per_day, _FUTURES_DATA_LIMIT_CAP))
 
-    extra, end_iso, _reaches_now = _futures_data_window(
-        symbol, canonical, look_back_days, start_date, end_date,
+    extra, end_iso, _reaches_now, end_ms, coverage_note = _futures_data_window(
+        symbol, canonical, look_back_days, start_date, end_date, period=period,
     )
 
     series_defs = [
@@ -982,7 +1085,7 @@ def get_binance_long_short_ratio(
     unavailable: list[str] = []
     for slabel, path in series_defs:
         try:
-            params: dict[str, int | str] = {"symbol": canonical, "period": "1d"}
+            params: dict[str, int | str] = {"symbol": canonical, "period": period}
             params.update(extra)
             if not extra:
                 params["limit"] = limit
@@ -1002,17 +1105,18 @@ def get_binance_long_short_ratio(
             if not isinstance(r, dict) or r.get("timestamp") is None:
                 continue
             records.append({
+                "_ts": int(r["timestamp"]),
                 "series": slabel,
-                "time": datetime.fromtimestamp(
-                    int(r["timestamp"]) / 1000, tz=UTC
-                ).strftime("%Y-%m-%d"),
+                "time": _fmt_futures_data_ts(int(r["timestamp"]), period),
                 "longAccount": r.get("longAccount"),
                 "longShortRatio": r.get("longShortRatio"),
                 "shortAccount": r.get("shortAccount"),
             })
-    # Belt-and-suspenders PIT trim (see _futures_data_window).
-    if end_iso is not None:
-        records = [r for r in records if r["time"] <= end_iso]
+    # Belt-and-suspenders PIT trim by timestamp ms (see _futures_data_window).
+    if end_ms is not None:
+        records = [r for r in records if r["_ts"] <= end_ms]
+    for r in records:
+        r.pop("_ts", None)
 
     if not records:
         raise NoMarketDataError(
@@ -1022,12 +1126,15 @@ def get_binance_long_short_ratio(
 
     df = pd.DataFrame.from_records(records)
     vlabel = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
-    header = f"# Perp USDT-M long/short ratio for {vlabel} (last {limit} days)\n"
+    header = f"# Perp USDT-M long/short ratio for {vlabel} (last {limit} {period} rows)\n"
     if end_iso is not None:
         header += (
             f"# window through {end_iso} (endpoints retain the last "
-            f"{_FUTURES_DATA_RETENTION_DAYS} days only)\n"
+            f"{_FUTURES_DATA_RETENTION_DAYS} days only; deeper history: "
+            f"get_binance_vision_metrics)\n"
         )
+    if coverage_note:
+        header += coverage_note
     if unavailable:
         header += (f"# ⚠ unavailable series: {', '.join(unavailable)} "
                    "(fetch failed/unsupported) — absence ≠ no positioning.\n")
@@ -1042,6 +1149,7 @@ def get_binance_long_short_ratio(
 def get_binance_taker_buy_sell(
     symbol: str, look_back_days: int = 7,
     start_date: str | None = None, end_date: str | None = None,
+    period: str = "1d",
 ) -> str:
     """Taker buy/sell volume for a Binance USDT-M perp (order-flow aggression).
 
@@ -1052,21 +1160,30 @@ def get_binance_taker_buy_sell(
     conviction move; a dump on buySellRatio > 1 is often a capitulation wash.
     Returns ``time, buySellRatio, buyVol, sellVol``.
 
+    ``period`` selects the granularity (``"1d"`` default; intraday values
+    ``5m``..``12h`` are timestamped ``YYYY-MM-DD HH:MM`` and scale the row
+    limit with rows-per-day, capped at the 500-row endpoint ceiling).
+
     Historical windows: ``start_date``/``end_date`` (end inclusive) are passed
     through as ``startTime``/``endTime`` with ``end_date`` clamped to the run's
     analysis date (PIT; see :func:`_futures_data_window`). The endpoint retains
     only the LAST 30 DAYS — a window ending further back raises
     ``NoMarketDataError`` instead of returning today's order flow as if it were
-    the past. Without explicit dates the call remains the most-recent ``limit``
-    live form.
+    the past; :func:`get_binance_vision_metrics` covers deeper history.
+    Without explicit dates the call remains the most-recent ``limit`` live
+    form.
     """
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
-    limit = max(1, min(int(look_back_days), _LSR_LIMIT_CAP))
+    per_day = _futures_period_per_day(period)
+    if period == "1d":
+        limit = max(1, min(int(look_back_days), _LSR_LIMIT_CAP))
+    else:
+        limit = max(1, min(int(look_back_days) * per_day, _FUTURES_DATA_LIMIT_CAP))
 
-    extra, end_iso, _reaches_now = _futures_data_window(
-        symbol, canonical, look_back_days, start_date, end_date,
+    extra, end_iso, _reaches_now, end_ms, coverage_note = _futures_data_window(
+        symbol, canonical, look_back_days, start_date, end_date, period=period,
     )
-    params: dict[str, int | str] = {"symbol": canonical, "period": "1d"}
+    params: dict[str, int | str] = {"symbol": canonical, "period": period}
     params.update(extra)
     if not extra:
         params["limit"] = limit
@@ -1078,16 +1195,17 @@ def get_binance_taker_buy_sell(
             if not isinstance(r, dict) or r.get("timestamp") is None:
                 continue
             records.append({
-                "time": datetime.fromtimestamp(
-                    int(r["timestamp"]) / 1000, tz=UTC
-                ).strftime("%Y-%m-%d"),
+                "_ts": int(r["timestamp"]),
+                "time": _fmt_futures_data_ts(int(r["timestamp"]), period),
                 "buySellRatio": r.get("buySellRatio"),
                 "buyVol": r.get("buyVol"),
                 "sellVol": r.get("sellVol"),
             })
-    # Belt-and-suspenders PIT trim (see _futures_data_window).
-    if end_iso is not None:
-        records = [r for r in records if r["time"] <= end_iso]
+    # Belt-and-suspenders PIT trim by timestamp ms (see _futures_data_window).
+    if end_ms is not None:
+        records = [r for r in records if r["_ts"] <= end_ms]
+    for r in records:
+        r.pop("_ts", None)
 
     if not records:
         raise NoMarketDataError(
@@ -1097,12 +1215,15 @@ def get_binance_taker_buy_sell(
 
     df = pd.DataFrame.from_records(records)
     vlabel = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
-    header = f"# Perp USDT-M taker buy/sell for {vlabel} (last {limit} days)\n"
+    header = f"# Perp USDT-M taker buy/sell for {vlabel} (last {limit} {period} rows)\n"
     if end_iso is not None:
         header += (
             f"# window through {end_iso} (endpoint retains the last "
-            f"{_FUTURES_DATA_RETENTION_DAYS} days only)\n"
+            f"{_FUTURES_DATA_RETENTION_DAYS} days only; deeper history: "
+            f"get_binance_vision_metrics)\n"
         )
+    if coverage_note:
+        header += coverage_note
     header += f"# Total records: {len(df)}\n"
     header += "# buySellRatio > 1 = takers buying > selling (long pressure); < 1 = selling pressure.\n"
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -1112,6 +1233,7 @@ def get_binance_taker_buy_sell(
 def get_binance_basis(
     symbol: str, look_back_days: int = 7,
     start_date: str | None = None, end_date: str | None = None,
+    period: str = "1d",
 ) -> str:
     """Perp-vs-index basis for a Binance USDT-M perp.
 
@@ -1127,6 +1249,10 @@ def get_binance_basis(
     to a sentinel so the analyst notes "basis unavailable" rather than crashing.
     Major crypto perps (BTCUSDT, ETHUSDT, …) return real data.
 
+    ``period`` selects the granularity (``"1d"`` default; intraday values are
+    timestamped ``YYYY-MM-DD HH:MM`` and scale the row limit, capped at the
+    500-row endpoint ceiling).
+
     Historical windows: ``start_date``/``end_date`` (end inclusive) are passed
     through as ``startTime``/``endTime`` with ``end_date`` clamped to the run's
     analysis date (PIT; see :func:`_futures_data_window`). The endpoint retains
@@ -1136,13 +1262,17 @@ def get_binance_basis(
     live form.
     """
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
-    limit = max(1, min(int(look_back_days), _LSR_LIMIT_CAP))
+    per_day = _futures_period_per_day(period)
+    if period == "1d":
+        limit = max(1, min(int(look_back_days), _LSR_LIMIT_CAP))
+    else:
+        limit = max(1, min(int(look_back_days) * per_day, _FUTURES_DATA_LIMIT_CAP))
 
-    extra, end_iso, _reaches_now = _futures_data_window(
-        symbol, canonical, look_back_days, start_date, end_date,
+    extra, end_iso, _reaches_now, end_ms, coverage_note = _futures_data_window(
+        symbol, canonical, look_back_days, start_date, end_date, period=period,
     )
     params: dict[str, int | str] = {
-        "pair": canonical, "contractType": "PERPETUAL", "period": "1d",
+        "pair": canonical, "contractType": "PERPETUAL", "period": period,
     }
     params.update(extra)
     if not extra:
@@ -1155,17 +1285,18 @@ def get_binance_basis(
             if not isinstance(r, dict) or r.get("timestamp") is None:
                 continue
             records.append({
-                "time": datetime.fromtimestamp(
-                    int(r["timestamp"]) / 1000, tz=UTC
-                ).strftime("%Y-%m-%d"),
+                "_ts": int(r["timestamp"]),
+                "time": _fmt_futures_data_ts(int(r["timestamp"]), period),
                 "basis": r.get("basis"),
                 "futuresPrice": r.get("futuresPrice"),
                 "indexPrice": r.get("indexPrice"),
                 "basisRate": r.get("basisRate"),
             })
-    # Belt-and-suspenders PIT trim (see _futures_data_window).
-    if end_iso is not None:
-        records = [r for r in records if r["time"] <= end_iso]
+    # Belt-and-suspenders PIT trim by timestamp ms (see _futures_data_window).
+    if end_ms is not None:
+        records = [r for r in records if r["_ts"] <= end_ms]
+    for r in records:
+        r.pop("_ts", None)
 
     if not records:
         raise NoMarketDataError(
@@ -1175,12 +1306,14 @@ def get_binance_basis(
 
     df = pd.DataFrame.from_records(records)
     vlabel = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
-    header = f"# Perp USDT-M basis for {vlabel} (last {limit} days)\n"
+    header = f"# Perp USDT-M basis for {vlabel} (last {limit} {period} rows)\n"
     if end_iso is not None:
         header += (
             f"# window through {end_iso} (endpoint retains the last "
             f"{_FUTURES_DATA_RETENTION_DAYS} days only)\n"
         )
+    if coverage_note:
+        header += coverage_note
     header += f"# Total records: {len(df)}\n"
     header += ("# basis = futuresPrice - indexPrice; positive = perp rich (long demand), "
                "negative = discount (short pressure).\n")
@@ -1260,6 +1393,101 @@ def get_binance_premium_index(symbol: str) -> str:
         "# liquidations trigger on markPrice (not last price); lastFundingRate "
         "is the rate in effect for the NEXT settlement; markVsIndexPct = mark "
         "premium vs index (%).\n"
+    )
+    header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    return header + df.to_csv(index=False)
+
+
+# Documented /fapi/v1/depth limit choices (the endpoint rejects anything else).
+_FAPI_DEPTH_LIMIT_CHOICES = (5, 10, 20, 50, 100, 500, 1000)
+
+
+def get_binance_depth_snapshot(symbol: str, limit: int = 100) -> str:
+    """Live order-book depth snapshot for a Binance USDT-M perp.
+
+    ``/fapi/v1/depth`` — the current resting book. Returns a level-by-level
+    ``level, bid_price, bid_qty, ask_price, ask_qty`` ladder plus a header with
+    ``mid``, ``spread_bps`` and the top-``limit`` quantity imbalance
+    ((bid_qty - ask_qty) / total — positive = heavier bid side). This is the
+    execution-reality tool: stop/target fills happen INTO this book, and a
+    thin side into the price's direction is slippage (or, at leverage, the
+    liquidation-cascade accelerant). For how depth PERSISTED through past
+    moves, see :func:`yiagents.dataflows.binance_vision.get_binance_vision_book_depth`.
+
+    Live-only snapshot: bound to the analyst only for non-historical runs
+    (same gate as the premium-index snapshot); ``limit`` must be one of the
+    documented choices (5/10/20/50/100/500/1000). Raising
+    :class:`NoMarketDataError` / :class:`VendorRateLimitError` degrades to the
+    optional-category sentinel.
+    """
+    canonical = normalize_symbol_for_venue(symbol, "binance_perp")
+    if int(limit) not in _FAPI_DEPTH_LIMIT_CHOICES:
+        raise ValueError(
+            f"limit must be one of {_FAPI_DEPTH_LIMIT_CHOICES}, got {limit}"
+        )
+
+    data = _http_get(
+        "/fapi/v1/depth",
+        {"symbol": canonical, "limit": int(limit)},
+        symbol,
+        canonical,
+    )
+
+    bids = data.get("bids") if isinstance(data, dict) else None
+    asks = data.get("asks") if isinstance(data, dict) else None
+    if not isinstance(bids, list) or not isinstance(asks, list) or not bids or not asks:
+        raise NoMarketDataError(symbol, canonical, "depth returned no levels")
+
+    def _levels(rows: list, price_i: int = 0, qty_i: int = 1) -> list[tuple[float, float]]:
+        out: list[tuple[float, float]] = []
+        for lv in rows:
+            if not isinstance(lv, list) or len(lv) < 2:
+                continue
+            try:
+                out.append((float(lv[price_i]), float(lv[qty_i])))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    bid_levels = _levels(bids)
+    ask_levels = _levels(asks)
+    if not bid_levels or not ask_levels:
+        raise NoMarketDataError(symbol, canonical, "depth levels unparseable")
+
+    best_bid, best_ask = bid_levels[0][0], ask_levels[0][0]
+    mid = (best_bid + best_ask) / 2.0
+    spread_bps = (best_ask - best_bid) / mid * 1e4 if mid else None
+    bid_qty = sum(q for _p, q in bid_levels)
+    ask_qty = sum(q for _p, q in ask_levels)
+    imbalance = (
+        (bid_qty - ask_qty) / (bid_qty + ask_qty)
+        if (bid_qty + ask_qty) > 0 else None
+    )
+
+    records = []
+    for i in range(max(len(bid_levels), len(ask_levels))):
+        records.append(
+            {
+                "level": i + 1,
+                "bid_price": bid_levels[i][0] if i < len(bid_levels) else None,
+                "bid_qty": bid_levels[i][1] if i < len(bid_levels) else None,
+                "ask_price": ask_levels[i][0] if i < len(ask_levels) else None,
+                "ask_qty": ask_levels[i][1] if i < len(ask_levels) else None,
+            }
+        )
+
+    df = pd.DataFrame.from_records(records)
+    vlabel = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
+    header = f"# Perp USDT-M order-book depth snapshot for {vlabel} (top {int(limit)})\n"
+    header += (
+        f"# mid={mid} spread={spread_bps:.1f}bps; top-{int(limit)} qty imbalance="
+        f"{imbalance:.3f}" if imbalance is not None and spread_bps is not None
+        else "# mid/spread/imbalance unavailable"
+    )
+    header += (
+        " (positive imbalance = heavier bid side).\n"
+        "# prices are per-level; fills walk the ladder — a thin side into the "
+        "price's direction is slippage / liquidation-cascade risk.\n"
     )
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     return header + df.to_csv(index=False)

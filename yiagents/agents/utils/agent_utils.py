@@ -28,12 +28,15 @@ from yiagents.agents.utils.binance_indicator_tools import (
 # Import tools from separate utility files
 from yiagents.agents.utils.binance_perp_tools import (
     get_binance_basis,
+    get_binance_depth_snapshot,
     get_binance_funding_rate,
     get_binance_klines,
     get_binance_long_short_ratio,
     get_binance_open_interest,
     get_binance_premium_index,
     get_binance_taker_buy_sell,
+    get_binance_vision_book_depth,
+    get_binance_vision_metrics,
 )
 from yiagents.agents.utils.binance_spot_tools import (
     get_binance_spot_klines,
@@ -98,6 +101,9 @@ __all__ = [
     "get_binance_taker_buy_sell",
     "get_binance_basis",
     "get_binance_premium_index",
+    "get_binance_depth_snapshot",
+    "get_binance_vision_metrics",
+    "get_binance_vision_book_depth",
     "get_binance_spot_klines",
     "get_binance_spot_ticker24",
     "get_binance_spot_perp_basis",

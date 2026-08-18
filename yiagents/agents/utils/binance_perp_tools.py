@@ -21,7 +21,7 @@ def get_binance_klines(
     start_date: Annotated[str, "Start date in yyyy-mm-dd format"],
     end_date: Annotated[str, "End date in yyyy-mm-dd format"],
     interval: Annotated[str, "Kline interval, e.g. '1d' (default) or '1h'"] = "1d",
-    price_type: Annotated[str, "'last' (default, traded price) or 'mark' (price Binance liquidates against)"] = "last",
+    price_type: Annotated[str, "'last' (default, traded price), 'mark' (price Binance liquidates against) or 'index' (settlement reference; volume is 0)"] = "last",
 ) -> str:
     """Retrieve daily OHLCV candles for a Binance USDT-M perpetual contract.
 
@@ -29,13 +29,15 @@ def get_binance_klines(
     USDT-M perp (not the Yahoo spot pair). Returns a CSV with Open, High, Low,
     Close, Adj Close, Volume columns (Adj Close == Close for perps). Use
     ``price_type='mark'`` when assessing liquidation risk — Binance triggers
-    liquidations on the mark price, not the last traded price.
+    liquidations on the mark price, not the last traded price — and
+    ``price_type='index'`` for the index-price series (mark-vs-index
+    displacement as two aligned series; volume column reads 0).
     Args:
         symbol: Binance USDT-M perp symbol, e.g. BTCUSDT, ETHUSDT, 1000PEPEUSDT.
         start_date: Start date in yyyy-mm-dd format.
         end_date: End date in yyyy-mm-dd format.
         interval: Kline interval (default '1d').
-        price_type: 'last' (default) or 'mark' (mark-price klines).
+        price_type: 'last' (default), 'mark' (mark-price klines) or 'index'.
     Returns:
         str: Header + CSV of OHLCV candles for the requested range.
     """
@@ -70,26 +72,34 @@ def get_binance_funding_rate(
 def get_binance_open_interest(
     symbol: Annotated[str, "Binance USDT-M perpetual symbol, e.g. BTCUSDT"],
     look_back_days: Annotated[int, "Number of past days of OI history (default 7)"] = 7,
+    period: Annotated[str, "Series granularity: '1d' (default), '5m', '15m', '30m', '1h', '2h', '4h', '6h' or '12h'"] = "1d",
 ) -> str:
     """Retrieve open-interest history + live snapshot for a Binance USDT-M perp.
 
     Rising open interest confirms new money entering a trend; combined with
     price direction it distinguishes trending conviction from crowded
     liquidation setups. Returns time, openInterest, openInterestValue columns
-    (last row is the live snapshot).
+    (last row is the live snapshot, daily windows only). ``period`` selects
+    the granularity — e.g. '1h' for intraday OI (rows timestamped to the
+    hour). The endpoint retains only the last 30 days; for deeper history use
+    get_binance_vision_metrics.
     Args:
         symbol: Binance USDT-M perp symbol, e.g. BTCUSDT.
-        look_back_days: Days of daily OI history to include (default 7).
+        look_back_days: Days of OI history to include (default 7).
+        period: Series granularity (default '1d').
     Returns:
         str: Header + CSV of open-interest rows (history then live snapshot).
     """
-    return route_to_vendor("get_binance_open_interest", symbol, look_back_days)
+    return route_to_vendor(
+        "get_binance_open_interest", symbol, look_back_days, period=period,
+    )
 
 
 @tool
 def get_binance_long_short_ratio(
     symbol: Annotated[str, "Binance USDT-M perpetual symbol, e.g. BTCUSDT"],
     look_back_days: Annotated[int, "Number of past days of history (default 7)"] = 7,
+    period: Annotated[str, "Series granularity: '1d' (default), '5m', '15m', '30m', '1h', '2h', '4h', '6h' or '12h'"] = "1d",
 ) -> str:
     """Retrieve trader long/short positioning for a Binance USDT-M perpetual.
 
@@ -98,19 +108,26 @@ def get_binance_long_short_ratio(
     top-trader account ratio, top-trader position ratio, and global account
     ratio (column ``series``) — with ``longAccount`` (long share 0-1),
     ``longShortRatio`` (>1 = longs dominate), and ``shortAccount``.
+    ``period`` selects the granularity ('1d' default; intraday for
+    event-window positioning). The endpoints retain only the last 30 days;
+    for deeper history use get_binance_vision_metrics.
     Args:
         symbol: Binance USDT-M perp symbol, e.g. BTCUSDT, AAPLUSDT.
-        look_back_days: Days of daily history (default 7, capped at 30).
+        look_back_days: Days of history (default 7; capped at 30 for '1d').
+        period: Series granularity (default '1d').
     Returns:
         str: Header + CSV of long/short ratio rows across the 3 series.
     """
-    return route_to_vendor("get_binance_long_short_ratio", symbol, look_back_days)
+    return route_to_vendor(
+        "get_binance_long_short_ratio", symbol, look_back_days, period=period,
+    )
 
 
 @tool
 def get_binance_taker_buy_sell(
     symbol: Annotated[str, "Binance USDT-M perpetual symbol, e.g. BTCUSDT"],
     look_back_days: Annotated[int, "Number of past days of history (default 7)"] = 7,
+    period: Annotated[str, "Series granularity: '1d' (default), '5m', '15m', '30m', '1h', '2h', '4h', '6h' or '12h'"] = "1d",
 ) -> str:
     """Retrieve taker buy/sell volume for a Binance USDT-M perpetual.
 
@@ -118,13 +135,19 @@ def get_binance_taker_buy_sell(
     than selling (urgent long pressure); < 1 = selling pressure. A rally on a
     sub-1 ratio is low-conviction; a dump on a above-1 ratio is often
     capitulation. Returns ``time, buySellRatio, buyVol, sellVol``.
+    ``period`` selects the granularity ('1d' default; '5m'/'15m' for
+    event-window order flow). The endpoint retains only the last 30 days; for
+    deeper history use get_binance_vision_metrics.
     Args:
         symbol: Binance USDT-M perp symbol, e.g. BTCUSDT.
-        look_back_days: Days of daily history (default 7, capped at 30).
+        look_back_days: Days of history (default 7; capped at 30 for '1d').
+        period: Series granularity (default '1d').
     Returns:
         str: Header + CSV of taker buy/sell rows.
     """
-    return route_to_vendor("get_binance_taker_buy_sell", symbol, look_back_days)
+    return route_to_vendor(
+        "get_binance_taker_buy_sell", symbol, look_back_days, period=period,
+    )
 
 
 @tool
@@ -150,6 +173,7 @@ def get_binance_premium_index(
 def get_binance_basis(
     symbol: Annotated[str, "Binance USDT-M perpetual symbol, e.g. BTCUSDT"],
     look_back_days: Annotated[int, "Number of past days of history (default 7)"] = 7,
+    period: Annotated[str, "Series granularity: '1d' (default), '5m', '15m', '30m', '1h', '2h', '4h', '6h' or '12h'"] = "1d",
 ) -> str:
     """Retrieve the perp-vs-index basis for a Binance USDT-M perpetual.
 
@@ -157,11 +181,99 @@ def get_binance_basis(
     = perp trades rich (long demand); negative = discount (short pressure).
     Returns ``time, basis, futuresPrice, indexPrice, basisRate``. Unsupported
     for newer TRADIFI stock-perps (e.g. AAPLUSDT/MUUSDT) — degrades to a
-    sentinel rather than failing the run.
+    sentinel rather than failing the run. ``period`` selects the granularity
+    ('1d' default; intraday for funding-window basis dynamics).
     Args:
         symbol: Binance USDT-M perp symbol, e.g. BTCUSDT.
-        look_back_days: Days of daily history (default 7, capped at 30).
+        look_back_days: Days of history (default 7; capped at 30 for '1d').
+        period: Series granularity (default '1d').
     Returns:
         str: Header + CSV of basis rows.
     """
-    return route_to_vendor("get_binance_basis", symbol, look_back_days)
+    return route_to_vendor("get_binance_basis", symbol, look_back_days, period=period)
+
+
+@tool
+def get_binance_depth_snapshot(
+    symbol: Annotated[str, "Binance USDT-M perpetual symbol, e.g. BTCUSDT"],
+    limit: Annotated[int, "Number of book levels per side: 5/10/20/50/100 (default)/500/1000"] = 100,
+) -> str:
+    """Retrieve the live order-book depth snapshot for a Binance USDT-M perp.
+
+    ``/fapi/v1/depth`` in one call: a level-by-level bid/ask ladder plus mid,
+    spread (bps) and the top-N quantity imbalance ((bids-asks)/total; positive
+    = heavier bid side). This is execution reality — stops and targets fill
+    INTO this book, and a thin side into the price's direction is slippage
+    (or, at leverage, the liquidation-cascade accelerant). Live-only; for how
+    depth persisted through past moves use get_binance_vision_book_depth.
+    Args:
+        symbol: Binance USDT-M perp symbol, e.g. BTCUSDT.
+        limit: Book levels per side (default 100).
+    Returns:
+        str: Header + CSV ladder (level, bid_price, bid_qty, ask_price, ask_qty).
+    """
+    return route_to_vendor("get_binance_depth_snapshot", symbol, limit)
+
+
+@tool
+def get_binance_vision_metrics(
+    symbol: Annotated[str, "Binance USDT-M perpetual symbol, e.g. BTCUSDT"],
+    start_date: Annotated[str, "Start date in yyyy-mm-dd format"],
+    end_date: Annotated[str, "End date in yyyy-mm-dd format"],
+    interval: Annotated[str, "Output granularity: '1d' (default), '4h', '1h' or '5m' (raw)"] = "1d",
+) -> str:
+    """Retrieve DEEP-HISTORY positioning metrics for a Binance USDT-M perp.
+
+    data.binance.vision public archives: 5-minute open interest, the
+    top-trader long/short ratio and the taker buy/sell ratio going back YEARS
+    (BTCUSDT since 2020-09) — the same series the REST tools only retain for
+    30 days. This is the tool for regime context across funding cycles and
+    the ONLY point-in-time-correct positioning source for a historical
+    analysis date (each archive file contains only its own day's rows; every
+    zip is sha256-verified). Note: the archive schema does NOT carry the
+    global long/short ratio value — the REST
+    get_binance_long_short_ratio tool covers that series (last 30 days).
+    Returns ``time, open_interest, open_interest_value,
+    top_trader_long_short_ratio, taker_buy_sell_ratio`` (day-close OI /
+    day-mean ratios at '1d').
+    Args:
+        symbol: Binance USDT-M perp symbol, e.g. BTCUSDT.
+        start_date: Start date in yyyy-mm-dd format.
+        end_date: End date in yyyy-mm-dd format (end inclusive; archives lag ~1 day).
+        interval: Output granularity (default '1d').
+    Returns:
+        str: Header + CSV of positioning metric rows for the requested range.
+    """
+    return route_to_vendor(
+        "get_binance_vision_metrics", symbol, start_date, end_date, interval,
+    )
+
+
+@tool
+def get_binance_vision_book_depth(
+    symbol: Annotated[str, "Binance USDT-M perpetual symbol, e.g. BTCUSDT"],
+    start_date: Annotated[str, "Start date in yyyy-mm-dd format"],
+    end_date: Annotated[str, "End date in yyyy-mm-dd format"],
+    interval: Annotated[str, "Output granularity: '1d' (default), '1h' or '5m'"] = "1d",
+) -> str:
+    """Retrieve historical order-book DEPTH for a Binance USDT-M perp (archived).
+
+    data.binance.vision ``bookDepth`` archives: resting depth within SIGNED
+    ±percentage price bands of mid (negative = bid side, positive = ask
+    side; bands at ±0.2/1/2/3/4/5%), ~30-second source grain, back years.
+    Depth persistence is the liquidation-cascade context — a thin book into
+    a falling price means slippage amplifies forced selling; a thick book
+    absorbing a dump signals real demand. PIT-correct for historical dates;
+    every zip is sha256-verified. Returns ``time, percentage, depth,
+    notional`` (~12 band rows per day at '1d').
+    Args:
+        symbol: Binance USDT-M perp symbol, e.g. BTCUSDT.
+        start_date: Start date in yyyy-mm-dd format.
+        end_date: End date in yyyy-mm-dd format (end inclusive; archives lag ~1 day).
+        interval: Output granularity (default '1d').
+    Returns:
+        str: Header + CSV of per-band depth rows for the requested range.
+    """
+    return route_to_vendor(
+        "get_binance_vision_book_depth", symbol, start_date, end_date, interval,
+    )
