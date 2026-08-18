@@ -89,6 +89,8 @@ def test_missing_key_sentinel_and_evidence(monkeypatch):
     assert len(events) == 1
     assert events[0]["method"] == "web_search"
     assert events[0]["kind"] == quality.KIND_OPTIONAL_UNAVAILABLE
+    # The missing-key check precedes the budget: nothing was charged.
+    assert sum(tavily.run_usage().values()) == 0
 
 
 def test_budget_exhausted_sentinel(monkeypatch):

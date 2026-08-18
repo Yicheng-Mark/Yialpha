@@ -225,16 +225,17 @@ def get_binance_vision_metrics(
     """Retrieve DEEP-HISTORY positioning metrics for a Binance USDT-M perp.
 
     data.binance.vision public archives: 5-minute open interest, the
-    top-trader long/short ratio and the taker buy/sell ratio going back YEARS
-    (BTCUSDT since 2020-09) — the same series the REST tools only retain for
-    30 days. This is the tool for regime context across funding cycles and
-    the ONLY point-in-time-correct positioning source for a historical
-    analysis date (each archive file contains only its own day's rows; every
-    zip is sha256-verified). Note: the archive schema does NOT carry the
-    global long/short ratio value — the REST
-    get_binance_long_short_ratio tool covers that series (last 30 days).
+    top-trader ACCOUNT and POSITION long/short ratios, the GLOBAL account
+    long/short ratio and the taker buy/sell ratio going back YEARS (BTCUSDT
+    since 2020-09) — the same series the REST tools only retain for 30 days
+    (the archive's count_/sum_ column prefixes are legacy naming for the
+    VALUE, REST-verified). This is the tool for regime context across
+    funding cycles and the ONLY point-in-time-correct positioning source
+    for a historical analysis date (each archive file contains only its own
+    day's rows; every zip is sha256-verified).
     Returns ``time, open_interest, open_interest_value,
-    top_trader_long_short_ratio, taker_buy_sell_ratio`` (day-close OI /
+    top_trader_account_long_short_ratio, top_trader_long_short_ratio,
+    global_long_short_ratio, taker_buy_sell_ratio`` (day-close OI /
     day-mean ratios at '1d').
     Args:
         symbol: Binance USDT-M perp symbol, e.g. BTCUSDT.

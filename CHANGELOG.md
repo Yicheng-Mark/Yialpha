@@ -12,6 +12,16 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Binance Vision deep-history archives (`crypto_perp`).** Two new tools,
+  `get_binance_vision_metrics` (5m-grain open interest, top-trader long/short
+  and taker buy/sell ratios) and `get_binance_vision_book_depth` (resting
+  depth per signed price band), serve the official data.binance.vision daily
+  zips — sha256-verified, disk-cached forever, PIT-clamped — back YEARS past
+  the 30-day retention of the REST positioning endpoints. Bound for both
+  live and historical perp runs (per-day files are inherently PIT-correct),
+  wired at all three layers (bind / ToolNode / guard tests). Same batch:
+  REST perp tools gained `period` passthrough (5m..12h), index-price klines
+  (`price_type="index"`) and a live `/fapi/v1/depth` snapshot tool.
 - **Data-vacuum gate (`data_vacuum_policy`, default `reject`).** A run whose
   core data calls ALL failed — the "data vacuum HOLD" that looked like a
   normal report — now raises a typed `DataVacuumError` at the trader node
@@ -96,6 +106,47 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Vision metrics: the global (and top-trader account) long/short ratio is
+  now served from the archives.** The Binance Vision metrics CSV's
+  `count_`/`sum_` prefixes are legacy naming residue — every ratio column
+  carries that 5m snapshot's VALUE (cross-checked against the live REST
+  series on identical timestamps): `count_long_short_ratio` IS the global
+  account ratio and `count_toptrader_long_short_ratio` the top-trader
+  ACCOUNT ratio. The shaper mapped only a nonexistent `sum_long_short_ratio`
+  spelling, silently dropping both series while three docstrings claimed the
+  archives lack the global one. Output now carries
+  `top_trader_account_long_short_ratio` and `global_long_short_ratio`, the
+  docs are corrected, and the output header relabels
+  `top_trader_long_short_ratio` as the POSITION ratio it actually is.
+- **Tavily missing-key no longer burns per-run budget.** The key-pool check
+  now precedes the budget charge, so a key-less run reports "configure a
+  key" on every call instead of drifting into a misleading
+  "budget exhausted — raise the caps" after the scope's charges are spent.
+- **Batch analyst parity with the interactive CLI.** `yiagents batch` and
+  `scripts/run_batch.py` now drop the Fundamentals Analyst for pure-crypto
+  batches via the shared `batch_selected_analysts` helper (tokenized-stock
+  perps keep it; mixed perp batches keep it for all) — previously batch
+  always ran all four analysts, wasting a fundamentals LLM tool loop on
+  pure cryptos with an honest-but-useless no-data section.
+- **Windowed intraday `/futures/data/*` requests are now end-anchored and
+  disclose truncation.** With an explicit date window needing more rows than
+  the 500-row endpoint cap, the request kept the window's own `startTime` —
+  and since these endpoints serve rows ascending from `startTime`, the
+  OLDEST rows came back while the decision-critical tail nearest `end_date`
+  was silently dropped (the header still claimed the full window). The
+  request now anchors one full page before the last in-window row (the tail
+  is always kept) and every affected tool's header discloses the dropped
+  head with a pointer to the archive tool. Archive windows with missing
+  interior days (pre-listing / unpublished) are likewise disclosed in the
+  header instead of only logging — the resampling shaper would otherwise
+  render the hole as a continuous series.
+- **`rank_signals` / `trade_ticket` no longer crash printing to stderr on
+  Windows legacy consoles.** Both scripts already forced `sys.stdout` to
+  UTF-8, but ✗ markers and Chinese error text emitted on the error stream
+  still hit the GBK (cp936) / cp1252 default and raised
+  `UnicodeEncodeError` — the same family as the prune-CLI U+2212 crash.
+  `sys.stderr` is now reconfigured alongside stdout (still inside the
+  `contextlib.suppress` guard).
 - **P0: Binance OHLC no longer rounded to 2 decimals.**
   `binance_klines_frame` mirrored yfinance's display rounding
   (`df.round(2)`), which zeroes sub-cent contracts outright (PEPE ≈ 1e-5 →

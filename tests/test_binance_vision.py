@@ -34,9 +34,10 @@ from yiagents.dataflows.errors import NoMarketDataError
 from yiagents.dataflows.utils import set_analysis_date
 
 # Extended fixture schema: the LIVE metrics schema (verified 2026-08-17) has
-# 8 columns and NO sum_long_short_ratio — the global-ratio column here
-# intentionally exercises the optional older/future column mapping;
-# test_verified_real_schema_without_global_ratio pins the real 8-column one.
+# 8 columns and NO sum_long_short_ratio; this header additionally carries
+# the hypothetical sum_-spelled global column to pin the both-present
+# precedence (sum_ wins, exactly one global output column);
+# test_verified_real_schema_maps_count_columns pins the real 8-column one.
 _METRICS_HEADER = (
     "create_time,symbol,sum_open_interest,sum_open_interest_value,"
     "count_toptrader_long_short_ratio,sum_toptrader_long_short_ratio,"
@@ -66,7 +67,8 @@ def _metrics_row(day: str, hhmm: str, oi: float, top: float, glob: float, taker:
     return {
         "create_time": f"{day} {hhmm}:00", "symbol": "BTCUSDT",
         "sum_open_interest": oi, "sum_open_interest_value": oi * 100.0,
-        "count_toptrader_long_short_ratio": 1, "sum_toptrader_long_short_ratio": top,
+        "count_toptrader_long_short_ratio": 0.9,
+        "sum_toptrader_long_short_ratio": top,
         "count_long_short_ratio": 1, "sum_long_short_ratio": glob,
         "count_taker_long_short_vol_ratio": 1,
         "sum_taker_long_short_vol_ratio": taker,
@@ -240,6 +242,13 @@ def test_metrics_daily_resample_close_oi_mean_ratios(archive):
     assert list(df["top_trader_long_short_ratio"]) == pytest.approx([1.3, 1.3])
     assert list(df["global_long_short_ratio"]) == pytest.approx([2.2, 2.2])
     assert list(df["taker_buy_sell_ratio"]) == pytest.approx([1.1, 1.1])
+    # count_toptrader… maps to the top-trader ACCOUNT ratio (fixture: 0.9).
+    assert list(df["top_trader_account_long_short_ratio"]) == pytest.approx(
+        [0.9, 0.9]
+    )
+    # Both-present precedence: the hypothetical sum_-spelled global column
+    # wins and the output carries exactly ONE global column.
+    assert list(df.columns).count("global_long_short_ratio") == 1
     assert "data.binance.vision" in out
 
 
@@ -256,10 +265,13 @@ def test_metrics_raw_5m_rows_preserved(archive):
 
 
 @pytest.mark.unit
-def test_verified_real_schema_without_global_ratio(archive):
+def test_verified_real_schema_maps_count_columns(archive):
     """The LIVE schema (verified 2026-08-17) has 8 columns and NO
-    sum_long_short_ratio — the global ratio value is not in the archive. The
-    shaper must serve the columns that exist without failing."""
+    sum_long_short_ratio. The count_/sum_ prefixes are legacy naming —
+    count_long_short_ratio IS the global account-ratio VALUE and
+    count_toptrader… the top-trader ACCOUNT ratio (REST-verified on
+    identical timestamps 2026-08-18), so BOTH must be served from the real
+    schema."""
     day = "2024-05-01"
     csv_text = (
         "create_time,symbol,sum_open_interest,sum_open_interest_value,"
@@ -273,10 +285,15 @@ def test_verified_real_schema_without_global_ratio(archive):
     df = pd.read_csv(io.StringIO(out.split("\n\n", 1)[1]))
     assert list(df.columns) == [
         "open_interest", "open_interest_value",
-        "top_trader_long_short_ratio", "taker_buy_sell_ratio", "time",
+        "top_trader_account_long_short_ratio", "top_trader_long_short_ratio",
+        "global_long_short_ratio", "taker_buy_sell_ratio", "time",
     ]
     assert df["open_interest"].iloc[0] == 300.0  # day CLOSE
     assert df["taker_buy_sell_ratio"].iloc[0] == pytest.approx((1.05 + 0.68) / 2)
+    assert df["global_long_short_ratio"].iloc[0] == pytest.approx((2.6 + 2.5) / 2)
+    assert df["top_trader_account_long_short_ratio"].iloc[0] == pytest.approx(
+        (2.4 + 2.2) / 2
+    )
 
 
 @pytest.mark.unit

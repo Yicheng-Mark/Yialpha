@@ -346,6 +346,16 @@ def get_web_search(
     if not query:
         return _sentinel("empty query.")
 
+    keys = api_key_pool()
+    if not keys:
+        # Static precondition, checked BEFORE the budget: a key-less run must
+        # burn nothing and the message must point at the actual fix
+        # (configure a key), not at raising the budget caps.
+        return _sentinel(
+            "Neither TAVILY_API_KEYS nor TAVILY_API_KEY is set. Get a free "
+            "key at https://app.tavily.com and put it in .env."
+        )
+
     total_cap = _max_calls_per_run()
     calls = _calls_map()
     split = _budget_split(total_cap)
@@ -372,13 +382,6 @@ def get_web_search(
             "YIAGENTS_TAVILY_MAX_CALLS_PER_RUN if more angles are needed)."
         )
     _charge(scope)
-
-    keys = api_key_pool()
-    if not keys:
-        return _sentinel(
-            "Neither TAVILY_API_KEYS nor TAVILY_API_KEY is set. Get a free "
-            "key at https://app.tavily.com and put it in .env."
-        )
 
     n_results = max(1, min(int(max_results), MAX_RESULTS_CEILING))
     payload = {

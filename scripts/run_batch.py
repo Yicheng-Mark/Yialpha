@@ -87,7 +87,11 @@ def main() -> int:
     # and `yiagents batch` agree on — the validation, worker-override and
     # config code that used to be duplicated here now lives in
     # yiagents.batch.runner.prepare_batch_run).
-    from yiagents.batch.runner import BatchInputError, prepare_batch_run
+    from yiagents.batch.runner import (
+        BatchInputError,
+        batch_selected_analysts,
+        prepare_batch_run,
+    )
 
     try:
         config, asset_type = prepare_batch_run(
@@ -110,6 +114,7 @@ def main() -> int:
     with BatchRunner(
         config,
         workers=args.workers,
+        selected_analysts=batch_selected_analysts(asset_type, args.tickers),
         progress=not args.no_progress,
     ) as runner:
         results = runner.run(args.tickers, args.date, asset_type=asset_type)

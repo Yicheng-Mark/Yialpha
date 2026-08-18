@@ -730,7 +730,10 @@ class YiAgentsGraph:
         """Deterministic perp advisory bullets for the risk overlay.
 
         Direction comes from the overlay's own final weight (never the LLM's
-        prose): positive → long, negative → short, flat → no ticket. Leverage
+        prose): positive → long, negative → short, flat → no ticket. Today
+        the risk manager clamps target_weight to >= 0 (long-only — kelly
+        sizing never sells), so the short branch below is dormant, kept
+        ready for the day the manager emits negative weights. Leverage
         is the min of the four perp_ticket caps; the liquidation estimate is
         the isolated-margin zero-MMR level (conservatively nearer than the
         exchange's real trigger). ``funding_total_7d`` is the SAME trailing

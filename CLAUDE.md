@@ -128,10 +128,10 @@ IC 剪枝结论的**真实落地路径**（此前 `prune_indicators_cli.py --sug
 
 | 资产类型 | `--asset-type` | 数据源 | 分析师绑定工具 | 备注 |
 |---|---|---|---|---|
-| `crypto_perp` | `crypto_perp` | Binance USDT-M 永续（`fapi.binance.com`） | 6 个 perp 原生工具：klines/funding/OI/long_short_ratio/taker_buy_sell/basis | 隐藏 Yahoo 工具（符号会解析到错误 spot 对）；无 RSI/MACD 指标（直读 klines） |
-| `crypto_spot` | `crypto_spot` | Binance 现货（默认 `api.binance.com`，镜像可切） | 5 工具：spot_klines/ticker24/**spot_perp_basis** + indicators + verified_snapshot | 现货无 funding/OI/杠杆；保留 indicators（符号解析正确）；**spot_perp_basis 是全新 alpha 维度**（跨 venue 基差 = 永续收盘 − 现货收盘） |
+| `crypto_perp` | `crypto_perp` | Binance USDT-M 永续（`fapi.binance.com`）+ data.binance.vision 深历史归档 | 基础 5（live+历史）：klines / funding / indicators / **vision_metrics / vision_book_depth**；live 另含 6：OI / long_short_ratio / taker_buy_sell / basis / premium_index / depth_snapshot，另加 live web_search（合计 live 12 / 历史 5，名单由 `test_crypto_perp_mode.py` 钉住） | 隐藏 Yahoo 工具（符号会解析到错误 spot 对）；RSI/MACD 由 `get_binance_indicators` 在 perp K 线上计算（stockstats 全电池，2026-08-15）；vision 归档 = PIT 正确的多年深历史持仓/盘口（REST 持仓端点仅保 30 天） |
+| `crypto_spot` | `crypto_spot` | Binance 现货（默认 `api.binance.com`，镜像可切） | 基础 10（live+历史）：get_stock_data / spot_klines / spot_indicators / indicators / verified_snapshot / 周线 / S-R / 量价 / K线形态 / 相对强度；live 另含 2：ticker24 / **spot_perp_basis**，另加 live web_search（合计 live 13 / 历史 10） | 现货无 funding/OI/杠杆；保留 indicators（符号解析正确）；**spot_perp_basis 是全新 alpha 维度**（跨 venue 基差 = 永续收盘 − 现货收盘） |
 
-**字节等价**：两模式均为 asset_type 新分支；泛化的 `_http_get`/`_paginate_history` 用默认参数（`base=_FAPI_BASE, weight_key="fapi"`），perp/stock/crypto 路径字节不变（`tests/test_crypto_perp_mode.py` 零修改全绿为证）。
+**字节等价**：两模式均为 asset_type 新分支；泛化的 `_http_get`/`_paginate_history` 用默认参数（`base=_FAPI_BASE, weight_key="fapi"`），perp/stock/crypto 路径字节不变（引入当时 `tests/test_crypto_perp_mode.py` 零修改全绿为证；后续加工具时该测试同步更新钉名单）。
 
 **Track B（执行 / 实时轨道，骨架已就位、网关未接）**：官方模块化 SDK `binance-sdk-derivatives-trading-usds-futures` + `binance-sdk-spot` 是实时 WS 行流 + 下单 + user-data stream 的预设基础（`dataflows/binance.py` docstring 已留 "Track B (execution) will bring the official SDK"）。**当前不迁 SDK**——对分析层 REST 公共行情无净收益，且 SDK 未文档化支持 `socks5h://`（需额外 `requests[socks]`/`aiohttp-socks`）。执行轨道单独启动时再引入。离线 SDK 源码副本 + Spot API 文档存于仓库外 `D:\edge download\binance-connector-python-master\` 与 `D:\edge download\binance-spot-api-docs-master\`（2026-07-08 二次确认：SOCKS5h 零支持、不接收外部 `requests.Session`、5xx 重试有隐性 bug、依赖重——迁分析层净负，结论不变）。
 

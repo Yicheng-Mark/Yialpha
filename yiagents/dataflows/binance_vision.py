@@ -13,9 +13,13 @@ underscore names and bookDepth columns do not match reality):
     CSV columns (8): create_time, symbol, sum_open_interest,
     sum_open_interest_value, count_toptrader_long_short_ratio,
     sum_toptrader_long_short_ratio, count_long_short_ratio,
-    sum_taker_long_short_vol_ratio. 5-minute grain (288 rows/day). Note the
-    dataset carries top-trader + taker ratio VALUES but NOT the global
-    long/short ratio value (only its trader count).
+    sum_taker_long_short_vol_ratio. 5-minute grain (288 rows/day). The
+    count_/sum_ prefixes are legacy naming residue, NOT counts/sums — every
+    ratio column carries that 5m snapshot's VALUE (cross-checked against the
+    live REST series on identical timestamps 2026-08-18: count_toptrader… =
+    top-trader ACCOUNT ratio, sum_toptrader… = top-trader POSITION ratio,
+    count_long_short… = GLOBAL account ratio), so the global long/short
+    ratio IS servable from the archives.
   - ``data/futures/um/daily/bookDepth/{SYM}/{SYM}-bookDepth-{YYYY-MM-DD}.zip``
     CSV columns (4): timestamp, percentage, depth, notional. ~30-second grain
     (28.5k-34.5k rows/day). ``percentage`` is SIGNED: negative = bid-side
@@ -370,13 +374,21 @@ def _load_dataset_range(
 
 # metrics column -> (output name, aggregation). Levels (open interest) take the
 # bucket CLOSE (matches openInterestHist's daily snapshot semantics); ratios
-# take the bucket MEAN (they are intensities, not levels). The verified schema
-# (2026-08-17) carries top-trader + taker ratio values; the global-ratio
-# mapping is kept for older/future files that may include it.
+# take the bucket MEAN (they are intensities, not levels). The count_/sum_
+# prefixes are legacy naming residue — each ratio column carries the 5m
+# snapshot's VALUE (REST-verified 2026-08-18): count_toptrader… = top-trader
+# ACCOUNT ratio, sum_toptrader… = top-trader POSITION ratio, count_long_short…
+# = GLOBAL account ratio. The sum_long_short_ratio spelling stays as a
+# fallback for hypothetical older/future files; real ones carry count_ only
+# (see the both-present precedence in _shape_metrics).
 _METRICS_AGGS: dict[str, tuple[str, str]] = {
     "sum_open_interest": ("open_interest", "last"),
     "sum_open_interest_value": ("open_interest_value", "last"),
+    "count_toptrader_long_short_ratio": (
+        "top_trader_account_long_short_ratio", "mean",
+    ),
     "sum_toptrader_long_short_ratio": ("top_trader_long_short_ratio", "mean"),
+    "count_long_short_ratio": ("global_long_short_ratio", "mean"),
     "sum_long_short_ratio": ("global_long_short_ratio", "mean"),
     "sum_taker_long_short_vol_ratio": ("taker_buy_sell_ratio", "mean"),
 }
@@ -391,6 +403,12 @@ def _shape_metrics(
     df: pd.DataFrame, interval: str,
     symbol_for_error: str, canonical: str,
 ) -> pd.DataFrame:
+    # count_/sum_ spellings both map to global_long_short_ratio; real files
+    # carry only count_, and when a (hypothetical) file carries both the
+    # historical sum_ mapping wins — the output must never carry two columns
+    # of the same name.
+    if {"count_long_short_ratio", "sum_long_short_ratio"} <= set(df.columns):
+        df = df.drop(columns=["count_long_short_ratio"])
     keep = [c for c in _METRICS_AGGS if c in df.columns]
     if not keep:
         raise NoMarketDataError(
@@ -507,21 +525,22 @@ def get_binance_vision_metrics(
     """Deep-history derivative metrics for a Binance USDT-M perp (archived).
 
     Serves the data.binance.vision ``metrics`` dataset — 5-minute open
-    interest, the top-trader long/short ratio and the taker buy/sell volume
-    ratio — back YEARS (BTCUSDT coverage starts 2020-09), where the REST
-    endpoints retain only 30 days. This is the deep-history positioning
-    pillar: regime analysis across funding cycles, IC work on positioning
-    features, and PIT-correct positioning context for historical replay
-    dates. Note the archive schema does NOT carry the GLOBAL long/short
-    ratio value (only top-trader + taker) — the REST
-    ``get_binance_long_short_ratio`` tool covers the global series for the
-    last 30 days.
+    interest, the top-trader ACCOUNT and POSITION long/short ratios, the
+    GLOBAL account long/short ratio and the taker buy/sell volume ratio —
+    back YEARS (BTCUSDT coverage starts 2020-09), where the REST endpoints
+    retain only 30 days. The archive's count_/sum_ column prefixes are
+    legacy naming for the VALUE (REST-verified on identical timestamps), so
+    this carries the same three ratio series as the REST
+    ``get_binance_long_short_ratio`` tool, whose 30-day retention it extends
+    by years. This is the deep-history positioning pillar: regime analysis
+    across funding cycles, IC work on positioning features, and PIT-correct
+    positioning context for historical replay dates.
 
     ``interval`` resamples the 5m source: ``"1d"`` (default) reports the
     day-close open interest and day-mean ratios; ``"5m"`` returns raw rows.
     Columns: ``time, open_interest, open_interest_value,
-    top_trader_long_short_ratio, global_long_short_ratio*,
-    taker_buy_sell_ratio`` (*when the file carries it). Every zip is
+    top_trader_account_long_short_ratio, top_trader_long_short_ratio,
+    global_long_short_ratio, taker_buy_sell_ratio``. Every zip is
     sha256-verified before use. The window is PIT-clamped to the run's
     analysis date and capped at the last published archive day (publication
     lags ~1 day); one request per day, cached forever after.
@@ -557,8 +576,10 @@ def get_binance_vision_metrics(
         _label(symbol, canonical), start_dt, end_dt, note, interval, len(shaped),
         semantics=(
             "# open_interest: base-asset units (day-close for 1d); "
-            "open_interest_value: USDT; top_trader_long_short_ratio > 1 = top "
-            "traders' accounts long-dominated (divergence vs the crowd is a "
+            "open_interest_value: USDT; top_trader_account_long_short_ratio / "
+            "top_trader_long_short_ratio > 1 = top traders' accounts / "
+            "positions long-dominated; global_long_short_ratio > 1 = all "
+            "traders' accounts long-dominated (top-vs-global divergence is a "
             "contrary signal); taker_buy_sell_ratio > 1 = taker buy pressure.\n"
         ),
     )
