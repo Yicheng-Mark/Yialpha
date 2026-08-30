@@ -11,11 +11,11 @@ from unittest import mock
 import pandas as pd
 import pytest
 
-import yiagents.dataflows.y_finance as y_finance
-from yiagents.dataflows import interface
-from yiagents.dataflows.config import reset_config, set_config
-from yiagents.dataflows.stockstats_utils import _assert_ohlcv_not_stale
-from yiagents.dataflows.symbol_utils import NoMarketDataError
+import yialpha.dataflows.y_finance as y_finance
+from yialpha.dataflows import interface
+from yialpha.dataflows.config import reset_config, set_config
+from yialpha.dataflows.stockstats_utils import _assert_ohlcv_not_stale
+from yialpha.dataflows.symbol_utils import NoMarketDataError
 
 
 def _frame(date):
@@ -121,7 +121,7 @@ class TestYfRetryTransportConversion(unittest.TestCase):
     def test_curl_cffi_timeout_converts_to_no_market_data(self):
         import curl_cffi.requests.exceptions as curl_exc
 
-        from yiagents.dataflows.stockstats_utils import yf_retry
+        from yialpha.dataflows.stockstats_utils import yf_retry
 
         def _timeout():
             raise curl_exc.Timeout("curl: (28) Connection timed out")
@@ -132,13 +132,13 @@ class TestYfRetryTransportConversion(unittest.TestCase):
         self.assertIn("Yahoo unreachable", cm.exception.detail)
 
     def test_plain_oserror_converts(self):
-        from yiagents.dataflows.stockstats_utils import yf_retry
+        from yialpha.dataflows.stockstats_utils import yf_retry
 
         with self.assertRaises(NoMarketDataError):
             yf_retry(lambda: (_ for _ in ()).throw(OSError("dns boom")))
 
     def test_success_path_unchanged(self):
-        from yiagents.dataflows.stockstats_utils import yf_retry
+        from yialpha.dataflows.stockstats_utils import yf_retry
 
         self.assertEqual(yf_retry(lambda: "DATA", symbol="X"), "DATA")
 

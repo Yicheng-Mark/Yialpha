@@ -19,20 +19,20 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from yiagents.dataflows.alpha_vantage_fundamentals import (
+from yialpha.dataflows.alpha_vantage_fundamentals import (
     _filter_reports_by_date,
     get_fundamentals as get_av_fundamentals,
 )
-from yiagents.dataflows.config import set_config
-from yiagents.dataflows.errors import NoMarketDataError
-from yiagents.dataflows.interface import route_to_vendor
-from yiagents.dataflows.stockstats_utils import filter_financials_by_date
-from yiagents.dataflows.utils import (
+from yialpha.dataflows.config import set_config
+from yialpha.dataflows.errors import NoMarketDataError
+from yialpha.dataflows.interface import route_to_vendor
+from yialpha.dataflows.stockstats_utils import filter_financials_by_date
+from yialpha.dataflows.utils import (
     FUNDAMENTALS_FILING_LAG_DAYS,
     is_filing_public,
     overview_would_leak_future,
 )
-from yiagents.dataflows.y_finance import get_fundamentals as get_yf_fundamentals
+from yialpha.dataflows.y_finance import get_fundamentals as get_yf_fundamentals
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ def test_filing_conservative_on_unparseable_period():
 
 @pytest.mark.unit
 def test_filing_lag_zero_is_the_old_semantics():
-    # The env escape hatch (YIAGENTS_FUNDAMENTALS_FILING_LAG_DAYS=0) reverts to
+    # The env escape hatch (YIALPHA_FUNDAMENTALS_FILING_LAG_DAYS=0) reverts to
     # the pre-fix ``fiscalDateEnding <= curr_date`` behaviour: with lag 0 the
     # Sep-30 period IS visible on Oct-1.
     assert is_filing_public("2024-09-30", "2024-10-01", lag_days=0) is True

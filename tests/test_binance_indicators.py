@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import yiagents.agents.utils.binance_indicator_tools as bit
+import yialpha.agents.utils.binance_indicator_tools as bit
 
 
 def _klines_frame(symbol: str, start_date: str, end_date: str, interval="1d",
@@ -99,7 +99,7 @@ class TestBinanceIndicatorsTool:
         assert out.startswith("DATA_UNAVAILABLE")
 
     def test_perp_prompt_mentions_indicator_tool(self):
-        from yiagents.agents.analysts.market_analyst import _PERP_NUDGE, _SPOT_NUDGE
+        from yialpha.agents.analysts.market_analyst import _PERP_NUDGE, _SPOT_NUDGE
         assert "get_binance_indicators" in _PERP_NUDGE
         # 2026-08-16: the spot run binds the spot-default variant so an
         # omitted venue arg can never price the perpetual.
@@ -159,7 +159,7 @@ class TestBinanceIndicatorsTool:
         """
         import re
 
-        from yiagents.dataflows.vol_estimators import (
+        from yialpha.dataflows.vol_estimators import (
             CRYPTO_TRADING_DAYS_PER_YEAR,
             TRADING_DAYS_PER_YEAR,
             close_to_close_vol,

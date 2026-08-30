@@ -8,8 +8,8 @@ from unittest import mock
 
 import pytest
 
-from yiagents.dataflows import fred, interface
-from yiagents.dataflows.config import reset_config, set_config
+from yialpha.dataflows import fred, interface
+from yialpha.dataflows.config import reset_config, set_config
 
 # A small, stable set of observations to format against.
 _META = {

@@ -9,7 +9,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from yiagents.dataflows import stockstats_utils as su
+from yialpha.dataflows import stockstats_utils as su
 
 
 def _ohlcv(date_col: str) -> pd.DataFrame:

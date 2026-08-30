@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.dataflows import quality
-from yiagents.dataflows.quality import (
+from yialpha.dataflows import quality
+from yialpha.dataflows.quality import (
     TIER_DEGRADED_AUXILIARY,
     TIER_DEGRADED_CRITICAL,
     TIER_GOOD,

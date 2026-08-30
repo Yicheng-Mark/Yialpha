@@ -1,4 +1,4 @@
-"""C3 regressions for ``yiagents.risk.breaker``.
+"""C3 regressions for ``yialpha.risk.breaker``.
 
 Two audited defects:
 
@@ -19,7 +19,7 @@ import math
 
 import pytest
 
-from yiagents.risk.breaker import DrawdownBreaker
+from yialpha.risk.breaker import DrawdownBreaker
 
 
 @pytest.mark.unit

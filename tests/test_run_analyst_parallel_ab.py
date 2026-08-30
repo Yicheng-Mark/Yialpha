@@ -1,7 +1,7 @@
 """Unit tests for the PURE metric functions in scripts/run_analyst_parallel_ab.py.
 
 These tests do NOT call propagate, do NOT touch the LLM, and do NOT import
-the yiagents graph stack (every metric function is stdlib-only). The script
+the yialpha graph stack (every metric function is stdlib-only). The script
 is loaded as an isolated module via importlib so its ``if __name__ ==
 "__main__"`` guard never fires.
 """

@@ -12,7 +12,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from yiagents.dataflows.ohlcv_resample import resample_weekly, weekly_ohlcv
+from yialpha.dataflows.ohlcv_resample import resample_weekly, weekly_ohlcv
 
 
 def _daily_frame(dates, closes):
@@ -81,7 +81,7 @@ class TestResampleWeekly:
 @pytest.mark.unit
 class TestWeeklyPit:
     def test_weekly_never_contains_rows_after_curr_date(self, monkeypatch):
-        import yiagents.dataflows.ohlcv_resample as mod
+        import yialpha.dataflows.ohlcv_resample as mod
 
         # 8 full weeks Mon-Fri, curr_date = the Wednesday of week 7.
         all_days = pd.date_range("2025-01-06", periods=8 * 5, freq="B")
@@ -98,8 +98,8 @@ class TestWeeklyPit:
 @pytest.mark.unit
 class TestWeeklyTool:
     def test_tool_renders_table_and_summary(self, monkeypatch):
-        import yiagents.dataflows.ohlcv_resample as mod
-        from yiagents.agents.utils.weekly_indicators_tools import get_indicators_weekly
+        import yialpha.dataflows.ohlcv_resample as mod
+        from yialpha.agents.utils.weekly_indicators_tools import get_indicators_weekly
         all_days = pd.date_range("2025-01-06", periods=60 * 5, freq="B")
         daily = _daily_frame(all_days, [100.0 + i * 0.5 for i in range(60 * 5)])
         monkeypatch.setattr(
@@ -116,8 +116,8 @@ class TestWeeklyTool:
         assert "N/A" not in out.splitlines()[-4]
 
     def test_tool_degrades_typed_on_failure(self, monkeypatch):
-        import yiagents.dataflows.ohlcv_resample as mod
-        from yiagents.agents.utils.weekly_indicators_tools import get_indicators_weekly
+        import yialpha.dataflows.ohlcv_resample as mod
+        from yialpha.agents.utils.weekly_indicators_tools import get_indicators_weekly
 
         def boom(symbol, curr_date):
             raise RuntimeError("vendor down")

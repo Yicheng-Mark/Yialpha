@@ -8,7 +8,7 @@ or IP leak). Both vendors now resolve through this one helper.
 import os
 import unittest
 
-from yiagents.dataflows.utils import proxy_map
+from yialpha.dataflows.utils import proxy_map
 
 _VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
 
@@ -58,8 +58,8 @@ class TestSharedAcrossVendors(unittest.TestCase):
     """binance and sec_edgar resolve proxies through the same helper now."""
 
     def test_no_divergent_local_proxy_helpers(self):
-        import yiagents.dataflows.binance as bn
-        import yiagents.dataflows.sec_edgar as se
+        import yialpha.dataflows.binance as bn
+        import yialpha.dataflows.sec_edgar as se
 
         # The divergent local _proxies() helpers were removed in favour of the
         # shared utils.proxy_map(); their continued absence is the contract that

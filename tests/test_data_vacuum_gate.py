@@ -22,7 +22,7 @@ from unittest import mock
 
 import pytest
 
-from yiagents.dataflows import quality
+from yialpha.dataflows import quality
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -42,8 +42,8 @@ def test_trader_node_is_gated():
     """The vacuum gate is a node-level wiring decision — assert it from the
     outside instead of trusting the comment in setup.py (round-5 lesson: a
     prompt/tool wired in one place but not the other ships silently)."""
-    import yiagents.graph.setup as setup_mod
-    from yiagents.graph.setup import GraphSetup
+    import yialpha.graph.setup as setup_mod
+    from yialpha.graph.setup import GraphSetup
 
     real_gate = setup_mod.quality.gate_on_data_vacuum
     wrapped = []
@@ -100,8 +100,8 @@ class TestRobustQualityGateDefault(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 def test_market_data_validator_degrade_records_sentinel(monkeypatch):
-    import yiagents.dataflows.market_data_validator as validator
-    from yiagents.dataflows.errors import NoMarketDataError
+    import yialpha.dataflows.market_data_validator as validator
+    from yialpha.dataflows.errors import NoMarketDataError
 
     def no_data(symbol, curr_date):
         raise NoMarketDataError(symbol, symbol, "no rows")
@@ -116,7 +116,7 @@ def test_market_data_validator_degrade_records_sentinel(monkeypatch):
 
 @pytest.mark.unit
 def test_price_structure_load_degrade_records_sentinel(monkeypatch):
-    import yiagents.agents.utils.price_structure_tools as ps
+    import yialpha.agents.utils.price_structure_tools as ps
 
     def boom(symbol, curr_date):
         raise RuntimeError("socket hang")
@@ -132,7 +132,7 @@ def test_price_structure_load_degrade_records_sentinel(monkeypatch):
 def test_price_structure_insufficient_rows_records_sentinel(monkeypatch):
     import pandas as pd
 
-    import yiagents.agents.utils.price_structure_tools as ps
+    import yialpha.agents.utils.price_structure_tools as ps
 
     monkeypatch.setattr(
         ps, "load_ohlcv",
@@ -145,7 +145,7 @@ def test_price_structure_insufficient_rows_records_sentinel(monkeypatch):
 
 @pytest.mark.unit
 def test_weekly_indicators_degrade_records_sentinel(monkeypatch):
-    import yiagents.agents.utils.weekly_indicators_tools as weekly
+    import yialpha.agents.utils.weekly_indicators_tools as weekly
 
     def boom(symbol, curr_date):
         raise RuntimeError("resample failed")
@@ -163,7 +163,7 @@ def test_weekly_indicators_degrade_records_sentinel(monkeypatch):
 
 @pytest.mark.unit
 def test_binance_indicators_degrade_records_sentinel(monkeypatch):
-    import yiagents.agents.utils.binance_indicator_tools as bind
+    import yialpha.agents.utils.binance_indicator_tools as bind
 
     def boom(symbol, start, end, **kw):
         raise RuntimeError("429")
@@ -181,7 +181,7 @@ def test_binance_indicators_degrade_records_sentinel(monkeypatch):
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 def test_reddit_rss_failure_records_sentinel(monkeypatch):
-    import yiagents.dataflows.reddit as reddit
+    import yialpha.dataflows.reddit as reddit
 
     def boom(*args, **kwargs):
         raise OSError("connection reset")
@@ -196,7 +196,7 @@ def test_reddit_rss_failure_records_sentinel(monkeypatch):
 
 @pytest.mark.unit
 def test_reddit_oauth_token_unavailable_records_sentinel(monkeypatch):
-    import yiagents.dataflows.reddit as reddit
+    import yialpha.dataflows.reddit as reddit
 
     monkeypatch.setattr(reddit, "_get_oauth_token", lambda timeout: None)
     monkeypatch.setattr(reddit, "_fetch_subreddit_rss", lambda *a: [])
@@ -207,7 +207,7 @@ def test_reddit_oauth_token_unavailable_records_sentinel(monkeypatch):
 
 @pytest.mark.unit
 def test_reddit_zero_posts_records_sentinel(monkeypatch):
-    import yiagents.dataflows.reddit as reddit
+    import yialpha.dataflows.reddit as reddit
 
     monkeypatch.setattr(reddit, "_fetch_subreddit", lambda *a: [])
     out = reddit.fetch_reddit_posts("ZZZZ", subreddits=("wallstreetbets",), timeout=1.0)
@@ -219,7 +219,7 @@ def test_reddit_zero_posts_records_sentinel(monkeypatch):
 def test_reddit_keyless_default_path_stays_silent(monkeypatch):
     """No creds configured = RSS is the designed default, not a degrade —
     recording here would fire a sentinel on every keyless run (noise)."""
-    import yiagents.dataflows.reddit as reddit
+    import yialpha.dataflows.reddit as reddit
 
     def rss_with_posts(ticker, sub, limit, timeout, _retry=True):
         return [{"title": "t", "score": None, "num_comments": None,
@@ -236,7 +236,7 @@ def test_reddit_keyless_default_path_stays_silent(monkeypatch):
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 def test_yf_timeout_default_30():
-    import yiagents.dataflows.stockstats_utils as ssu
+    import yialpha.dataflows.stockstats_utils as ssu
 
     assert ssu.YF_HTTP_TIMEOUT == 30.0
 
@@ -245,21 +245,21 @@ def test_yf_timeout_default_30():
 def test_yf_timeout_env_zero_disables(monkeypatch):
     import importlib
 
-    import yiagents.dataflows.stockstats_utils as ssu
+    import yialpha.dataflows.stockstats_utils as ssu
 
-    monkeypatch.setenv("YIAGENTS_HTTP_TIMEOUT_S", "0")
+    monkeypatch.setenv("YIALPHA_HTTP_TIMEOUT_S", "0")
     importlib.reload(ssu)
     try:
         assert ssu.YF_HTTP_TIMEOUT is None  # explicit 0 = deliberate opt-out
     finally:
-        monkeypatch.delenv("YIAGENTS_HTTP_TIMEOUT_S", raising=False)
+        monkeypatch.delenv("YIALPHA_HTTP_TIMEOUT_S", raising=False)
         importlib.reload(ssu)  # restore the module default for later tests
     assert ssu.YF_HTTP_TIMEOUT == 30.0
 
 
 @pytest.mark.unit
 def test_baostock_timeout_default_and_scope():
-    import yiagents.dataflows.baostock_vendor as bs
+    import yialpha.dataflows.baostock_vendor as bs
 
     assert bs.BS_SOCKET_TIMEOUT == 30.0
 
@@ -284,7 +284,7 @@ def test_baostock_timeout_default_and_scope():
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 def test_default_vendor_chains_have_fallback():
-    from yiagents.default_config import DEFAULT_CONFIG
+    from yialpha.default_config import DEFAULT_CONFIG
 
     vendors = DEFAULT_CONFIG["data_vendors"]
     assert vendors["core_stock_apis"] == "yfinance,alpha_vantage"
@@ -301,10 +301,10 @@ def test_default_vendor_chains_have_fallback():
 
 @pytest.mark.unit
 def test_data_vacuum_policy_default_reject():
-    from yiagents.default_config import DEFAULT_CONFIG
+    from yialpha.default_config import DEFAULT_CONFIG
 
     assert DEFAULT_CONFIG["data_vacuum_policy"] == "reject"
     # The chain must be registered so an unattended run inherits the default.
-    from yiagents.default_config import _ENV_OVERRIDES
+    from yialpha.default_config import _ENV_OVERRIDES
 
-    assert _ENV_OVERRIDES["YIAGENTS_DATA_VACUUM_POLICY"] == "data_vacuum_policy"
+    assert _ENV_OVERRIDES["YIALPHA_DATA_VACUUM_POLICY"] == "data_vacuum_policy"

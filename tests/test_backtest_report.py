@@ -5,8 +5,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from yiagents.backtest.engine import BacktestResult, TradeRow, run_backtest
-from yiagents.backtest.report import (
+from yialpha.backtest.engine import BacktestResult, TradeRow, run_backtest
+from yialpha.backtest.report import (
     multi_run,
     render_backtest_report,
     render_multi_run_report,
@@ -251,7 +251,7 @@ def test_multi_run_table_shares_n_column():
 
 @pytest.mark.unit
 def test_fmt_price_adaptive_precision():
-    from yiagents.backtest.report import _fmt_price
+    from yialpha.backtest.report import _fmt_price
 
     assert _fmt_price(123.456) == "123.46"
     assert _fmt_price(0.0000123456) == "1.235e-05"

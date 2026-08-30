@@ -7,10 +7,10 @@ hit the right instrument instead of failing/mismatching.
 """
 import pandas as pd
 
-import yiagents.agents.utils.agent_utils as au
-import yiagents.dataflows.y_finance as yfin
-import yiagents.dataflows.yfinance_news as ynews
-from yiagents.graph.trading_graph import YiAgentsGraph
+import yialpha.agents.utils.agent_utils as au
+import yialpha.dataflows.y_finance as yfin
+import yialpha.dataflows.yfinance_news as ynews
+from yialpha.graph.trading_graph import YiAlphaGraph
 
 
 def test_identity_lookup_normalizes_symbol(monkeypatch):
@@ -48,7 +48,7 @@ def test_fetch_returns_normalizes_symbol(monkeypatch):
     monkeypatch.setattr(yfin.yf, "Ticker", FakeTicker)
 
     # _fetch_returns does not use ``self``; call unbound to avoid building the graph.
-    raw, alpha, days = YiAgentsGraph._fetch_returns(
+    raw, alpha, days = YiAlphaGraph._fetch_returns(
         None, "XAUUSD", "2025-01-02", holding_days=5, benchmark="SPY"
     )
 

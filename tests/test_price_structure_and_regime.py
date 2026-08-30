@@ -12,16 +12,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from yiagents.dataflows.candlestick_patterns import (
+from yialpha.dataflows.candlestick_patterns import (
     detect_double_top_bottom,
     find_pivots,
     scan_candlestick_patterns,
 )
-from yiagents.dataflows.market_regime import (
+from yialpha.dataflows.market_regime import (
     classify_trend_state,
     classify_vol_state,
 )
-from yiagents.dataflows.support_resistance import (
+from yialpha.dataflows.support_resistance import (
     build_support_resistance,
     classic_pivots,
     daily_pivots,
@@ -314,7 +314,7 @@ class TestRegimeClassifiers:
 @pytest.mark.unit
 class TestRegimeContextLine:
     def test_composes_trend_and_vol(self, monkeypatch):
-        import yiagents.dataflows.market_regime as mr
+        import yialpha.dataflows.market_regime as mr
 
         step = 0.5
         closes = [100.0 + i * step for i in range(400)]
@@ -331,7 +331,7 @@ class TestRegimeContextLine:
         assert "breadth" not in line  # not an A-share ticker
 
     def test_fails_soft_to_none_without_data(self, monkeypatch):
-        import yiagents.dataflows.market_regime as mr
+        import yialpha.dataflows.market_regime as mr
 
         def boom(symbol, curr_date):
             raise RuntimeError("vendor down")
@@ -343,8 +343,8 @@ class TestRegimeContextLine:
 @pytest.mark.unit
 class TestAnalystWiring:
     def test_stock_tools_include_price_structure(self):
-        import yiagents.agents.analysts.market_analyst as ma
-        from yiagents.agents.utils.agent_utils import (
+        import yialpha.agents.analysts.market_analyst as ma
+        from yialpha.agents.utils.agent_utils import (
             get_candlestick_patterns,
             get_indicators_weekly,
             get_support_resistance,
@@ -367,8 +367,8 @@ class TestAnalystWiring:
         assert "get_indicators_weekly" in legacy
 
     def test_regime_context_gate(self, monkeypatch):
-        import yiagents.agents.analysts.market_analyst as ma
-        from yiagents.dataflows.config import set_config
+        import yialpha.agents.analysts.market_analyst as ma
+        from yialpha.dataflows.config import set_config
 
         monkeypatch.setattr(
             ma, "format_regime_context", lambda t, d: "Market regime (T): line"
@@ -377,7 +377,7 @@ class TestAnalystWiring:
         # The gate lives in the node; assert the config key is honored by
         # direct inspection of the default and the override round-trip.
         set_config({"regime_context": True})
-        from yiagents.dataflows.config import get_config
+        from yialpha.dataflows.config import get_config
         assert get_config()["regime_context"] is True
         set_config({"regime_context": None})  # restore default handling
 
@@ -392,7 +392,7 @@ class TestPriceStructureTools:
 
     @pytest.fixture()
     def patched_ohlcv(self, monkeypatch):
-        import yiagents.agents.utils.price_structure_tools as pst
+        import yialpha.agents.utils.price_structure_tools as pst
         frame = self._frame()
         monkeypatch.setattr(pst, "load_ohlcv", lambda s, d: frame)
         return pst
@@ -423,7 +423,7 @@ class TestPriceStructureTools:
             or "No double" in out
 
     def test_typed_degrade_on_vendor_failure(self, monkeypatch):
-        import yiagents.agents.utils.price_structure_tools as pst
+        import yialpha.agents.utils.price_structure_tools as pst
 
         def boom(symbol, curr_date):
             raise RuntimeError("vendor down")
@@ -440,7 +440,7 @@ class TestPriceStructureTools:
         exactly when the ticker outperformed."""
         import pandas as pd
 
-        import yiagents.agents.utils.price_structure_tools as pst
+        import yialpha.agents.utils.price_structure_tools as pst
 
         n = 260
         dates = pd.bdate_range("2025-01-01", periods=n)

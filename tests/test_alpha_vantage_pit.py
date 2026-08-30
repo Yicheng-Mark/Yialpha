@@ -11,7 +11,7 @@ executed and backtests ingested reports that were not yet public on
 
 The fix parses the string with ``json.loads`` when it is a JSON statement
 payload, filters ``annualReports`` / ``quarterlyReports`` by
-:func:`yiagents.dataflows.utils.is_filing_public` (period end + filing lag),
+:func:`yialpha.dataflows.utils.is_filing_public` (period end + filing lag),
 and returns the filtered ``dict``. A non-JSON string (CSV datasets, error
 bodies) is returned unchanged — there is nothing statement-shaped in it.
 
@@ -25,10 +25,10 @@ import json
 
 import pytest
 
-from yiagents.dataflows import alpha_vantage_fundamentals as avf
+from yialpha.dataflows import alpha_vantage_fundamentals as avf
 
 #curr_date 2024-06-15. is_filing_public uses a 45-day default lag (env-tunable
-# via YIAGENTS_FUNDAMENTALS_FILING_LAG_DAYS); the fixtures below stay
+# via YIALPHA_FUNDAMENTALS_FILING_LAG_DAYS); the fixtures below stay
 # deterministic for any lag in [0, 300]: the past report (2023-12-31) is
 # public by 2024-06-15, the future one (2024-06-30) is not.
 CURR = "2024-06-15"

@@ -23,9 +23,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from yiagents.dataflows import binance as bn
-from yiagents.dataflows.errors import NoMarketDataError
-from yiagents.dataflows.utils import set_analysis_date
+from yialpha.dataflows import binance as bn
+from yialpha.dataflows.errors import NoMarketDataError
+from yialpha.dataflows.utils import set_analysis_date
 
 
 def _days_ago(n: int) -> str:

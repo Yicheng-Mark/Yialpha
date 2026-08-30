@@ -1,6 +1,6 @@
 """Tests for env-driven CLI behavior (#897, #873).
 
-The config-layer override (YIAGENTS_* -> DEFAULT_CONFIG) is covered by
+The config-layer override (YIALPHA_* -> DEFAULT_CONFIG) is covered by
 test_env_overrides.py. These tests cover the CLI layer: an env-configured
 provider/model/language must skip its interactive prompt and use the value.
 """
@@ -15,17 +15,17 @@ import pytest
 @pytest.mark.unit
 class TestProviderDefaultUrl(unittest.TestCase):
     def test_known_providers_resolve(self):
-        from yiagents.cli.utils import provider_default_url
+        from yialpha.cli.utils import provider_default_url
         self.assertEqual(provider_default_url("openai"), "https://api.openai.com/v1")
         self.assertEqual(provider_default_url("DeepSeek"), "https://api.deepseek.com")
         self.assertIsNone(provider_default_url("google"))  # uses SDK default
 
     def test_unknown_provider_returns_none(self):
-        from yiagents.cli.utils import provider_default_url
+        from yialpha.cli.utils import provider_default_url
         self.assertIsNone(provider_default_url("not-a-provider"))
 
     def test_ollama_honors_base_url_env(self):
-        from yiagents.cli.utils import provider_default_url
+        from yialpha.cli.utils import provider_default_url
         with mock.patch.dict(os.environ, {"OLLAMA_BASE_URL": "http://host:1234/v1"}):
             self.assertEqual(provider_default_url("ollama"), "http://host:1234/v1")
 
@@ -33,14 +33,14 @@ class TestProviderDefaultUrl(unittest.TestCase):
 @pytest.mark.unit
 class TestCliSkipsPromptsFromEnv(unittest.TestCase):
     def test_env_config_skips_llm_prompts(self):
-        import yiagents.cli.main as m
+        import yialpha.cli.main as m
 
         env = {
-            "YIAGENTS_LLM_PROVIDER": "openai",
-            "YIAGENTS_DEEP_THINK_LLM": "kimi-k2.5",
-            "YIAGENTS_QUICK_THINK_LLM": "deepseek-v4-pro",
-            "YIAGENTS_LLM_BACKEND_URL": "https://opencode.ai/zen/go/v1",
-            "YIAGENTS_OUTPUT_LANGUAGE": "Japanese",
+            "YIALPHA_LLM_PROVIDER": "openai",
+            "YIALPHA_DEEP_THINK_LLM": "kimi-k2.5",
+            "YIALPHA_QUICK_THINK_LLM": "deepseek-v4-pro",
+            "YIALPHA_LLM_BACKEND_URL": "https://opencode.ai/zen/go/v1",
+            "YIALPHA_OUTPUT_LANGUAGE": "Japanese",
         }
         fake_cfg = dict(m.DEFAULT_CONFIG)
         fake_cfg.update({
@@ -83,11 +83,11 @@ class TestCliSkipsPromptsFromEnv(unittest.TestCase):
 @pytest.mark.unit
 class TestResearchDepthSkippedFromEnv(unittest.TestCase):
     def test_both_round_envs_skip_depth_prompt(self):
-        import yiagents.cli.main as m
+        import yialpha.cli.main as m
 
         env = {
-            "YIAGENTS_MAX_DEBATE_ROUNDS": "2",
-            "YIAGENTS_MAX_RISK_ROUNDS": "4",
+            "YIALPHA_MAX_DEBATE_ROUNDS": "2",
+            "YIALPHA_MAX_RISK_ROUNDS": "4",
         }
         fake_cfg = dict(m.DEFAULT_CONFIG)
         fake_cfg.update({"max_debate_rounds": 2, "max_risk_discuss_rounds": 4})
@@ -114,9 +114,9 @@ class TestResearchDepthSkippedFromEnv(unittest.TestCase):
 @pytest.mark.unit
 class TestReasoningEffortSkippedFromEnv(unittest.TestCase):
     def test_effort_env_skips_step8_prompt(self):
-        import yiagents.cli.main as m
+        import yialpha.cli.main as m
 
-        env = {"YIAGENTS_OPENAI_REASONING_EFFORT": "high"}
+        env = {"YIALPHA_OPENAI_REASONING_EFFORT": "high"}
         fake_cfg = dict(m.DEFAULT_CONFIG)
         fake_cfg.update({"openai_reasoning_effort": "high"})
 

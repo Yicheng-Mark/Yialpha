@@ -6,7 +6,7 @@ Two invariants this plan promised:
    skeleton (domain / gateway / bridge) is new code with no callers; if a
    future change wires it into an agent prompt or the LangGraph topology, the
    default-off / byte-equivalence contract silently breaks. This test greps
-   ``yiagents/agents`` and ``yiagents/graph`` for any such import and fails
+   ``yialpha/agents`` and ``yialpha/graph`` for any such import and fails
    loudly if one appears.
 
 2. **The existing BrowserBroker public surface is unchanged.** This round
@@ -23,16 +23,16 @@ from pathlib import Path
 
 import pytest
 
-import yiagents
+import yialpha
 
 _EXEC_IMPORT_RE = re.compile(
-    r"^\s*(?:from\s+yiagents\.execution\b|import\s+yiagents\.execution\b)"
+    r"^\s*(?:from\s+yialpha\.execution\b|import\s+yialpha\.execution\b)"
 )
 
 # Directories whose import graphs must stay free of the execution layer.
 _GUARDED_DIRS = [
-    Path(yiagents.__file__).resolve().parent / "agents",
-    Path(yiagents.__file__).resolve().parent / "graph",
+    Path(yialpha.__file__).resolve().parent / "agents",
+    Path(yialpha.__file__).resolve().parent / "graph",
 ]
 
 
@@ -63,7 +63,7 @@ class TestExecutionDecoupledFromAgentsAndGraph:
         # bridge.py lives in execution/ and depends on agents/schemas (allowed,
         # execution -> analysis). Confirm the dependency is one-way by making
         # sure the import works and lives in execution, not agents.
-        import yiagents.execution.bridge as bridge  # noqa: F401
+        import yialpha.execution.bridge as bridge  # noqa: F401
 
         assert hasattr(bridge, "decision_to_order_requests")
 
@@ -75,7 +75,7 @@ class TestBrowserBrokerSurfaceUnchanged:
         # must not remove or rename any of them.
         # OrderResult is the order-result dataclass the broker returns; keep it
         # importable too (used by the future Track B adapter).
-        from yiagents.execution.browser_broker import (  # noqa: F401
+        from yialpha.execution.browser_broker import (  # noqa: F401
             BrowserBroker,
             KillSwitch,
             OrderAction,

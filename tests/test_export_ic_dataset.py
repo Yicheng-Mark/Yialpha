@@ -20,12 +20,12 @@ assert _spec is not None and _spec.loader is not None
 exporter = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(exporter)
 
-# The implementation moved into the package (2026-08-16) so `yiagents
+# The implementation moved into the package (2026-08-16) so `yialpha
 # ic-cycle` can share it; the script is a thin CLI wrapper. build_ic_frame's
 # lazy imports resolve against the real dataflow modules, so tests stub
 # THOSE (not the script namespace, which no longer carries them).
-from yiagents.backtest.ic_dataset import build_ic_frame  # noqa: E402
-from yiagents.dataflows import feature_registry, stockstats_utils  # noqa: E402
+from yialpha.backtest.ic_dataset import build_ic_frame  # noqa: E402
+from yialpha.dataflows import feature_registry, stockstats_utils  # noqa: E402
 
 
 def _ohlcv(days: int = 40, start_close: float = 100.0) -> pd.DataFrame:

@@ -18,9 +18,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-import yiagents.dataflows.alpha_vantage_news as av_news
-import yiagents.dataflows.yfinance_news as ynews
-from yiagents.dataflows.utils import set_analysis_date
+import yialpha.dataflows.alpha_vantage_news as av_news
+import yialpha.dataflows.yfinance_news as ynews
+from yialpha.dataflows.utils import set_analysis_date
 
 
 @pytest.fixture(autouse=True)

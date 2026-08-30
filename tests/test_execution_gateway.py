@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.execution.binance_gateway``.
+"""Unit tests for ``yialpha.execution.binance_gateway``.
 
 All tests are network-free: the official Binance SDK is never imported (the
 gateway imports it lazily inside ``connect``), and a mock client is injected
@@ -14,13 +14,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from yiagents.dataflows.errors import VendorNotConfiguredError
-from yiagents.execution.binance_gateway import (
+from yialpha.dataflows.errors import VendorNotConfiguredError
+from yialpha.execution.binance_gateway import (
     BinanceGateway,
     ExecutionEnableSwitch,
     _as_order_id,
 )
-from yiagents.execution.domain import (
+from yialpha.execution.domain import (
     Direction,
     Exchange,
     Offset,
@@ -28,14 +28,14 @@ from yiagents.execution.domain import (
     OrderType,
     Status,
 )
-from yiagents.risk.breaker import BreakerState
-from yiagents.risk.manager import RiskDecision
+from yialpha.risk.breaker import BreakerState
+from yialpha.risk.manager import RiskDecision
 
 pytestmark = pytest.mark.unit
 
-_ENV_ENABLED = "YIAGENTS_EXECUTION_ENABLED"
-_ENV_ANALYSIS_ONLY = "YIAGENTS_ANALYSIS_ONLY"
-_ENV_LIVE_ENABLED = "YIAGENTS_LIVE_EXECUTION_ENABLED"
+_ENV_ENABLED = "YIALPHA_EXECUTION_ENABLED"
+_ENV_ANALYSIS_ONLY = "YIALPHA_ANALYSIS_ONLY"
+_ENV_LIVE_ENABLED = "YIALPHA_LIVE_EXECUTION_ENABLED"
 _ENV_KEY = "BINANCE_API_KEY"
 _ENV_SECRET = "BINANCE_API_SECRET"
 
@@ -46,15 +46,15 @@ def _arm_test_execution_policy(monkeypatch):
     monkeypatch.setenv(_ENV_ANALYSIS_ONLY, "false")
     monkeypatch.setenv(_ENV_LIVE_ENABLED, "true")
     monkeypatch.setenv(_ENV_ENABLED, "true")
-    monkeypatch.setenv("YIAGENTS_KILL_SWITCH", "false")
-    monkeypatch.delenv("YIAGENTS_EXECUTION_LEVERAGE", raising=False)
+    monkeypatch.setenv("YIALPHA_KILL_SWITCH", "false")
+    monkeypatch.delenv("YIALPHA_EXECUTION_LEVERAGE", raising=False)
     # exchangeInfo gate (2026-08-16): a permissive tick/step grid so the
     # pre-existing mapping assertions still see their exact values, while
     # the quantization path itself is exercised by dedicated tests below.
     from decimal import Decimal
 
-    import yiagents.execution.binance_gateway as gw_mod
-    from yiagents.dataflows.binance_filters import SymbolFilters
+    import yialpha.execution.binance_gateway as gw_mod
+    from yialpha.dataflows.binance_filters import SymbolFilters
 
     def _permissive_filters(symbol, venue):  # noqa: ARG001
         return SymbolFilters(
@@ -464,7 +464,7 @@ class TestSendOrderFailClosed:
 
     def test_dynamic_kill_switch_stops_connected_gateway(self, monkeypatch):
         gw = _perp_gw_with_client()
-        monkeypatch.setenv("YIAGENTS_KILL_SWITCH", "true")
+        monkeypatch.setenv("YIALPHA_KILL_SWITCH", "true")
         assert gw.send_order(_req()).status is Status.REJECTED
         gw._client.rest_api.new_order.assert_not_called()
 
@@ -479,11 +479,11 @@ class TestSendOrderFailClosed:
         gw._client.rest_api.new_order.return_value = _FakeResp(
             {"status": "NEW", "orderId": 99, "executedQty": "0"}
         )
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
 
         # First call (entry) passes; second call (network edge) halts.
         # Simulates the switch flipping during the risk gate.
-        from yiagents.execution import binance_gateway as gw_mod
+        from yialpha.execution import binance_gateway as gw_mod
 
         calls = {"n": 0}
 
@@ -611,7 +611,7 @@ class TestQueries:
 class TestCancel:
     def test_perp_cancel_coerces_int(self):
         gw = _perp_gw_with_client()
-        from yiagents.execution.domain import CancelRequest
+        from yialpha.execution.domain import CancelRequest
 
         gw.cancel_order(CancelRequest(orderid="777", symbol="BTCUSDT", exchange=Exchange.BINANCE))
         gw._client.rest_api.cancel_order.assert_called_once_with(symbol="BTCUSDT", order_id=777)
@@ -619,7 +619,7 @@ class TestCancel:
     def test_spot_cancel_uses_delete(self):
         gw = _perp_gw_with_client()
         gw._product = "spot"
-        from yiagents.execution.domain import CancelRequest
+        from yialpha.execution.domain import CancelRequest
 
         gw.cancel_order(CancelRequest(orderid="777", symbol="BTCUSDT", exchange=Exchange.BINANCE))
         gw._client.rest_api.delete_order.assert_called_once_with(symbol="BTCUSDT", order_id=777)
@@ -646,7 +646,7 @@ class TestLazyImport:
             sys.modules.pop(mod, None)
         import importlib
 
-        import yiagents.execution.binance_gateway as bg
+        import yialpha.execution.binance_gateway as bg
 
         importlib.reload(bg)
         assert "binance_sdk_spot" not in sys.modules
@@ -765,7 +765,7 @@ class TestGenClientOrderIdUniqueness:
 
     def test_unique_even_when_clock_does_not_advance(self, monkeypatch):
         monkeypatch.setattr(
-            "yiagents.execution.binance_gateway.time.time_ns", lambda: 1
+            "yialpha.execution.binance_gateway.time.time_ns", lambda: 1
         )
         ids = {BinanceGateway._gen_client_order_id() for _ in range(1000)}
         assert len(ids) == 1000
@@ -776,17 +776,17 @@ class TestGenClientOrderIdUniqueness:
             assert len(BinanceGateway._gen_client_order_id()) <= 36
 
     def test_starts_with_namespace(self):
-        assert BinanceGateway._gen_client_order_id().startswith("yiagents-")
+        assert BinanceGateway._gen_client_order_id().startswith("yialpha-")
 
 
 class TestMalformedMainnetEnvFailsClosed:
-    """A malformed ``YIAGENTS_EXECUTION_MAINNET`` must not raise from ``connect``."""
+    """A malformed ``YIALPHA_EXECUTION_MAINNET`` must not raise from ``connect``."""
 
     def test_garbage_mainnet_env_does_not_raise(self, monkeypatch):
         monkeypatch.setenv(_ENV_ENABLED, "true")
         monkeypatch.setenv(_ENV_KEY, "k")
         monkeypatch.setenv(_ENV_SECRET, "s")
-        monkeypatch.setenv("YIAGENTS_EXECUTION_MAINNET", "garbage")
+        monkeypatch.setenv("YIALPHA_EXECUTION_MAINNET", "garbage")
         gw = BinanceGateway()
         gw._build_client = MagicMock(return_value="FAKE_CLIENT")  # avoid SDK import
         # Pre-fix this raised ValueError from _coerce_bool_env.
@@ -798,7 +798,7 @@ class TestMalformedMainnetEnvFailsClosed:
         monkeypatch.setenv(_ENV_ENABLED, "true")
         monkeypatch.setenv(_ENV_KEY, "k")
         monkeypatch.setenv(_ENV_SECRET, "s")
-        monkeypatch.setenv("YIAGENTS_EXECUTION_MAINNET", "not-a-bool")
+        monkeypatch.setenv("YIALPHA_EXECUTION_MAINNET", "not-a-bool")
         gw = BinanceGateway(setting={"mainnet": True})
         gw._build_client = MagicMock(return_value="FAKE_CLIENT")
         gw.connect()
@@ -881,7 +881,7 @@ def _filters(tick="0.01", step="0.001", min_qty="0.001", max_qty="0",
              min_notional="0"):
     from decimal import Decimal
 
-    from yiagents.dataflows.binance_filters import SymbolFilters
+    from yialpha.dataflows.binance_filters import SymbolFilters
 
     def factory(symbol, venue):  # noqa: ARG001
         return SymbolFilters(
@@ -897,7 +897,7 @@ def _filters(tick="0.01", step="0.001", min_qty="0.001", max_qty="0",
 
 class TestExchangeRuleGates:
     def test_quantity_floored_to_step_and_price_to_tick(self, monkeypatch):
-        import yiagents.execution.binance_gateway as gw_mod
+        import yialpha.execution.binance_gateway as gw_mod
 
         gw = _perp_gw_with_client()
         gw._client.rest_api.new_order.return_value = _FakeResp(
@@ -913,7 +913,7 @@ class TestExchangeRuleGates:
         assert kw["price"] == 60000.4   # nearest tick
 
     def test_below_min_notional_rejected(self, monkeypatch):
-        import yiagents.execution.binance_gateway as gw_mod
+        import yialpha.execution.binance_gateway as gw_mod
 
         gw = _perp_gw_with_client()
         monkeypatch.setattr(
@@ -926,7 +926,7 @@ class TestExchangeRuleGates:
         gw._client.rest_api.new_order.assert_not_called()
 
     def test_exchangeinfo_unavailable_rejects_fail_closed(self, monkeypatch):
-        import yiagents.execution.binance_gateway as gw_mod
+        import yialpha.execution.binance_gateway as gw_mod
 
         def boom(symbol, venue):
             raise RuntimeError("exchangeInfo down")
@@ -938,7 +938,7 @@ class TestExchangeRuleGates:
         gw._client.rest_api.new_order.assert_not_called()
 
     def test_optin_leverage_set_once_per_symbol(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_EXECUTION_LEVERAGE", "3")
+        monkeypatch.setenv("YIALPHA_EXECUTION_LEVERAGE", "3")
         gw = _perp_gw_with_client()
         gw._client.rest_api.new_order.return_value = _FakeResp(
             {"status": "FILLED", "orderId": 1, "executedQty": "0.5",
@@ -951,7 +951,7 @@ class TestExchangeRuleGates:
         )
 
     def test_leverage_failure_rejects_fail_closed(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_EXECUTION_LEVERAGE", "3")
+        monkeypatch.setenv("YIALPHA_EXECUTION_LEVERAGE", "3")
         gw = _perp_gw_with_client()
         gw._client.rest_api.change_initial_leverage.side_effect = RuntimeError("nope")
         order = gw.send_order(_req())
@@ -1028,8 +1028,8 @@ class TestMarketNotionalAndStatusGates:
     def _restrictive_filters(monkeypatch, *, status="TRADING", min_notional="5"):
         from decimal import Decimal
 
-        import yiagents.execution.binance_gateway as gw_mod
-        from yiagents.dataflows.binance_filters import SymbolFilters
+        import yialpha.execution.binance_gateway as gw_mod
+        from yialpha.dataflows.binance_filters import SymbolFilters
 
         def _filters(symbol, venue):  # noqa: ARG001
             return SymbolFilters(
@@ -1049,7 +1049,7 @@ class TestMarketNotionalAndStatusGates:
         gw._client.rest_api.new_order.return_value = _FakeResp(
             {"status": "NEW", "orderId": 20, "executedQty": "0"}
         )
-        with caplog.at_level("WARNING", logger="yiagents.execution.binance_gateway"):
+        with caplog.at_level("WARNING", logger="yialpha.execution.binance_gateway"):
             order = gw.send_order(
                 _req(volume=2.0), reference_price=2.0,
             )
@@ -1085,7 +1085,7 @@ class TestMarketNotionalAndStatusGates:
     def test_non_trading_symbol_rejected_before_quantization(self, monkeypatch, caplog):
         self._restrictive_filters(monkeypatch, status="BREAK")
         gw = _perp_gw_with_client()
-        with caplog.at_level("WARNING", logger="yiagents.execution.binance_gateway"):
+        with caplog.at_level("WARNING", logger="yialpha.execution.binance_gateway"):
             order = gw.send_order(_req(volume=3.0), reference_price=60_000.0)
         assert order.status is Status.REJECTED
         assert "not trading" in caplog.text

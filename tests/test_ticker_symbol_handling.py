@@ -2,8 +2,8 @@ import unittest
 
 import pytest
 
-from yiagents.agents.utils.agent_utils import build_instrument_context
-from yiagents.cli.utils import normalize_ticker_symbol
+from yialpha.agents.utils.agent_utils import build_instrument_context
+from yialpha.cli.utils import normalize_ticker_symbol
 
 
 @pytest.mark.unit
@@ -20,7 +20,7 @@ class TickerSymbolHandlingTests(unittest.TestCase):
         # Regression: cli/main.py had a duplicate get_ticker with an empty
         # questionary prompt (rendered as a bare "?") that shadowed the
         # descriptive one in cli/utils. Keep a single canonical definition.
-        from yiagents.cli import main, utils
+        from yialpha.cli import main, utils
         self.assertIs(main.get_ticker, utils.get_ticker)
 
 

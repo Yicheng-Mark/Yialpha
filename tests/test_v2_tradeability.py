@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.risk.cost_model import CostEstimate
-from yiagents.risk.tradeability import (
+from yialpha.risk.cost_model import CostEstimate
+from yialpha.risk.tradeability import (
     REASON_CRITICAL_MISSING,
     REASON_DATA_INVALID,
     REASON_EDGE,

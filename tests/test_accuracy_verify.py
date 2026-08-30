@@ -1,4 +1,4 @@
-"""Tests for the rating↔outcome verification loop (yiagents/accuracy).
+"""Tests for the rating↔outcome verification loop (yialpha/accuracy).
 
 Covers the history scan, asset routing, forward-outcome scoring, aggregate
 report + markdown, the artifact write, the extracted memory-resolution core,
@@ -16,8 +16,8 @@ from fastapi.testclient import TestClient
 
 from web import runner, store
 from web.app import app as web_app
-from yiagents import accuracy
-from yiagents.accuracy import DecisionRecord
+from yialpha import accuracy
+from yialpha.accuracy import DecisionRecord
 
 
 @pytest.fixture()
@@ -35,7 +35,7 @@ def _write_log(
     asset_type: str | None = None, price: float | None = None,
     basis: str | None = None,
 ) -> None:
-    d = root / ticker / "YiAgentsStrategy_logs"
+    d = root / ticker / "YiAlphaStrategy_logs"
     d.mkdir(parents=True, exist_ok=True)
     entry = {
         "company_of_interest": ticker,
@@ -63,7 +63,7 @@ def history(tmp_path):
     _write_log(tmp_path, "BTCUSDT", "2026-01-05", pm_rating="Rating: Hold",
                asset_type="crypto_perp", price=42000.0)
     # Unreadable file must be skipped, not fatal.
-    bad = tmp_path / "ZZZZ" / "YiAgentsStrategy_logs"
+    bad = tmp_path / "ZZZZ" / "YiAlphaStrategy_logs"
     bad.mkdir(parents=True, exist_ok=True)
     (bad / "full_states_log_2026-01-05.json").write_text("{not json", encoding="utf-8")
     return tmp_path
@@ -188,7 +188,7 @@ def test_verify_history_writes_artifacts(history, monkeypatch):
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 def test_fetch_returns_yf_cutoff_and_math(monkeypatch):
-    import yiagents.accuracy as acc
+    import yialpha.accuracy as acc
 
     closes = pd.DataFrame(
         {"Close": [100.0, 110.0, 121.0]},
@@ -203,10 +203,10 @@ def test_fetch_returns_yf_cutoff_and_math(monkeypatch):
         return bench if symbol == "SPY" else closes
 
     monkeypatch.setattr(
-        "yiagents.dataflows.y_finance.get_YFin_history_cached", fake_history
+        "yialpha.dataflows.y_finance.get_YFin_history_cached", fake_history
     )
     monkeypatch.setattr(
-        "yiagents.dataflows.symbol_utils.normalize_symbol", lambda s: s
+        "yialpha.dataflows.symbol_utils.normalize_symbol", lambda s: s
     )
 
     raw, alpha, days = acc.fetch_returns_yf("AAPL", "2026-01-05", "SPY", holding_days=2)
@@ -227,7 +227,7 @@ def test_fetch_returns_yf_cutoff_and_math(monkeypatch):
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 def test_resolve_pending_entries(monkeypatch, caplog):
-    from yiagents.graph import memory_resolution as mr
+    from yialpha.graph import memory_resolution as mr
 
     class FakeMemoryLog:
         def get_pending_entries(self):
@@ -295,4 +295,4 @@ def test_api_accuracy_unavailable_is_honest(client, monkeypatch, tmp_path):
     monkeypatch.setattr(store, "LOGS_ROOT", tmp_path)  # no artifact on disk
     body = client.get("/api/accuracy").json()
     assert body["available"] is False
-    assert body["hint"] == "yiagents verify-history"
+    assert body["hint"] == "yialpha verify-history"

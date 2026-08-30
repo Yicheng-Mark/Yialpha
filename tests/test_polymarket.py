@@ -13,8 +13,8 @@ from unittest import mock
 import pytest
 import requests
 
-from yiagents.dataflows import interface, polymarket
-from yiagents.dataflows.config import reset_config, set_config
+from yialpha.dataflows import interface, polymarket
+from yialpha.dataflows.config import reset_config, set_config
 
 
 def _market(question, prob, *, volume, end_date, closed=False, wk=None):
@@ -107,7 +107,7 @@ class PolymarketResilienceTests(unittest.TestCase):
         """Through the router, the propagated error becomes the optional-
         category DATA_UNAVAILABLE sentinel + a KIND_OPTIONAL_UNAVAILABLE
         data-quality event (previously the swallowed prose lost the evidence)."""
-        from yiagents.dataflows import quality
+        from yialpha.dataflows import quality
 
         quality.ensure_run_context()
         try:

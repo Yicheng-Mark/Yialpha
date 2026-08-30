@@ -5,12 +5,12 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from yiagents.agents.managers.portfolio_manager import create_portfolio_manager
-from yiagents.agents.schemas import PortfolioDecision, PortfolioRating
-from yiagents.agents.utils.memory import TradingMemoryLog
-from yiagents.graph.propagation import Propagator
-from yiagents.graph.reflection import Reflector
-from yiagents.graph.trading_graph import YiAgentsGraph
+from yialpha.agents.managers.portfolio_manager import create_portfolio_manager
+from yialpha.agents.schemas import PortfolioDecision, PortfolioRating
+from yialpha.agents.utils.memory import TradingMemoryLog
+from yialpha.graph.propagation import Propagator
+from yialpha.graph.reflection import Reflector
+from yialpha.graph.trading_graph import YiAlphaGraph
 
 _SEP = TradingMemoryLog._SEPARATOR
 
@@ -524,55 +524,55 @@ class TestDeferredReflection:
         assert "-5.0%" in human_content
         assert "Exit position immediately." in human_content
 
-    # YiAgentsGraph._fetch_returns
+    # YiAlphaGraph._fetch_returns
 
     def test_fetch_returns_valid_ticker(self):
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         spy_prices   = [400.0, 402.0, 404.0, 403.0, 405.0, 406.0]
-        mock_graph = MagicMock(spec=YiAgentsGraph)
+        mock_graph = MagicMock(spec=YiAlphaGraph)
         with patch("yfinance.Ticker") as mock_ticker_cls:
             def _make_ticker(sym):
                 m = MagicMock()
                 m.history.return_value = _price_df(spy_prices if sym == "SPY" else stock_prices)
                 return m
             mock_ticker_cls.side_effect = _make_ticker
-            raw, alpha, days = YiAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-01-05")
+            raw, alpha, days = YiAlphaGraph._fetch_returns(mock_graph, "NVDA", "2026-01-05")
         assert raw is not None and alpha is not None and days is not None
         assert isinstance(raw, float) and isinstance(alpha, float) and isinstance(days, int)
         assert days == 5
 
     def test_fetch_returns_too_recent(self):
         """Only 1 data point available → returns (None, None, None), no crash."""
-        mock_graph = MagicMock(spec=YiAgentsGraph)
+        mock_graph = MagicMock(spec=YiAlphaGraph)
         with patch("yfinance.Ticker") as mock_ticker_cls:
             m = MagicMock()
             m.history.return_value = _price_df([100.0])
             mock_ticker_cls.return_value = m
-            raw, alpha, days = YiAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-04-19")
+            raw, alpha, days = YiAlphaGraph._fetch_returns(mock_graph, "NVDA", "2026-04-19")
         assert raw is None and alpha is None and days is None
 
     def test_fetch_returns_delisted(self):
         """Empty DataFrame → returns (None, None, None), no crash."""
-        mock_graph = MagicMock(spec=YiAgentsGraph)
+        mock_graph = MagicMock(spec=YiAlphaGraph)
         with patch("yfinance.Ticker") as mock_ticker_cls:
             m = MagicMock()
             m.history.return_value = pd.DataFrame({"Close": []})
             mock_ticker_cls.return_value = m
-            raw, alpha, days = YiAgentsGraph._fetch_returns(mock_graph, "XXXXXFAKE", "2026-01-10")
+            raw, alpha, days = YiAlphaGraph._fetch_returns(mock_graph, "XXXXXFAKE", "2026-01-10")
         assert raw is None and alpha is None and days is None
 
     def test_fetch_returns_spy_shorter_than_stock(self):
         """SPY having fewer rows than the stock must not raise IndexError."""
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         spy_prices   = [400.0, 402.0, 403.0]
-        mock_graph = MagicMock(spec=YiAgentsGraph)
+        mock_graph = MagicMock(spec=YiAlphaGraph)
         with patch("yfinance.Ticker") as mock_ticker_cls:
             def _make_ticker(sym):
                 m = MagicMock()
                 m.history.return_value = _price_df(spy_prices if sym == "SPY" else stock_prices)
                 return m
             mock_ticker_cls.side_effect = _make_ticker
-            raw, alpha, days = YiAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-01-05")
+            raw, alpha, days = YiAlphaGraph._fetch_returns(mock_graph, "NVDA", "2026-01-05")
         assert raw is not None and alpha is not None and days is not None
         assert days == 2
 
@@ -594,7 +594,7 @@ class TestDeferredReflection:
                 return ticker
 
             mock_ticker_cls.side_effect = _make_ticker
-            raw, alpha, days = YiAgentsGraph._fetch_returns(
+            raw, alpha, days = YiAlphaGraph._fetch_returns(
                 None,
                 "NVDA",
                 "2020-01-02",
@@ -626,30 +626,30 @@ class TestDeferredReflection:
                 )
                 return m
             mock_ticker_cls.side_effect = _make_ticker
-            mock_graph = MagicMock(spec=YiAgentsGraph)
-            first = YiAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-01-05")
-            second = YiAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-01-05")
+            mock_graph = MagicMock(spec=YiAlphaGraph)
+            first = YiAlphaGraph._fetch_returns(mock_graph, "NVDA", "2026-01-05")
+            second = YiAlphaGraph._fetch_returns(mock_graph, "NVDA", "2026-01-05")
 
         assert first == second
         assert first[0] == pytest.approx(0.1)
         # One vendor construction per leg on the first call only.
         assert calls == ["NVDA", "SPY"]
 
-    # YiAgentsGraph._resolve_benchmark — picks index for alpha calc
+    # YiAlphaGraph._resolve_benchmark — picks index for alpha calc
 
     def test_resolve_benchmark_explicit_override(self):
         """config['benchmark_ticker'] wins for every ticker."""
-        mock_graph = MagicMock(spec=YiAgentsGraph)
+        mock_graph = MagicMock(spec=YiAlphaGraph)
         mock_graph.config = {
             "benchmark_ticker": "QQQ",
             "benchmark_map": {"": "SPY", ".T": "^N225"},
         }
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "7203.T") == "QQQ"
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "NVDA") == "QQQ"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "7203.T") == "QQQ"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "NVDA") == "QQQ"
 
     def test_resolve_benchmark_suffix_map(self):
         """Known suffixes route to their regional index."""
-        mock_graph = MagicMock(spec=YiAgentsGraph)
+        mock_graph = MagicMock(spec=YiAlphaGraph)
         mock_graph.config = {
             "benchmark_ticker": None,
             "benchmark_map": {
@@ -658,52 +658,52 @@ class TestDeferredReflection:
                 ".BO": "^BSESN", "": "SPY",
             },
         }
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "7203.T") == "^N225"
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "0700.HK") == "^HSI"
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "RELIANCE.NS") == "^NSEI"
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "AZN.L") == "^FTSE"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "7203.T") == "^N225"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "0700.HK") == "^HSI"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "RELIANCE.NS") == "^NSEI"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "AZN.L") == "^FTSE"
 
     def test_resolve_benchmark_china_a_shares(self):
         """A-share tickers route to their exchange composite (uses the real
         default benchmark_map, since A-share support relies on it)."""
-        from yiagents.default_config import DEFAULT_CONFIG
-        mock_graph = MagicMock(spec=YiAgentsGraph)
+        from yialpha.default_config import DEFAULT_CONFIG
+        mock_graph = MagicMock(spec=YiAlphaGraph)
         mock_graph.config = {"benchmark_ticker": None,
                              "benchmark_map": DEFAULT_CONFIG["benchmark_map"]}
         # 2026-08-15: A-share benchmarks are CSI 300 (000300.SS) on both
         # .SS and .SZ — the investable cross-market index — instead of the
         # old SSE Composite / SZSE Component pair.
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "600519.SS") == "000300.SS"
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "000001.SZ") == "000300.SS"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "600519.SS") == "000300.SS"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "000001.SZ") == "000300.SS"
 
     def test_resolve_benchmark_us_ticker_defaults_to_spy(self):
         """US tickers (no dotted suffix) take the empty-suffix entry."""
-        mock_graph = MagicMock(spec=YiAgentsGraph)
+        mock_graph = MagicMock(spec=YiAlphaGraph)
         mock_graph.config = {
             "benchmark_ticker": None,
             "benchmark_map": {"": "SPY", ".T": "^N225"},
         }
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "NVDA") == "SPY"
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "AAPL") == "SPY"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "NVDA") == "SPY"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "AAPL") == "SPY"
 
     def test_resolve_benchmark_unknown_suffix_falls_back(self):
         """Unrecognised suffix (BRK.B, FAKE.XX) falls back to SPY."""
-        mock_graph = MagicMock(spec=YiAgentsGraph)
+        mock_graph = MagicMock(spec=YiAlphaGraph)
         mock_graph.config = {
             "benchmark_ticker": None,
             "benchmark_map": {"": "SPY", ".T": "^N225"},
         }
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "FAKE.XX") == "SPY"
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "BRK.B") == "SPY"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "FAKE.XX") == "SPY"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "BRK.B") == "SPY"
 
     def test_resolve_benchmark_case_insensitive(self):
         """Suffix matching is case-insensitive so 7203.t resolves like 7203.T."""
-        mock_graph = MagicMock(spec=YiAgentsGraph)
+        mock_graph = MagicMock(spec=YiAlphaGraph)
         mock_graph.config = {
             "benchmark_ticker": None,
             "benchmark_map": {".T": "^N225", "": "SPY"},
         }
-        assert YiAgentsGraph._resolve_benchmark(mock_graph, "7203.t") == "^N225"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "7203.t") == "^N225"
 
     def test_reflector_includes_benchmark_in_label(self):
         """benchmark_name appears in the prompt label, not 'SPY' hardcoded."""
@@ -735,13 +735,13 @@ class TestDeferredReflection:
         human_content = next(content for role, content in messages if role == "human")
         assert "Alpha vs SPY:" in human_content
 
-    # YiAgentsGraph._resolve_pending_entries
+    # YiAlphaGraph._resolve_pending_entries
 
     def test_resolve_skips_other_tickers(self, tmp_path, monkeypatch):
         """Pending AAPL entry is not resolved when the run is for NVDA."""
         log = make_log(tmp_path)
         log.store_decision("AAPL", "2026-01-10", DECISION_BUY)
-        mock_graph = MagicMock(spec=YiAgentsGraph)
+        mock_graph = MagicMock(spec=YiAlphaGraph)
         mock_graph.memory_log = log
         mock_graph.reflector = MagicMock()
         mock_graph._resolve_benchmark.return_value = "SPY"
@@ -749,8 +749,8 @@ class TestDeferredReflection:
         # accuracy.fetch_returns_yf — stub that seam (the graph's
         # _fetch_returns is itself a thin delegate to it now).
         fetch = MagicMock(return_value=(0.05, 0.02, 5))
-        monkeypatch.setattr("yiagents.accuracy.fetch_returns_yf", fetch)
-        YiAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
+        monkeypatch.setattr("yialpha.accuracy.fetch_returns_yf", fetch)
+        YiAlphaGraph._resolve_pending_entries(mock_graph, "NVDA")
         fetch.assert_not_called()
         assert len(log.get_pending_entries()) == 1
 
@@ -760,15 +760,15 @@ class TestDeferredReflection:
         log.store_decision("NVDA", "2026-01-05", DECISION_BUY)
         mock_reflector = MagicMock()
         mock_reflector.reflect_on_final_decision.return_value = "Momentum confirmed."
-        mock_graph = MagicMock(spec=YiAgentsGraph)
+        mock_graph = MagicMock(spec=YiAlphaGraph)
         mock_graph.memory_log = log
         mock_graph.reflector = mock_reflector
         mock_graph._resolve_benchmark.return_value = "SPY"
         monkeypatch.setattr(
-            "yiagents.accuracy.fetch_returns_yf",
+            "yialpha.accuracy.fetch_returns_yf",
             MagicMock(return_value=(0.05, 0.02, 5)),
         )
-        YiAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
+        YiAlphaGraph._resolve_pending_entries(mock_graph, "NVDA")
         assert log.get_pending_entries() == []
         entries = log.load_entries()
         assert len(entries) == 1
@@ -781,16 +781,16 @@ class TestDeferredReflection:
         log = make_log(tmp_path)
         log.store_decision("NVDA", "2020-01-02", DECISION_BUY)
         log.store_decision("NVDA", "2020-02-02", DECISION_BUY)
-        mock_graph = MagicMock(spec=YiAgentsGraph)
+        mock_graph = MagicMock(spec=YiAlphaGraph)
         mock_graph.memory_log = log
         mock_reflector = MagicMock()
         mock_reflector.reflect_on_final_decision.return_value = "Causal lesson."
         mock_graph.reflector = mock_reflector
         mock_graph._resolve_benchmark.return_value = "SPY"
         fetch = MagicMock(return_value=(0.05, 0.02, 5))
-        monkeypatch.setattr("yiagents.accuracy.fetch_returns_yf", fetch)
+        monkeypatch.setattr("yialpha.accuracy.fetch_returns_yf", fetch)
 
-        YiAgentsGraph._resolve_pending_entries(
+        YiAlphaGraph._resolve_pending_entries(
             mock_graph,
             "NVDA",
             as_of_date="2020-01-15",
@@ -959,17 +959,17 @@ class TestLegacyRemoval:
 
     def test_financial_situation_memory_removed(self):
         """FinancialSituationMemory must not be importable from the memory module."""
-        import yiagents.agents.utils.memory as m
+        import yialpha.agents.utils.memory as m
         assert not hasattr(m, "FinancialSituationMemory")
 
     def test_bm25_not_imported(self):
         """rank_bm25 must not be present in the memory module namespace."""
-        import yiagents.agents.utils.memory as m
+        import yialpha.agents.utils.memory as m
         assert not hasattr(m, "BM25Okapi")
 
     def test_reflect_and_remember_removed(self):
-        """YiAgentsGraph must not expose reflect_and_remember."""
-        assert not hasattr(YiAgentsGraph, "reflect_and_remember")
+        """YiAlphaGraph must not expose reflect_and_remember."""
+        assert not hasattr(YiAlphaGraph, "reflect_and_remember")
 
     def test_portfolio_manager_no_memory_param(self):
         """create_portfolio_manager accepts only llm; passing memory= raises TypeError."""
@@ -1015,9 +1015,9 @@ class TestLegacyRemoval:
         # Bind the real _run_graph so propagate's call to self._run_graph executes
         # the actual write path instead of the auto-MagicMock.
         mock_graph._run_graph = functools.partial(
-            YiAgentsGraph._run_graph, mock_graph
+            YiAlphaGraph._run_graph, mock_graph
         )
-        YiAgentsGraph.propagate(mock_graph, "NVDA", "2026-01-10")
+        YiAlphaGraph.propagate(mock_graph, "NVDA", "2026-01-10")
         entries = mock_graph.memory_log.load_entries()
         assert len(entries) == 1
         assert entries[0]["ticker"] == "NVDA"

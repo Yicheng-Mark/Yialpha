@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.backtest.ic`` (IC-based indicator pruning).
+"""Unit tests for ``yialpha.backtest.ic`` (IC-based indicator pruning).
 
 Pure numpy/pandas, no network, no LLM, scipy optional. Marked
 ``@pytest.mark.unit``.
@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from yiagents.backtest.ic import (
+from yialpha.backtest.ic import (
     build_ic_report,
     consecutive_below_threshold,
     information_coefficient,
@@ -134,7 +134,7 @@ def test_rolling_ic_vectorized_matches_per_window_reference():
     ties in factor and returns (exact average-rank fallback), a zero-variance
     stretch, and a window smaller than some gaps' valid-pair count.
     """
-    from yiagents.backtest.ic import information_coefficient
+    from yialpha.backtest.ic import information_coefficient
 
     rng = np.random.default_rng(42)
     n, window = 400, 30

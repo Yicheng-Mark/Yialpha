@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.graph.propagation.Propagator.create_initial_state``.
+"""Unit tests for ``yialpha.graph.propagation.Propagator.create_initial_state``.
 
 Pins the contract that the initial state carries every key that downstream
 nodes read via direct ``state[key]`` indexing. This matters for checkpoint
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.graph.propagation import Propagator
+from yialpha.graph.propagation import Propagator
 
 pytestmark = pytest.mark.unit
 

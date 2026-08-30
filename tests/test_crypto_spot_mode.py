@@ -15,13 +15,13 @@ from unittest import mock
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
-from yiagents.agents.analysts.market_analyst import create_market_analyst
-from yiagents.agents.utils.agent_utils import build_instrument_context
-from yiagents.cli.models import AnalystType, AssetType
-from yiagents.cli.utils import filter_analysts_for_asset_type
-from yiagents.dataflows import binance as binance_vendor
-from yiagents.dataflows.errors import NoMarketDataError
-from yiagents.dataflows.symbol_utils import (
+from yialpha.agents.analysts.market_analyst import create_market_analyst
+from yialpha.agents.utils.agent_utils import build_instrument_context
+from yialpha.cli.models import AnalystType, AssetType
+from yialpha.cli.utils import filter_analysts_for_asset_type
+from yialpha.dataflows import binance as binance_vendor
+from yialpha.dataflows.errors import NoMarketDataError
+from yialpha.dataflows.symbol_utils import (
     normalize_symbol,
     normalize_symbol_for_venue,
 )

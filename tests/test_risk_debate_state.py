@@ -11,7 +11,7 @@ decision the Portfolio Manager had already written until the PM ran again).
 """
 import unittest
 
-from yiagents.agents.utils.agent_utils import build_risk_debate_update
+from yialpha.agents.utils.agent_utils import build_risk_debate_update
 
 # A representative incoming state with every field populated distinctly.
 _BASE = {

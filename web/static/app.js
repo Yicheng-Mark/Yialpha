@@ -1,4 +1,4 @@
-// YiAgents SPA router. Vanilla JS, no framework, no build step.
+// YiAlpha SPA router. Vanilla JS, no framework, no build step.
 //
 // Routes (hash-based so the server only needs to serve index.html at "/"):
 //   #/                       ticker list (home, with client-side filter)
@@ -15,7 +15,7 @@
 // Agent markdown is rendered with marked.js and passed through the vendored
 // DOMPurify allowlist before insertion. The
 // report language itself follows the 🌐 toggle (window.lang() is sent on submit
-// and routed to the run_robust child via YIAGENTS_OUTPUT_LANGUAGE); there is no
+// and routed to the run_robust child via YIALPHA_OUTPUT_LANGUAGE); there is no
 // in-browser post-translation. Only static chrome goes through t() / data-i18n.
 //
 // Accessibility: interactive elements get a global :focus-visible ring (CSS),
@@ -748,7 +748,7 @@
           <div class="empty-icon" aria-hidden="true">🎯</div>
           <p class="empty-title">${t("accuracy_empty_title")}</p>
           <p class="empty-desc">${t("accuracy_empty")}</p>
-          <p><code>yiagents verify-history</code></p>
+          <p><code>yialpha verify-history</code></p>
         </div>`;
       return;
     }
@@ -978,7 +978,7 @@
 
   // ----------------------------- theme ------------------------------------
 
-  const THEME_KEY = "yiagents_theme";
+  const THEME_KEY = "yialpha_theme";
   const themeBtn = () => document.getElementById("theme-toggle");
 
   function currentTheme() {

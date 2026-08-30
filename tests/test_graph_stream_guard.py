@@ -8,7 +8,7 @@ non-telemetry ``invoke`` path are byte-identical to before.
 """
 import unittest
 
-from yiagents.graph.trading_graph import YiAgentsGraph
+from yialpha.graph.trading_graph import YiAlphaGraph
 
 
 class _NoChunkGraph:
@@ -50,14 +50,14 @@ class TestInvokeOrStreamGuard(unittest.TestCase):
         _NoChunkGraph.invoke_calls = 0  # reset shared class counter
         stub = _Stub(_NoChunkGraph(), telemetry=True)
         with self.assertRaises(RuntimeError):
-            YiAgentsGraph._invoke_or_stream(stub, {}, {})
+            YiAlphaGraph._invoke_or_stream(stub, {}, {})
         # The silent full-graph re-invoke (double billing) must NOT happen.
         self.assertEqual(_NoChunkGraph.invoke_calls, 0)
 
     def test_healthy_stream_returns_last_chunk(self):
         g = _HealthyStreamGraph()
         stub = _Stub(g, telemetry=True)
-        out = YiAgentsGraph._invoke_or_stream(stub, {}, {})
+        out = YiAlphaGraph._invoke_or_stream(stub, {}, {})
         # Last values chunk is the merged final state, exactly like invoke.
         self.assertEqual(out, {"a": 1, "b": 2})
         self.assertEqual(g.invoke_calls, 0)
@@ -68,7 +68,7 @@ class TestInvokeOrStreamGuard(unittest.TestCase):
         g = _NoChunkGraph()
         _NoChunkGraph.invoke_calls = 0
         stub = _Stub(g, telemetry=False)
-        out = YiAgentsGraph._invoke_or_stream(stub, {"x": 1}, {})
+        out = YiAlphaGraph._invoke_or_stream(stub, {"x": 1}, {})
         self.assertEqual(out, {"company_of_interest": "X"})
         self.assertEqual(_NoChunkGraph.invoke_calls, 1)
 

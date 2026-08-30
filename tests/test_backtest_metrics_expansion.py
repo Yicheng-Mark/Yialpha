@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from yiagents.backtest.metrics import (
+from yialpha.backtest.metrics import (
     BacktestMetrics,
     benchmark_comparison,
     compute_metrics,
@@ -103,8 +103,8 @@ class TestBenchmarkComparison:
 @pytest.mark.unit
 class TestBenchmarkMapCsi300:
     def test_a_share_suffixes_resolve_to_csi300(self):
-        from yiagents.dataflows.config import get_config
-        from yiagents.dataflows.market_regime import resolve_market_benchmark
+        from yialpha.dataflows.config import get_config
+        from yialpha.dataflows.market_regime import resolve_market_benchmark
 
         bmap = get_config()["benchmark_map"]
         assert bmap[".SS"] == "000300.SS"
@@ -126,7 +126,7 @@ class TestRelativeStrengthTool:
 
     @pytest.fixture()
     def patched(self, monkeypatch):
-        import yiagents.agents.utils.price_structure_tools as pst
+        import yialpha.agents.utils.price_structure_tools as pst
 
         # Ticker doubles over ~2y; benchmark up 20% over the same rows.
         n = 300
@@ -150,7 +150,7 @@ class TestRelativeStrengthTool:
         assert "improving" in out or "fading" in out
 
     def test_benchmark_unavailable_degrades_named(self, monkeypatch):
-        import yiagents.agents.utils.price_structure_tools as pst
+        import yialpha.agents.utils.price_structure_tools as pst
 
         n = 300
         ticker = self._frame(list(np.linspace(100, 200, n)))
@@ -169,7 +169,7 @@ class TestRelativeStrengthTool:
         assert "relative strength as unavailable" in out
 
     def test_ticker_failure_is_typed(self, monkeypatch):
-        import yiagents.agents.utils.price_structure_tools as pst
+        import yialpha.agents.utils.price_structure_tools as pst
 
         def boom(symbol, curr_date):
             raise RuntimeError("vendor down")
@@ -184,8 +184,8 @@ class TestRelativeStrengthTool:
 @pytest.mark.unit
 class TestReportRendersNewMetrics:
     def test_metric_rows_present(self):
-        from yiagents.backtest.engine import BacktestResult
-        from yiagents.backtest.report import render_backtest_report
+        from yialpha.backtest.engine import BacktestResult
+        from yialpha.backtest.report import render_backtest_report
 
         metrics = BacktestMetrics(
             total_return=0.2, cagr=0.2, volatility=0.1, sharpe=1.5,

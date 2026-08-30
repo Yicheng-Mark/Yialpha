@@ -5,9 +5,9 @@ stock), #982 (BTC-USDT accepted but unpriceable on Yahoo).
 """
 import pytest
 
-from yiagents.cli.models import AssetType
-from yiagents.cli.utils import detect_asset_type, is_valid_ticker_input, normalize_ticker_symbol
-from yiagents.dataflows.symbol_utils import normalize_symbol
+from yialpha.cli.models import AssetType
+from yialpha.cli.utils import detect_asset_type, is_valid_ticker_input, normalize_ticker_symbol
+from yialpha.dataflows.symbol_utils import normalize_symbol
 
 
 # --- #982: stablecoin-quoted crypto normalizes to Yahoo's -USD pair ---
@@ -69,15 +69,15 @@ def test_detect_asset_type(raw, expected):
 
 # --- interactive analyze: --asset-type override reaches perp runs ---------
 # crypto_perp is never auto-detected (BTCUSDT -> CRYPTO spot by design), so
-# the override is the ONLY way `yiagents analyze` reaches a perp run.
+# the override is the ONLY way `yialpha analyze` reaches a perp run.
 
 
 def _mock_interactive(monkeypatch):
     """Patch the interactive prompts; also record the asset_type handed to
     select_analysts so tests can assert the override/detection propagates
     into the analyst filter (the perp Fundamentals gating depends on it)."""
-    import yiagents.cli.main as cli_main
-    from yiagents.cli.models import AnalystType
+    import yialpha.cli.main as cli_main
+    from yialpha.cli.models import AnalystType
 
     seen = {}
 
@@ -96,9 +96,9 @@ def _mock_interactive(monkeypatch):
         lambda: ("deepseek", "https://api.deepseek.com"),
     )
     monkeypatch.setattr(cli_main, "ensure_api_key", lambda p: None)
-    monkeypatch.setenv("YIAGENTS_OUTPUT_LANGUAGE", "中文")
-    monkeypatch.setenv("YIAGENTS_QUICK_THINK_LLM", "deepseek-chat")
-    monkeypatch.setenv("YIAGENTS_DEEP_THINK_LLM", "deepseek-reasoner")
+    monkeypatch.setenv("YIALPHA_OUTPUT_LANGUAGE", "中文")
+    monkeypatch.setenv("YIALPHA_QUICK_THINK_LLM", "deepseek-chat")
+    monkeypatch.setenv("YIALPHA_DEEP_THINK_LLM", "deepseek-reasoner")
     return cli_main, seen
 
 

@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from langgraph.prebuilt import ToolNode
 
-from yiagents.graph.conditional_logic import ConditionalLogic
-from yiagents.graph.perf_telemetry import NodePerfTracker, wrap_node
-from yiagents.graph.setup import GraphSetup
+from yialpha.graph.conditional_logic import ConditionalLogic
+from yialpha.graph.perf_telemetry import NodePerfTracker, wrap_node
+from yialpha.graph.setup import GraphSetup
 
 
 def _make_setup(perf_tracker=None) -> GraphSetup:

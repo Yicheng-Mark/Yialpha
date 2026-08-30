@@ -5,8 +5,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-import yiagents.dataflows.market_data_validator as validator
-from yiagents.dataflows.errors import NoMarketDataError
+import yialpha.dataflows.market_data_validator as validator
+from yialpha.dataflows.errors import NoMarketDataError
 
 
 def _sample_ohlcv() -> pd.DataFrame:
@@ -80,7 +80,7 @@ class TestVerifiedSnapshot:
 @pytest.mark.unit
 class TestTool:
     def test_tool_delegates_to_builder(self, monkeypatch):
-        from yiagents.agents.utils.market_data_validation_tools import (
+        from yialpha.agents.utils.market_data_validation_tools import (
             get_verified_market_snapshot,
         )
         monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: _sample_ohlcv())

@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.dataflows.sec_ownership`` (Form 4 + FTD) and the
+"""Unit tests for ``yialpha.dataflows.sec_ownership`` (Form 4 + FTD) and the
 fundamentals-analyst wiring (Track B2).
 
 Hermetic: no network. The vendor paths are exercised by patching
@@ -23,10 +23,10 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
-from yiagents.agents.analysts.fundamentals_analyst import create_fundamentals_analyst
-from yiagents.dataflows import sec_ownership
-from yiagents.dataflows.errors import NoMarketDataError
-from yiagents.dataflows.sec_edgar import SecNoFileError
+from yialpha.agents.analysts.fundamentals_analyst import create_fundamentals_analyst
+from yialpha.dataflows import sec_ownership
+from yialpha.dataflows.errors import NoMarketDataError
+from yialpha.dataflows.sec_edgar import SecNoFileError
 
 
 # --------------------------------------------------------------------------- #
@@ -173,7 +173,7 @@ def test_form4_primary_document_with_path_prefix_caches_correctly(monkeypatch, t
     subdirectory, so the 90-day cache never hit and every call re-fetched.
     Exercises the real cached_or_fetch (only the transport is stubbed).
     """
-    from yiagents.dataflows import sec_edgar
+    from yialpha.dataflows import sec_edgar
 
     subs = (
         b'{"cik":320193,"filings":{"recent":{'
@@ -361,8 +361,8 @@ def test_ftd_row_date_gate(monkeypatch, tmp_path):
 @pytest.mark.unit
 def test_router_routes_form4_via_sec_edgar(monkeypatch, tmp_path):
     _patch_form4(monkeypatch, tmp_path)
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
 
     orig = cfgmod.get_config()
     try:
@@ -383,8 +383,8 @@ def test_router_optional_category_degrades_to_sentinel(monkeypatch, tmp_path):
     monkeypatch.setattr(sec_ownership, "_cik_for_ticker",
                         lambda t: (_ for _ in ()).throw(
                             NoMarketDataError(t, detail="US-listed only")))
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
 
     orig = cfgmod.get_config()
     try:
@@ -431,7 +431,7 @@ class FundamentalsWiringTests(unittest.TestCase):
     """B2 — default-off byte-equivalence + on-appends-two-tools."""
 
     def _tool_names(self, config_overrides=None):
-        from yiagents.dataflows import config as cfgmod
+        from yialpha.dataflows import config as cfgmod
         orig = cfgmod.get_config()
         try:
             if config_overrides:
@@ -641,7 +641,7 @@ def test_13f_row_malformed_filing_date_fail_closed(monkeypatch, tmp_path, caplog
         "00006B\tAPPLE INC\t037833100\tCOM\t99999\t999\tSH\t\tSOLE\t999\t0\t0"
     )
     _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
-    with caplog.at_level("DEBUG", logger="yiagents.dataflows.sec_ownership"):
+    with caplog.at_level("DEBUG", logger="yialpha.dataflows.sec_ownership"):
         out = sec_ownership.get_institutional_holdings("AAPL", "2024-06-15", 180)
     assert "EARLY CAPITAL" in out
     assert "GARBLED DATE CAPITAL" not in out   # PIT gate cannot be bypassed
@@ -662,7 +662,7 @@ def test_13f_row_missing_filing_date_fail_closed(monkeypatch, tmp_path, caplog):
         "00007B\tAPPLE INC\t037833100\tCOM\t88888\t888\tSH\t\tSOLE\t888\t0\t0"
     )
     _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
-    with caplog.at_level("DEBUG", logger="yiagents.dataflows.sec_ownership"):
+    with caplog.at_level("DEBUG", logger="yialpha.dataflows.sec_ownership"):
         out = sec_ownership.get_institutional_holdings("AAPL", "2024-06-15", 180)
     assert "EARLY CAPITAL" in out
     assert "NO DATE CAPITAL" not in out    # no as-of proof -> dropped
@@ -705,8 +705,8 @@ def test_router_routes_13f_via_sec_edgar(monkeypatch, tmp_path):
         "00005A\tAPPLE INC\t037833100\tCOM\t1000\t10\tSH\t\tSOLE\t10\t0\t0"
     )
     _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
 
     orig = cfgmod.get_config()
     try:
@@ -724,8 +724,8 @@ def test_13f_router_optional_category_degrades_to_sentinel(monkeypatch, tmp_path
     monkeypatch.setattr(sec_ownership, "_cik_for_ticker",
                         lambda t: (_ for _ in ()).throw(
                             NoMarketDataError(t, detail="US-listed only")))
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
 
     orig = cfgmod.get_config()
     try:

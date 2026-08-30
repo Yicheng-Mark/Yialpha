@@ -1,4 +1,4 @@
-"""Unit tests for the synchronous gateway base (yiagents.execution.gateway).
+"""Unit tests for the synchronous gateway base (yialpha.execution.gateway).
 
 Verifies the ABC contract (the six abstract methods are all required), the
 synchronous ``send_order -> OrderData`` seam, the inert no-op callbacks (which
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.execution.domain import (
+from yialpha.execution.domain import (
     AccountData,
     CancelRequest,
     Direction,
@@ -20,7 +20,7 @@ from yiagents.execution.domain import (
     OrderType,
     PositionData,
 )
-from yiagents.execution.gateway import BaseGateway
+from yialpha.execution.gateway import BaseGateway
 
 
 def _full_kwargs():
@@ -111,7 +111,7 @@ class TestCallbacksAreNoOps:
         order = OrderData(
             gateway_name="min", symbol="AAPL", exchange=Exchange.SMART, orderid="1"
         )
-        from yiagents.execution.domain import TradeData
+        from yialpha.execution.domain import TradeData
 
         trade = TradeData(
             gateway_name="min",

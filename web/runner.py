@@ -41,7 +41,7 @@ _LOG_TAIL_MAX = 50
 
 # UI language code -> config output_language value. English matches the config
 # default (get_language_instruction() then adds no prompt tokens). Used only to
-# set YIAGENTS_OUTPUT_LANGUAGE on the child env — run_robust's argv is untouched
+# set YIALPHA_OUTPUT_LANGUAGE on the child env — run_robust's argv is untouched
 # (byte-identical to a plain CLI run); default_config._apply_env_overrides
 # applies it in the child.
 _LANG_MAP = {"en": "English", "zh": "Chinese"}
@@ -150,7 +150,7 @@ async def spawn(ticker: str, date: str, asset_type: str, language: str = "en") -
     # Route the UI language to the child's output_language config so the
     # already-wired get_language_instruction() localizes every agent's report.
     # Env (not argv) so run_robust's cmd stays byte-identical to a plain CLI run.
-    env["YIAGENTS_OUTPUT_LANGUAGE"] = _LANG_MAP.get(language, "English")
+    env["YIALPHA_OUTPUT_LANGUAGE"] = _LANG_MAP.get(language, "English")
     cmd = _build_cmd(ticker, date, asset_type)
     try:
         proc = await asyncio.create_subprocess_exec(

@@ -5,9 +5,9 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from yiagents.backtest.engine import run_backtest
-from yiagents.backtest.report import render_backtest_report
-from yiagents.risk.manager import (
+from yialpha.backtest.engine import run_backtest
+from yialpha.backtest.report import render_backtest_report
+from yialpha.risk.manager import (
     PortfolioState,
     RiskDecision,
     RiskManager,

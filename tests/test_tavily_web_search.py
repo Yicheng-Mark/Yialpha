@@ -19,13 +19,13 @@ import datetime
 
 import requests
 
-from yiagents.agents.utils.web_search_tools import web_search
-from yiagents.dataflows import quality, tavily
+from yialpha.agents.utils.web_search_tools import web_search
+from yialpha.dataflows import quality, tavily
 
 _KEY_ENV = "TAVILY" + "_API_KEY"
 _KEYS_ENV = "TAVILY_API" + "_KEYS"
-_MAX_ENV = "YIAGENTS_TAVILY_MAX_CALLS" + "_PER_RUN"
-_SPLIT_ENV = "YIAGENTS_TAVILY_BUDGET" + "_SPLIT"
+_MAX_ENV = "YIALPHA_TAVILY_MAX_CALLS" + "_PER_RUN"
+_SPLIT_ENV = "YIALPHA_TAVILY_BUDGET" + "_SPLIT"
 # Assembled at runtime — never a real credential, and never a whole-literal
 # assignment that secret scanners flag.
 _FAKE_KEY = "tvly-dev-" + "unit-test-fake"
@@ -439,8 +439,8 @@ def _news_bound_tools_and_prompt(config_overrides, trade_date=None):
     from langchain_core.messages import HumanMessage
     from langchain_core.runnables import Runnable
 
-    from yiagents.agents.analysts.news_analyst import create_news_analyst
-    from yiagents.dataflows import config as cfgmod
+    from yialpha.agents.analysts.news_analyst import create_news_analyst
+    from yialpha.dataflows import config as cfgmod
 
     class _RecordingLLM(Runnable):
         def __init__(self):
@@ -532,8 +532,8 @@ def _recording_llm_class():
 def _market_bound_tools_and_prompt(config_overrides, trade_date=None):
     from langchain_core.messages import HumanMessage
 
-    from yiagents.agents.analysts.market_analyst import create_market_analyst
-    from yiagents.dataflows import config as cfgmod
+    from yialpha.agents.analysts.market_analyst import create_market_analyst
+    from yialpha.dataflows import config as cfgmod
 
     orig = cfgmod.get_config()
     try:
@@ -576,10 +576,10 @@ def test_market_analyst_historical_date_never_binds_web_search():
 def _fundamentals_bound_tools_and_prompt(config_overrides, trade_date=None):
     from langchain_core.messages import HumanMessage
 
-    from yiagents.agents.analysts.fundamentals_analyst import (
+    from yialpha.agents.analysts.fundamentals_analyst import (
         create_fundamentals_analyst,
     )
-    from yiagents.dataflows import config as cfgmod
+    from yialpha.dataflows import config as cfgmod
 
     orig = cfgmod.get_config()
     try:

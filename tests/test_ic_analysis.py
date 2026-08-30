@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from yiagents.backtest.ic import (
+from yialpha.backtest.ic import (
     factor_turnover,
     ic_decay,
     information_coefficient,

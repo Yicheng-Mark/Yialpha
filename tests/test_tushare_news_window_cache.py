@@ -15,8 +15,8 @@ from datetime import date, timedelta
 import pandas as pd
 import pytest
 
-from yiagents.dataflows import tushare_vendor as tv
-from yiagents.dataflows.errors import (
+from yialpha.dataflows import tushare_vendor as tv
+from yialpha.dataflows.errors import (
     NoMarketDataError,
     VendorError,
     VendorNotConfiguredError,
@@ -62,7 +62,7 @@ def _token(monkeypatch):
 @pytest.fixture(autouse=True)
 def _isolated_vendor_cache(monkeypatch, tmp_path):
     """Route the news disk cache into tmp_path — the REAL vendor_cache_dir
-    writes into the user's ~/.yiagents cache, so an unisolated run both
+    writes into the user's ~/.yialpha cache, so an unisolated run both
     pollutes it and becomes order-dependent across test invocations."""
 
     def _cache_dir(name: str) -> str:
@@ -189,7 +189,7 @@ def test_pro_handle_is_cached_per_token(monkeypatch):
 @pytest.mark.unit
 def test_missing_token_still_not_configured(monkeypatch):
     monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
-    from yiagents.dataflows import config as cfgmod
+    from yialpha.dataflows import config as cfgmod
     orig = cfgmod.get_config()
     try:
         cfgmod.set_config({**orig, "tushare_token": None})

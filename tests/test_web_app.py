@@ -105,7 +105,7 @@ def test_reports_root_created_on_startup_not_import(monkeypatch, tmp_path):
 
 
 def _write_state_log(root, ticker: str, day: str, rating_word: str) -> None:
-    d = root / ticker / "YiAgentsStrategy_logs"
+    d = root / ticker / "YiAlphaStrategy_logs"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"full_states_log_{day}.json").write_text(
         json.dumps({"final_trade_decision": f"**Rating**: {rating_word}"}),
@@ -140,7 +140,7 @@ def test_api_compare_aggregates_rating_series(client, monkeypatch, tmp_path):
 @pytest.mark.unit
 def test_api_compare_skips_ticker_with_only_unreadable_logs(client, monkeypatch, tmp_path):
     _write_state_log(tmp_path, "AAPL", "2026-06-01", "Buy")
-    bad = tmp_path / "CRASH" / "YiAgentsStrategy_logs"
+    bad = tmp_path / "CRASH" / "YiAlphaStrategy_logs"
     bad.mkdir(parents=True)
     (bad / "full_states_log_2026-06-01.json").write_text("{not json", encoding="utf-8")
     monkeypatch.setattr(store, "LOGS_ROOT", tmp_path)

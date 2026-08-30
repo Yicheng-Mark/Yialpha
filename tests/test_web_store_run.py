@@ -22,7 +22,7 @@ def logs_root(tmp_path, monkeypatch):
 
 
 def _write_log(root, date: str, extra_state: dict) -> None:
-    d = root / "AAPL" / "YiAgentsStrategy_logs"
+    d = root / "AAPL" / "YiAlphaStrategy_logs"
     d.mkdir(parents=True, exist_ok=True)
     state = {
         "company_of_interest": "AAPL",

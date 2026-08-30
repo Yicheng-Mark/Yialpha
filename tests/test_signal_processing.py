@@ -2,7 +2,7 @@
 
 The Portfolio Manager produces a typed PortfolioDecision via structured
 output and renders it to markdown that always contains a ``**Rating**: X``
-header.  The deterministic heuristic in ``yiagents.agents.utils.rating``
+header.  The deterministic heuristic in ``yialpha.agents.utils.rating``
 is therefore sufficient to extract the rating downstream — no second LLM
 call is needed — and SignalProcessor is now a thin adapter that delegates
 to it.
@@ -10,8 +10,8 @@ to it.
 
 import pytest
 
-from yiagents.agents.utils.rating import RATINGS_5_TIER, parse_rating
-from yiagents.graph.signal_processing import SignalProcessor
+from yialpha.agents.utils.rating import RATINGS_5_TIER, parse_rating
+from yialpha.graph.signal_processing import SignalProcessor
 
 # ---------------------------------------------------------------------------
 # Heuristic parser
@@ -64,7 +64,7 @@ class TestParseRating:
         """When warn_on_default=True, a fallback to default logs a warning."""
         import logging
 
-        with caplog.at_level(logging.WARNING, logger="yiagents.agents.utils.rating"):
+        with caplog.at_level(logging.WARNING, logger="yialpha.agents.utils.rating"):
             result = parse_rating("No rating here at all.", warn_on_default=True)
         assert result == "Hold"
         assert len(caplog.records) == 1
@@ -75,7 +75,7 @@ class TestParseRating:
         """Without warn_on_default, no warning is emitted (backwards compat)."""
         import logging
 
-        with caplog.at_level(logging.WARNING, logger="yiagents.agents.utils.rating"):
+        with caplog.at_level(logging.WARNING, logger="yialpha.agents.utils.rating"):
             parse_rating("No rating here at all.")
         assert len(caplog.records) == 0
 

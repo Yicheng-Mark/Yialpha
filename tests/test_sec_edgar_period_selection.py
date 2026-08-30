@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from yiagents.dataflows import sec_edgar
+from yialpha.dataflows import sec_edgar
 
 TICKERS_JSON = json.dumps({
     "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},

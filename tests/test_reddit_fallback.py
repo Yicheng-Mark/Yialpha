@@ -12,7 +12,7 @@ from urllib.error import HTTPError
 
 import pytest
 
-from yiagents.dataflows import reddit
+from yialpha.dataflows import reddit
 
 
 @pytest.fixture(autouse=True)

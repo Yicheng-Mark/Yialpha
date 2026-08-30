@@ -20,12 +20,12 @@
     --tickers      代码列表（nargs +），必填
     --date         分析日期 YYYY-MM-DD，必填
     --asset-type   stock | crypto | auto（auto=按首个 ticker 自动判定），默认 auto
-    --workers      并发数 K（池大小）；不传则用 YIAGENTS_BATCH_WORKERS（默认 3）
+    --workers      并发数 K（池大小）；不传则用 YIALPHA_BATCH_WORKERS（默认 3）
     --no-progress  关闭 tqdm 进度条
     --out          （可选）覆盖 results_dir
 
 注意：K 受 DeepSeek RPM / SOCKS5 代理并发上限 / 厂商限流约束。默认 K=3，先用
-小批测，确认无 429 风暴再放大。一键回滚串行：YIAGENTS_BATCH_CONCURRENCY=false。
+小批测，确认无 429 风暴再放大。一键回滚串行：YIALPHA_BATCH_CONCURRENCY=false。
 """
 
 from __future__ import annotations
@@ -48,11 +48,11 @@ for _stream in (sys.stdout, sys.stderr):
         with contextlib.suppress(AttributeError, ValueError):
             _reconfigure(encoding="utf-8", errors="replace")
 
-from yiagents.logging_config import setup_logging  # noqa: E402
+from yialpha.logging_config import setup_logging  # noqa: E402
 
 setup_logging()
 
-from yiagents.batch.runner import BatchRunner  # noqa: E402
+from yialpha.batch.runner import BatchRunner  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -73,7 +73,7 @@ def _parse_args() -> argparse.Namespace:
         "--workers",
         type=int,
         default=None,
-        help="并发数 K（不传则用 YIAGENTS_BATCH_WORKERS，默认 3）",
+        help="并发数 K（不传则用 YIALPHA_BATCH_WORKERS，默认 3）",
     )
     p.add_argument("--no-progress", action="store_true", help="关闭进度条")
     p.add_argument("--out", default=None, help="覆盖 results_dir")
@@ -84,10 +84,10 @@ def main() -> int:
     args = _parse_args()
 
     # Shared validation/config assembly (the single source both this script
-    # and `yiagents batch` agree on — the validation, worker-override and
+    # and `yialpha batch` agree on — the validation, worker-override and
     # config code that used to be duplicated here now lives in
-    # yiagents.batch.runner.prepare_batch_run).
-    from yiagents.batch.runner import (
+    # yialpha.batch.runner.prepare_batch_run).
+    from yialpha.batch.runner import (
         BatchInputError,
         batch_selected_analysts,
         prepare_batch_run,

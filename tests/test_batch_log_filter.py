@@ -2,7 +2,7 @@
 
 ``_TickerLogFilter`` was originally attached to the root *logger*, which
 Python's logging semantics never apply to records propagated up from child
-loggers — every ``yiagents.*`` module logs through its own child logger, so
+loggers — every ``yialpha.*`` module logs through its own child logger, so
 the "[TICKER]" tagging never fired in real concurrent batches. The filter now
 rides on the root logger's *handlers*, where propagated records do pass
 through it.
@@ -15,7 +15,7 @@ import threading
 
 import pytest
 
-from yiagents.batch.runner import BatchRunner
+from yialpha.batch.runner import BatchRunner
 
 
 class _ListHandler(logging.Handler):
@@ -30,7 +30,7 @@ class _ListHandler(logging.Handler):
 
 
 class _FakeGraph:
-    """Minimal stand-in for YiAgentsGraph used by BatchRunner."""
+    """Minimal stand-in for YiAlphaGraph used by BatchRunner."""
 
     def __init__(self, config):
         self.config = config
@@ -57,9 +57,9 @@ def isolated_root_handler():
 
 
 def _emit_child(message: str, *args) -> None:
-    # The realistic emission path: a yiagents.* child logger propagating to
+    # The realistic emission path: a yialpha.* child logger propagating to
     # the root handlers (what a worker thread's vendor/agent code does).
-    logging.getLogger("yiagents.dataflows.utils").info(message, *args)
+    logging.getLogger("yialpha.dataflows.utils").info(message, *args)
 
 
 @pytest.mark.unit
@@ -120,7 +120,7 @@ def test_two_runners_isolated_close(isolated_root_handler):
 def test_tagging_is_idempotent_per_record(isolated_root_handler):
     with BatchRunner({}, graph_factory=_FakeGraph, progress=False) as br:
         br._worker_ctx.ticker = "NVDA"
-        child = logging.getLogger("yiagents.agents.test")
+        child = logging.getLogger("yialpha.agents.test")
         child.info("once %s", "x")
 
     assert isolated_root_handler.records[0].getMessage() == "[NVDA] once x"

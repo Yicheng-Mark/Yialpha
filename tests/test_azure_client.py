@@ -1,4 +1,4 @@
-"""Tests for the Azure OpenAI client wrapper (yiagents/llm_clients/azure_client.py).
+"""Tests for the Azure OpenAI client wrapper (yialpha/llm_clients/azure_client.py).
 
 Azure keys on a *deployment name* created in the portal rather than a model id,
 and validate_model() always returns True (any deployed name is accepted). These
@@ -10,7 +10,7 @@ import warnings
 
 import pytest
 
-from yiagents.llm_clients import azure_client as mod
+from yialpha.llm_clients import azure_client as mod
 
 
 def _capture_kwargs(monkeypatch):

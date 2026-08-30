@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.graph.analyst_fanout``.
+"""Unit tests for ``yialpha.graph.analyst_fanout``.
 
 These tests exercise the per-analyst ``agent <-> tool <-> clear`` cluster
 (``build_analyst_subgraph``) and the parallel fan-out node
@@ -25,14 +25,14 @@ import unittest
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from yiagents.agents.utils.agent_utils import get_clear_placeholder_from_state
-from yiagents.dataflows.config import get_config, set_config
-from yiagents.graph.analyst_execution import build_analyst_execution_plan
-from yiagents.graph.analyst_fanout import (
+from yialpha.agents.utils.agent_utils import get_clear_placeholder_from_state
+from yialpha.dataflows.config import get_config, set_config
+from yialpha.graph.analyst_execution import build_analyst_execution_plan
+from yialpha.graph.analyst_fanout import (
     build_analyst_subgraph,
     create_analyst_fanout_node,
 )
-from yiagents.graph.conditional_logic import ConditionalLogic
+from yialpha.graph.conditional_logic import ConditionalLogic
 
 # ---------------------------------------------------------------------------
 # State + stub helpers
@@ -497,7 +497,7 @@ class TestSerialParallelPlaceholderEquivalence(unittest.TestCase):
     duplicate string is caught immediately."""
 
     def test_clear_node_and_fanout_share_one_builder(self):
-        from yiagents.agents.utils.agent_utils import (
+        from yialpha.agents.utils.agent_utils import (
             create_msg_delete,
             get_clear_placeholder_from_state,
         )

@@ -1,4 +1,4 @@
-// YiAgents ECharts integration — themed, offline, no CDN.
+// YiAlpha ECharts integration — themed, offline, no CDN.
 //
 // Reads CSS custom properties at draw time so charts follow the dual-theme
 // system automatically. All instances are tracked so theme switches and route

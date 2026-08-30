@@ -1,4 +1,4 @@
-"""C2 + C6 regressions for ``yiagents.graph.analyst_fanout``.
+"""C2 + C6 regressions for ``yialpha.graph.analyst_fanout``.
 
 C2 — recursion-budget parity: the per-analyst subgraph budget must be derived
 from the serial whole-graph budget (``max_recur_limit``), not a fixed constant,
@@ -19,14 +19,14 @@ import threading
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from yiagents.dataflows.config import set_config
-from yiagents.graph.analyst_execution import build_analyst_execution_plan
-from yiagents.graph.analyst_fanout import (
+from yialpha.dataflows.config import set_config
+from yialpha.graph.analyst_execution import build_analyst_execution_plan
+from yialpha.graph.analyst_fanout import (
     create_analyst_fanout_node,
     derive_subgraph_recursion_limit,
 )
-from yiagents.graph.conditional_logic import ConditionalLogic
-from yiagents.graph.perf_telemetry import NodePerfTracker
+from yialpha.graph.conditional_logic import ConditionalLogic
+from yialpha.graph.perf_telemetry import NodePerfTracker
 
 # ---------------------------------------------------------------------------
 # Shared stub helpers (same shape as tests/test_analyst_fanout.py)

@@ -13,7 +13,7 @@ UNDERLYING US equity through the stock vendors. These tests pin:
   * the warm-call wiring at both perp-run entry points.
 
 Everything runs with ZERO network: the resolver never fetches by design
-(:func:`yiagents.dataflows.binance.equity_perp_bases` is cache-or-seed), and
+(:func:`yialpha.dataflows.binance.equity_perp_bases` is cache-or-seed), and
 the one fetch path (:func:`warm_equity_perp_bases`) is tested behind a mocked
 ``_http_get``.
 """
@@ -25,12 +25,12 @@ from unittest import mock
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
-from yiagents.agents.analysts.fundamentals_analyst import create_fundamentals_analyst
-from yiagents.agents.utils.agent_utils import build_instrument_context
-from yiagents.cli.models import AnalystType, AssetType
-from yiagents.cli.utils import filter_analysts_for_asset_type
-from yiagents.dataflows import binance as bn
-from yiagents.dataflows.symbol_utils import (
+from yialpha.agents.analysts.fundamentals_analyst import create_fundamentals_analyst
+from yialpha.agents.utils.agent_utils import build_instrument_context
+from yialpha.cli.models import AnalystType, AssetType
+from yialpha.cli.utils import filter_analysts_for_asset_type
+from yialpha.dataflows import binance as bn
+from yialpha.dataflows.symbol_utils import (
     _EQUITY_PERP_SEED_BASES,
     tokenized_stock_perp_underlying,
 )
@@ -140,7 +140,7 @@ class EquityPerpBasesCacheTests(unittest.TestCase):
                 bn, "_http_get",
                 side_effect=bn.NoMarketDataError("EQUITY_PERP_BASES", "EQUITY_PERP_BASES", "boom"),
             ),
-            self.assertLogs("yiagents.dataflows.binance", level="WARNING"),
+            self.assertLogs("yialpha.dataflows.binance", level="WARNING"),
         ):
             bases = bn.warm_equity_perp_bases()
         self.assertEqual(bases, _EQUITY_PERP_SEED_BASES)
@@ -150,7 +150,7 @@ class EquityPerpBasesCacheTests(unittest.TestCase):
         # A 200 with zero EQUITY rows must not silently disable the analyst.
         with (
             mock.patch.object(bn, "_http_get", return_value={"symbols": []}),
-            self.assertLogs("yiagents.dataflows.binance", level="WARNING"),
+            self.assertLogs("yialpha.dataflows.binance", level="WARNING"),
         ):
             bases = bn.warm_equity_perp_bases()
         self.assertEqual(bases, _EQUITY_PERP_SEED_BASES)
@@ -240,7 +240,7 @@ class FundamentalsToolRemapTests(unittest.TestCase):
         return calls, fake_route
 
     def test_core_four_remap_equity_perp_to_underlying(self):
-        import yiagents.agents.utils.fundamental_data_tools as fdt
+        import yialpha.agents.utils.fundamental_data_tools as fdt
 
         calls, fake = self._record(fdt)
         with mock.patch.object(fdt, "route_to_vendor", side_effect=fake):
@@ -255,7 +255,7 @@ class FundamentalsToolRemapTests(unittest.TestCase):
         )
 
     def test_core_four_pass_through_non_perp_symbols(self):
-        import yiagents.agents.utils.fundamental_data_tools as fdt
+        import yialpha.agents.utils.fundamental_data_tools as fdt
 
         calls, fake = self._record(fdt)
         with mock.patch.object(fdt, "route_to_vendor", side_effect=fake):
@@ -264,7 +264,7 @@ class FundamentalsToolRemapTests(unittest.TestCase):
         self.assertEqual([c[1][0] for c in calls], ["AAPL", "BTCUSDT"])
 
     def test_sec_ownership_trio_remaps(self):
-        import yiagents.agents.utils.sec_ownership_tools as sot
+        import yialpha.agents.utils.sec_ownership_tools as sot
 
         calls, fake = self._record(sot)
         with mock.patch.object(sot, "route_to_vendor", side_effect=fake):
@@ -320,7 +320,7 @@ class ResolveInstrumentContextStockPerpTests(unittest.TestCase):
     """Identity resolution anchors on the UNDERLYING ticker for equity perps."""
 
     def _resolve(self, ticker, asset_type):
-        import yiagents.graph.trading_graph as tg
+        import yialpha.graph.trading_graph as tg
 
         identity_calls = []
 
@@ -329,7 +329,7 @@ class ResolveInstrumentContextStockPerpTests(unittest.TestCase):
             return {}
 
         with mock.patch.object(tg, "resolve_instrument_identity", side_effect=fake_identity):
-            ctx = tg.YiAgentsGraph.resolve_instrument_context(
+            ctx = tg.YiAlphaGraph.resolve_instrument_context(
                 None, ticker, asset_type, "2026-08-17"
             )
         return identity_calls, ctx
@@ -375,7 +375,7 @@ class FundamentalsStockPerpNudgeTests(unittest.TestCase):
     """The nudge fires ONLY on a crypto_perp run with an equity underlying."""
 
     def _system_message(self, state):
-        from yiagents.dataflows import config as cfgmod
+        from yialpha.dataflows import config as cfgmod
 
         orig = cfgmod.get_config()
         try:
@@ -407,11 +407,11 @@ class WarmWiringGuardTests(unittest.TestCase):
     ROOT = Path(__file__).resolve().parents[1]
 
     def test_cli_selection_warms_before_filter(self):
-        src = (self.ROOT / "yiagents" / "cli" / "main.py").read_text(encoding="utf-8")
+        src = (self.ROOT / "yialpha" / "cli" / "main.py").read_text(encoding="utf-8")
         self.assertIn("warm_equity_perp_bases()", src)
 
     def test_graph_propagate_warms_for_perp_runs(self):
-        src = (self.ROOT / "yiagents" / "graph" / "trading_graph.py").read_text(encoding="utf-8")
+        src = (self.ROOT / "yialpha" / "graph" / "trading_graph.py").read_text(encoding="utf-8")
         self.assertIn("warm_equity_perp_bases()", src)
 
 

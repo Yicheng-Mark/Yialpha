@@ -1,4 +1,4 @@
-"""Unit tests for the market turbulence signal (yiagents.dataflows.market_regime)
+"""Unit tests for the market turbulence signal (yialpha.dataflows.market_regime)
 and its opt-in wiring into the conservative risk debater.
 
 Covers: benchmark resolution, the single-asset turbulence computation
@@ -15,9 +15,9 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-import yiagents.agents.risk_mgmt.conservative_debator as cd
-import yiagents.dataflows.market_regime as mr
-from yiagents.dataflows.market_regime import (
+import yialpha.agents.risk_mgmt.conservative_debator as cd
+import yialpha.dataflows.market_regime as mr
+from yialpha.dataflows.market_regime import (
     compute_turbulence,
     resolve_market_benchmark,
 )

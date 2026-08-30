@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.execution import browser_broker as bb
-from yiagents.execution.browser_broker import (
+from yialpha.execution import browser_broker as bb
+from yialpha.execution.browser_broker import (
     BrowserBroker,
     KillSwitch,
     LiveExecutionSwitch,
@@ -26,9 +26,9 @@ from yiagents.execution.browser_broker import (
 
 @pytest.fixture(autouse=True)
 def _arm_live_policy_for_existing_gate_tests(monkeypatch):
-    monkeypatch.setenv("YIAGENTS_ANALYSIS_ONLY", "false")
-    monkeypatch.setenv("YIAGENTS_LIVE_EXECUTION_ENABLED", "true")
-    monkeypatch.setenv("YIAGENTS_EXECUTION_ENABLED", "true")
+    monkeypatch.setenv("YIALPHA_ANALYSIS_ONLY", "false")
+    monkeypatch.setenv("YIALPHA_LIVE_EXECUTION_ENABLED", "true")
+    monkeypatch.setenv("YIALPHA_EXECUTION_ENABLED", "true")
 
 # ---------------------------------------------------------------------------
 # Enum round-tripping
@@ -89,23 +89,23 @@ class TestCoerceBoolEnv:
 @pytest.mark.unit
 class TestKillSwitch:
     def test_unset_is_not_halted(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         assert KillSwitch.is_halted() is False
         assert "unset" in KillSwitch.reason().lower()
 
     def test_truthy_values_halt(self, monkeypatch):
         for v in ("true", "1", "yes", "on"):
-            monkeypatch.setenv("YIAGENTS_KILL_SWITCH", v)
+            monkeypatch.setenv("YIALPHA_KILL_SWITCH", v)
             assert KillSwitch.is_halted() is True, v
 
     def test_falsy_values_allow(self, monkeypatch):
         for v in ("false", "0", "no", "off"):
-            monkeypatch.setenv("YIAGENTS_KILL_SWITCH", v)
+            monkeypatch.setenv("YIALPHA_KILL_SWITCH", v)
             assert KillSwitch.is_halted() is False, v
 
     def test_malformed_is_treated_as_halted(self, monkeypatch):
         # Fail-closed: a typo must not silently re-enable trading.
-        monkeypatch.setenv("YIAGENTS_KILL_SWITCH", "treu")
+        monkeypatch.setenv("YIALPHA_KILL_SWITCH", "treu")
         assert KillSwitch.is_halted() is True
         assert "halted" in KillSwitch.reason().lower()
 
@@ -116,18 +116,18 @@ class TestLiveExecutionSwitch:
         assert LiveExecutionSwitch.is_enabled() is True
 
     def test_analysis_only_default_fails_closed(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_ANALYSIS_ONLY", raising=False)
+        monkeypatch.delenv("YIALPHA_ANALYSIS_ONLY", raising=False)
         assert LiveExecutionSwitch.is_enabled() is False
 
     def test_malformed_analysis_only_fails_closed(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_ANALYSIS_ONLY", "maybe")
+        monkeypatch.setenv("YIALPHA_ANALYSIS_ONLY", "maybe")
         assert LiveExecutionSwitch.is_enabled() is False
 
     def test_each_enable_switch_is_required(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_LIVE_EXECUTION_ENABLED", raising=False)
+        monkeypatch.delenv("YIALPHA_LIVE_EXECUTION_ENABLED", raising=False)
         assert LiveExecutionSwitch.is_enabled() is False
-        monkeypatch.setenv("YIAGENTS_LIVE_EXECUTION_ENABLED", "true")
-        monkeypatch.delenv("YIAGENTS_EXECUTION_ENABLED", raising=False)
+        monkeypatch.setenv("YIALPHA_LIVE_EXECUTION_ENABLED", "true")
+        monkeypatch.delenv("YIALPHA_EXECUTION_ENABLED", raising=False)
         assert LiveExecutionSwitch.is_enabled() is False
 
 
@@ -146,14 +146,14 @@ class TestPlaceOrderGates:
     def test_kill_switch_on_blocks_before_anything(self, monkeypatch):
         # Kill switch on MUST block even with an invalid size and no playwright,
         # proving gate 1 short-circuits before later gates.
-        monkeypatch.setenv("YIAGENTS_KILL_SWITCH", "true")
+        monkeypatch.setenv("YIALPHA_KILL_SWITCH", "true")
         broker = BrowserBroker(order_page_url="https://broker.example/order")
         result = broker.place_order("AAPL", "buy", size=-5.0)
         assert result.status is OrderStatus.BLOCKED_KILL_SWITCH
         assert result.submitted is False
 
     def test_kill_switch_on_submitted_false(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_KILL_SWITCH", "1")
+        monkeypatch.setenv("YIALPHA_KILL_SWITCH", "1")
         broker = BrowserBroker()
         result = broker.place_order("AAPL", OrderAction.BUY, size=10.0)
         assert result.status is OrderStatus.BLOCKED_KILL_SWITCH
@@ -161,7 +161,7 @@ class TestPlaceOrderGates:
         assert "kill switch" in result.message.lower()
 
     def test_dry_run_default_no_playwright_no_url(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker()  # dry_run_default=True, order_page_url=None
         with pytest.MonkeyPatch().context() as m:
             m.setattr(bb.BrowserBroker, "_get_playwright", _no_playwright)
@@ -172,7 +172,7 @@ class TestPlaceOrderGates:
         assert result.preview_url is None
 
     def test_dry_run_default_no_playwright_with_url(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker(order_page_url="https://broker.example/order")
         with pytest.MonkeyPatch().context() as m:
             m.setattr(bb.BrowserBroker, "_get_playwright", _no_playwright)
@@ -183,7 +183,7 @@ class TestPlaceOrderGates:
         assert result.preview_url == "https://broker.example/order"
 
     def test_dry_run_false_playwright_missing_blocks(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker(order_page_url="https://broker.example/order")
         with pytest.MonkeyPatch().context() as m:
             m.setattr(bb.BrowserBroker, "_get_playwright", _no_playwright)
@@ -195,14 +195,14 @@ class TestPlaceOrderGates:
         assert "playwright" in result.message.lower()
 
     def test_live_order_blocked_by_analysis_only_before_browser(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_ANALYSIS_ONLY", "true")
+        monkeypatch.setenv("YIALPHA_ANALYSIS_ONLY", "true")
         broker = BrowserBroker(order_page_url="https://broker.example/order")
         result = broker.place_order("AAPL", "buy", size=10.0, dry_run=False)
         assert result.status is OrderStatus.BLOCKED_EXECUTION_POLICY
         assert result.submitted is False
 
     def test_dry_run_false_no_url_blocks(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker(order_page_url=None)
         # Even with playwright present, no URL => blocked (live path needs target).
         result = broker.place_order(
@@ -212,14 +212,14 @@ class TestPlaceOrderGates:
         assert result.submitted is False
 
     def test_size_zero_blocks_validation(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker()
         result = broker.place_order("AAPL", "buy", size=0.0)
         assert result.status is OrderStatus.BLOCKED_VALIDATION
         assert result.submitted is False
 
     def test_negative_size_blocks_validation(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker()
         result = broker.place_order("AAPL", "buy", size=-3.0)
         assert result.status is OrderStatus.BLOCKED_VALIDATION
@@ -228,7 +228,7 @@ class TestPlaceOrderGates:
     def test_size_exceeds_equity_cap_blocks(self, monkeypatch):
         # notional = 1000 shares * $100 = 100,000 on 10,000 equity
         # = 1000% > 1% cap.
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker(max_order_pct_of_equity=0.01)
         result = broker.place_order(
             "AAPL", "buy", size=1000.0, equity_value=10000.0,
@@ -242,7 +242,7 @@ class TestPlaceOrderGates:
         # notional = 50 shares * $10 = 500 on 100,000 equity = 0.5% <= 1%
         # cap => passes validation; dry-run default => DRY_RUN_PREVIEW
         # (proves we got past the equity gate).
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker(max_order_pct_of_equity=0.01, order_page_url="https://b.example/o")
         result = broker.place_order(
             "AAPL", "buy", size=50.0, equity_value=100000.0,
@@ -252,7 +252,7 @@ class TestPlaceOrderGates:
         assert result.submitted is False
 
     def test_invalid_equity_value_blocks(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker()
         result = broker.place_order(
             "AAPL", "buy", size=10.0, equity_value="not-a-number"
@@ -261,7 +261,7 @@ class TestPlaceOrderGates:
         assert result.submitted is False
 
     def test_zero_equity_blocks(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker()
         result = broker.place_order(
             "AAPL", "buy", size=10.0, equity_value=0.0
@@ -277,7 +277,7 @@ class TestPlaceOrderGates:
         The old shares/equity heuristic (100/100000 = 0.1%) let this pass a
         1% cap while the true notional exposure is 50%.
         """
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker(max_order_pct_of_equity=0.01)
         result = broker.place_order(
             "AAPL", "buy", size=100.0, equity_value=100_000.0,
@@ -289,7 +289,7 @@ class TestPlaceOrderGates:
 
     def test_missing_reference_price_fails_closed(self, monkeypatch):
         # equity_value without reference_price => notional unverifiable => block.
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker(max_order_pct_of_equity=0.01,
                                order_page_url="https://b.example/o")
         result = broker.place_order(
@@ -302,7 +302,7 @@ class TestPlaceOrderGates:
     def test_no_equity_value_skips_cap_entirely(self, monkeypatch):
         # Without equity_value the cap is not requested; the order proceeds
         # to the next gate (dry-run preview).
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker(order_page_url="https://b.example/o")
         result = broker.place_order(
             "AAPL", "buy", size=1_000_000.0,
@@ -311,7 +311,7 @@ class TestPlaceOrderGates:
         assert result.submitted is False
 
     def test_invalid_reference_price_blocks(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker()
         for bad_price in ("oops", 0.0, -5.0, float("nan"), float("inf")):
             result = broker.place_order(
@@ -322,7 +322,7 @@ class TestPlaceOrderGates:
             assert result.submitted is False, bad_price
 
     def test_pre_submit_validator_false_blocks(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker()
 
         def reject(ticker, action, size):
@@ -335,7 +335,7 @@ class TestPlaceOrderGates:
         assert result.submitted is False
 
     def test_pre_submit_validator_raising_blocks(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker()
 
         def explode(ticker, action, size):
@@ -348,7 +348,7 @@ class TestPlaceOrderGates:
         assert result.submitted is False
 
     def test_pre_submit_validator_true_with_dry_run_previews(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker(order_page_url="https://b.example/o")
 
         def accept(ticker, action, size):
@@ -362,7 +362,7 @@ class TestPlaceOrderGates:
 
     def test_pre_submit_validator_none_ok_with_dry_run(self, monkeypatch):
         # A validator returning None is treated as "ok".
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker(order_page_url="https://b.example/o")
 
         def neutral(ticker, action, size):
@@ -375,7 +375,7 @@ class TestPlaceOrderGates:
         assert result.submitted is False
 
     def test_invalid_action_string_blocks_validation(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker()
         result = broker.place_order("AAPL", "hold", size=10.0)
         assert result.status is OrderStatus.BLOCKED_VALIDATION
@@ -393,7 +393,7 @@ class TestLivePathFailClosed:
         # The base broker's _fill_order_form is intentionally a stub; a live
         # attempt must fail closed with BLOCKED_PLAYWRIGHT (mapped from
         # NotImplementedError), never a submission.
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker(order_page_url="https://b.example/o")
         result = broker.place_order(
             "AAPL", "buy", size=10.0, dry_run=False
@@ -406,7 +406,7 @@ class TestLivePathFailClosed:
     def test_subclass_submit_never_slips_on_dom_error(self, monkeypatch):
         # Even a subclass with a buggy _fill_order_form that raises after
         # navigating must not submit; the error is caught.
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
 
         class BrokenBroker(BrowserBroker):
             def _fill_order_form(self, page, ticker, action, size):
@@ -489,7 +489,7 @@ def mock_chromium():
 @pytest.mark.unit
 class TestSubmittedInvariant:
     def test_non_submitted_statuses_never_mark_submitted(self, monkeypatch):
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
         broker = BrowserBroker()
         # Walk several gate outcomes; none should report submitted=True.
         for kwargs, expected_status in [
@@ -535,7 +535,7 @@ class TestSubmitEdgeKillSwitch:
     def test_kill_switch_flipped_after_fill_blocks_before_click(self, monkeypatch):
         # Kill switch OFF at entry (passes Gate 1), then engaged DURING the
         # form fill. The submit-edge guard must catch it.
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
 
         broker = _TrackingBroker(order_page_url="https://b.example/o")
 
@@ -544,7 +544,7 @@ class TestSubmitEdgeKillSwitch:
         original_fill = broker._fill_order_form
 
         def flip_mid_fill(page, ticker, action, size):
-            monkeypatch.setenv("YIAGENTS_KILL_SWITCH", "true")
+            monkeypatch.setenv("YIALPHA_KILL_SWITCH", "true")
             original_fill(page, ticker, action, size)
 
         broker._fill_order_form = flip_mid_fill
@@ -563,14 +563,14 @@ class TestSubmitEdgeKillSwitch:
     def test_policy_flipped_after_fill_blocks_before_click(self, monkeypatch):
         # Live policy ON at entry (passes Gate 3), then flipped to analysis-only
         # DURING the form fill. The submit-edge guard must catch it.
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
 
         broker = _TrackingBroker(order_page_url="https://b.example/o")
 
         original_fill = broker._fill_order_form
 
         def flip_mid_fill(page, ticker, action, size):
-            monkeypatch.setenv("YIAGENTS_ANALYSIS_ONLY", "true")
+            monkeypatch.setenv("YIALPHA_ANALYSIS_ONLY", "true")
             original_fill(page, ticker, action, size)
 
         broker._fill_order_form = flip_mid_fill
@@ -588,7 +588,7 @@ class TestSubmitEdgeKillSwitch:
 
     def test_no_flip_submits_normally(self, monkeypatch):
         # Control: kill switch stays OFF through the whole flow → submits.
-        monkeypatch.delenv("YIAGENTS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("YIALPHA_KILL_SWITCH", raising=False)
 
         broker = _TrackingBroker(order_page_url="https://b.example/o")
 

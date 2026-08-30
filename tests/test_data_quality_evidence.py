@@ -11,9 +11,9 @@ import json
 
 import pytest
 
-from yiagents.dataflows import quality
-from yiagents.dataflows.errors import NoMarketDataError
-from yiagents.dataflows.interface import route_to_vendor
+from yialpha.dataflows import quality
+from yialpha.dataflows.errors import NoMarketDataError
+from yialpha.dataflows.interface import route_to_vendor
 
 
 @pytest.fixture(autouse=True)
@@ -107,7 +107,7 @@ def test_summarize_data_vacuum_flag():
 # --------------------------------------------------------------------------- #
 @pytest.fixture()
 def _policy_ctx():
-    from yiagents.dataflows import config as dfconfig
+    from yialpha.dataflows import config as dfconfig
 
     dfconfig.reset_config()
     yield dfconfig
@@ -167,7 +167,7 @@ def test_gate_wrapper_passthrough():
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 def test_no_data_sentinel_is_recorded(monkeypatch):
-    from yiagents.dataflows import interface as iface
+    from yialpha.dataflows import interface as iface
 
     def no_data(*a, **k):
         raise NoMarketDataError("ZZZZ", "ZZZZ", "no rows anywhere")
@@ -198,7 +198,7 @@ def test_core_hard_error_records_sentinel_then_raises(monkeypatch):
     """The router's core-category raise path must leave evidence BEFORE
     raising — a caller that swallows the error into a degraded report
     otherwise produces zero data AND zero proof there was no data."""
-    from yiagents.dataflows import interface as iface
+    from yialpha.dataflows import interface as iface
 
     def boom(*a, **k):
         raise RuntimeError("network unreachable")
@@ -220,7 +220,7 @@ def test_core_hard_error_records_sentinel_then_raises(monkeypatch):
 
 @pytest.mark.unit
 def test_core_success_records_success(monkeypatch):
-    from yiagents.dataflows import interface as iface
+    from yialpha.dataflows import interface as iface
 
     method = "get_stock_data"
     monkeypatch.setattr(iface, "get_vendor", lambda category, m: "default")
@@ -238,7 +238,7 @@ def test_core_success_records_success(monkeypatch):
 
 @pytest.mark.unit
 def test_optional_success_records_nothing(monkeypatch):
-    from yiagents.dataflows import interface as iface
+    from yialpha.dataflows import interface as iface
 
     method = "get_macro_indicators"  # macro_data is optional
     monkeypatch.setattr(iface, "get_vendor", lambda category, m: "default")
@@ -258,7 +258,7 @@ def test_optional_no_data_sentinel_counts_as_optional(monkeypatch):
     """A US-only optional tool raising NoMarketDataError by design (e.g. Form 4
     for a non-US ticker) must be evidence of *optional* unavailability — not a
     core-data degradation that would flag every non-US run as DEGRADED."""
-    from yiagents.dataflows import interface as iface
+    from yialpha.dataflows import interface as iface
 
     def no_data(*a, **k):
         raise NoMarketDataError("0700.HK", "0700.HK", "US-listed only")
@@ -285,12 +285,12 @@ def test_optional_no_data_sentinel_counts_as_optional(monkeypatch):
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 def test_log_state_writes_pm_rating_and_data_quality(tmp_path, monkeypatch):
-    from yiagents.graph.trading_graph import YiAgentsGraph
+    from yialpha.graph.trading_graph import YiAlphaGraph
 
     quality.record_sentinel("get_stock_data", quality.KIND_NO_DATA, "stale")
     quality.record_sentinel("get_macro_data", quality.KIND_OPTIONAL_UNAVAILABLE, "x")
 
-    graph = YiAgentsGraph.__new__(YiAgentsGraph)  # skip __init__: only attrs below used
+    graph = YiAlphaGraph.__new__(YiAlphaGraph)  # skip __init__: only attrs below used
     graph.ticker = "NVDA"
     graph.log_states_dict = {}
     monkeypatch.setattr(
@@ -324,7 +324,7 @@ def test_log_state_writes_pm_rating_and_data_quality(tmp_path, monkeypatch):
     returned = graph._log_state("2026-06-10", final_state)
 
     log_path = (
-        results_dir / "NVDA" / "YiAgentsStrategy_logs" / "full_states_log_2026-06-10.json"
+        results_dir / "NVDA" / "YiAlphaStrategy_logs" / "full_states_log_2026-06-10.json"
     )
     assert log_path.exists()
     data = json.loads(log_path.read_text(encoding="utf-8"))

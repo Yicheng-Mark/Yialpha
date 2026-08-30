@@ -1,6 +1,6 @@
 # 研究基础与文献支撑
 
-YiAgents 的设计方法学源自以下 99 篇文献，覆盖 LLM 金融推理、多智能体决策、量化风控、回测严谨性、对抗安全等 14 个研究方向。本目录是 [README](README.md) 中"研究基础与文献支撑"一节所引用文献的完整版。
+YiAlpha 的设计方法学源自以下 99 篇文献，覆盖 LLM 金融推理、多智能体决策、量化风控、回测严谨性、对抗安全等 14 个研究方向。本目录是 [README](README.md) 中"研究基础与文献支撑"一节所引用文献的完整版。
 
 > 说明：arXiv 编号以 `arXiv:XXXX.XXXXX` 文本形式保留，便于检索；部分编号在不同条目间存在复用，按原始整理稿原样收录，未做二次校正。
 
@@ -205,7 +205,7 @@ YiAgents 的设计方法学源自以下 99 篇文献，覆盖 LLM 金融推理�
 
 ## 附录：确定性估值引擎方法学出处（`valuation_methods.py`）
 
-下列经典公开教材为 `yiagents/dataflows/valuation_methods.py` 中各确定性估值公式的出处。这些是教科书级公开方法学（非衍生自任何框架），独立于上述 99 篇 LLM/量化研究文献，仅作为公式溯源登记；调用层零人名（见叙事红线：persona 命名被证明有害，REFERENCES #18）。
+下列经典公开教材为 `yialpha/dataflows/valuation_methods.py` 中各确定性估值公式的出处。这些是教科书级公开方法学（非衍生自任何框架），独立于上述 99 篇 LLM/量化研究文献，仅作为公式溯源登记；调用层零人名（见叙事红线：persona 命名被证明有害，REFERENCES #18）。
 
 | 公式 | 出处 | 在本框架的对应函数 |
 | --- | --- | --- |
@@ -220,7 +220,7 @@ YiAgents 的设计方法学源自以下 99 篇文献，覆盖 LLM 金融推理�
 
 ## 附录：事件研究引擎方法学出处（`event_study.py`）
 
-`yiagents/backtest/event_study.py` 用市场模型把「分析师决策后股价是否有异常收益」变成可证伪的统计命题，是对回测中朴素 `alpha_vs_index`（无 β 控制、无显著性）的统计强化。方法学为公开经典文献，事件锚用本框架的决策日（非财报 filing_date）。
+`yialpha/backtest/event_study.py` 用市场模型把「分析师决策后股价是否有异常收益」变成可证伪的统计命题，是对回测中朴素 `alpha_vs_index`（无 β 控制、无显著性）的统计强化。方法学为公开经典文献，事件锚用本框架的决策日（非财报 filing_date）。
 
 | 方法 | 出处 | 在本框架的对应实现 |
 | --- | --- | --- |
@@ -232,7 +232,7 @@ YiAgents 的设计方法学源自以下 99 篇文献，覆盖 LLM 金融推理�
 
 ## 附录：SEC 所有权信号引擎方法学出处（`sec_ownership.py`）
 
-`yiagents/dataflows/sec_ownership.py` 暴露两支美股专属、纯只读、PIT 正确的所有权/空头信号（Form 4 内幕交易 + fails-to-deliver），作为 fundamentals 分析师 opt-in 的 `sec_ownership` category（默认关，开启才挂载工具，见铁律）。两支信号的信息含量均有公开经典文献支撑（非衍生自任何框架），数据源为 SEC 官方公开端点（submissions JSON + Form 4 XML + CNS 半月度 FTD 文件），无鉴权、无 key。
+`yialpha/dataflows/sec_ownership.py` 暴露两支美股专属、纯只读、PIT 正确的所有权/空头信号（Form 4 内幕交易 + fails-to-deliver），作为 fundamentals 分析师 opt-in 的 `sec_ownership` category（默认关，开启才挂载工具，见铁律）。两支信号的信息含量均有公开经典文献支撑（非衍生自任何框架），数据源为 SEC 官方公开端点（submissions JSON + Form 4 XML + CNS 半月度 FTD 文件），无鉴权、无 key。
 
 | 信号 | 方法/文献出处 | 在本框架的对应实现 |
 | --- | --- | --- |
@@ -240,4 +240,4 @@ YiAgents 的设计方法学源自以下 99 篇文献，覆盖 LLM 金融推理�
 | Fails-to-Deliver / 裸卖空压力代理 | Boni (2006) "Strategic Delivery Failures in U.S. Equities Market"；SEC Reg SHO（fails-to-deliver 半月度披露制度） | `get_ftd_data`（CNS 半月度文件，`cutoff + 发布滞后 ≤ curr_date` PIT，按 ticker 过滤） |
 | 机构持仓 / 空头兴趣（13F） | Asquith, Pathak & Ritter (2005) "Short Interest, Institutional Ownership, and Stock Returns"（JFE）；Yan & Zhang (2012) "Institutional Investors and Equity Volatility" | `get_institutional_holdings`（SEC 批量 Form 13F Data Sets，每季一 ZIP 本地按 CUSIP 反向聚合；CUSIP 单源 companyfacts `dei:EntityCusip`；`period-end+发布滞后 ≤ curr_date` PIT；剔 PRN/期权） |
 
-该 category 默认关=字节等价：未开 `YIAGENTS_SEC_OWNERSHIP` 时 fundamentals 分析师的工具列表 / prompt / 能力字节不变；开启后仅追加三支供其选用的信号工具 + 一段降级指引，不触任何 agent 的输入/能力/深度，不引入新随机性。
+该 category 默认关=字节等价：未开 `YIALPHA_SEC_OWNERSHIP` 时 fundamentals 分析师的工具列表 / prompt / 能力字节不变；开启后仅追加三支供其选用的信号工具 + 一段降级指引，不触任何 agent 的输入/能力/深度，不引入新随机性。

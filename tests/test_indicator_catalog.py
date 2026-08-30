@@ -3,7 +3,7 @@
 The name -> description catalog used to live in three drifted copies
 (y_finance tool gate, market_analyst prompt sections, Alpha Vantage
 descriptions — the AV copy had already lost ``mfi``). All three now render
-from yiagents/dataflows/indicator_catalog.py; these tests pin that they
+from yialpha/dataflows/indicator_catalog.py; these tests pin that they
 stay in lockstep.
 """
 
@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import pytest
 
-import yiagents.agents.analysts.market_analyst as ma
-import yiagents.dataflows.alpha_vantage_indicator as avi
-import yiagents.dataflows.indicator_catalog as ic
-import yiagents.dataflows.y_finance as yfin
+import yialpha.agents.analysts.market_analyst as ma
+import yialpha.dataflows.alpha_vantage_indicator as avi
+import yialpha.dataflows.indicator_catalog as ic
+import yialpha.dataflows.y_finance as yfin
 
 
 @pytest.mark.unit

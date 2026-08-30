@@ -44,7 +44,7 @@ def _isolate_config():
     and make routing behavior order-dependent. Reset the context outright so
     every test starts from a clean DEFAULT_CONFIG.
     """
-    from yiagents.dataflows.config import reset_config
+    from yialpha.dataflows.config import reset_config
 
     reset_config()
     yield
@@ -57,13 +57,13 @@ def _isolated_vendor_cache(tmp_path):
 
     Vendor disk caches (OHLCV per-symbol CSVs, eastmoney/sec/baostock/fred/
     alphavantage/yfnews) must never read from — or write into — the
-    developer's real ``~/.yiagents/cache`` during tests: a fresh real-world
+    developer's real ``~/.yialpha/cache`` during tests: a fresh real-world
     cache file would bypass a test's mocked network path, and a mocked
     response would pollute the real cache. Tests that manage their own
     cache dir call ``set_config`` in the test body, which runs after this
     fixture and therefore wins.
     """
-    from yiagents.dataflows.config import set_config
+    from yialpha.dataflows.config import set_config
 
     set_config({"data_cache_dir": str(tmp_path / "vendor-cache")})
 
@@ -73,7 +73,7 @@ def mock_llm_client():
     client = MagicMock()
     client.get_llm.return_value = MagicMock()
     with patch(
-        "yiagents.llm_clients.factory.create_llm_client",
+        "yialpha.llm_clients.factory.create_llm_client",
         return_value=client,
     ):
         yield client
@@ -87,7 +87,7 @@ def _isolated_binance_history_memo():
     every later test whose fetch lands on the same (path, params, window)
     key, and that test's own mock would never fire.
     """
-    from yiagents.dataflows.binance import reset_history_memo_for_test
+    from yialpha.dataflows.binance import reset_history_memo_for_test
 
     reset_history_memo_for_test()
     yield

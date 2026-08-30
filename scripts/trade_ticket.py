@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-trade_ticket.py — YiAgents 分析完成后的「交执行单」生成器。
+trade_ticket.py — YiAlpha 分析完成后的「交执行单」生成器。
 
-只读取已生成的报告产物（~/.yiagents/logs/reports/<TICKER>_<ts>/），不触碰任何
+只读取已生成的报告产物（~/.yialpha/logs/reports/<TICKER>_<ts>/），不触碰任何
 agent / 图 / 数据流，零影响（符合「增强层零影响」铁律）。给定用户资金 + 风险偏好，
 依据固定分数法（risk-of-ruin）+ ATR 止损 + R 倍数止盈 + 爆仓安全杠杆，输出一张
 可执行的交易单：方向 / 入场 / 止损 / 止盈 / 仓位 / 杠杆 / 保证金 / 爆仓价。
@@ -39,10 +39,10 @@ with contextlib.suppress(Exception):
 # ---------------------------------------------------------------------------
 # 资产类型 / 方向 / 评级 常量
 # ---------------------------------------------------------------------------
-# 杠杆/爆仓/止盈核心数学已抽到 yiagents/risk/perp_ticket.py（运行时风险
+# 杠杆/爆仓/止盈核心数学已抽到 yialpha/risk/perp_ticket.py（运行时风险
 # overlay 复用同一套公式）；本脚本保留展示用的本地常量与报告解析。
 
-from yiagents.risk.perp_ticket import (  # noqa: E402
+from yialpha.risk.perp_ticket import (  # noqa: E402
     ATR_STOP_MULT,
     LIQ_SAFETY,
     RATING_STRENGTH,
@@ -66,9 +66,9 @@ RATING_TO_CONFIDENCE = {
 # ---------------------------------------------------------------------------
 
 def _results_dir() -> Path:
-    """复用框架的 results_dir 解析（YIAGENTS_RESULTS_DIR / ~/.yiagents/logs）。"""
-    home = os.path.join(os.path.expanduser("~"), ".yiagents")
-    return Path(os.getenv("YIAGENTS_RESULTS_DIR", os.path.join(home, "logs"))) / "reports"
+    """复用框架的 results_dir 解析（YIALPHA_RESULTS_DIR / ~/.yialpha/logs）。"""
+    home = os.path.join(os.path.expanduser("~"), ".yialpha")
+    return Path(os.getenv("YIALPHA_RESULTS_DIR", os.path.join(home, "logs"))) / "reports"
 
 
 def find_report(ticker: str | None = None, report_dir: str | None = None) -> Path:
@@ -102,7 +102,7 @@ def detect_asset_type(ticker: str) -> str:
     """从 ticker 后缀推断资产类型（与报告 state.asset_type 一致）。"""
     t = ticker.upper()
     if t.endswith("USDT") or t.endswith("USDC") or t.endswith("BUSD"):
-        # 现货 vs 永续：YiAgents 的加密报告目录一律 *USDT，含 perp / spot；
+        # 现货 vs 永续：YiAlpha 的加密报告目录一律 *USDT，含 perp / spot；
         # 杠杆语义下两者都按 perp 处理（spot 无杠杆会被 HARD_CEILING 兜住）
         return "crypto_perp"
     if t.endswith(".SS") or t.endswith(".SZ"):
@@ -550,7 +550,7 @@ def _execution_plan(t):
 
 def _disclaimer():
     return ("---\n*免责声明：本单由 `scripts/trade_ticket.py` 依据固定分数法 + ATR 止损 + "
-            "R 倍数止盈 + 爆仓安全杠杆公式生成，输入为 YiAgents 的 LLM 分析结论。LLM 输出"
+            "R 倍数止盈 + 爆仓安全杠杆公式生成，输入为 YiAlpha 的 LLM 分析结论。LLM 输出"
             "具非确定性，公式基于历史假设，杠杆交易有爆仓归零风险。不构成投资建议。*")
 
 
@@ -560,7 +560,7 @@ def _disclaimer():
 
 def main():
     ap = argparse.ArgumentParser(
-        description="YiAgents 分析完成后生成交执行单（方向+杠杆+止盈止损+仓位）")
+        description="YiAlpha 分析完成后生成交执行单（方向+杠杆+止盈止损+仓位）")
     ap.add_argument("--ticker", help="按 ticker 取最新报告")
     ap.add_argument("--report-dir", help="直接指定报告目录")
     ap.add_argument("--capital", type=float, help="本笔可动用资金（必填）")

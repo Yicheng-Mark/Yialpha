@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from yiagents.dataflows import disk_cache as dc
+from yialpha.dataflows import disk_cache as dc
 
 
 def _fetch_ok(payload: bytes = b"data"):
@@ -113,7 +113,7 @@ def test_failure_without_cache_raises_by_default(tmp_path):
 def test_stale_over_cap_refused_fail_closed(tmp_path, caplog):
     """A cache older than data_cache_max_stale_days must NOT be served when
     the vendor fails — an arbitrarily old cache is worse than an honest error."""
-    from yiagents.dataflows import config as cfgmod, quality
+    from yialpha.dataflows import config as cfgmod, quality
 
     path = tmp_path / "f.json"
     path.write_bytes(b"ancient")
@@ -145,7 +145,7 @@ def boom_fn() -> bytes:
 
 @pytest.mark.unit
 def test_stale_within_cap_served_with_sentinel(tmp_path, caplog):
-    from yiagents.dataflows import config as cfgmod, quality
+    from yialpha.dataflows import config as cfgmod, quality
 
     path = tmp_path / "f.json"
     path.write_bytes(b"stale-data")
@@ -173,7 +173,7 @@ def test_stale_within_cap_served_with_sentinel(tmp_path, caplog):
 
 @pytest.mark.unit
 def test_cap_zero_never_serves_stale(tmp_path):
-    from yiagents.dataflows import config as cfgmod
+    from yialpha.dataflows import config as cfgmod
 
     path = tmp_path / "f.json"
     path.write_bytes(b"stale-data")
@@ -260,7 +260,7 @@ def test_cache_file_path_roundtrip(tmp_path):
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 def test_vendor_cache_dir_creates_subdir(tmp_path, monkeypatch):
-    from yiagents.dataflows import config as cfgmod
+    from yialpha.dataflows import config as cfgmod
 
     orig = cfgmod.get_config()
     try:

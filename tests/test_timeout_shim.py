@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 import requests
 
-from yiagents.dataflows import timeout_shim as ts
+from yialpha.dataflows import timeout_shim as ts
 
 
 def _session_request_original():
@@ -122,7 +122,7 @@ def test_akshare_direct_connect_applies_timeout(monkeypatch):
     """The akshare vendor's _direct_connect window fills missing timeouts."""
     import os
 
-    from yiagents.dataflows import akshare_vendor as akv
+    from yialpha.dataflows import akshare_vendor as akv
 
     monkeypatch.setenv("HTTP_PROXY", "socks5h://127.0.0.1:1080")
     original = _session_request_original()

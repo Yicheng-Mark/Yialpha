@@ -19,9 +19,9 @@ import os
 import pandas as pd
 import pytest
 
-import yiagents.dataflows.stockstats_utils as su
-from yiagents.dataflows.config import get_config, set_config
-from yiagents.dataflows.symbol_utils import NoMarketDataError
+import yialpha.dataflows.stockstats_utils as su
+from yialpha.dataflows.config import get_config, set_config
+from yialpha.dataflows.symbol_utils import NoMarketDataError
 
 
 @pytest.fixture(autouse=True)

@@ -1,4 +1,4 @@
-"""Packaging regressions for the collision-free YiAgents CLI namespace."""
+"""Packaging regressions for the collision-free YiAlpha CLI namespace."""
 
 import os
 import subprocess
@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.unit
 def test_pyproject_entrypoint_and_package_data_use_unique_namespace():
     source = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'yiagents = "yiagents.cli.main:app"' in source
-    assert 'include = ["yiagents*"]' in source
-    assert '"yiagents.cli" = ["static/*"]' in source
+    assert 'yialpha = "yialpha.cli.main:app"' in source
+    assert 'include = ["yialpha*"]' in source
+    assert '"yialpha.cli" = ["static/*"]' in source
 
 
 @pytest.mark.unit
@@ -29,7 +29,7 @@ def test_unique_cli_starts_even_when_top_level_cli_is_not_a_package(tmp_path):
     )
 
     completed = subprocess.run(
-        [sys.executable, "-m", "yiagents.cli.main", "--help"],
+        [sys.executable, "-m", "yialpha.cli.main", "--help"],
         cwd=tmp_path,
         env=env,
         capture_output=True,
@@ -41,7 +41,7 @@ def test_unique_cli_starts_even_when_top_level_cli_is_not_a_package(tmp_path):
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "YiAgents CLI" in completed.stdout
+    assert "YiAlpha CLI" in completed.stdout
 
 
 @pytest.mark.unit

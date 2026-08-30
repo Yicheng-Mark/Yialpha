@@ -14,8 +14,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from yiagents.backtest.cache import DecisionCache
-from yiagents.backtest.engine import run_backtest
+from yialpha.backtest.cache import DecisionCache
+from yialpha.backtest.engine import run_backtest
 
 
 def _rising_prices(ticker: str, start: str, end: str) -> pd.Series:

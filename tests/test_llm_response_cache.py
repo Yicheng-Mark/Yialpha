@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.llm_clients.response_cache.DiskLLMCache``.
+"""Unit tests for ``yialpha.llm_clients.response_cache.DiskLLMCache``.
 
 Exercises the cache directly (no network, no real LLM): round-trip fidelity
 for content + tool_calls, disabled=no-op, corrupt-entry eviction, version
@@ -15,7 +15,7 @@ import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration
 
-from yiagents.llm_clients.response_cache import DiskLLMCache
+from yialpha.llm_clients.response_cache import DiskLLMCache
 
 
 def _gen(content: str = "hello", tool_calls=None) -> ChatGeneration:

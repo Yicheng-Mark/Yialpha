@@ -1,10 +1,10 @@
-"""Regression smoke test: a real ``YiAgentsGraph`` must construct end-to-end.
+"""Regression smoke test: a real ``YiAlphaGraph`` must construct end-to-end.
 
 WHY THIS EXISTS
 ---------------
-The test suite deliberately avoids the real ``YiAgentsGraph.__init__``: most
-graph tests use ``YiAgentsGraph.__new__(...)`` to skip the constructor or
-``MagicMock(spec=YiAgentsGraph)`` to call unbound methods. That isolation is
+The test suite deliberately avoids the real ``YiAlphaGraph.__init__``: most
+graph tests use ``YiAlphaGraph.__new__(...)`` to skip the constructor or
+``MagicMock(spec=YiAlphaGraph)`` to call unbound methods. That isolation is
 fast and focused, but it created a **coverage blind spot**: the constructor is
 the only place that threads LLM instances through ``GraphSetup`` and then calls
 ``setup_graph()`` → ``compile()``.
@@ -25,12 +25,12 @@ exercised because ``setup_graph`` dereferences each one eagerly.
 
 from __future__ import annotations
 
-from yiagents.default_config import DEFAULT_CONFIG
-from yiagents.graph.trading_graph import YiAgentsGraph
+from yialpha.default_config import DEFAULT_CONFIG
+from yialpha.graph.trading_graph import YiAlphaGraph
 
 
 def test_real_graph_constructs_without_error(mock_llm_client, tmp_path):
-    """Construct a real YiAgentsGraph and confirm the compiled graph exists.
+    """Construct a real YiAlphaGraph and confirm the compiled graph exists.
 
     ``mock_llm_client`` (conftest fixture) patches ``create_llm_client`` so no
     network or real API key is needed. Directs cache/results dirs to ``tmp_path``
@@ -40,7 +40,7 @@ def test_real_graph_constructs_without_error(mock_llm_client, tmp_path):
     config["data_cache_dir"] = str(tmp_path / "cache")
     config["results_dir"] = str(tmp_path / "results")
 
-    graph = YiAgentsGraph(config=config)
+    graph = YiAlphaGraph(config=config)
 
     # If we get here, __init__ → setup_graph() → compile() all succeeded,
     # meaning every LLM attribute (including debate_llm) was threaded through
@@ -65,7 +65,7 @@ def test_debate_llm_falls_back_to_deep_think_when_unset(mock_llm_client, tmp_pat
     config["data_cache_dir"] = str(tmp_path / "cache")
     config["results_dir"] = str(tmp_path / "results")
 
-    graph = YiAgentsGraph(config=config)
+    graph = YiAlphaGraph(config=config)
 
     assert graph.debate_llm is not None
     # The mock client returns the same MagicMock regardless of model name, so

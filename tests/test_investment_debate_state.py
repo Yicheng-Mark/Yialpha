@@ -16,7 +16,7 @@ for the three risk debators' shared helper.
 """
 import unittest
 
-from yiagents.agents.utils.agent_utils import build_investment_debate_update
+from yialpha.agents.utils.agent_utils import build_investment_debate_update
 
 # A representative incoming state with every field populated distinctly.
 _BASE = {

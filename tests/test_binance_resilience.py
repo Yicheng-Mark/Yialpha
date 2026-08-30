@@ -11,9 +11,9 @@ immediate 429 raise (no Retry-After sleep).
 import pytest
 import requests
 
-from yiagents.dataflows import binance, binance_http
-from yiagents.dataflows.config import set_config
-from yiagents.dataflows.errors import NoMarketDataError, VendorRateLimitError
+from yialpha.dataflows import binance, binance_http
+from yialpha.dataflows.config import set_config
+from yialpha.dataflows.errors import NoMarketDataError, VendorRateLimitError
 
 # --- fakes -------------------------------------------------------------------
 

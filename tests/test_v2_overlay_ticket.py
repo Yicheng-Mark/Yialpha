@@ -11,15 +11,15 @@ import json
 
 import pytest
 
-from yiagents.agents.utils.rating import parse_rating
-from yiagents.graph.signal_processing import SignalProcessor
-from yiagents.graph.trading_graph import YiAgentsGraph
-from yiagents.risk.tradeability import TicketSide, Tradeability
+from yialpha.agents.utils.rating import parse_rating
+from yialpha.graph.signal_processing import SignalProcessor
+from yialpha.graph.trading_graph import YiAlphaGraph
+from yialpha.risk.tradeability import TicketSide, Tradeability
 
 
-def _make_graph(tmp_path) -> YiAgentsGraph:
+def _make_graph(tmp_path) -> YiAlphaGraph:
     """Graph shell with just enough state for the overlay + log (no LLMs)."""
-    g = YiAgentsGraph.__new__(YiAgentsGraph)
+    g = YiAlphaGraph.__new__(YiAlphaGraph)
     g.config = {
         "risk_enabled": True,
         "kelly_fraction": 0.25,
@@ -142,7 +142,7 @@ def test_ticket_failure_degrades_without_breaking_the_overlay(
     g = _make_graph(tmp_path)
     monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (190.0, 3.0))
 
-    import yiagents.tickets as tickets
+    import yialpha.tickets as tickets
 
     def _explode(**kwargs):
         raise RuntimeError("ticket machinery broken")
@@ -193,7 +193,7 @@ def test_log_state_persists_ticket_and_pm_fields(monkeypatch, tmp_path):
     g._log_state("2024-01-15", final_state)
 
     log_path = (
-        tmp_path / "AAPL" / "YiAgentsStrategy_logs" / "full_states_log_2024-01-15.json"
+        tmp_path / "AAPL" / "YiAlphaStrategy_logs" / "full_states_log_2024-01-15.json"
     )
     entry = json.loads(log_path.read_text(encoding="utf-8"))
     assert entry["pm_decision_fields"]["price_target"] == 220.0

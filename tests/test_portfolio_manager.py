@@ -7,7 +7,7 @@ byte-identically to the baseline.
 """
 import unittest
 
-from yiagents.agents.managers.portfolio_manager import (
+from yialpha.agents.managers.portfolio_manager import (
     _format_portfolio_state,
     _safe_float,
 )

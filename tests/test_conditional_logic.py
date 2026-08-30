@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.graph.conditional_logic.ConditionalLogic``.
+"""Unit tests for ``yialpha.graph.conditional_logic.ConditionalLogic``.
 
 These tests pin the debate-routing contract. The investment debate's speaker
 alternation was previously driven by ``current_response.startswith("Bull")``,
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.graph.conditional_logic import ConditionalLogic
+from yialpha.graph.conditional_logic import ConditionalLogic
 
 pytestmark = pytest.mark.unit
 

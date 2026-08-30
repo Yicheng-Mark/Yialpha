@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 
-from yiagents.agents.utils.agent_utils import (
+from yialpha.agents.utils.agent_utils import (
     build_instrument_context,
     create_msg_delete,
     get_instrument_context_from_state,
@@ -21,7 +21,7 @@ class ResolveInstrumentIdentityTests(unittest.TestCase):
         resolve_instrument_identity.cache_clear()
 
     def test_resolves_company_metadata_from_yfinance(self):
-        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+        with patch("yialpha.agents.utils.agent_utils.yf.Ticker") as mock:
             mock.return_value.info = {
                 "longName": "TOTO LTD.",
                 "shortName": "TOTO",
@@ -38,26 +38,26 @@ class ResolveInstrumentIdentityTests(unittest.TestCase):
         self.assertEqual(identity["exchange"], "PNK")
 
     def test_falls_back_to_short_name(self):
-        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+        with patch("yialpha.agents.utils.agent_utils.yf.Ticker") as mock:
             mock.return_value.info = {"shortName": "TOTO", "sector": "Industrials"}
             identity = resolve_instrument_identity("TOTDY")
         self.assertEqual(identity["company_name"], "TOTO")
 
     def test_skips_placeholder_values(self):
-        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+        with patch("yialpha.agents.utils.agent_utils.yf.Ticker") as mock:
             mock.return_value.info = {"longName": "  ", "sector": "None", "industry": "n/a"}
             identity = resolve_instrument_identity("TOTDY")
         self.assertEqual(identity, {})
 
     def test_fails_open_on_exception(self):
         with patch(
-            "yiagents.agents.utils.agent_utils.yf.Ticker",
+            "yialpha.agents.utils.agent_utils.yf.Ticker",
             side_effect=RuntimeError("rate limited"),
         ):
             self.assertEqual(resolve_instrument_identity("TOTDY"), {})
 
     def test_result_is_cached(self):
-        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+        with patch("yialpha.agents.utils.agent_utils.yf.Ticker") as mock:
             mock.return_value.info = {"longName": "TOTO LTD."}
             first = resolve_instrument_identity("TOTDY")
             second = resolve_instrument_identity("TOTDY")
@@ -104,7 +104,7 @@ class GetInstrumentContextFromStateTests(unittest.TestCase):
 
     def test_fallback_is_network_free_ticker_only(self):
         # No instrument_context and no yfinance call — must not hit the network.
-        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+        with patch("yialpha.agents.utils.agent_utils.yf.Ticker") as mock:
             context = get_instrument_context_from_state(
                 {"company_of_interest": "NVDA", "asset_type": "stock"}
             )
@@ -180,7 +180,7 @@ class ResolveInstrumentIdentityPITTests(unittest.TestCase):
         resolve_instrument_identity.cache_clear()
 
     def test_historical_date_returns_empty_without_touching_yfinance(self):
-        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+        with patch("yialpha.agents.utils.agent_utils.yf.Ticker") as mock:
             identity = resolve_instrument_identity("AAPL", curr_date="2020-01-02")
         mock.assert_not_called()  # must not even hit the network
         self.assertEqual(identity, {})
@@ -188,20 +188,20 @@ class ResolveInstrumentIdentityPITTests(unittest.TestCase):
     def test_future_label_date_also_refused(self):
         # A future date is not "live/today" either — it must not get today's
         # snapshot dressed up as that future date.
-        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+        with patch("yialpha.agents.utils.agent_utils.yf.Ticker") as mock:
             identity = resolve_instrument_identity("AAPL", curr_date="2099-12-31")
         mock.assert_not_called()
         self.assertEqual(identity, {})
 
     def test_live_mode_still_resolves(self):
-        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+        with patch("yialpha.agents.utils.agent_utils.yf.Ticker") as mock:
             mock.return_value.info = {"longName": "Apple Inc.", "sector": "Technology"}
             identity = resolve_instrument_identity("AAPL", curr_date=None)
         mock.assert_called_once()
         self.assertEqual(identity["company_name"], "Apple Inc.")
 
     def test_none_curr_date_is_live(self):
-        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+        with patch("yialpha.agents.utils.agent_utils.yf.Ticker") as mock:
             mock.return_value.info = {"longName": "Apple Inc."}
             identity = resolve_instrument_identity("AAPL")
         self.assertEqual(identity["company_name"], "Apple Inc.")
@@ -209,7 +209,7 @@ class ResolveInstrumentIdentityPITTests(unittest.TestCase):
     def test_cache_keyed_on_curr_date(self):
         # Same ticker, different curr_date → different cache slots. The live
         # call resolves; the historical call is refused — both independent.
-        with patch("yiagents.agents.utils.agent_utils.yf.Ticker") as mock:
+        with patch("yialpha.agents.utils.agent_utils.yf.Ticker") as mock:
             mock.return_value.info = {"longName": "Apple Inc."}
             live = resolve_instrument_identity("AAPL", curr_date=None)
             historical = resolve_instrument_identity("AAPL", curr_date="2020-01-02")
@@ -217,7 +217,7 @@ class ResolveInstrumentIdentityPITTests(unittest.TestCase):
         self.assertEqual(historical, {})
 
     def test_context_degrades_to_ticker_only_on_historical(self):
-        from yiagents.agents.utils.agent_utils import build_instrument_context
+        from yialpha.agents.utils.agent_utils import build_instrument_context
 
         # resolve returns {} on historical → context has no identity line.
         context = build_instrument_context("AAPL", "stock", {})

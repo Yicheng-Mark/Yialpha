@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.agents.trader.trader`` node-level contract.
+"""Unit tests for ``yialpha.agents.trader.trader`` node-level contract.
 
 ``test_structured_agents.py`` already covers the structured-output happy path,
 the free-text fallback, and ``render_trader_proposal``. These tests focus on
@@ -14,8 +14,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from yiagents.agents.schemas import TraderAction, TraderProposal
-from yiagents.agents.trader.trader import create_trader
+from yialpha.agents.schemas import TraderAction, TraderProposal
+from yialpha.agents.trader.trader import create_trader
 
 pytestmark = pytest.mark.unit
 

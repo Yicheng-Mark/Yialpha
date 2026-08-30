@@ -29,9 +29,9 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 import pytest
 
-from yiagents.dataflows import binance_vision as bnv
-from yiagents.dataflows.errors import NoMarketDataError
-from yiagents.dataflows.utils import set_analysis_date
+from yialpha.dataflows import binance_vision as bnv
+from yialpha.dataflows.errors import NoMarketDataError
+from yialpha.dataflows.utils import set_analysis_date
 
 # Extended fixture schema: the LIVE metrics schema (verified 2026-08-17) has
 # 8 columns and NO sum_long_short_ratio; this header additionally carries
@@ -453,7 +453,7 @@ def test_second_call_served_from_cache_without_refetch(archive):
 
 @pytest.mark.unit
 def test_vendor_registration_and_optional_category():
-    from yiagents.dataflows.interface import (
+    from yialpha.dataflows.interface import (
         OPTIONAL_CATEGORIES,
         TOOLS_CATEGORIES,
         VENDOR_METHODS,
@@ -473,7 +473,7 @@ def test_vendor_registration_and_optional_category():
 def test_router_degrades_vision_no_data_to_sentinel(archive, monkeypatch):
     """Optional-category contract: a NoMarketDataError from the archive tool
     must surface as the instructive NO_DATA_AVAILABLE sentinel, not an abort."""
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows.interface import route_to_vendor
 
     quality_calls: list[tuple] = []
 
@@ -482,7 +482,7 @@ def test_router_degrades_vision_no_data_to_sentinel(archive, monkeypatch):
         def record_sentinel(*args, **kwargs):
             quality_calls.append((args, kwargs))
 
-    import yiagents.dataflows.interface as iface
+    import yialpha.dataflows.interface as iface
 
     monkeypatch.setattr(iface.quality, "record_sentinel", _Q.record_sentinel)
     out = route_to_vendor("get_binance_vision_metrics", "BTCUSDT", "2024-05-01", "2024-05-02")

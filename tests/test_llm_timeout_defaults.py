@@ -3,15 +3,15 @@
 Cloud providers (DeepSeek, OpenAI, xAI, …) get a 120s built-in timeout so a
 half-open socket can't hang the batch forever. Local providers (Ollama,
 openai_compatible) are exempt — slow local generation would be killed by a
-ceiling. Precedence: caller kwarg > ``YIAGENTS_LLM_TIMEOUT_S`` > provider default.
+ceiling. Precedence: caller kwarg > ``YIALPHA_LLM_TIMEOUT_S`` > provider default.
 
 These tests mock ``ChatOpenAI.__init__`` to capture the kwargs without making a
 network call or requiring a real API key.
 """
 import pytest
 
-from yiagents.llm_clients._timeout import _DEFAULT_CLOUD_TIMEOUT
-from yiagents.llm_clients.factory import create_llm_client
+from yialpha.llm_clients._timeout import _DEFAULT_CLOUD_TIMEOUT
+from yialpha.llm_clients.factory import create_llm_client
 
 # Providers that need an API key must see one, otherwise get_llm() raises before
 # reaching the timeout logic. Use a dummy key for cloud providers.
@@ -22,7 +22,7 @@ def _captured_llm(monkeypatch, provider, *, model="m", base_url=None, env=None):
     """Create a client, intercept the ChatOpenAI kwargs, return the captured dict.
 
     ``env`` is an optional dict of env vars to set before constructing the client
-    (YIAGENTS_LLM_TIMEOUT_S, provider API keys, etc.).
+    (YIALPHA_LLM_TIMEOUT_S, provider API keys, etc.).
     """
     captured = {}
 
@@ -47,7 +47,7 @@ def _captured_llm(monkeypatch, provider, *, model="m", base_url=None, env=None):
 @pytest.mark.unit
 def test_cloud_provider_gets_default_timeout(monkeypatch):
     """DeepSeek (cloud) with no explicit timeout gets the 120s built-in default."""
-    monkeypatch.delenv("YIAGENTS_LLM_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("YIALPHA_LLM_TIMEOUT_S", raising=False)
     captured = _captured_llm(
         monkeypatch, "deepseek", env={"DEEPSEEK_API_KEY": _DUMMY_KEY}
     )
@@ -57,7 +57,7 @@ def test_cloud_provider_gets_default_timeout(monkeypatch):
 @pytest.mark.unit
 def test_cloud_provider_openai_gets_default_timeout(monkeypatch):
     """Native OpenAI (cloud) also gets the default when timeout is unset."""
-    monkeypatch.delenv("YIAGENTS_LLM_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("YIALPHA_LLM_TIMEOUT_S", raising=False)
     captured = _captured_llm(
         monkeypatch, "openai", env={"OPENAI_API_KEY": _DUMMY_KEY}
     )
@@ -67,7 +67,7 @@ def test_cloud_provider_openai_gets_default_timeout(monkeypatch):
 @pytest.mark.unit
 def test_local_provider_ollama_no_timeout(monkeypatch):
     """Ollama is a local server: no read-timeout (slow local gen is expected)."""
-    monkeypatch.delenv("YIAGENTS_LLM_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("YIALPHA_LLM_TIMEOUT_S", raising=False)
     captured = _captured_llm(monkeypatch, "ollama")
     assert "timeout" not in captured
 
@@ -75,7 +75,7 @@ def test_local_provider_ollama_no_timeout(monkeypatch):
 @pytest.mark.unit
 def test_local_provider_openai_compatible_no_timeout(monkeypatch):
     """Generic openai_compatible (vLLM / LM Studio) is also local: no timeout."""
-    monkeypatch.delenv("YIAGENTS_LLM_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("YIALPHA_LLM_TIMEOUT_S", raising=False)
     monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
     captured = _captured_llm(
         monkeypatch, "openai_compatible", base_url="http://localhost:8000/v1"
@@ -85,22 +85,22 @@ def test_local_provider_openai_compatible_no_timeout(monkeypatch):
 
 @pytest.mark.unit
 def test_explicit_env_overrides_provider_default(monkeypatch):
-    """YIAGENTS_LLM_TIMEOUT_S wins over the cloud default for cloud providers."""
+    """YIALPHA_LLM_TIMEOUT_S wins over the cloud default for cloud providers."""
     captured = _captured_llm(
         monkeypatch,
         "deepseek",
-        env={"DEEPSEEK_API_KEY": _DUMMY_KEY, "YIAGENTS_LLM_TIMEOUT_S": "60"},
+        env={"DEEPSEEK_API_KEY": _DUMMY_KEY, "YIALPHA_LLM_TIMEOUT_S": "60"},
     )
     assert captured["timeout"] == 60.0
 
 
 @pytest.mark.unit
 def test_explicit_env_applies_to_local_provider(monkeypatch):
-    """YIAGENTS_LLM_TIMEOUT_S also works for local providers (explicit override)."""
+    """YIALPHA_LLM_TIMEOUT_S also works for local providers (explicit override)."""
     captured = _captured_llm(
         monkeypatch,
         "ollama",
-        env={"YIAGENTS_LLM_TIMEOUT_S": "300"},
+        env={"YIALPHA_LLM_TIMEOUT_S": "300"},
     )
     assert captured["timeout"] == 300.0
 
@@ -108,7 +108,7 @@ def test_explicit_env_applies_to_local_provider(monkeypatch):
 @pytest.mark.unit
 def test_caller_timeout_kwarg_wins(monkeypatch):
     """A caller-supplied timeout kwarg takes precedence over everything."""
-    monkeypatch.setenv("YIAGENTS_LLM_TIMEOUT_S", "60")
+    monkeypatch.setenv("YIALPHA_LLM_TIMEOUT_S", "60")
     captured = {}
 
     from langchain_openai import ChatOpenAI
@@ -125,7 +125,7 @@ def test_caller_timeout_kwarg_wins(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Gap A — a non-numeric YIAGENTS_LLM_TIMEOUT_S must NOT be silently swallowed.
+# Gap A — a non-numeric YIALPHA_LLM_TIMEOUT_S must NOT be silently swallowed.
 #
 # Before the fix, ``contextlib.suppress(ValueError)`` around ``float(env)`` ate
 # the bad value AND skipped the cloud-default branch (the env was truthy), so
@@ -135,17 +135,17 @@ def test_caller_timeout_kwarg_wins(monkeypatch):
 
 @pytest.mark.unit
 def test_non_numeric_env_warns_and_falls_back_to_cloud_default(monkeypatch, caplog):
-    """Bad YIAGENTS_LLM_TIMEOUT_S warns and uses the 120s cloud default."""
+    """Bad YIALPHA_LLM_TIMEOUT_S warns and uses the 120s cloud default."""
     import logging
 
-    from yiagents.llm_clients import _timeout as _t
+    from yialpha.llm_clients import _timeout as _t
     # Reset the one-shot cloud-default info guard so this test is independent.
     monkeypatch.setattr(_t, "_timeout_warned", False)
 
     captured = _captured_llm(
         monkeypatch,
         "deepseek",
-        env={"DEEPSEEK_API_KEY": _DUMMY_KEY, "YIAGENTS_LLM_TIMEOUT_S": "120s"},
+        env={"DEEPSEEK_API_KEY": _DUMMY_KEY, "YIALPHA_LLM_TIMEOUT_S": "120s"},
     )
     assert captured["timeout"] == _DEFAULT_CLOUD_TIMEOUT
     assert any(
@@ -165,7 +165,7 @@ def test_non_positive_env_warns_and_falls_back(monkeypatch, caplog, bad):
     captured = _captured_llm(
         monkeypatch,
         "deepseek",
-        env={"DEEPSEEK_API_KEY": _DUMMY_KEY, "YIAGENTS_LLM_TIMEOUT_S": bad},
+        env={"DEEPSEEK_API_KEY": _DUMMY_KEY, "YIALPHA_LLM_TIMEOUT_S": bad},
     )
     assert captured["timeout"] == _DEFAULT_CLOUD_TIMEOUT
     assert any(
@@ -183,7 +183,7 @@ def test_non_numeric_env_warns_and_local_stays_timeoutless(monkeypatch, caplog):
     captured = _captured_llm(
         monkeypatch,
         "ollama",
-        env={"YIAGENTS_LLM_TIMEOUT_S": "120s"},
+        env={"YIALPHA_LLM_TIMEOUT_S": "120s"},
     )
     assert "timeout" not in captured
     assert any(
@@ -239,7 +239,7 @@ def _native_captured_llm(monkeypatch, provider, *, model, env=None, client_kwarg
 @pytest.mark.unit
 def test_anthropic_cloud_default_timeout(monkeypatch):
     """Anthropic gets the 120s cloud default when timeout is unset (gap B)."""
-    monkeypatch.delenv("YIAGENTS_LLM_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("YIALPHA_LLM_TIMEOUT_S", raising=False)
     captured = _native_captured_llm(
         monkeypatch, "anthropic",
         model="claude-3-5-sonnet-20240620",
@@ -250,13 +250,13 @@ def test_anthropic_cloud_default_timeout(monkeypatch):
 
 @pytest.mark.unit
 def test_anthropic_env_overrides_default(monkeypatch):
-    """YIAGENTS_LLM_TIMEOUT_S overrides the default for Anthropic."""
+    """YIALPHA_LLM_TIMEOUT_S overrides the default for Anthropic."""
     captured = _native_captured_llm(
         monkeypatch, "anthropic",
         model="claude-3-5-sonnet-20240620",
         env={
             "ANTHROPIC_API_KEY": _DUMMY_KEY,
-            "YIAGENTS_LLM_TIMEOUT_S": "45",
+            "YIALPHA_LLM_TIMEOUT_S": "45",
         },
     )
     assert captured["timeout"] == 45.0
@@ -265,7 +265,7 @@ def test_anthropic_env_overrides_default(monkeypatch):
 @pytest.mark.unit
 def test_anthropic_caller_kwarg_wins(monkeypatch):
     """A caller timeout kwarg beats env for Anthropic."""
-    monkeypatch.setenv("YIAGENTS_LLM_TIMEOUT_S", "45")
+    monkeypatch.setenv("YIALPHA_LLM_TIMEOUT_S", "45")
     captured = _native_captured_llm(
         monkeypatch, "anthropic",
         model="claude-3-5-sonnet-20240620",
@@ -278,7 +278,7 @@ def test_anthropic_caller_kwarg_wins(monkeypatch):
 @pytest.mark.unit
 def test_google_cloud_default_timeout(monkeypatch):
     """Google Gemini gets the 120s cloud default when timeout is unset (gap B)."""
-    monkeypatch.delenv("YIAGENTS_LLM_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("YIALPHA_LLM_TIMEOUT_S", raising=False)
     captured = _native_captured_llm(
         monkeypatch, "google",
         model="gemini-1.5-pro",
@@ -289,11 +289,11 @@ def test_google_cloud_default_timeout(monkeypatch):
 
 @pytest.mark.unit
 def test_google_env_overrides_default(monkeypatch):
-    """YIAGENTS_LLM_TIMEOUT_S overrides the default for Google."""
+    """YIALPHA_LLM_TIMEOUT_S overrides the default for Google."""
     captured = _native_captured_llm(
         monkeypatch, "google",
         model="gemini-1.5-pro",
-        env={"GOOGLE_API_KEY": _DUMMY_KEY, "YIAGENTS_LLM_TIMEOUT_S": "50"},
+        env={"GOOGLE_API_KEY": _DUMMY_KEY, "YIALPHA_LLM_TIMEOUT_S": "50"},
     )
     assert captured["timeout"] == 50.0
 
@@ -301,7 +301,7 @@ def test_google_env_overrides_default(monkeypatch):
 @pytest.mark.unit
 def test_google_caller_kwarg_wins(monkeypatch):
     """A caller timeout kwarg beats env for Google."""
-    monkeypatch.setenv("YIAGENTS_LLM_TIMEOUT_S", "50")
+    monkeypatch.setenv("YIALPHA_LLM_TIMEOUT_S", "50")
     captured = _native_captured_llm(
         monkeypatch, "google",
         model="gemini-1.5-pro",
@@ -314,7 +314,7 @@ def test_google_caller_kwarg_wins(monkeypatch):
 @pytest.mark.unit
 def test_azure_cloud_default_timeout(monkeypatch):
     """Azure gets the 120s cloud default when timeout is unset (gap B)."""
-    monkeypatch.delenv("YIAGENTS_LLM_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("YIALPHA_LLM_TIMEOUT_S", raising=False)
     captured = _native_captured_llm(
         monkeypatch, "azure",
         model="gpt-4",
@@ -330,7 +330,7 @@ def test_azure_cloud_default_timeout(monkeypatch):
 
 @pytest.mark.unit
 def test_azure_env_overrides_default(monkeypatch):
-    """YIAGENTS_LLM_TIMEOUT_S overrides the default for Azure."""
+    """YIALPHA_LLM_TIMEOUT_S overrides the default for Azure."""
     captured = _native_captured_llm(
         monkeypatch, "azure",
         model="gpt-4",
@@ -339,7 +339,7 @@ def test_azure_env_overrides_default(monkeypatch):
             "AZURE_OPENAI_ENDPOINT": "https://x.openai.azure.com",
             "AZURE_OPENAI_DEPLOYMENT_NAME": "dep",
             "OPENAI_API_VERSION": "2024-01-01",
-            "YIAGENTS_LLM_TIMEOUT_S": "55",
+            "YIALPHA_LLM_TIMEOUT_S": "55",
         },
     )
     assert captured["timeout"] == 55.0
@@ -348,7 +348,7 @@ def test_azure_env_overrides_default(monkeypatch):
 @pytest.mark.unit
 def test_azure_caller_kwarg_wins(monkeypatch):
     """A caller timeout kwarg beats env for Azure."""
-    monkeypatch.setenv("YIAGENTS_LLM_TIMEOUT_S", "55")
+    monkeypatch.setenv("YIALPHA_LLM_TIMEOUT_S", "55")
     captured = _native_captured_llm(
         monkeypatch, "azure",
         model="gpt-4",
@@ -380,7 +380,7 @@ def test_bedrock_get_llm_wires_timeout_helper():
     """
     from pathlib import Path
 
-    src = Path(__file__).resolve().parent.parent / "yiagents" / "llm_clients" / "bedrock_client.py"
+    src = Path(__file__).resolve().parent.parent / "yialpha" / "llm_clients" / "bedrock_client.py"
     text = src.read_text(encoding="utf-8")
     assert "from .base_client import" in text
     assert "apply_passthrough_kwargs(" in text
@@ -390,7 +390,7 @@ def test_bedrock_get_llm_wires_timeout_helper():
     # The helper itself must keep routing to resolve_timeout (cloud default).
     base_src = (
         Path(__file__).resolve().parent.parent
-        / "yiagents" / "llm_clients" / "base_client.py"
+        / "yialpha" / "llm_clients" / "base_client.py"
     ).read_text(encoding="utf-8")
     assert "resolve_timeout(llm_kwargs, is_local=False, provider_name=timeout_provider)" in base_src
 

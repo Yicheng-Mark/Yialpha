@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.graph.perf_telemetry``.
+"""Unit tests for ``yialpha.graph.perf_telemetry``.
 
 Covers:
 1. ``wrap_node`` transparency (return value + exception propagation).
@@ -20,7 +20,7 @@ import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
-from yiagents.graph.perf_telemetry import (
+from yialpha.graph.perf_telemetry import (
     UNATTRIBUTED,
     NodePerfTokenCallback,
     NodePerfTracker,

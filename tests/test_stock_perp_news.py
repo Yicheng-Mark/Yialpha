@@ -26,10 +26,10 @@ from unittest import mock
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
-import yiagents.agents.analysts.news_analyst as news
-import yiagents.agents.analysts.sentiment_analyst as sent
-from yiagents.agents.analysts.news_analyst import create_news_analyst
-from yiagents.dataflows import config as cfgmod
+import yialpha.agents.analysts.news_analyst as news
+import yialpha.agents.analysts.sentiment_analyst as sent
+from yialpha.agents.analysts.news_analyst import create_news_analyst
+from yialpha.dataflows import config as cfgmod
 
 
 class _PromptCaptureLLM(Runnable):

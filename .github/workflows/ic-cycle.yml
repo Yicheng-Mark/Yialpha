@@ -39,7 +39,7 @@ jobs:
         # needs. Non-zero exit = no dataset at all, which SHOULD fail the
         # job (an empty artifact masquerading as evidence is worse).
         run: |
-          yiagents ic-cycle \
+          yialpha ic-cycle \
             --ticker NVDA --ticker AMD --ticker MSFT \
             --horizon 5 --window 60
       - name: Upload IC evidence

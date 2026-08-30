@@ -1,6 +1,6 @@
-"""Tests for the ``yiagents snapshot`` CLI subcommand group.
+"""Tests for the ``yialpha snapshot`` CLI subcommand group.
 
-The record/diff/list wiring gives yiagents/config_snapshot.py (previously
+The record/diff/list wiring gives yialpha/config_snapshot.py (previously
 mechanism-complete but unreachable at runtime) its human-driven entry point.
 Snapshots are isolated into a tmp data_cache_dir so tests never touch the
 user's real history.
@@ -13,8 +13,8 @@ import json
 import pytest
 from typer.testing import CliRunner
 
-from yiagents.cli.main import app
-from yiagents.dataflows.config import set_config
+from yialpha.cli.main import app
+from yialpha.dataflows.config import set_config
 
 runner = CliRunner()
 
@@ -102,11 +102,11 @@ class TestConfigDriftWarning:
     """The interactive-entry drift check (analyze startup advisory)."""
 
     def test_no_drift_no_warning(self, isolated_history, monkeypatch):
-        import yiagents.cli.main as cli_main
+        import yialpha.cli.main as cli_main
 
         recorded = {"n": 0}
         monkeypatch.setattr(
-            "yiagents.config_snapshot.diff_against_last_snapshot",
+            "yialpha.config_snapshot.diff_against_last_snapshot",
             lambda cfg, **kw: (recorded.__setitem__("n", recorded["n"] + 1) or {}),
         )
         cli_main.console.begin_capture()
@@ -116,10 +116,10 @@ class TestConfigDriftWarning:
         assert recorded["n"] == 1
 
     def test_drift_prints_warning(self, isolated_history, monkeypatch):
-        import yiagents.cli.main as cli_main
+        import yialpha.cli.main as cli_main
 
         monkeypatch.setattr(
-            "yiagents.config_snapshot.diff_against_last_snapshot",
+            "yialpha.config_snapshot.diff_against_last_snapshot",
             lambda cfg, **kw: {"indicator_battery": (None, ["rsi"])},
         )
         cli_main.console.begin_capture()
@@ -130,13 +130,13 @@ class TestConfigDriftWarning:
         assert "snapshot diff" in out
 
     def test_check_failure_is_silent(self, isolated_history, monkeypatch):
-        import yiagents.cli.main as cli_main
+        import yialpha.cli.main as cli_main
 
         def boom(cfg, **kw):
             raise RuntimeError("snapshot dir on fire")
 
         monkeypatch.setattr(
-            "yiagents.config_snapshot.diff_against_last_snapshot", boom
+            "yialpha.config_snapshot.diff_against_last_snapshot", boom
         )
         cli_main.console.begin_capture()
         cli_main._warn_config_drift()  # must not raise

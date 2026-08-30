@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.agents.utils.prompt_builder import (
+from yialpha.agents.utils.prompt_builder import (
     build_collaborator_prompt,
     build_fincot_prompt,
     build_mermaid_workflow,

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.monitoring.preflight import _resolve_proxy_probe
+from yialpha.monitoring.preflight import _resolve_proxy_probe
 
 _PROXY_ENV_VARS = ("SOCKS5_PROXY", "ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY")
 

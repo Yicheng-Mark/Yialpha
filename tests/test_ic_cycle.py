@@ -12,7 +12,7 @@ from unittest import mock
 import pandas as pd
 import pytest
 
-from yiagents.dataflows import stockstats_utils
+from yialpha.dataflows import stockstats_utils
 
 
 def _ohlcv(days: int = 60, start_close: float = 100.0) -> pd.DataFrame:
@@ -40,7 +40,7 @@ def patched_ohlcv(monkeypatch):
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 def test_export_ic_datasets_writes_csvs(tmp_path, patched_ohlcv):
-    from yiagents.backtest.ic_dataset import export_ic_datasets
+    from yialpha.backtest.ic_dataset import export_ic_datasets
 
     written = export_ic_datasets(
         ["NVDA", "AMD"], horizon=5, output_dir=tmp_path,
@@ -54,7 +54,7 @@ def test_export_ic_datasets_writes_csvs(tmp_path, patched_ohlcv):
 
 @pytest.mark.unit
 def test_export_rejects_unknown_indicator(tmp_path):
-    from yiagents.backtest.ic_dataset import export_ic_datasets
+    from yialpha.backtest.ic_dataset import export_ic_datasets
 
     with pytest.raises(ValueError, match="unknown indicator"):
         export_ic_datasets(
@@ -64,7 +64,7 @@ def test_export_rejects_unknown_indicator(tmp_path):
 
 @pytest.mark.unit
 def test_prune_verdict_for_csv_shape(tmp_path):
-    from yiagents.backtest.ic_dataset import prune_verdict_for_csv
+    from yialpha.backtest.ic_dataset import prune_verdict_for_csv
 
     # A perfectly monotone indicator (close itself) predicts the forward
     # return of a trending series at rank level; rsi on a straight-line trend
@@ -92,7 +92,7 @@ def test_prune_verdict_for_csv_shape(tmp_path):
 
 @pytest.mark.unit
 def test_run_ic_cycle_end_to_end(tmp_path, patched_ohlcv):
-    from yiagents.backtest.ic_dataset import run_ic_cycle
+    from yialpha.backtest.ic_dataset import run_ic_cycle
 
     result = run_ic_cycle(
         ["NVDA"], horizon=5, output_dir=tmp_path, indicators=["rsi"],
@@ -131,7 +131,7 @@ def _binance_frame(days: int = 320) -> pd.DataFrame:
 
 @pytest.mark.unit
 def test_export_crypto_perp_uses_binance_venue_and_suffix(tmp_path, monkeypatch):
-    from yiagents.backtest.ic_dataset import export_ic_datasets
+    from yialpha.backtest.ic_dataset import export_ic_datasets
 
     calls: list[dict] = []
 
@@ -142,7 +142,7 @@ def test_export_crypto_perp_uses_binance_venue_and_suffix(tmp_path, monkeypatch)
         return _binance_frame()
 
     monkeypatch.setattr(
-        "yiagents.dataflows.binance.binance_klines_frame", fake_frame,
+        "yialpha.dataflows.binance.binance_klines_frame", fake_frame,
     )
     written = export_ic_datasets(
         ["BTCUSDT"], horizon=5, output_dir=tmp_path,
@@ -161,13 +161,13 @@ def test_export_crypto_perp_uses_binance_venue_and_suffix(tmp_path, monkeypatch)
 
 @pytest.mark.unit
 def test_export_crypto_defaults_to_binance_battery(tmp_path, monkeypatch):
-    from yiagents.agents.utils.binance_indicator_tools import (
+    from yialpha.agents.utils.binance_indicator_tools import (
         BINANCE_INDICATOR_DEFAULTS,
     )
-    from yiagents.backtest.ic_dataset import export_ic_datasets
+    from yialpha.backtest.ic_dataset import export_ic_datasets
 
     monkeypatch.setattr(
-        "yiagents.dataflows.binance.binance_klines_frame",
+        "yialpha.dataflows.binance.binance_klines_frame",
         lambda *a, **k: _binance_frame(),
     )
     written = export_ic_datasets(
@@ -181,7 +181,7 @@ def test_export_crypto_defaults_to_binance_battery(tmp_path, monkeypatch):
 
 @pytest.mark.unit
 def test_indicator_ic_context_filters_by_venue(tmp_path, monkeypatch):
-    from yiagents.agents.analysts.market_analyst import (
+    from yialpha.agents.analysts.market_analyst import (
         _format_indicator_ic_context,
     )
 
@@ -212,7 +212,7 @@ def test_indicator_ic_context_filters_by_venue(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 def test_ic_cycle_command_registered():
-    from yiagents.cli.main import app
+    from yialpha.cli.main import app
 
     names = [
         getattr(c, "name", None) or (c.callback.__name__ if c.callback else "")
@@ -226,13 +226,13 @@ def test_ic_cycle_command_registered():
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 def test_snapshot_record_warns_on_missing_pathlike_evidence(monkeypatch, capsys):
-    from yiagents.cli import main as cli_main
+    from yialpha.cli import main as cli_main
 
     def fake_record(config, reason, evidence):
         return Path("unused.json")
 
     monkeypatch.setattr(
-        "yiagents.config_snapshot.record_config_snapshot", fake_record
+        "yialpha.config_snapshot.record_config_snapshot", fake_record
     )
     cli_main.snapshot_record(
         reason="test", evidence="does/not/exist.prune.json"
@@ -256,7 +256,7 @@ def test_snapshot_record_warns_on_missing_pathlike_evidence(monkeypatch, capsys)
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 def test_indicator_ic_context_render(tmp_path, monkeypatch):
-    from yiagents.agents.analysts.market_analyst import _format_indicator_ic_context
+    from yialpha.agents.analysts.market_analyst import _format_indicator_ic_context
 
     monkeypatch.chdir(tmp_path)
     assert _format_indicator_ic_context() is None  # no ic_data dir
@@ -283,7 +283,7 @@ def test_indicator_ic_context_render(tmp_path, monkeypatch):
 
 @pytest.mark.unit
 def test_indicator_ic_context_config_key_default_off():
-    from yiagents.default_config import _ENV_OVERRIDES, DEFAULT_CONFIG
+    from yialpha.default_config import _ENV_OVERRIDES, DEFAULT_CONFIG
 
     assert DEFAULT_CONFIG["indicator_ic_context"] is False
-    assert _ENV_OVERRIDES["YIAGENTS_INDICATOR_IC_CONTEXT"] == "indicator_ic_context"
+    assert _ENV_OVERRIDES["YIALPHA_INDICATOR_IC_CONTEXT"] == "indicator_ic_context"

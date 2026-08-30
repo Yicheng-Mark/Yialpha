@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-rank_signals.py — YiAgents 多标的信心排名。
+rank_signals.py — YiAlpha 多标的信心排名。
 
 扫描一批 ticker 的最新分析报告，按 做多 / 做空 / 观望 分组，各自按「综合信心分」排名，
 一眼看到最强多头 / 最强空头。只读报告产物，零触碰 agent/图/数据流（守「增强层零影响」铁律）。
@@ -362,7 +362,7 @@ def _render_ticket_md(report_dir: Path, capital: float) -> str:
 # ---------------------------------------------------------------------------
 
 def main():
-    ap = argparse.ArgumentParser(description="YiAgents 多标的信心排名（做多/做空/观望分组）")
+    ap = argparse.ArgumentParser(description="YiAlpha 多标的信心排名（做多/做空/观望分组）")
     ap.add_argument("--tickers", nargs="+", help="要排名的 ticker 列表（不传则全部 ticker 各取最新）")
     ap.add_argument("--top", type=int, default=10, help="每组展示前 N（默认 10；0=全部）")
     ap.add_argument("--since", help="只排报告日期 ≥ 此日的（YYYY-MM-DD）")

@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.dataflows.baostock_vendor`` and the
+"""Unit tests for ``yialpha.dataflows.baostock_vendor`` and the
 fundamentals-analyst wiring of the ``a_share_native`` category (Track A,
 native A-share OHLC + TTM valuation).
 
@@ -23,9 +23,9 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
-from yiagents.agents.analysts.fundamentals_analyst import create_fundamentals_analyst
-from yiagents.dataflows import akshare_vendor as akv, baostock_vendor as bsv
-from yiagents.dataflows.errors import NoMarketDataError, VendorRateLimitError
+from yialpha.agents.analysts.fundamentals_analyst import create_fundamentals_analyst
+from yialpha.dataflows import akshare_vendor as akv, baostock_vendor as bsv
+from yialpha.dataflows.errors import NoMarketDataError, VendorRateLimitError
 
 
 # --------------------------------------------------------------------------- #
@@ -222,8 +222,8 @@ def test_statement_rows_cached_per_code_fn_anchor(monkeypatch):
 @pytest.mark.unit
 def test_router_routes_ohlc_via_baostock(monkeypatch):
     _patch_daily(monkeypatch)
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
 
     orig = cfgmod.get_config()
     try:
@@ -240,8 +240,8 @@ def test_router_optional_category_degrades_to_sentinel(monkeypatch):
     """A non-A-share ticker -> NoMarketDataError -> the router's NO_DATA_AVAILABLE
     sentinel (the typed 'report unavailable' path), not a crash. The optional
     category never re-raises: a missing native-data signal can't abort the run."""
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
 
     orig = cfgmod.get_config()
     try:
@@ -268,8 +268,8 @@ def test_router_missing_dependency_degrades_to_sentinel(monkeypatch, tmp_path):
     # Point the vendor at an empty cache dir so the shared disk cache misses
     # and _cached_daily actually reaches the (blocked) login path.
     monkeypatch.setattr(bsv, "_cache_dir", lambda: str(tmp_path))
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
 
     orig = cfgmod.get_config()
     try:
@@ -316,7 +316,7 @@ class FundamentalsAShareWiringTests(unittest.TestCase):
     """a_share_native — default-off byte-equivalence + on-appends-native-tools."""
 
     def _tool_names(self, config_overrides=None, ticker="600519.SS"):
-        from yiagents.dataflows import config as cfgmod
+        from yialpha.dataflows import config as cfgmod
         orig = cfgmod.get_config()
         try:
             if config_overrides:
@@ -502,8 +502,8 @@ def test_akshare_direct_connect_restores_env(monkeypatch):
 @pytest.mark.unit
 def test_router_routes_news_via_akshare(monkeypatch):
     _patch_akshare(monkeypatch, _news_df())
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
 
     orig = cfgmod.get_config()
     try:
@@ -517,8 +517,8 @@ def test_router_routes_news_via_akshare(monkeypatch):
 
 @pytest.mark.unit
 def test_router_news_optional_category_degrades_to_sentinel(monkeypatch):
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
 
     orig = cfgmod.get_config()
     try:
@@ -671,8 +671,8 @@ def test_money_flow_direct_connect_restores_env(monkeypatch):
 @pytest.mark.unit
 def test_router_routes_money_flow_via_akshare(monkeypatch):
     _patch_ak(monkeypatch, stock_individual_fund_flow=lambda stock, market: _fund_flow_df())
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
     orig = cfgmod.get_config()
     try:
         cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
@@ -757,8 +757,8 @@ def test_dragon_tiger_direct_connect_restores_env(monkeypatch):
 @pytest.mark.unit
 def test_router_routes_dragon_tiger_via_akshare(monkeypatch):
     _patch_ak(monkeypatch, stock_lhb_detail_em=lambda start_date, end_date: _lhb_df())
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
     orig = cfgmod.get_config()
     try:
         cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
@@ -771,8 +771,8 @@ def test_router_routes_dragon_tiger_via_akshare(monkeypatch):
 
 @pytest.mark.unit
 def test_router_money_flow_non_a_share_degrades_to_sentinel(monkeypatch):
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
     orig = cfgmod.get_config()
     try:
         cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
@@ -797,8 +797,8 @@ class NewsAShareWiringTests(unittest.TestCase):
         ticker="600519.SS",
         trade_date=None,
     ):
-        from yiagents.agents.analysts.news_analyst import create_news_analyst
-        from yiagents.dataflows import config as cfgmod
+        from yialpha.agents.analysts.news_analyst import create_news_analyst
+        from yialpha.dataflows import config as cfgmod
         orig = cfgmod.get_config()
         frozen = {"web_search_enabled": False}
         if config_overrides:
@@ -849,8 +849,8 @@ class NewsAShareWiringTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # Tushare vendor (Phase 3 — opt-in token tier)
 # --------------------------------------------------------------------------- #
-from yiagents.dataflows import tushare_vendor as tv  # noqa: E402
-from yiagents.dataflows.errors import VendorNotConfiguredError  # noqa: E402
+from yialpha.dataflows import tushare_vendor as tv  # noqa: E402
+from yialpha.dataflows.errors import VendorNotConfiguredError  # noqa: E402
 
 
 def _tushare_pro(df_basic=None, df_news=None, raises=None):
@@ -894,7 +894,7 @@ def _tushare_news_df():
 
 @pytest.mark.unit
 def test_tushare_symbol_map_ss_to_sh():
-    # YiAgents .SS (yfinance Shanghai) maps to Tushare's .SH.
+    # YiAlpha .SS (yfinance Shanghai) maps to Tushare's .SH.
     assert tv._to_tushare_code("600519.SS") == "600519.SH"
     assert tv._to_tushare_code("600000.SH") == "600000.SH"
 
@@ -906,7 +906,7 @@ def test_tushare_transport_error_is_not_no_market_data():
     invalid, delisted') during an outage."""
     import requests
 
-    from yiagents.dataflows.errors import NoMarketDataError, VendorError
+    from yialpha.dataflows.errors import NoMarketDataError, VendorError
 
     pro = _tushare_pro(raises=requests.exceptions.ConnectionError("conn refused"))
     with pytest.raises(VendorError, match="transport failure") as ei:
@@ -930,7 +930,7 @@ def test_tushare_non_a_share_raises(bad):
 def test_tushare_missing_token_raises_not_configured(monkeypatch):
     """No TUSHARE_TOKEN -> VendorNotConfiguredError (router skips this vendor)."""
     monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
-    from yiagents.dataflows import config as cfgmod
+    from yialpha.dataflows import config as cfgmod
     orig = cfgmod.get_config()
     try:
         cfgmod.set_config({**orig, "tushare_token": None})
@@ -974,8 +974,8 @@ def test_router_falls_back_from_tushare_to_baostock(monkeypatch, tmp_path):
     key multi-vendor value: a keyless default still works when Tushare is listed
     but unconfigured."""
     monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
     # BaoStock path: serve synthetic daily rows.
     monkeypatch.setattr(bsv, "_cached_daily", lambda code, curr_date=None: list(SYNTH_ROWS))
 
@@ -1057,8 +1057,8 @@ def test_northbound_rate_limit_typed(monkeypatch):
 @pytest.mark.unit
 def test_router_routes_northbound_via_akshare(monkeypatch):
     _patch_ak(monkeypatch, stock_hsgt_individual_em=lambda symbol: _northbound_df())
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
     orig = cfgmod.get_config()
     try:
         cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
@@ -1071,8 +1071,8 @@ def test_router_routes_northbound_via_akshare(monkeypatch):
 
 @pytest.mark.unit
 def test_router_northbound_non_a_share_degrades_to_sentinel(monkeypatch):
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
     orig = cfgmod.get_config()
     try:
         cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
@@ -1168,8 +1168,8 @@ def test_sector_flow_transport_error_degrades(monkeypatch):
 def test_router_routes_sector_flow_via_akshare(monkeypatch):
     _patch_ak(monkeypatch, stock_sector_fund_flow_rank=lambda **kw: _sector_flow_df())
     monkeypatch.setattr(akv, "_baostock_industry", lambda ticker: "白酒")
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
     orig = cfgmod.get_config()
     try:
         cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
@@ -1231,7 +1231,7 @@ def test_realtime_quote_malformed_date_fails_closed(monkeypatch):
     """A non-empty UNPARSEABLE curr_date (slash form an LLM can emit) used to
     pass is_historical_date as "live" and serve today's snapshot into a
     nominally historical run. It now takes the historical branch."""
-    from yiagents.dataflows.utils import is_historical_date
+    from yialpha.dataflows.utils import is_historical_date
 
     # Unit-level contract: only empty/None is live; garbage is historical.
     assert is_historical_date(None) is False
@@ -1263,8 +1263,8 @@ def test_realtime_quote_transport_error(monkeypatch):
 @pytest.mark.unit
 def test_router_routes_realtime_via_akshare(monkeypatch):
     _patch_ak(monkeypatch, stock_zh_a_spot_em=lambda: _spot_em_df())
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
     orig = cfgmod.get_config()
     try:
         cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
@@ -1360,8 +1360,8 @@ def test_market_breadth_transport_error(monkeypatch):
 @pytest.mark.unit
 def test_router_routes_breadth_via_akshare(monkeypatch):
     _patch_ak(monkeypatch, stock_zh_a_spot=lambda: _breadth_df())
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
     orig = cfgmod.get_config()
     try:
         cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
@@ -1377,8 +1377,8 @@ class MarketAnalystAShareWiringTests(unittest.TestCase):
     """a_share_native — default-off byte-equivalence + on-appends-market-tools."""
 
     def _tool_names(self, config_overrides=None, ticker="600519.SS"):
-        from yiagents.agents.analysts.market_analyst import create_market_analyst
-        from yiagents.dataflows import config as cfgmod
+        from yialpha.agents.analysts.market_analyst import create_market_analyst
+        from yialpha.dataflows import config as cfgmod
         orig = cfgmod.get_config()
         try:
             if config_overrides:
@@ -1426,12 +1426,12 @@ class MarketAnalystAShareWiringTests(unittest.TestCase):
 # BaoStock quarterly statements (Phase 6 — income / balance / cashflow)
 # --------------------------------------------------------------------------- #
 # Rows use the REAL server-delivered field names (pinned in
-# yiagents.dataflows.baostock_fields against the official docs) — the previous
+# yialpha.dataflows.baostock_fields against the official docs) — the previous
 # fixtures invented npParentCompanyOwners/totalAssets/netCFOperate fields the
 # endpoints never return, so the mocks mirrored the renderers' bug and the
 # all-n/a tables looked "tested". Ratio fields are decimal fractions per the
 # official samples (roeAvg 0.074617 == 7.46%).
-from yiagents.dataflows import baostock_fields as bsf  # noqa: E402
+from yialpha.dataflows import baostock_fields as bsf  # noqa: E402
 
 
 @pytest.mark.unit
@@ -1576,8 +1576,8 @@ def test_cashflow_statement_pit(monkeypatch):
 @pytest.mark.unit
 def test_router_routes_income_statement_via_baostock(monkeypatch):
     monkeypatch.setattr(bsv, "_statement_rows", lambda code, fn, anchor=None: bsv.StatementFetch(_profit_rows(), []))
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
     orig = cfgmod.get_config()
     try:
         cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
@@ -1591,8 +1591,8 @@ def test_router_routes_income_statement_via_baostock(monkeypatch):
 
 @pytest.mark.unit
 def test_router_income_statement_non_a_share_degrades(monkeypatch):
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
     orig = cfgmod.get_config()
     try:
         cfgmod.set_config({**orig, "data_vendors": {**orig.get("data_vendors", {}),
@@ -1608,7 +1608,7 @@ class FundamentalsAShareStatementWiringTests(unittest.TestCase):
     """Verify the 3 quarterly-statement tools are bound to the fundamentals analyst."""
 
     def _tool_names(self, config_overrides=None, ticker="600519.SS"):
-        from yiagents.dataflows import config as cfgmod
+        from yialpha.dataflows import config as cfgmod
         orig = cfgmod.get_config()
         try:
             if config_overrides:

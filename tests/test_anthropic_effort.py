@@ -8,7 +8,7 @@ support automatically.
 
 import pytest
 
-from yiagents.llm_clients import anthropic_client as mod
+from yialpha.llm_clients import anthropic_client as mod
 
 
 def _capture_kwargs(monkeypatch):

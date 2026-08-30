@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.dataflows.eastmoney`` (A-share margin trading),
+"""Unit tests for ``yialpha.dataflows.eastmoney`` (A-share margin trading),
 the router wiring, and the fundamentals-analyst byte-equivalence gate (Track A).
 
 Hermetic: no network. The vendor path is exercised by patching
@@ -25,10 +25,10 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
-from yiagents.agents.analysts.fundamentals_analyst import create_fundamentals_analyst
-from yiagents.dataflows import eastmoney
-from yiagents.dataflows.errors import NoMarketDataError, VendorRateLimitError
-from yiagents.dataflows.symbol_utils import is_a_stock
+from yialpha.agents.analysts.fundamentals_analyst import create_fundamentals_analyst
+from yialpha.dataflows import eastmoney
+from yialpha.dataflows.errors import NoMarketDataError, VendorRateLimitError
+from yialpha.dataflows.symbol_utils import is_a_stock
 
 
 # --------------------------------------------------------------------------- #
@@ -263,8 +263,8 @@ def test_cached_or_fetch_serves_stale_on_failure(monkeypatch, tmp_path):
 @pytest.mark.unit
 def test_router_routes_margin_via_eastmoney(monkeypatch, tmp_path):
     _patch_fetch(monkeypatch, tmp_path, lambda u: _margin_json(_MARGIN_ROWS))
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
 
     orig = cfgmod.get_config()
     try:
@@ -280,8 +280,8 @@ def test_router_routes_margin_via_eastmoney(monkeypatch, tmp_path):
 def test_router_optional_category_degrades_to_sentinel(monkeypatch, tmp_path):
     """A non-A-share ticker -> NoMarketDataError -> the router's NO_DATA_AVAILABLE
     sentinel (optional category never re-raises)."""
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
 
     orig = cfgmod.get_config()
     try:
@@ -302,8 +302,8 @@ def test_router_eastmoney_host_failure_degrades_to_sentinel(monkeypatch, tmp_pat
     monkeypatch.setattr(eastmoney, "_direct_get",
                         lambda *a, **k: (_ for _ in ()).throw(
                             NoMarketDataError("x", detail="host down")))
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
 
     orig = cfgmod.get_config()
     try:
@@ -352,7 +352,7 @@ class FundamentalsWiringTests(unittest.TestCase):
     """Track A — default-off byte-equivalence + double-gate (flag AND is_a_stock)."""
 
     def _tool_names(self, config_overrides, ticker):
-        from yiagents.dataflows import config as cfgmod
+        from yialpha.dataflows import config as cfgmod
         orig = cfgmod.get_config()
         try:
             if config_overrides:

@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from yiagents.dataflows.valuation_methods import (
+from yialpha.dataflows.valuation_methods import (
     earnings_yield,
     graham_number,
     intrinsic_value_two_stage_dcf,

@@ -52,7 +52,7 @@ PIT 时间语义的快捷实现，均视为架构违规。**
 
 ## 代码内版本戳
 
-所有 schema 与账本对象携带（定义见 `yiagents/versions.py`；不靠 git 反推）：
+所有 schema 与账本对象携带（定义见 `yialpha/versions.py`；不靠 git 反推）：
 `schema_version` / `feature_version` / `cost_model_version` / `regime_version` /
 `ticket_version`。字段重命名/删除/重定义必须 bump；带默认值的可选新增不算。
 

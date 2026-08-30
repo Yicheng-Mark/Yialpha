@@ -1,4 +1,4 @@
-// YiAgents shared utilities — single home for helpers used by BOTH app.js and
+// YiAlpha shared utilities — single home for helpers used by BOTH app.js and
 // charts.js (they were previously copy-pasted with "keep in sync" comments).
 //
 // Loaded before app.js/charts.js (see index.html script order). Exposed as

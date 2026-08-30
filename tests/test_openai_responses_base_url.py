@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.llm_clients.openai_client import (
+from yialpha.llm_clients.openai_client import (
     OpenAIClient,
     _is_native_openai_base_url,
 )
