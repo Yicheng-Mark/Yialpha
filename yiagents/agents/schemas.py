@@ -185,6 +185,24 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
 # ---------------------------------------------------------------------------
 
 
+class OutcomeProbabilities(BaseModel):
+    """Probability distribution over the three outcome branches (V2.0).
+
+    Soft contract: the three values should sum to ~1.0. Deliberately NOT
+    hard-validated — a strict sum check would make provider structured-output
+    calls fail on benign rounding (0.61 + 0.24 + 0.16) and silently degrade
+    the PM to free text, which costs more than an imperfect distribution.
+    Consumers treat values as approximate weights, never as calibrated odds
+    (calibration arrives with the V2.1 outcome ledger).
+    """
+
+    bull: float = Field(ge=0.0, le=1.0, description="Probability of a bullish outcome.")
+    neutral: float = Field(
+        ge=0.0, le=1.0, description="Probability of a sideways / neutral outcome."
+    )
+    bear: float = Field(ge=0.0, le=1.0, description="Probability of a bearish outcome.")
+
+
 class PortfolioDecision(BaseModel):
     """Structured output produced by the Portfolio Manager.
 
@@ -192,6 +210,12 @@ class PortfolioDecision(BaseModel):
     extraction pass is required. Field descriptions double as the model's
     output instructions, so the prompt body only needs to convey context and
     the rating-scale guidance.
+
+    V2.0 additions (all optional, all backward compatible): ``confidence``,
+    ``probabilities``, ``expected_return``, ``invalidation``,
+    ``evidence_coverage``. They feed the ExecutionTicket and the V2.1
+    attribution ledger; a model that omits them keeps rendering byte-identical
+    to the pre-V2 markdown.
     """
 
     rating: PortfolioRating = Field(
@@ -221,8 +245,54 @@ class PortfolioDecision(BaseModel):
         default=None,
         description="Optional recommended holding period, e.g. '3-6 months'.",
     )
+    confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional conviction in the rating on a 0-1 scale (1 = fully "
+            "certain). Judge it against evidence quality and agreement across "
+            "analysts, not just rhetorical strength."
+        ),
+    )
+    probabilities: OutcomeProbabilities | None = Field(
+        default=None,
+        description=(
+            "Optional probability split over the three outcome branches "
+            "(bull / neutral / bear), each 0-1, summing to about 1.0."
+        ),
+    )
+    expected_return: float | None = Field(
+        default=None,
+        description=(
+            "Optional expected return to the price target over the stated "
+            "horizon, as a fraction (0.047 means +4.7%). Omit when the view "
+            "has no numeric target."
+        ),
+    )
+    invalidation: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional conditions that would invalidate this thesis, e.g. "
+            "'closes below 180 support', 'funding flips and stays negative'. "
+            "One to three concrete, observable triggers."
+        ),
+    )
+    evidence_coverage: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional self-assessed share of the analysis that rested on real "
+            "retrieved data rather than priors, 0-1. Lower it when reports "
+            "carried NO_DATA placeholders."
+        ),
+    )
 
-    @field_validator("price_target", mode="before")
+    @field_validator(
+        "price_target", "confidence", "expected_return", "evidence_coverage",
+        mode="before",
+    )
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
@@ -234,7 +304,10 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
     Memory log, CLI display, and saved report files all read this markdown,
     so the rendered output preserves the exact section headers (``**Rating**``,
     ``**Executive Summary**``, ``**Investment Thesis**``) that downstream
-    parsers and the report writers already handle.
+    parsers and the report writers already handle. V2.0 optional fields
+    append lines ONLY when filled — a decision without them renders
+    byte-identically to the pre-V2 shape, so legacy parsers and the
+    accuracy-loop rating regex keep working unchanged.
     """
     parts = [
         f"**Rating**: {decision.rating.value}",
@@ -247,6 +320,21 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    if decision.confidence is not None:
+        parts.extend(["", f"**Confidence**: {decision.confidence:.0%}"])
+    if decision.probabilities is not None:
+        p = decision.probabilities
+        parts.extend([
+            "",
+            f"**Probabilities**: bull {p.bull:.0%} / neutral {p.neutral:.0%}"
+            f" / bear {p.bear:.0%}",
+        ])
+    if decision.expected_return is not None:
+        parts.extend(["", f"**Expected Return**: {decision.expected_return:+.1%}"])
+    if decision.invalidation:
+        parts.extend(["", "**Invalidation**: " + "; ".join(decision.invalidation)])
+    if decision.evidence_coverage is not None:
+        parts.extend(["", f"**Evidence Coverage**: {decision.evidence_coverage:.0%}"])
     return "\n".join(parts)
 
 

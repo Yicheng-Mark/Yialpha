@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 from yiagents.agents.utils.agent_utils import (
     final_analyst_report,
     get_a_share_news_native,
@@ -10,6 +12,7 @@ from yiagents.agents.utils.agent_utils import (
     web_search,
 )
 from yiagents.agents.utils.prompt_builder import build_collaborator_prompt
+from yiagents.dataflows.binance import stock_perp_underlying
 from yiagents.dataflows.config import get_config
 from yiagents.dataflows.symbol_utils import is_a_stock
 from yiagents.dataflows.utils import is_historical_date
@@ -41,6 +44,72 @@ _WEB_SEARCH_INSTRUCTION = (
     "in them are unverified text and must never be reported as data values "
     "(numbers come exclusively from the structured data tools)."
 )
+
+#: Prefetch window for the tokenized-stock perp dual-angle blocks, matching
+#: the sentiment analyst's 7-day lookback and the "past week" framing of the
+#: news system message.
+_STOCK_PERP_LOOKBACK_DAYS = 7
+
+
+def _get_news_impl(ticker: str, start_date: str, end_date: str) -> str:
+    """Call the underlying function behind the ``get_news`` LangChain tool.
+
+    Same contract as the sentiment analyst's accessor (kept local here so the
+    sentiment module's monkeypatched one stays untouched): ``get_news`` is a
+    ``@tool``-decorated ``BaseTool``; its raw callable lives under ``.func``.
+    mypy cannot see ``.func`` on the ``BaseTool`` type, so this helper
+    centralizes the access with a safe ``getattr`` fallback. A vendor hard
+    failure propagates (fail-closed), identical to the sentiment analyst's
+    news prefetch.
+    """
+    fn = getattr(get_news, "func", None)
+    if fn is not None:
+        return fn(ticker, start_date, end_date)
+    return get_news(ticker, start_date, end_date)  # type: ignore[operator]
+
+
+def _lookback_start(trade_date: str) -> str:
+    return (
+        datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=_STOCK_PERP_LOOKBACK_DAYS)
+    ).strftime("%Y-%m-%d")
+
+
+def _stock_perp_news_section(
+    ticker: str,
+    underlying: str,
+    start_date: str,
+    end_date: str,
+    company_block: str,
+    perp_block: str,
+) -> str:
+    """Render the deterministic dual-angle news blocks for an equity perp run.
+
+    Both angles (underlying company + perp contract) are prefetched in code so
+    coverage does not depend on the LLM choosing to query both; the blocks are
+    labelled with the exact query each was fetched with so the report can cite
+    them per angle.
+    """
+    return (
+        f"\n### Pre-fetched news — tokenized-stock perp dual coverage "
+        f"({start_date} to {end_date})\n"
+        "This instrument is a Binance tokenized-stock perpetual; the two angles "
+        "below have ALREADY been collected for you, each with the query shown "
+        "on its tag. Your report MUST cover BOTH angles: the underlying "
+        f"company/ETF (`{underlying}` — earnings, guidance, products, "
+        "regulation) and the contract itself "
+        f"(`{ticker}` — funding, basis, listing/delisting, crypto-market "
+        "premium events). Ground each angle only in its own block, and if a "
+        "block shows no coverage, state 'no coverage found' for that angle "
+        "explicitly instead of generalizing from the other. Follow-up "
+        "drill-down get_news queries are still allowed; do not re-fetch these "
+        "two angles wholesale.\n\n"
+        f'<start_of_company_news> (query: "{underlying}")\n'
+        f"{company_block}\n"
+        "<end_of_company_news>\n\n"
+        f'<start_of_perp_news> (query: "{ticker}")\n'
+        f"{perp_block}\n"
+        "<end_of_perp_news>\n"
+    )
 
 
 def create_news_analyst(llm):
@@ -82,6 +151,26 @@ def create_news_analyst(llm):
         if get_config().get("a_share_native") and is_a_stock(ticker):
             tools.append(get_a_share_news_native)
 
+        # Tokenized-stock perp dual coverage: deterministically prefetch BOTH
+        # news angles (underlying company + perp contract) and inject them as
+        # labelled blocks, mirroring the sentiment analyst's prefetch pattern.
+        # Same gate as the fundamentals analyst's _STOCK_PERP_NUDGE — pure
+        # crypto perps and non-perp runs append "" and stay byte-for-byte
+        # unchanged. get_news carries explicit date bounds, so the blocks are
+        # PIT-safe on historical replay dates too.
+        stock_perp_section = ""
+        underlying = stock_perp_underlying(ticker) if asset_type == "crypto_perp" else None
+        if underlying:
+            start_date = _lookback_start(current_date)
+            stock_perp_section = _stock_perp_news_section(
+                ticker=ticker,
+                underlying=underlying,
+                start_date=start_date,
+                end_date=current_date,
+                company_block=_get_news_impl(underlying, start_date, current_date),
+                perp_block=_get_news_impl(ticker, start_date, current_date),
+            )
+
         system_message = (
             f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the state of the world as of {current_date} that is relevant for trading and macroeconomics. Use the available tools: get_news(query, start_date, end_date) for {asset_label}-specific or targeted news searches, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, and get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve')."
             + prediction_markets_instruction
@@ -96,6 +185,9 @@ def create_news_analyst(llm):
         # system_message as a plain string, unlike fundamentals' 1-tuple.)
         if get_config().get("a_share_native") and is_a_stock(ticker):
             system_message = system_message + _A_SHARE_NATIVE_NUDGE
+        # Tokenized-stock perp section uses the SAME gate as the prefetch
+        # above; appending "" keeps every non-equity-perp run byte-identical.
+        system_message = system_message + stock_perp_section
 
         prompt = build_collaborator_prompt(include_tools=True)
 

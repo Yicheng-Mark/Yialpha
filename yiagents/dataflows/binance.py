@@ -34,6 +34,7 @@ import math
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import urlsplit
 
 import pandas as pd
@@ -1826,3 +1827,146 @@ def stock_perp_underlying(ticker: str) -> str | None:
     if not compact.endswith(("USDT", "USDC")):
         return None
     return tokenized_stock_perp_underlying(ticker, equity_perp_bases())
+
+
+# ---------------------------------------------------------------------------
+# V2.0 P0.4 — derivatives-stress input series (fail-open fetcher)
+# ---------------------------------------------------------------------------
+
+def _stress_series_from_records(
+    rows: object, ts_key: str, value_key: str,
+) -> pd.Series:  # type: ignore[type-arg]
+    """Datetime-indexed float Series from one /futures/data|fapi record list.
+
+    Rows with a missing/non-numeric value are dropped (not coerced to 0);
+    sorted by timestamp ascending. An empty result is a valid Series the
+    caller's window check will reject.
+    """
+    records: list[dict] = [r for r in rows if isinstance(r, dict)] if isinstance(
+        rows, list
+    ) else []
+    data: dict[datetime, float] = {}
+    for r in records:
+        ts = r.get(ts_key)
+        raw = r.get(value_key)
+        if ts is None or raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        data[datetime.fromtimestamp(int(ts) / 1000.0, tz=UTC)] = value
+    return pd.Series(data).sort_index()
+
+
+def derivatives_stress_series(
+    symbol: str, end_date: str, window_days: int = 90,
+) -> dict[str, Any]:
+    """Trailing positioning series for the Derivatives Stress Score.
+
+    Returns ``{funding, open_interest, global_lsr, basis, taker_ratio}`` —
+    the first four as datetime-indexed Series, ``taker_ratio`` as the latest
+    float. EVERY component is independently fail-open: a component that
+    cannot be fetched is ``None`` (the pure ``compute_stress`` then drops it
+    and lists it as missing) instead of failing the whole report. The window
+    is PIT-clamped to ``end_date`` via :func:`current_pit_end`.
+
+    Live-run practicality (why the REST paths, not the vision archive):
+    ``/futures/data/*`` retains only the LAST 30 DAYS, so OI/LSR typically
+    arrive as ~30 points — enough for the score's ``MIN_WINDOW`` while the
+    report carries the ``thin_history`` flag; funding and the klines-based
+    basis cover the full requested window. Downloading ~90 per-day archive
+    zips on a live decision path would cost far more than the extra context
+    is worth; deep-history stress belongs to offline IC work.
+    """
+    canonical = normalize_symbol_for_venue(symbol, "binance_perp")
+    end_clamped = current_pit_end(end_date) or end_date
+    end_dt = datetime.strptime(end_clamped, "%Y-%m-%d").replace(tzinfo=UTC)
+    start_dt = end_dt - timedelta(days=int(window_days))
+    start_ms = int(start_dt.timestamp() * 1000)
+    end_ms = int((end_dt.timestamp() + 86399) * 1000)  # end-of-day inclusive
+
+    out: dict[str, Any] = {}
+
+    try:
+        rows = _http_get(
+            "/fapi/v1/fundingRate",
+            {
+                "symbol": canonical,
+                "startTime": start_ms,
+                "endTime": end_ms,
+                "limit": 1000,
+            },
+            symbol,
+            canonical,
+        )
+        out["funding"] = _stress_series_from_records(rows, "fundingTime", "fundingRate")
+    except Exception as exc:  # noqa: BLE001 — component fail-open, never abort
+        logger.info("stress series funding unavailable for %s: %s", canonical, exc)
+        out["funding"] = None
+
+    for name, path, value_key in (
+        ("open_interest", "/futures/data/openInterestHist", "sumOpenInterest"),
+        ("global_lsr", "/futures/data/globalLongShortAccountRatio", "longShortRatio"),
+    ):
+        try:
+            rows = _http_get(
+                path,
+                {
+                    "symbol": canonical,
+                    "period": "1d",
+                    "startTime": start_ms,
+                    "endTime": end_ms,
+                    "limit": 30,
+                },
+                symbol,
+                canonical,
+            )
+            series = _stress_series_from_records(rows, "timestamp", value_key)
+            out[name] = series if len(series) > 0 else None
+        except Exception as exc:  # noqa: BLE001 — component fail-open
+            logger.info("stress series %s unavailable for %s: %s", name, canonical, exc)
+            out[name] = None
+
+    # Basis = perp close / index close − 1 over the window, from the two
+    # aligned klines frames (both PIT-clamped by binance_klines_frame itself).
+    try:
+        perp = binance_klines_frame(
+            symbol, start_dt.strftime("%Y-%m-%d"), end_clamped, "1d", "binance_perp",
+            "last",
+        )
+        index = binance_klines_frame(
+            symbol, start_dt.strftime("%Y-%m-%d"), end_clamped, "1d", "binance_perp",
+            "index",
+        )
+        joined = pd.DataFrame({"perp": perp["close"], "index": index["close"]}).dropna()
+        out["basis"] = (
+            (joined["perp"] / joined["index"] - 1.0).dropna()
+            if not joined.empty
+            else None
+        )
+    except Exception as exc:  # noqa: BLE001 — component fail-open
+        logger.info("stress series basis unavailable for %s: %s", canonical, exc)
+        out["basis"] = None
+
+    # Taker aggression: latest daily buySellRatio (float, not a series).
+    try:
+        rows = _http_get(
+            "/futures/data/takerlongshortRatio",
+            {
+                "symbol": canonical,
+                "period": "1d",
+                "startTime": end_ms - 2 * 86_400_000,
+                "endTime": end_ms,
+                "limit": 2,
+            },
+            symbol,
+            canonical,
+        )
+        series = _stress_series_from_records(rows, "timestamp", "buySellRatio")
+        out["taker_ratio"] = float(series.iloc[-1]) if len(series) > 0 else None
+    except Exception as exc:  # noqa: BLE001 — component fail-open
+        logger.info("stress taker_ratio unavailable for %s: %s", canonical, exc)
+        out["taker_ratio"] = None
+
+    return out

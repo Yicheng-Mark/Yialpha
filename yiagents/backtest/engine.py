@@ -43,17 +43,16 @@ from yiagents.backtest.metrics import (
     trade_quality_stats,
 )
 
-logger = logging.getLogger(__name__)
+# V2.0 P0.1: the Binance fee constants moved to yiagents.risk.cost_model as
+# the single source of truth shared with the decision-time tradeability
+# gate; they are re-exported below so existing imports keep working.
+from yiagents.risk.cost_model import (  # noqa: F401  (re-export)
+    BINANCE_USDT_M_MAKER_BPS,
+    BINANCE_USDT_M_TAKER_BPS,
+    BNB_FEE_DISCOUNT,
+)
 
-# ---------------------------------------------------------------------------
-# Binance USDT-M regular-tier fee schedule (VIP-0, no promo). The engine's
-# fills are market orders at the daily close, so the applicable fee is the
-# TAKER rate; the maker constant is carried for config_summary honesty and
-# for callers pricing limit-style variants. BNB fee settlement takes 10% off.
-# ---------------------------------------------------------------------------
-BINANCE_USDT_M_TAKER_BPS = 5.0    # 0.05%
-BINANCE_USDT_M_MAKER_BPS = 2.0    # 0.02%
-BNB_FEE_DISCOUNT = 0.10
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

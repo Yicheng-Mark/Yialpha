@@ -101,3 +101,42 @@ def take_profits(
         tp = entry + mult * R if direction == "long" else entry - mult * R
         out.append(round(tp, 6))
     return out
+
+
+def perp_ticket_numbers(
+    entry: float | None,
+    atr: float | None,
+    rating: str,
+    stop: float | None,
+    weight: float,
+) -> tuple[float, dict[str, float], float | None, float] | None:
+    """Shared numeric core of the perp ticket: leverage, cap detail, estimated
+    liquidation price, and the stop actually used.
+
+    Faithful extraction of the overlay renderer's math (V2.0) so the runtime
+    :class:`~yiagents.tickets.ExecutionTicket` and the markdown advisory can
+    never drift apart. Returns None when the inputs cannot support a ticket —
+    non-positive price/ATR, or a flat (zero) weight. Direction is the SIGN of
+    ``weight`` (long for positive, short for negative), mirroring the overlay;
+    a SHORT always re-derives its stop from ATR (the ATR stop module
+    implements the long form only), and a LONG without an explicit stop gets
+    one constructed the same way.
+    """
+    if entry is None or entry <= 0.0 or atr is None or atr <= 0.0:
+        return None
+    if weight == 0.0:
+        return None
+    direction = "long" if weight > 0.0 else "short"
+    strength = RATING_STRENGTH.get(rating, 0)
+    stop_used = stop
+    if direction == "short" or stop_used is None:
+        stop_used = (
+            entry - ATR_STOP_MULT * atr
+            if direction == "long"
+            else entry + ATR_STOP_MULT * atr
+        )
+    stop_dist = abs(entry - stop_used) / entry
+    atr_pct = atr / entry
+    lev, detail = compute_leverage(stop_dist, atr_pct, "crypto_perp", strength)
+    liq = liquidation_price(entry, lev, direction, "crypto_perp")
+    return lev, detail, liq, stop_used
