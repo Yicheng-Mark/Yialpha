@@ -68,7 +68,7 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 | Binance 现货 | `crypto_spot` | Binance 现货（`api.binance.com`，可切镜像） | 所有运行：spot_klines + 现货指标 + 有日期的指标/快照/证据工具；当前日期另含 ticker24 / **spot_perp_basis** | 历史分析不会注入滚动 24h 与当前跨市场基差 |
 | Binance 永续 | `crypto_perp` | Binance USDT-M 永续（`fapi.binance.com`）+ data.binance.vision 深历史归档 | 所有运行：klines + funding + 指标 + **vision 深历史归档**（OI/多空/taker 指标 + 盘口深度，回溯数年，PIT 正确）；当前日期另含 OI / 多空比 / 主动买卖 / basis / mark price 溢价指数 / 盘口快照 | 仅分析；回测已支持完整永续建模（资金费 / 成本 / 杠杆 / 强平） |
 
-加密模式下纯币对（无公司基本面）仍会自动剔除 Fundamentals Analyst——但币安**代币化股票永续**（exchangeInfo `underlyingType=EQUITY`，如跟踪美光的 `MUUSDT`）会保留该分析师并分析**标的美股**（符号自动重映射；每 run 预热一次实时上市表，失败回退静态种子快照）。所有 Binance 请求为手写 `requests`（**非官方 SDK**），复用已验证的 SOCKS5 代理，按产品线独立限流，并保留反应式 429/418 兜底。
+加密模式下纯币对（无公司基本面）仍会自动剔除 Fundamentals Analyst——但币安**代币化股票永续**（exchangeInfo `underlyingType=EQUITY`，如跟踪美光的 `MUUSDT`）会保留该分析师并分析**标的美股**（符号自动重映射；每 run 预热一次实时上市表，失败回退静态种子快照）。此类运行的 News Analyst 还会在代码层**确定性预取双角度新闻**——标的公司与 perp 合约本身（`MU` 与 `MUUSDT` 两组查询，7 天窗口）——以带标签的 prompt 块注入，双覆盖不依赖模型自觉查询。所有 Binance 请求为手写 `requests`（**非官方 SDK**），复用已验证的 SOCKS5 代理，按产品线独立限流，并保留反应式 429/418 兜底。
 
 ### A 股原生数据
 
@@ -345,6 +345,17 @@ LLM 定方向，数学定仓位与风险（[yiagents/risk/](yiagents/risk/)）�
 | 总线 | [manager.py](yiagents/risk/manager.py) | 汇聚以上，覆盖单票 / 行业 / 敞口上限 |
 
 `risk_enabled` 默认**开启**：风控经理确定性地改写分析报告中的仓位 / 止损 / 敞口，LLM 只保留方向。`scripts/run_baseline.py` 按模式显式设置（`--baseline` 关，建立 Phase-0 基线；`--full` 开，做配对 A/B）。
+
+**V2.0 交易可执行性层（默认开启）**——每次 run 的叠加层还会确定性地构建一张**候选执行票券 ExecutionTicket**（[yiagents/tickets.py](yiagents/tickets.py)，冻结版 [V2 基线](docs/V2_BASELINE.md)中唯一跨阶段交易对象）：
+
+| 机制 | 文件 | 效果 |
+| ------ | ------ | ------ |
+| 往返成本模型 | [cost_model.py](yiagents/risk/cost_model.py) | 按资产类的费率/滑点/资金费估算；回测引擎的费率常量现在以此为单一事实源 |
+| 方向化优势门 | [tradeability.py](yiagents/risk/tradeability.py) | LONG `target/ref−1`，SHORT 镜像（绝不取绝对值）；`net_edge <= 0 → NO_TRADE` |
+| 关键数据门 | [quality.py](yiagents/dataflows/quality.py) | GOOD / DEGRADED_AUXILIARY（社交新闻缺失→仅降置信度）/ DEGRADED_CRITICAL（价格/ATR/基本面缺失→NO_TRADE）/ INVALID |
+| 衍生品压力分 | [derivatives_stress.py](yiagents/risk/derivatives_stress.py) | 仅 perp：滚动 funding/OI/多空比/基差分位 → 拥挤度 0–100 + 标签状态 + 风险旗标（live run） |
+
+PM 的 `PortfolioDecision` 新增可选字段 `confidence / probabilities / expected_return / invalidation / evidence_coverage`；票券与这些字段以增量键入档 `full_states_log`。以上任何一层都不会改写 PM 的评级文本——观点 / 约束 / 状态三层隔离（V2 不变量 I1）。
 
 ---
 

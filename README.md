@@ -68,7 +68,7 @@ Crypto has three opt-in modes. `crypto` (Yahoo spot) is the default; `crypto_spo
 | Binance spot | `crypto_spot` | Binance spot (`api.binance.com`, optional mirror) | all runs: spot klines + spot indicators + dated indicators / snapshot / evidence tools; current date also: ticker24 / **spot_perp_basis** | Rolling 24h and current cross-venue basis are never injected into historical runs |
 | Binance perpetual | `crypto_perp` | Binance USDT-M perp (`fapi.binance.com`) + data.binance.vision deep-history archives | all runs: klines + funding + indicators + **vision deep-history archives** (OI / long-short / taker metrics + order-book depth, years back, PIT-correct); current date also: OI / long-short / taker flow / basis / mark-price premium index / depth snapshot | Analysis only. Backtests supported with full perp modeling (funding / costs / leverage / liquidation) |
 
-In crypto modes the Fundamentals Analyst is dropped for pure-crypto pairs (no company fundamentals) — but a Binance **tokenized-stock perp** (exchangeInfo `underlyingType=EQUITY`, e.g. `MUUSDT` tracking Micron) keeps it and analyzes the **underlying US equity** (symbol remapped automatically; the live listing is warmed once per run, with a static seed snapshot as the fail-open fallback). All Binance requests are hand-written `requests` (not the official SDK) over the existing SOCKS5 proxy, with per-product-line rate limiting and reactive 429/418 backstop.
+In crypto modes the Fundamentals Analyst is dropped for pure-crypto pairs (no company fundamentals) — but a Binance **tokenized-stock perp** (exchangeInfo `underlyingType=EQUITY`, e.g. `MUUSDT` tracking Micron) keeps it and analyzes the **underlying US equity** (symbol remapped automatically; the live listing is warmed once per run, with a static seed snapshot as the fail-open fallback). On those runs the News Analyst also deterministically pre-fetches **both news angles** — the underlying company and the perp contract itself (`MU` and `MUUSDT` queries over a 7-day window) — as labelled prompt blocks, so dual coverage does not depend on the model choosing to query both. All Binance requests are hand-written `requests` (not the official SDK) over the existing SOCKS5 proxy, with per-product-line rate limiting and reactive 429/418 backstop.
 
 ### A-share native data
 
@@ -346,6 +346,17 @@ The LLM picks direction; math owns sizing and risk ([yiagents/risk/](yiagents/ri
 | Bus | [manager.py](yiagents/risk/manager.py) | Combines the above; enforces per-ticker / sector / exposure caps |
 
 `risk_enabled` defaults to **True**: the risk manager deterministically rewrites the analytical position size / stop / exposure while the LLM keeps direction. `scripts/run_baseline.py` sets it explicitly per mode (`--baseline` = off, to build the Phase-0 baseline; `--full` = on, for the paired A/B).
+
+**V2.0 tradeability layer (default ON)** — every run's overlay also builds a deterministic **Candidate ExecutionTicket** ([yiagents/tickets.py](yiagents/tickets.py), the single cross-stage trading object of the frozen [V2 baseline](docs/V2_BASELINE.md)):
+
+| Mechanism | File | Effect |
+| ------ | ------ | ------ |
+| Round-trip cost model | [cost_model.py](yiagents/risk/cost_model.py) | Per-asset fee/slippage/funding estimate; the single source of truth the backtester's fee constants now live in |
+| Directional edge gate | [tradeability.py](yiagents/risk/tradeability.py) | LONG `target/ref−1`, SHORT mirrored (never abs); `net_edge <= 0 → NO_TRADE` |
+| Critical-data gate | [quality.py](yiagents/dataflows/quality.py) | GOOD / DEGRADED_AUXILIARY (social/news down → confidence penalty only) / DEGRADED_CRITICAL (price/ATR/fundamentals missing → NO_TRADE) / INVALID |
+| Derivatives stress | [derivatives_stress.py](yiagents/risk/derivatives_stress.py) | Perp-only crowding score 0–100 + labelled states + risk flags from trailing funding/OI/LSR/basis percentiles (live runs) |
+
+The PM's `PortfolioDecision` also gained optional `confidence / probabilities / expected_return / invalidation / evidence_coverage` fields, and the ticket plus these fields land in `full_states_log` as additive keys. The PM's rating text is never rewritten by any of this — opinion / constraint / state layers stay separated (V2 invariant I1).
 
 ---
 

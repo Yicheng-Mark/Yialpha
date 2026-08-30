@@ -256,3 +256,97 @@ def gate_on_data_vacuum(handler: Callable[..., Any]) -> Callable[..., Any]:
         return handler(*args, **kwargs)
 
     return _gated
+
+
+# ---------------------------------------------------------------------------
+# V2.0 P0.3 — four-tier data-quality classification (critical-data gate)
+# ---------------------------------------------------------------------------
+
+#: Tiers consumed by the tradeability gate. ``DEGRADED_AUXILIARY`` degrades
+#: confidence and is disclosed; only ``DEGRADED_CRITICAL`` and ``INVALID``
+#: can veto a trade.
+TIER_GOOD = "GOOD"
+TIER_DEGRADED_AUXILIARY = "DEGRADED_AUXILIARY"
+TIER_DEGRADED_CRITICAL = "DEGRADED_CRITICAL"
+TIER_INVALID = "INVALID"
+
+#: Categories whose failure means the decision lacks CRITICAL inputs: the
+#: price/indicator books (price, ATR, perp/spot klines incl. mark/index) and
+#: core fundamentals. News, macro, prediction markets, social and the A-share
+#: enrichment stacks are deliberately absent — a Reddit or Binance Square
+#: outage must not veto an otherwise fully-priced BTC perp trade (freeze
+#: check #2). Extending this set is a reviewable semantic change.
+CRITICAL_CATEGORIES = frozenset({
+    "core_stock_apis",
+    "technical_indicators",
+    "fundamental_data",
+    "binance_perp",
+    "binance_spot",
+})
+
+
+def classify_quality(
+    events: list[dict[str, Any]] | None,
+    core_successes: set[str] | None = None,
+) -> dict[str, Any]:
+    """Classify a run's sentinel evidence into the four-tier scale.
+
+    Returns ``{tier, critical_data_available, critical_missing,
+    auxiliary_degraded}``:
+
+    - ``INVALID`` — data vacuum (core calls attempted, none succeeded). The
+      vacuum gate refuses such runs under the default policy; this tier keeps
+      the classification complete for ``warn``-policy runs and post-hoc reads.
+    - ``DEGRADED_CRITICAL`` — at least one sentinel in a critical category
+      (price/indicators/fundamentals/perp-or-spot book). The tradeability
+      gate turns this into NO_TRADE.
+    - ``DEGRADED_AUXILIARY`` — only auxiliary degradation (news/macro/social
+      absent or stale-cache serves). Confidence penalty + disclosure, never a
+      veto.
+    - ``GOOD`` — no degradation evidence.
+
+    A sentinel method whose category cannot be resolved counts as auxiliary
+    (fail-open classification); its raw name is still listed so the report
+    shows what actually happened.
+    """
+    events = events or []
+    if is_data_vacuum(events, core_successes):
+        return {
+            "tier": TIER_INVALID,
+            "critical_data_available": False,
+            "critical_missing": ["(all core categories failed)"],
+            "auxiliary_degraded": [],
+        }
+
+    critical_missing: list[str] = []
+    auxiliary: list[str] = []
+    for e in events:
+        method = str(e.get("method", ""))
+        kind = str(e.get("kind", ""))
+        try:
+            from .interface import get_category_for_method  # local: avoid cycle
+
+            category = get_category_for_method(method)
+        except Exception:  # noqa: BLE001 -- unknown method: classify aux, keep name
+            category = ""
+        if kind in _CORE_SENTINEL_KINDS or kind == KIND_OPTIONAL_UNAVAILABLE:
+            label = f"{method}({kind})" if kind else method
+            if category in CRITICAL_CATEGORIES:
+                critical_missing.append(label)
+            else:
+                auxiliary.append(label)
+        elif kind == KIND_STALE_CACHE:
+            auxiliary.append(f"{method}(stale_cache)")
+
+    if critical_missing:
+        tier = TIER_DEGRADED_CRITICAL
+    elif auxiliary:
+        tier = TIER_DEGRADED_AUXILIARY
+    else:
+        tier = TIER_GOOD
+    return {
+        "tier": tier,
+        "critical_data_available": not critical_missing,
+        "critical_missing": critical_missing,
+        "auxiliary_degraded": auxiliary,
+    }

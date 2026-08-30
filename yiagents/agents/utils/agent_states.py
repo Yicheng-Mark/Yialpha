@@ -35,7 +35,7 @@ Field ownership map (writer → field):
   Research Mgr→ investment_plan
   Trader      → trader_investment_plan, messages (AIMessage)
   Risk debators→ risk_debate_state (via build_risk_debate_update)
-  Portfolio Mgr→ final_trade_decision, pm_rating, risk_debate_state.judge_decision
+  Portfolio Mgr→ final_trade_decision, pm_rating, pm_decision_fields, risk_debate_state.judge_decision
 """
 
 from typing import Annotated, Any
@@ -117,6 +117,14 @@ class AgentState(MessagesState):
         " directly from the PortfolioDecision, bypassing markdown parsing so the risk"
         " overlay never depends on text ordering. Empty string when the PM fell back to"
         " free-text (the overlay then falls back to parse_rating).",
+    ]
+    pm_decision_fields: Annotated[
+        Any,
+        "V2.0: the PM's PortfolioDecision fields the deterministic layers consume"
+        " (price_target/confidence/probabilities/expected_return/invalidation/"
+        "evidence_coverage + schema_version), as a plain dict. Empty dict on a"
+        " free-text fallback — the ExecutionTicket builder treats missing fields as"
+        " not-evaluated rather than guessing.",
     ]
     past_context: Annotated[str, "Memory log context injected at run start (same-ticker decisions + cross-ticker lessons)"]
     portfolio_state: Annotated[Any, "Optional live portfolio snapshot (Phase 1) for the Portfolio Manager"]

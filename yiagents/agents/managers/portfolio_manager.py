@@ -21,6 +21,7 @@ from yiagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
+from yiagents.versions import SCHEMA_VERSION
 
 
 def _format_portfolio_state(portfolio_state) -> str:
@@ -81,6 +82,38 @@ def _safe_float(value) -> float | None:
         return None
 
 
+def _decision_fields_dict(decision) -> dict:
+    """Flatten the typed PortfolioDecision into the plain dict state carries.
+
+    V2.0: the deterministic layers (ExecutionTicket builder, evidence log)
+    read the PM's numeric/opinion fields from here — no markdown re-parsing.
+    ``decision`` is the parsed Pydantic instance or None (free-text fallback /
+    structured mode unavailable); None yields {} so consumers treat every
+    field as absent rather than guessed. ``schema_version`` rides along per
+    the V2 baseline's version-everything rule.
+    """
+    if decision is None:
+        return {}
+    probabilities = None
+    if decision.probabilities is not None:
+        probabilities = {
+            "bull": decision.probabilities.bull,
+            "neutral": decision.probabilities.neutral,
+            "bear": decision.probabilities.bear,
+        }
+    return {
+        "rating": decision.rating.value,
+        "price_target": decision.price_target,
+        "time_horizon": decision.time_horizon,
+        "confidence": decision.confidence,
+        "probabilities": probabilities,
+        "expected_return": decision.expected_return,
+        "invalidation": list(decision.invalidation) if decision.invalidation else None,
+        "evidence_coverage": decision.evidence_coverage,
+        "schema_version": SCHEMA_VERSION,
+    }
+
+
 def create_portfolio_manager(llm):
     structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
 
@@ -127,6 +160,15 @@ def create_portfolio_manager(llm):
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}""" + NO_EXTERNAL_TOOLS
 
+        # The typed decision is stashed by the extract callback (below) so the
+        # V2.0 field snapshot and the rating come from ONE parse — there is no
+        # second extraction pass to drift out of sync.
+        captured: dict = {}
+
+        def _extract(decision) -> str:
+            captured["decision"] = decision
+            return decision.rating.value
+
         final_trade_decision, pm_rating = invoke_structured_or_freetext(
             structured_llm,
             llm,
@@ -138,7 +180,7 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
             # free-text fallback pm_rating is STRUCTURED_FALLBACK -> the rating
             # is unknown and the overlay must fall back to parse_rating (see
             # trading_graph._apply_risk_overlay).
-            extract=lambda decision: decision.rating.value,
+            extract=_extract,
         )
 
         # Detect the structured-output degradation path. When the PM fell back to
@@ -155,6 +197,11 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
                 "was extracted from free text via regex. Treat the rating with "
                 "caution."
             )
+
+        # V2.0: snapshot the typed decision's fields for the ticket builder /
+        # evidence log. {} when structured output did not happen — downstream
+        # treats missing price_target as UNEVALUATED, never guesses.
+        pm_decision_fields = _decision_fields_dict(captured.get("decision"))
 
         new_risk_debate_state = {
             "judge_decision": final_trade_decision,
@@ -173,6 +220,7 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
             "pm_rating": pm_rating if pm_rating and not structured_degraded else "",
+            "pm_decision_fields": pm_decision_fields,
         }
 
     return portfolio_manager_node

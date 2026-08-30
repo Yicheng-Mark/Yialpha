@@ -696,6 +696,37 @@ class YiAgentsGraph:
                 ticker, str(trade_date), rating, decision, close, atr,
                 funding_total_7d=funding_total_7d,
             )
+            overlay += self._render_stress_line(ticker, str(trade_date))
+        # V2.0: the Candidate ExecutionTicket — the single cross-stage trading
+        # object (I1). Deterministic tradeability verdict (directional edge vs
+        # round-trip cost + four-tier data quality) with the linkage keys later
+        # stages fill (prediction_ids/regime_id → V2.1/V2.2). Stored on state
+        # and rendered here; the PM's rating text is never touched.
+        ticket = None
+        try:
+            from yiagents.dataflows import quality as _quality
+            from yiagents.tickets import build_candidate_ticket, render_ticket_lines
+
+            ticket = build_candidate_ticket(
+                symbol=ticker,
+                asset_type=asset_type,
+                rating=rating,
+                target_weight=float(decision.target_weight),
+                entry_price=decision.entry_price,
+                stop_loss=decision.stop_loss,
+                reference_price=close,
+                quality_events=_quality.snapshot_quality(),
+                core_successes=_quality.snapshot_core_successes(),
+                pm_fields=final_state.get("pm_decision_fields") or {},
+                atr=atr,
+                funding_rate_annualized=funding_annualized,
+                trade_date=str(trade_date),
+            )
+        except Exception as exc:  # noqa: BLE001 -- ticket must never break a run
+            logger.warning("candidate ticket build failed for %s: %s", ticker, exc)
+        if ticket is not None:
+            final_state["execution_ticket"] = ticket.model_dump()
+            overlay += render_ticket_lines(ticket)
         overlay += (
             f"- **Drawdown Regime**: {decision.breaker.regime}"
             f" ({decision.breaker.current_drawdown:.1%})\n"
@@ -733,41 +764,29 @@ class YiAgentsGraph:
         prose): positive → long, negative → short, flat → no ticket. Today
         the risk manager clamps target_weight to >= 0 (long-only — kelly
         sizing never sells), so the short branch below is dormant, kept
-        ready for the day the manager emits negative weights. Leverage
-        is the min of the four perp_ticket caps; the liquidation estimate is
-        the isolated-margin zero-MMR level (conservatively nearer than the
-        exchange's real trigger). ``funding_total_7d`` is the SAME trailing
-        7-day settlement sum the risk gate priced (fetched once by the
-        caller); None formats as an explicit n/a. Failures degrade to a
-        missing bullet, never a broken overlay.
+        ready for the day the manager emits negative weights. The numeric
+        core (leverage caps, stop construction, liquidation estimate) is
+        shared with the ExecutionTicket via
+        :func:`yiagents.risk.perp_ticket.perp_ticket_numbers` — one
+        implementation, two consumers, zero drift.
+        ``funding_total_7d`` is the SAME trailing 7-day settlement sum the
+        risk gate priced (fetched once by the caller); None formats as an
+        explicit n/a. Failures degrade to a missing bullet, never a broken
+        overlay.
         """
         if close is None or close <= 0.0 or atr is None or atr <= 0.0:
             return ""
         weight = decision.target_weight
         if weight == 0.0:
             return ""
-        direction = "long" if weight > 0.0 else "short"
         entry = decision.entry_price if decision.entry_price else close
 
-        from yiagents.risk.perp_ticket import (
-            ATR_STOP_MULT,
-            RATING_STRENGTH,
-            compute_leverage,
-            liquidation_price,
-        )
+        from yiagents.risk.perp_ticket import perp_ticket_numbers
 
-        strength = RATING_STRENGTH.get(rating, 0)
-        stop = decision.stop_loss
-        if direction == "short" or stop is None:
-            # The ATR stop module implements the long stop only; mirror it for
-            # shorts (and construct one when the overlay ran without it).
-            stop = (entry - ATR_STOP_MULT * atr if direction == "long"
-                    else entry + ATR_STOP_MULT * atr)
-        stop_dist = abs(entry - stop) / entry
-        atr_pct = atr / entry
-        lev, detail = compute_leverage(
-            stop_dist, atr_pct, "crypto_perp", strength,
-        )
+        result = perp_ticket_numbers(entry, atr, rating, decision.stop_loss, weight)
+        if result is None:
+            return ""
+        lev, detail, liq, stop = result
 
         def _p(x: float) -> str:
             return f"{x:.6g}"
@@ -778,7 +797,6 @@ class YiAgentsGraph:
             f"{detail['L_vol']:.1f}x · conviction {detail['L_conv']:.1f}x · "
             f"hard {detail['L_hard']:.0f}x)\n"
         ]
-        liq = liquidation_price(entry, lev, direction, "crypto_perp")
         if liq is not None:
             off = abs(liq / entry - 1.0)
             lines.append(
@@ -792,6 +810,48 @@ class YiAgentsGraph:
             + "\n"
         )
         return "".join(lines)
+
+    @staticmethod
+    def _render_stress_line(ticker: str, trade_date: str) -> str:
+        """Derivatives Stress bullet for perp overlays (V2.0 P0.4).
+
+        Live runs only — the same no-fetch-on-historical-dates policy as the
+        funding note (a backtest must not pay five vendor calls per
+        decision). Any fetch failure degrades to an explicit n/a line, never
+        a silently missing section; the pure ``compute_stress`` itself is
+        fail-open per component, so a partial window scores what it has and
+        flags what it lacks.
+        """
+        from datetime import date, datetime, timedelta
+
+        try:
+            dt = datetime.strptime(trade_date, "%Y-%m-%d").date()
+        except ValueError:
+            dt = None
+        if dt is None or dt < date.today() - timedelta(days=3):
+            return (
+                "- **Derivatives Stress**: n/a (historical run — live-only "
+                "positioning window)\n"
+            )
+        try:
+            from yiagents.dataflows.binance import derivatives_stress_series
+            from yiagents.risk.derivatives_stress import (
+                compute_stress,
+                render_stress_line,
+            )
+
+            series = derivatives_stress_series(ticker, trade_date)
+            report = compute_stress(
+                funding=series.get("funding"),
+                global_lsr=series.get("global_lsr"),
+                basis=series.get("basis"),
+                open_interest=series.get("open_interest"),
+                taker_ratio=series.get("taker_ratio"),
+            )
+            return render_stress_line(report)
+        except Exception as exc:  # noqa: BLE001 -- disclosure, never break
+            logger.warning("derivatives stress unavailable for %s: %s", ticker, exc)
+            return "- **Derivatives Stress**: n/a (fetch failed)\n"
 
     @staticmethod
     def _trailing_funding_total(ticker: str, trade_date: str) -> float | None:
@@ -1308,6 +1368,13 @@ class YiAgentsGraph:
             # message histories. Charged calls only; degradations live in
             # data_quality above. Additive like its neighbours.
             "web_search_usage": web_search_usage,
+            # V2.0 Evidence/Prediction-ledger linkage: the PM's typed decision
+            # fields (opinion layer) and the deterministic Candidate
+            # ExecutionTicket (tradeability verdict + linkage keys). None/{}
+            # when the PM fell back to free text or the ticket build degraded;
+            # both additive keys older readers ignore.
+            "pm_decision_fields": final_state.get("pm_decision_fields") or {},
+            "execution_ticket": final_state.get("execution_ticket"),
         }
         # Write-and-drop: nothing downstream reads PAST dates from this dict
         # (the on-disk JSON below is the durable record), but a multi-date

@@ -103,6 +103,10 @@ class Propagator:
             # pm_rating is "" when the PM hasn't run or fell back to free text;
             # the risk overlay then falls back to parse_rating on the markdown.
             "pm_rating": "",
+            # V2.0: PM decision fields for the deterministic layers (ticket
+            # builder reads price_target/confidence). Empty until the PM node
+            # fills it; {} on free-text fallback, mirroring pm_rating.
+            "pm_decision_fields": {},
         }
 
     def get_graph_args(self, callbacks: list | None = None) -> dict[str, Any]:
