@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.backtest import engine
-from yiagents.risk import cost_model
-from yiagents.risk.cost_model import CostEstimate, estimate_round_trip_cost
-from yiagents.versions import COST_MODEL_VERSION
+from yialpha.backtest import engine
+from yialpha.risk import cost_model
+from yialpha.risk.cost_model import CostEstimate, estimate_round_trip_cost
+from yialpha.versions import COST_MODEL_VERSION
 
 
 @pytest.mark.unit

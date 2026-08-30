@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.dataflows.y_finance``.
+"""Unit tests for ``yialpha.dataflows.y_finance``.
 
 Covers: get_YFin_data_online error/tz paths, fundamentals (PIT + stub-info),
 the three financial statements (balance_sheet / cashflow / income_statement),
@@ -12,8 +12,8 @@ All yfinance access is mocked via ``yf.Ticker`` so no network is needed.
 import pandas as pd
 import pytest
 
-import yiagents.dataflows.y_finance as y_finance
-from yiagents.dataflows.symbol_utils import NoMarketDataError
+import yialpha.dataflows.y_finance as y_finance
+from yialpha.dataflows.symbol_utils import NoMarketDataError
 
 # ---------------------------------------------------------------------------
 # Test fixtures / helpers
@@ -418,7 +418,7 @@ def test_fundamentals_corrupt_cache_raises_typed_error(monkeypatch):
     """A corrupt cached JSON payload raises NoMarketDataError, never garbage."""
     from pathlib import Path
 
-    from yiagents.dataflows.disk_cache import vendor_cache_dir
+    from yialpha.dataflows.disk_cache import vendor_cache_dir
 
     cache_file = (
         Path(vendor_cache_dir("yfinance")) / "stmt_AAPL_fundamentals.json"
@@ -561,7 +561,7 @@ def test_stock_symbol_keeps_252_annualization(monkeypatch):
 
 @pytest.mark.unit
 def test_is_crypto_symbol_accepts_all_spelling_forms():
-    from yiagents.dataflows.symbol_utils import is_crypto_symbol
+    from yialpha.dataflows.symbol_utils import is_crypto_symbol
 
     assert is_crypto_symbol("BTCUSDT") is True
     assert is_crypto_symbol("BTC-USD") is True

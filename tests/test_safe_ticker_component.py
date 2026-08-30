@@ -5,7 +5,7 @@ import unittest
 
 import pytest
 
-from yiagents.dataflows.utils import safe_ticker_component
+from yialpha.dataflows.utils import safe_ticker_component
 
 
 @pytest.mark.unit

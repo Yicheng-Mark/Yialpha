@@ -23,7 +23,7 @@ import pandas as pd
 import pytest
 
 from tests.test_backtest_engine import FakeGraph, _rising_prices
-from yiagents.backtest.engine import run_backtest
+from yialpha.backtest.engine import run_backtest
 
 
 def _funding(rate: float):
@@ -71,7 +71,7 @@ def test_perp_default_price_provider_is_binance_klines(monkeypatch):
     The wiring gap this closes: the funding-drag work was unreachable from a
     default perp run because prices/marks came from Yahoo spot (BTC-USD).
     """
-    import yiagents.backtest.engine as eng
+    import yialpha.backtest.engine as eng
 
     calls: list[tuple[str, str, str]] = []
 
@@ -88,7 +88,7 @@ def test_perp_default_price_provider_is_binance_klines(monkeypatch):
         return df
 
     monkeypatch.setattr(
-        "yiagents.dataflows.binance.binance_klines_frame", fake_frame,
+        "yialpha.dataflows.binance.binance_klines_frame", fake_frame,
     )
     # NO explicit price_provider here — the whole point is that the DEFAULT
     # provider gets swapped to the perp's own klines.
@@ -114,7 +114,7 @@ def test_perp_explicit_price_provider_wins(monkeypatch):
         raise AssertionError("perp provider must not be swapped in")
 
     monkeypatch.setattr(
-        "yiagents.backtest.engine._binance_perp_price_provider", explode,
+        "yialpha.backtest.engine._binance_perp_price_provider", explode,
     )
     res = run_backtest(
         FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],
@@ -203,7 +203,7 @@ def test_fill_quantization_floors_to_step():
     sub-minNotional delta is refused (no trade), like the venue would."""
     from decimal import Decimal
 
-    from yiagents.dataflows.binance_filters import SymbolFilters
+    from yialpha.dataflows.binance_filters import SymbolFilters
 
     filters = SymbolFilters(
         symbol="BTCUSDT", status="TRADING",
@@ -419,7 +419,7 @@ def _mark_vs_last_frames(monkeypatch, mark_low_on_day: int, last_low: float = 99
         )
 
     monkeypatch.setattr(
-        "yiagents.dataflows.binance.binance_klines_frame", fake_frame,
+        "yialpha.dataflows.binance.binance_klines_frame", fake_frame,
     )
 
 
@@ -469,7 +469,7 @@ def test_mark_unavailable_falls_back_loudly(monkeypatch):
     """Mark klines failing -> LAST fallback with a disclosure stamp, never a
     silent relabel (the difference between mark and last can be liquidation
     itself)."""
-    import yiagents.backtest.engine  # noqa: F401  — ensures engine module path
+    import yialpha.backtest.engine  # noqa: F401  — ensures engine module path
 
     real_frame_calls: list[str] = []
 
@@ -487,7 +487,7 @@ def test_mark_unavailable_falls_back_loudly(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "yiagents.dataflows.binance.binance_klines_frame", fake_frame,
+        "yialpha.dataflows.binance.binance_klines_frame", fake_frame,
     )
     res = run_backtest(
         FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],

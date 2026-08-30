@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "yiagents"
+name = "yialpha"
 version = "0.3.0"
-description = "YiAgents: Multi-Agent LLM Financial Analysis Framework"
+description = "YiAlpha: Multi-Agent LLM Financial Analysis Framework"
 readme = "README.md"
 # Floor is 3.11, not 3.10: pandas 3.x (the line this project develops and
 # locks against) publishes requires-python >=3.11, so a 3.10 resolution can
@@ -55,14 +55,14 @@ dev = [
     "httpx>=0.27",
 ]
 # Amazon Bedrock support (AWS SigV4 auth + boto3). Optional so the core install
-# stays lean: pip install "yiagents[bedrock]".
+# stays lean: pip install "yialpha[bedrock]".
 bedrock = [
     "langchain-aws>=1.5.0",
 ]
 # Local web UI (FastAPI + vanilla JS). Optional so a headless / server install
-# stays lean: pip install "yiagents[web]". The web/ source tree is NOT a
+# stays lean: pip install "yialpha[web]". The web/ source tree is NOT a
 # packaged module (excluded from packages.find below) — it's run in place from
-# the project root (it spawns scripts/run_robust.py and reads ~/.yiagents/logs).
+# the project root (it spawns scripts/run_robust.py and reads ~/.yialpha/logs).
 # Plain ``uvicorn`` (no [standard] extra) is enough for the default run; the
 # [standard] extra only adds auto-reload/websockets deps we don't use.
 web = [
@@ -71,7 +71,7 @@ web = [
 ]
 # Native China A-share data vendors for the optional ``a_share_native`` category
 # (BaoStock OHLC/TTM valuation + AKShare 东财 news). Optional so the core install
-# stays lean: ``pip install "yiagents[a-share]"``. The vendors are lazy-imported,
+# stays lean: ``pip install "yialpha[a-share]"``. The vendors are lazy-imported,
 # so default-off runs (and machines without this extra) are unaffected — the
 # category degrades to a sentinel when the libs are absent. curl_cffi is an
 # optional anti-bot enhancer for AKShare (not required; degrades gracefully).
@@ -80,19 +80,19 @@ a-share = [
     "akshare>=1.17.86",
 ]
 # Tushare Pro — opt-in quality tier (needs TUSHARE_TOKEN). Separate extra because
-# it requires a token the keyless vendors do not. ``pip install "yiagents[a-share-tushare]"``.
+# it requires a token the keyless vendors do not. ``pip install "yialpha[a-share-tushare]"``.
 a-share-tushare = [
     "tushare>=1.4.21",
 ]
 
 [project.scripts]
-yiagents = "yiagents.cli.main:app"
+yialpha = "yialpha.cli.main:app"
 
 [tool.setuptools.packages.find]
-include = ["yiagents*"]
+include = ["yialpha*"]
 
 [tool.setuptools.package-data]
-"yiagents.cli" = ["static/*"]
+"yialpha.cli" = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -106,7 +106,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["yiagents"]
+source = ["yialpha"]
 
 [tool.coverage.report]
 # Coverage gate: baseline is 78% (2026-08-10). The 3-point cushion absorbs
@@ -130,7 +130,7 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["F401"]   # intentional re-exports
-"yiagents/cli/main.py" = ["B008"]  # typer.Option(...) defaults are the framework's idiom
+"yialpha/cli/main.py" = ["B008"]  # typer.Option(...) defaults are the framework's idiom
 
 [tool.ruff.lint.isort]
 # Keep multiple aliased names from one module in a single combined import block
@@ -181,5 +181,5 @@ follow_imports = "skip"
 [[tool.mypy.overrides]]
 # The execution layer is money-touching: check function bodies there even when
 # defs are untyped, so a wrong-type arg is caught before order placement.
-module = "yiagents.execution.*"
+module = "yialpha.execution.*"
 check_untyped_defs = true

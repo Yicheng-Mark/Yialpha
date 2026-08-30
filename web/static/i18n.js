@@ -1,6 +1,6 @@
-// i18n for YiAgents web. Static chrome is translated here via data-i18n / t().
+// i18n for YiAlpha web. Static chrome is translated here via data-i18n / t().
 // The 🌐 toggle ALSO sets the report language: window.lang() is sent on submit
-// and routed to the run_robust child via YIAGENTS_OUTPUT_LANGUAGE, so the
+// and routed to the run_robust child via YIALPHA_OUTPUT_LANGUAGE, so the
 // existing get_language_instruction() localizes every agent's output. Agent
 // markdown is still rendered as-is — there is no in-browser post-translation.
 //
@@ -13,7 +13,7 @@
 
   const DICT = {
     zh: {
-      app_title: "YiAgents 决策可视化",
+      app_title: "YiAlpha 决策可视化",
       nav_home: "历史报告",
       nav_new: "提交新分析",
       nav_health: "环境自检",
@@ -140,9 +140,9 @@
 
       // accuracy view
       accuracy_title: "评级准确率",
-      accuracy_sub: "评级对照已实现前向收益；由 yiagents verify-history 离线计算，本页只读展示。",
+      accuracy_sub: "评级对照已实现前向收益；由 yialpha verify-history 离线计算，本页只读展示。",
       accuracy_empty_title: "尚无准确率报告",
-      accuracy_empty: "先在终端运行 yiagents verify-history（会为每个决策日期拉取前向价格并生成报告）。",
+      accuracy_empty: "先在终端运行 yialpha verify-history（会为每个决策日期拉取前向价格并生成报告）。",
       accuracy_direction: "方向命中率（Buy / Overweight / Sell / Underweight）",
       accuracy_hold: "Hold 条目：n={n}，平均前向收益 {ret}（机会成本视角，不计方向）",
       accuracy_by_rating: "分评级",
@@ -172,7 +172,7 @@
     },
 
     en: {
-      app_title: "YiAgents Decision Viewer",
+      app_title: "YiAlpha Decision Viewer",
       nav_home: "Reports",
       nav_new: "New Analysis",
       nav_health: "Health Check",
@@ -294,9 +294,9 @@
 
       // accuracy view
       accuracy_title: "Rating Accuracy",
-      accuracy_sub: "Ratings vs realized forward returns; computed offline by yiagents verify-history, this page is read-only.",
+      accuracy_sub: "Ratings vs realized forward returns; computed offline by yialpha verify-history, this page is read-only.",
       accuracy_empty_title: "No accuracy report yet",
-      accuracy_empty: "Run yiagents verify-history in a terminal first — it fetches the forward price for every decision date.",
+      accuracy_empty: "Run yialpha verify-history in a terminal first — it fetches the forward price for every decision date.",
       accuracy_direction: "Directional hit rate (Buy / Overweight / Sell / Underweight)",
       accuracy_hold: "Hold entries: n={n}, mean forward return {ret} (opportunity-cost view, not scored)",
       accuracy_by_rating: "By rating",
@@ -325,7 +325,7 @@
     },
   };
 
-  const STORE_KEY = "yiagents_lang";
+  const STORE_KEY = "yialpha_lang";
   let current = localStorage.getItem(STORE_KEY);
   if (current !== "zh" && current !== "en") current = "zh";
 

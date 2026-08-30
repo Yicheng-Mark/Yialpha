@@ -1,4 +1,4 @@
-"""Integration tests for the Phase-1 risk overlay wired into YiAgentsGraph.
+"""Integration tests for the Phase-1 risk overlay wired into YiAlphaGraph.
 
 These exercise the live-flow wiring (``_apply_risk_overlay``) directly, without
 the full graph ``__init__`` (no LLM clients, no network). The backtest-side
@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.agents.utils.rating import parse_rating
-from yiagents.graph.signal_processing import SignalProcessor
-from yiagents.graph.trading_graph import YiAgentsGraph
+from yialpha.agents.utils.rating import parse_rating
+from yialpha.graph.signal_processing import SignalProcessor
+from yialpha.graph.trading_graph import YiAlphaGraph
 
 
-def _make_graph(risk_enabled: bool) -> YiAgentsGraph:
+def _make_graph(risk_enabled: bool) -> YiAlphaGraph:
     """Build a graph shell with just enough state for the overlay to run."""
-    g = YiAgentsGraph.__new__(YiAgentsGraph)
+    g = YiAlphaGraph.__new__(YiAlphaGraph)
     g.config = {
         "risk_enabled": risk_enabled,
         "kelly_fraction": 0.25,
@@ -147,7 +147,7 @@ def test_overlay_marks_stop_computation_failure(monkeypatch, caplog):
     # close valid, atr negative -> atr_stop_from_values raises ValueError.
     monkeypatch.setattr(g, "_latest_close_and_atr", lambda t, d, at="stock": (190.0, -1.0))
     state = {"final_trade_decision": "**Rating**: Buy\n\nThesis."}
-    with caplog.at_level(logging.WARNING, logger="yiagents.risk.manager"):
+    with caplog.at_level(logging.WARNING, logger="yialpha.risk.manager"):
         out = g._apply_risk_overlay("AAPL", "2024-01-15", state, {"equity": 100_000})
     md = out["final_trade_decision"]
     # Position is sized but stop failed -> marker visible (the F1 fix).
@@ -365,13 +365,13 @@ def test_perp_ticket_short_side_mirrors():
     # with a synthesized decision-shaped object.
     from types import SimpleNamespace
 
-    from yiagents.graph.trading_graph import YiAgentsGraph
+    from yialpha.graph.trading_graph import YiAlphaGraph
 
     decision = SimpleNamespace(
         rating="Sell", action="exit", target_weight=-0.10,
         stop_loss=None, entry_price=100.0,
     )
-    out = YiAgentsGraph._render_perp_ticket(
+    out = YiAlphaGraph._render_perp_ticket(
         "BTCUSDT", "2020-01-15", "Sell", decision, 100.0, 2.0,
     )
     assert "**Suggested Leverage**" in out
@@ -408,7 +408,7 @@ def test_perp_ticket_skipped_without_price_or_atr(monkeypatch):
 @pytest.mark.unit
 def test_perp_ticket_math_module_pinned():
     """The extracted module reproduces the script's documented caps exactly."""
-    from yiagents.risk.perp_ticket import (
+    from yialpha.risk.perp_ticket import (
         compute_leverage,
         liquidation_price,
         take_profits,

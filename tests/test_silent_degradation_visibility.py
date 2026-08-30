@@ -24,18 +24,18 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import yiagents.dataflows.yfinance_news as ynews
-from yiagents.agents.utils.memory import TradingMemoryLog
-from yiagents.backtest.engine import _resolve_index_benchmark
-from yiagents.dataflows import baostock_vendor
-from yiagents.execution.binance_gateway import BinanceGateway
-from yiagents.execution.domain import (
+import yialpha.dataflows.yfinance_news as ynews
+from yialpha.agents.utils.memory import TradingMemoryLog
+from yialpha.backtest.engine import _resolve_index_benchmark
+from yialpha.dataflows import baostock_vendor
+from yialpha.execution.binance_gateway import BinanceGateway
+from yialpha.execution.domain import (
     Direction,
     Exchange,
     OrderRequest,
     OrderType,
 )
-from yiagents.graph import checkpointer
+from yialpha.graph import checkpointer
 
 
 @pytest.fixture(autouse=True)
@@ -66,7 +66,7 @@ def test_ticker_news_failure_raises_not_prose(monkeypatch, caplog):
 
     monkeypatch.setattr(ynews.yf, "Ticker", lambda t: BoomTicker())
     monkeypatch.setattr(ynews, "yf_retry", lambda fn: fn())
-    with (caplog.at_level("ERROR", logger="yiagents.dataflows.yfinance_news"),
+    with (caplog.at_level("ERROR", logger="yialpha.dataflows.yfinance_news"),
           pytest.raises(RuntimeError, match="network down")):
         ynews.get_news_yfinance("AAPL", "2025-01-01", "2025-01-10")
     assert any("news retrieval failed" in r.message for r in caplog.records)
@@ -79,7 +79,7 @@ def test_global_news_failure_raises_not_prose(monkeypatch, caplog):
 
     monkeypatch.setattr(ynews.yf, "Search", boom_search)
     monkeypatch.setattr(ynews, "yf_retry", lambda fn: fn())
-    with (caplog.at_level("ERROR", logger="yiagents.dataflows.yfinance_news"),
+    with (caplog.at_level("ERROR", logger="yialpha.dataflows.yfinance_news"),
           pytest.raises(RuntimeError, match="network down")):
         ynews.get_global_news_yfinance("2025-05-09", look_back_days=7, limit=10)
     assert any("global news retrieval failed" in r.message for r in caplog.records)
@@ -102,7 +102,7 @@ def test_baostock_quarter_fetch_failure_warns(caplog):
         return FakeRs()
 
     bs = SimpleNamespace(profit=raising_query)
-    with caplog.at_level("WARNING", logger="yiagents.dataflows.baostock_vendor"):
+    with caplog.at_level("WARNING", logger="yialpha.dataflows.baostock_vendor"):
         fetch = baostock_vendor._query_statement(
             bs, "600519.SH", "profit", anchor=date(2025, 6, 1))
     assert fetch.rows == []  # failed quarter skipped, the statement call survives
@@ -121,7 +121,7 @@ def test_benchmark_spy_fallback_warns(caplog):
         def _resolve_benchmark(self, ticker):
             raise RuntimeError("no benchmark for this market")
 
-    with caplog.at_level("WARNING", logger="yiagents.backtest.engine"):
+    with caplog.at_level("WARNING", logger="yialpha.backtest.engine"):
         assert _resolve_index_benchmark(Graph(), "600519.SS") == "SPY"
     assert any("falling back to SPY" in r.message for r in caplog.records)
 
@@ -136,7 +136,7 @@ def test_checkpoint_cleanup_failure_warns(tmp_path, caplog):
     # An empty DB file: connect succeeds but the DELETE hits missing tables,
     # i.e. the sqlite3.OperationalError cleanup path.
     (db_dir / "AAPL.db").touch()
-    with caplog.at_level("WARNING", logger="yiagents.graph.checkpointer"):
+    with caplog.at_level("WARNING", logger="yialpha.graph.checkpointer"):
         checkpointer.clear_checkpoint(tmp_path, "AAPL", "2024-01-01")
     assert any("checkpoint cleanup failed" in r.message for r in caplog.records)
 
@@ -148,17 +148,17 @@ def test_checkpoint_cleanup_failure_warns(tmp_path, caplog):
 def test_fincot_prompt_selection_failure_warns(monkeypatch, caplog):
     # Config itself is healthy; only the fin_cot prompt build blows up — the
     # run must fall back to the legacy prompt, visibly.
-    from yiagents.dataflows.config import set_config
+    from yialpha.dataflows.config import set_config
 
     set_config({"fin_cot_prompts": True})
 
     def boom():
         raise RuntimeError("fincot build broken")
 
-    import yiagents.agents.analysts.market_analyst as ma
+    import yialpha.agents.analysts.market_analyst as ma
 
     monkeypatch.setattr(ma, "_fincot_system_message", boom)
-    with caplog.at_level("WARNING", logger="yiagents.agents.analysts.market_analyst"):
+    with caplog.at_level("WARNING", logger="yialpha.agents.analysts.market_analyst"):
         msg = ma._system_message()
     assert "You are a trading assistant" in msg   # legacy fallback still served
     assert any("fin_cot prompt selection failed" in r.message for r in caplog.records)
@@ -172,7 +172,7 @@ def test_memory_bad_as_of_date_warns(tmp_path, caplog):
     log = TradingMemoryLog(
         {"memory_enabled": True, "memory_log_path": str(tmp_path / "mem.md")}
     )
-    with caplog.at_level("WARNING", logger="yiagents.agents.utils.memory"):
+    with caplog.at_level("WARNING", logger="yialpha.agents.utils.memory"):
         out = log.get_past_context("AAPL", as_of_date="not-a-date")
     assert out == ""    # fail closed: no history rather than a look-ahead leak
     assert any("unparseable as_of_date" in r.message for r in caplog.records)
@@ -193,6 +193,6 @@ def test_binance_recovery_failure_warns(caplog):
         type=OrderType.MARKET,
         volume=0.5,
     )
-    with caplog.at_level("WARNING", logger="yiagents.execution.binance_gateway"):
+    with caplog.at_level("WARNING", logger="yialpha.execution.binance_gateway"):
         assert gw._safe_query_by_client_id(req, "coid-1") is None
     assert any("recovery lookup failed" in r.message for r in caplog.records)

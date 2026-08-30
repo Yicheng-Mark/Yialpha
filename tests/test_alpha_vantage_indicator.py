@@ -6,10 +6,10 @@ risk). The shared ``_make_api_request`` is mocked so no network/API key is neede
 """
 import pytest
 
-import yiagents.dataflows.alpha_vantage_indicator as avi
-import yiagents.dataflows.indicator_catalog as ic
-from yiagents.dataflows.alpha_vantage_common import AlphaVantageNotConfiguredError
-from yiagents.dataflows.errors import NoMarketDataError
+import yialpha.dataflows.alpha_vantage_indicator as avi
+import yialpha.dataflows.indicator_catalog as ic
+from yialpha.dataflows.alpha_vantage_common import AlphaVantageNotConfiguredError
+from yialpha.dataflows.errors import NoMarketDataError
 
 # A representative CSV with rows before / inside / after the window.
 # Default test window: curr_date=2025-03-01, look_back_days=30  => [2025-01-30, 2025-03-01]
@@ -288,7 +288,7 @@ def test_router_falls_back_to_yfinance_on_vwma(monkeypatch):
     """
     from unittest import mock
 
-    from yiagents.dataflows import config as cfgmod, interface
+    from yialpha.dataflows import config as cfgmod, interface
 
     orig = cfgmod.get_config()
     try:

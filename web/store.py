@@ -1,14 +1,14 @@
-"""Read-only scans of ``~/.yiagents/logs`` to serve run history to the web UI.
+"""Read-only scans of ``~/.yialpha/logs`` to serve run history to the web UI.
 
 The single source of truth for a completed run is::
 
-    ~/.yiagents/logs/<TICKER>/YiAgentsStrategy_logs/full_states_log_<date>.json
+    ~/.yialpha/logs/<TICKER>/YiAlphaStrategy_logs/full_states_log_<date>.json
 
-written atomically by ``yiagents.graph.trading_graph._log_state``. A same-date
+written atomically by ``yialpha.graph.trading_graph._log_state``. A same-date
 re-run atomically overwrites (``os.replace``), so one file == one analysis date
 and the date in the filename is the analysis date (not the run wall-clock).
 
-Report directories ``~/.yiagents/logs/reports/<TICKER>_<stamp>/`` carry a
+Report directories ``~/.yialpha/logs/reports/<TICKER>_<stamp>/`` carry a
 wall-clock stamp, NOT the analysis date, and may be multiple per date; they are
 listed separately as download links and never force-paired 1:1 with a date.
 
@@ -27,21 +27,21 @@ import os
 import re
 from pathlib import Path
 
-from yiagents.agents.utils.rating import parse_rating
-from yiagents.dataflows.utils import safe_ticker_component
-from yiagents.graph.overlay_fields import parse_overlay
+from yialpha.agents.utils.rating import parse_rating
+from yialpha.dataflows.utils import safe_ticker_component
+from yialpha.graph.overlay_fields import parse_overlay
 
 
 def _resolve_logs_root() -> Path:
-    """Resolve the logs root from ``YIAGENTS_RESULTS_DIR`` (same source as the
+    """Resolve the logs root from ``YIALPHA_RESULTS_DIR`` (same source as the
     CLI/batch write side) so the web read side stays aligned with a custom
-    results dir. Falls back to ``~/.yiagents/logs`` when the env is unset,
-    matching :mod:`yiagents.default_config`.
+    results dir. Falls back to ``~/.yialpha/logs`` when the env is unset,
+    matching :mod:`yialpha.default_config`.
     """
-    env = os.getenv("YIAGENTS_RESULTS_DIR")
+    env = os.getenv("YIALPHA_RESULTS_DIR")
     if env:
         return Path(env)
-    return Path.home() / ".yiagents" / "logs"
+    return Path.home() / ".yialpha" / "logs"
 
 
 LOGS_ROOT = _resolve_logs_root()
@@ -53,15 +53,15 @@ _NON_TICKER_DIRS = {"reports", "robust"}
 _DATE_RE = re.compile(r"full_states_log_(\d{4}-\d{2}-\d{2})\.json$")
 
 # Alias kept for callers/tests that imported the local name; the marker,
-# field map and parser are owned by yiagents.graph.overlay_fields (the
+# field map and parser are owned by yialpha.graph.overlay_fields (the
 # module beside the renderer) so this side can never drift from the
 # analyze_window script's copy again.
 parse_overlay_local = parse_overlay
 
 
 def _strategy_dir(ticker: str) -> Path:
-    """``LOGS_ROOT/<ticker>/YiAgentsStrategy_logs`` (ticker already validated)."""
-    return LOGS_ROOT / ticker / "YiAgentsStrategy_logs"
+    """``LOGS_ROOT/<ticker>/YiAlphaStrategy_logs`` (ticker already validated)."""
+    return LOGS_ROOT / ticker / "YiAlphaStrategy_logs"
 
 
 def _dates_for(ticker: str) -> list[str]:
@@ -180,7 +180,7 @@ def list_compare() -> dict:
 
 
 def load_accuracy_report() -> dict:
-    """Serve the ``yiagents verify-history`` artifact (read-only).
+    """Serve the ``yialpha verify-history`` artifact (read-only).
 
     Scoring fetches forward prices per record — a CLI job, not a request
     handler. Until the operator runs it, the honest payload is
@@ -191,7 +191,7 @@ def load_accuracy_report() -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"available": False, "hint": "yiagents verify-history"}
+        return {"available": False, "hint": "yialpha verify-history"}
     return {"available": True, **data}
 
 

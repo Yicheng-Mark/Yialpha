@@ -55,21 +55,21 @@ for _stream in (sys.stdout, sys.stderr):
         with contextlib.suppress(ValueError):
             _reconfigure(encoding="utf-8", errors="replace")
 
-from yiagents.logging_config import setup_logging  # noqa: E402
+from yialpha.logging_config import setup_logging  # noqa: E402
 
 setup_logging()
 
 import pandas as pd  # noqa: E402
 
-from yiagents.backtest.cache import DecisionCache  # noqa: E402
-from yiagents.backtest.engine import run_backtest  # noqa: E402
-from yiagents.backtest.report import write_report  # noqa: E402
-from yiagents.backtest.validation_gate import evaluate_gate  # noqa: E402
-from yiagents.dataflows.config import submit_with_context  # noqa: E402
-from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
-from yiagents.graph.trading_graph import YiAgentsGraph  # noqa: E402
-from yiagents.monitoring.dashboard import write_dashboard  # noqa: E402
-from yiagents.risk.manager import RiskManager, build_backtest_weight_fn  # noqa: E402
+from yialpha.backtest.cache import DecisionCache  # noqa: E402
+from yialpha.backtest.engine import run_backtest  # noqa: E402
+from yialpha.backtest.report import write_report  # noqa: E402
+from yialpha.backtest.validation_gate import evaluate_gate  # noqa: E402
+from yialpha.dataflows.config import submit_with_context  # noqa: E402
+from yialpha.default_config import DEFAULT_CONFIG  # noqa: E402
+from yialpha.graph.trading_graph import YiAlphaGraph  # noqa: E402
+from yialpha.monitoring.dashboard import write_dashboard  # noqa: E402
+from yialpha.risk.manager import RiskManager, build_backtest_weight_fn  # noqa: E402
 
 
 def _rebalance_dates(start: str, end: str, step: int, n: int) -> list[str]:
@@ -87,7 +87,7 @@ def _build_graph(
     debug: bool = False,
     risk_enabled: bool | None = None,
     node_perf_telemetry: bool = False,
-) -> YiAgentsGraph:
+) -> YiAlphaGraph:
     config = DEFAULT_CONFIG.copy()
     # Validation runs must not depend on persistent lessons written by an
     # earlier ticker/run ordering. Point-in-time filtering prevents lookahead,
@@ -103,7 +103,7 @@ def _build_graph(
     # breakdown without changing any agent's input/depth.
     if node_perf_telemetry:
         config["node_perf_telemetry"] = True
-    return YiAgentsGraph(debug=debug, config=config)
+    return YiAlphaGraph(debug=debug, config=config)
 
 
 def _map_tickers(tickers, task, workers: int = 1, risk_enabled: bool | None = None):
@@ -172,10 +172,10 @@ def preflight(ticker: str) -> int:
     5 项检查：依赖(含 PySocks) / env+key / 代理端口 / yfinance 实拉 / DeepSeek 探活。
     DeepSeek 用免费 GET /v1/models（非 chat completion），走 NO_PROXY 直连，零 LLM 成本。
 
-    检查逻辑由 yiagents.monitoring.preflight.run_health 单一实现（web 健康页
+    检查逻辑由 yialpha.monitoring.preflight.run_health 单一实现（web 健康页
     用同一份）；本函数只负责把结构化结果渲染成中文 stdout。
     """
-    from yiagents.monitoring.preflight import run_health
+    from yialpha.monitoring.preflight import run_health
 
     print(f"\n=== 起飞检查（preflight）：{ticker} ===")
     report = run_health(ticker)
@@ -356,7 +356,7 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
     # risk-adjusted and the improved leg applies a second overlay. The cache is
     # temporary to this invocation: it pairs A/B decisions without silently
     # reusing an older experiment's LLM outputs.
-    with tempfile.TemporaryDirectory(prefix="yiagents_ab_decisions_") as cache_dir:
+    with tempfile.TemporaryDirectory(prefix="yialpha_ab_decisions_") as cache_dir:
         decision_cache = DecisionCache(cache_dir, enabled=True)
         gate_inputs = _map_tickers(tickers, per_ticker, workers, risk_enabled=False)
 
@@ -391,7 +391,7 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
 
 
 def main():
-    p = argparse.ArgumentParser(description="YiAgents 一键回测")
+    p = argparse.ArgumentParser(description="YiAlpha 一键回测")
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--preflight", action="store_true", help="起飞检查：零成本自检（最先跑这个）")
     mode.add_argument("--smoke", action="store_true", help="冒烟：1票1日")

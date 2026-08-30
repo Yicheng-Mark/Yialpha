@@ -24,8 +24,8 @@ from unittest import mock
 import pytest
 import requests
 
-from yiagents.dataflows import binance_square as bs, quality
-from yiagents.dataflows.utils import proxy_map
+from yialpha.dataflows import binance_square as bs, quality
+from yialpha.dataflows.utils import proxy_map
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +325,7 @@ def test_http_error_degrades_with_sentinel(monkeypatch):
 def test_transport_error_retries_then_degrades(monkeypatch):
     quality.ensure_run_context()
     # Avoid the transient-retry backoff sleeping 2s in tests.
-    from yiagents.dataflows import netretry
+    from yialpha.dataflows import netretry
 
     monkeypatch.setattr(netretry.time, "sleep", lambda _s: None)
 

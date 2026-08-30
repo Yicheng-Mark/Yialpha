@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from datetime import UTC
 
-from yiagents.dataflows.utils import (
+from yialpha.dataflows.utils import (
     clamp_end_date,
     current_pit_end,
     get_analysis_date,
@@ -106,7 +106,7 @@ class TestVendorClamp:
         monkeypatch.setattr(yf.Ticker, "history", fake_history, raising=False)
 
         try:
-            from yiagents.dataflows.y_finance import get_YFin_data_online
+            from yialpha.dataflows.y_finance import get_YFin_data_online
             # LLM asks for 2030 — must be clamped to 2020-01-02.
             result = get_YFin_data_online("AAPL", "2019-12-01", "2030-06-15")
             # get_YFin_data_online adds +1 day for yfinance's exclusive end, so
@@ -123,7 +123,7 @@ class TestVendorClamp:
         set_analysis_date("2020-01-02")
         captured = {}
 
-        import yiagents.dataflows.binance as binance_mod
+        import yialpha.dataflows.binance as binance_mod
 
         def fake_paginate(endpoint, params, limit, key_fn, start_ms, end_ms, *a, **kw):
             captured["start_ms"] = start_ms

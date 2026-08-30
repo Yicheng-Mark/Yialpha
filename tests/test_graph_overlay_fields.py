@@ -1,7 +1,7 @@
 """Drift guard: the overlay renderer and its parser must stay in sync.
 
 ``trading_graph._apply_risk_overlay`` renders the ``## Quantitative Risk
-Overlay`` markdown block; ``yiagents.graph.overlay_fields.parse_overlay`` (the
+Overlay`` markdown block; ``yialpha.graph.overlay_fields.parse_overlay`` (the
 single parser shared by web/store and scripts/analyze_window) extracts its
 fields. This test round-trips a rendered-shaped overlay through the parser so
 a bullet-format change in the renderer fails here instead of silently
@@ -10,7 +10,7 @@ emptying the web history view.
 
 from __future__ import annotations
 
-from yiagents.graph.overlay_fields import (
+from yialpha.graph.overlay_fields import (
     OVERLAY_FIELDS,
     OVERLAY_MARKER,
     parse_overlay,

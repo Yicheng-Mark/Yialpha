@@ -1,4 +1,4 @@
-"""Unit tests for the execution domain model (yiagents.execution.domain).
+"""Unit tests for the execution domain model (yialpha.execution.domain).
 
 Adapted-from-vnpy dataclasses + enums: construction, the ``vt_*`` naming
 convention, the ``create_order_data`` factory, and ``is_active``. No network,
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.execution.domain import (
+from yialpha.execution.domain import (
     ACTIVE_STATUSES,
     AccountData,
     BaseData,
@@ -49,7 +49,7 @@ class TestEnums:
         assert Status.REJECTED not in ACTIVE_STATUSES
 
     def test_exchange_has_binance(self):
-        # Synthetic crypto exchange added for YiAgents; the rest are pruned.
+        # Synthetic crypto exchange added for YiAlpha; the rest are pruned.
         assert Exchange("BINANCE") is Exchange.BINANCE
         assert Exchange("SMART") is Exchange.SMART
         assert Exchange("SSE") is Exchange.SSE

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.dataflows.netretry import with_transient_retry
+from yialpha.dataflows.netretry import with_transient_retry
 
 
 @pytest.mark.unit
@@ -21,7 +21,7 @@ def test_success_first_try_no_retry():
 
 @pytest.mark.unit
 def test_retries_once_then_succeeds(monkeypatch):
-    monkeypatch.setattr("yiagents.dataflows.netretry.time.sleep", lambda s: None)
+    monkeypatch.setattr("yialpha.dataflows.netretry.time.sleep", lambda s: None)
     calls = {"n": 0}
 
     def fetch() -> str:
@@ -36,7 +36,7 @@ def test_retries_once_then_succeeds(monkeypatch):
 
 @pytest.mark.unit
 def test_exhausted_retries_reraises_last(monkeypatch):
-    monkeypatch.setattr("yiagents.dataflows.netretry.time.sleep", lambda s: None)
+    monkeypatch.setattr("yialpha.dataflows.netretry.time.sleep", lambda s: None)
     calls = {"n": 0}
 
     def fetch():

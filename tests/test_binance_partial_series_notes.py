@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.dataflows import binance as bn
-from yiagents.dataflows.errors import NoMarketDataError
+from yialpha.dataflows import binance as bn
+from yialpha.dataflows.errors import NoMarketDataError
 
 
 def _ls_rows():

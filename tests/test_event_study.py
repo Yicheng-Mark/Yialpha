@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from yiagents.backtest.event_study import (
+from yialpha.backtest.event_study import (
     abnormal_returns,
     bootstrap_ci,
     cross_sectional_ttest,

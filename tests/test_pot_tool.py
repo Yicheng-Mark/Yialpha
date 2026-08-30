@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from yiagents.agents.utils.pot_tool import make_pot_compute_tool
+from yialpha.agents.utils.pot_tool import make_pot_compute_tool
 
 
 @dataclass
@@ -42,7 +42,7 @@ class TestPotComputeTool:
             result=42.0, ok=True, error=None, attempts=1,
         )
         with patch(
-            "yiagents.agents.utils.pot_tool.PotAnalyzer"
+            "yialpha.agents.utils.pot_tool.PotAnalyzer"
         ) as MockAnalyzer:
             MockAnalyzer.return_value.compute.return_value = fake
             t = make_pot_compute_tool(llm)
@@ -58,7 +58,7 @@ class TestPotComputeTool:
             error="NameError: name 'foo' is not defined", attempts=2,
         )
         with patch(
-            "yiagents.agents.utils.pot_tool.PotAnalyzer"
+            "yialpha.agents.utils.pot_tool.PotAnalyzer"
         ) as MockAnalyzer:
             MockAnalyzer.return_value.compute.return_value = fake
             t = make_pot_compute_tool(llm)
@@ -69,7 +69,7 @@ class TestPotComputeTool:
     def test_invalid_json_returns_error(self):
         """Malformed data_json is reported without crashing."""
         llm = MagicMock()
-        with patch("yiagents.agents.utils.pot_tool.PotAnalyzer"):
+        with patch("yialpha.agents.utils.pot_tool.PotAnalyzer"):
             t = make_pot_compute_tool(llm)
             result = t.invoke({"question": "anything", "data_json": "not valid json{"})
         assert "PoT error" in result
@@ -82,7 +82,7 @@ class TestPotComputeTool:
             question="q", code="result = 1", result=1, ok=True, error=None, attempts=1,
         )
         with patch(
-            "yiagents.agents.utils.pot_tool.PotAnalyzer"
+            "yialpha.agents.utils.pot_tool.PotAnalyzer"
         ) as MockAnalyzer:
             MockAnalyzer.return_value.compute.return_value = fake
             t = make_pot_compute_tool(llm)

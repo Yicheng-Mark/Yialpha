@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yiagents.graph.trading_graph import YiAgentsGraph
+from yialpha.graph.trading_graph import YiAlphaGraph
 
 
 class _StubLLM:
@@ -56,7 +56,7 @@ def test_market_toolnode_registers_prompt_mandated_expansion_tools():
 
 @pytest.mark.unit
 def test_market_toolnode_registers_flag_gated_tools():
-    """A-share market tools the analyst binds when YIAGENTS_A_SHARE_NATIVE is on."""
+    """A-share market tools the analyst binds when YIALPHA_A_SHARE_NATIVE is on."""
     market_tools = set(_tool_nodes()["market"].tools_by_name)
     missing = {
         "get_a_share_northbound_native",
@@ -141,4 +141,4 @@ def _tool_nodes() -> dict:
     # _create_tool_nodes needs only self.quick_thinking_llm (the PoT tool
     # closure); a stub keeps this a pure-construction unit test.
     fake_self = SimpleNamespace(quick_thinking_llm=_StubLLM())
-    return YiAgentsGraph._create_tool_nodes(fake_self)
+    return YiAlphaGraph._create_tool_nodes(fake_self)

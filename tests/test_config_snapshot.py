@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from yiagents.config_snapshot import (
+from yialpha.config_snapshot import (
     diff_against_last_snapshot,
     list_snapshots,
     load_last_snapshot,

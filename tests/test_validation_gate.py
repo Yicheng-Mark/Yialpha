@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.backtest.engine import BacktestResult, TradeRow
-from yiagents.backtest.metrics import BacktestMetrics
-from yiagents.backtest.validation_gate import evaluate_gate
+from yialpha.backtest.engine import BacktestResult, TradeRow
+from yialpha.backtest.metrics import BacktestMetrics
+from yialpha.backtest.validation_gate import evaluate_gate
 
 
 def _result(total_return: float, dsr: float, sharpe: float = 1.0,

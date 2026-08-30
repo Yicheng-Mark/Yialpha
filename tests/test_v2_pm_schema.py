@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.agents.managers.portfolio_manager import _decision_fields_dict
-from yiagents.agents.schemas import (
+from yialpha.agents.managers.portfolio_manager import _decision_fields_dict
+from yialpha.agents.schemas import (
     OutcomeProbabilities,
     PortfolioDecision,
     render_pm_decision,
 )
-from yiagents.versions import SCHEMA_VERSION
+from yialpha.versions import SCHEMA_VERSION
 
 
 def _old_shape_decision() -> PortfolioDecision:

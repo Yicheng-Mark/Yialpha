@@ -23,10 +23,10 @@ import time
 import pandas as pd
 import pytest
 
-import yiagents.dataflows.eastmoney as eastmoney
-import yiagents.dataflows.stockstats_utils as su
-import yiagents.dataflows.y_finance as y_finance
-from yiagents.dataflows.config import get_config, set_config
+import yialpha.dataflows.eastmoney as eastmoney
+import yialpha.dataflows.stockstats_utils as su
+import yialpha.dataflows.y_finance as y_finance
+from yialpha.dataflows.config import get_config, set_config
 
 
 @pytest.fixture(autouse=True)

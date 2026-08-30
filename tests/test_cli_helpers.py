@@ -1,4 +1,4 @@
-"""Unit tests for pure-logic helpers in ``yiagents.cli.main``.
+"""Unit tests for pure-logic helpers in ``yialpha.cli.main``.
 
 Focuses on: format_tokens, format_tool_args, extract_content_string,
 classify_message_type, MessageBuffer state machine, update_analyst_statuses,
@@ -15,7 +15,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from typer.testing import CliRunner
 
-from yiagents.cli.main import (
+from yialpha.cli.main import (
     MessageBuffer,
     app,
     classify_message_type,
@@ -284,7 +284,7 @@ class TestUpdateAnalystStatuses:
 class TestUpdateResearchTeamStatus:
     def test_sets_all_three_members(self, monkeypatch):
         # update_research_team_status operates on the module-level message_buffer.
-        from yiagents.cli import main as cli_main
+        from yialpha.cli import main as cli_main
 
         buf = MessageBuffer()
         buf.init_for_analysis(["market"])
@@ -324,27 +324,27 @@ class TestGetAnalysisDate:
 @pytest.mark.unit
 class TestBatchValidation:
     def test_rejects_invalid_ticker_exits_2(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "deepseek")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")
         result = runner.invoke(app, ["batch", "-t", "bad symbol!", "-d", "2026-01-10"])
         assert result.exit_code == 2
         assert "Invalid ticker" in result.output
 
     def test_rejects_bad_date_exits_2(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "deepseek")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")
         result = runner.invoke(app, ["batch", "-t", "AAPL", "-d", "2026/01/10"])
         assert result.exit_code == 2
         assert "Bad date" in result.output
 
     def test_rejects_workers_below_one_exits_2(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "deepseek")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")
         result = runner.invoke(app, ["batch", "-t", "AAPL", "-d", "2026-01-10", "-w", "0"])
         assert result.exit_code == 2
 
     def test_rejects_mixed_asset_classes_exits_2(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "deepseek")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")
         result = runner.invoke(
             app, ["batch", "-t", "AAPL", "-t", "BTC-USD", "-d", "2026-01-10", "--asset-type", "auto"]
@@ -360,17 +360,17 @@ class TestBatchValidation:
 @pytest.mark.unit
 class TestConfigCheckTimeout:
     def test_cloud_shows_default_message(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "deepseek")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-        monkeypatch.delenv("YIAGENTS_LLM_TIMEOUT_S", raising=False)
+        monkeypatch.delenv("YIALPHA_LLM_TIMEOUT_S", raising=False)
         result = runner.invoke(app, ["config-check"])
         assert result.exit_code == 0
         assert "120s" in result.output
         assert "default" in result.output
 
     def test_local_shows_expected_message(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "ollama")
-        monkeypatch.delenv("YIAGENTS_LLM_TIMEOUT_S", raising=False)
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "ollama")
+        monkeypatch.delenv("YIALPHA_LLM_TIMEOUT_S", raising=False)
         result = runner.invoke(app, ["config-check"])
         assert result.exit_code == 0
         assert "local provider" in result.output.lower()
@@ -381,18 +381,18 @@ class TestConfigCheckTimeout:
     # safety net now applies to all clients, and the CLI reflects that).
 
     def test_anthropic_shows_default_message(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "anthropic")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-        monkeypatch.delenv("YIAGENTS_LLM_TIMEOUT_S", raising=False)
+        monkeypatch.delenv("YIALPHA_LLM_TIMEOUT_S", raising=False)
         result = runner.invoke(app, ["config-check"])
         assert result.exit_code == 0
         assert "120s" in result.output
         assert "default" in result.output
 
     def test_google_shows_default_message(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "google")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "google")
         monkeypatch.setenv("GOOGLE_API_KEY", "sk-test")
-        monkeypatch.delenv("YIAGENTS_LLM_TIMEOUT_S", raising=False)
+        monkeypatch.delenv("YIALPHA_LLM_TIMEOUT_S", raising=False)
         result = runner.invoke(app, ["config-check"])
         assert result.exit_code == 0
         assert "120s" in result.output

@@ -12,10 +12,10 @@ from multiprocessing import get_context
 
 import pytest
 
-from yiagents.agents.utils.memory import TradingMemoryLog
-from yiagents.batch.locks import FileLock
-from yiagents.batch.runner import BatchRunner, serialized_run
-from yiagents.dataflows.config import get_config
+from yialpha.agents.utils.memory import TradingMemoryLog
+from yialpha.batch.locks import FileLock
+from yialpha.batch.runner import BatchRunner, serialized_run
+from yialpha.dataflows.config import get_config
 
 DECISION = "Rating: Buy\nEnter at $190, 6% portfolio cap."
 
@@ -26,7 +26,7 @@ DECISION = "Rating: Buy\nEnter at $190, 6% portfolio cap."
 
 
 class _FakeGraph:
-    """Minimal stand-in for YiAgentsGraph used by BatchRunner."""
+    """Minimal stand-in for YiAlphaGraph used by BatchRunner."""
 
     def __init__(self, config):
         self.config = config
@@ -247,7 +247,7 @@ def test_batchrunner_on_respects_workers():
 
 def test_explicit_workers_overrides_off_switch():
     """An explicit --workers>1 must force concurrency ON even when the env
-    master switch (YIAGENTS_BATCH_CONCURRENCY=false) left batch_concurrency off.
+    master switch (YIALPHA_BATCH_CONCURRENCY=false) left batch_concurrency off.
 
     This is the run_batch.py / CLI override contract: an explicit value is
     authoritative, so the default-off switch cannot silently force a requested

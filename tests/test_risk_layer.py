@@ -1,6 +1,6 @@
 """Tests for the quantitative risk-control layer (Phase 1).
 
-Covers ``yiagents.risk.{kelly, atr_stop, breaker, cvar}``. All tests
+Covers ``yialpha.risk.{kelly, atr_stop, breaker, cvar}``. All tests
 are unit-level: no network, no global config, deterministic inputs.
 The symbol path of ``latest_atr(symbol, date)`` is covered by mocking the
 ``load_ohlcv`` loader with a synthetic frame (the loader's own caching and
@@ -15,10 +15,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from yiagents.risk.atr_stop import atr_stop, latest_atr, latest_atr_from_frame
-from yiagents.risk.breaker import DrawdownBreaker
-from yiagents.risk.cvar import cvar_position_multiplier, historical_cvar
-from yiagents.risk.kelly import (
+from yialpha.risk.atr_stop import atr_stop, latest_atr, latest_atr_from_frame
+from yialpha.risk.breaker import DrawdownBreaker
+from yialpha.risk.cvar import cvar_position_multiplier, historical_cvar
+from yialpha.risk.kelly import (
     RATING_TO_BAND,
     bayesian_win_rate,
     kelly_fraction,
@@ -144,7 +144,7 @@ class TestAtrStop:
         # truncation behavior is covered by the dataflow tests.
         df = _synthetic_ohlcv()
         with mock.patch(
-            "yiagents.risk.atr_stop.load_ohlcv", return_value=df
+            "yialpha.risk.atr_stop.load_ohlcv", return_value=df
         ) as loader:
             close, atr = latest_atr("AAPL", "2026-06-01")
         loader.assert_called_once_with("AAPL", "2026-06-01")

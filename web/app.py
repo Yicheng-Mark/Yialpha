@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""FastAPI web UI for YiAgents: browse past analyses + submit new ones.
+"""FastAPI web UI for YiAlpha: browse past analyses + submit new ones.
 
-MUST run from the project root (the dir containing ``.env``, ``yiagents/``,
-``scripts/``). ``yiagents/__init__.py`` loads ``.env`` via
+MUST run from the project root (the dir containing ``.env``, ``yialpha/``,
+``scripts/``). ``yialpha/__init__.py`` loads ``.env`` via
 ``load_dotenv(usecwd=True)``, so running from elsewhere leaves
 ``DEEPSEEK_API_KEY`` and the SOCKS5 proxy unset — the spawned ``run_robust``
 subprocess inherits this env and would then be unable to reach DeepSeek or
@@ -37,7 +37,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from yiagents.logging_config import setup_logging  # noqa: E402
+from yialpha.logging_config import setup_logging  # noqa: E402
 
 setup_logging()
 
@@ -47,8 +47,8 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from web import health, runner, store  # noqa: E402
-from yiagents.cli.utils import normalize_ticker_symbol  # noqa: E402
-from yiagents.dataflows.utils import safe_ticker_component  # noqa: E402
+from yialpha.cli.utils import normalize_ticker_symbol  # noqa: E402
+from yialpha.dataflows.utils import safe_ticker_component  # noqa: E402
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -57,16 +57,16 @@ def _assert_cwd_is_project_root() -> None:
     """Refuse to start unless cwd is the project root (see module docstring)."""
     cwd = Path.cwd()
     missing = []
-    if not (cwd / "yiagents").is_dir():
-        missing.append("yiagents/")
+    if not (cwd / "yialpha").is_dir():
+        missing.append("yialpha/")
     if not (cwd / "scripts" / "run_robust.py").is_file():
         missing.append("scripts/run_robust.py")
     if missing:
         sys.stderr.write(
-            "\nERROR: web/app.py must run from the YiAgents project root.\n"
+            "\nERROR: web/app.py must run from the YiAlpha project root.\n"
             f"  cwd     = {cwd}\n"
             f"  missing = {', '.join(missing)}\n"
-            "  yiagents/__init__.py loads .env via load_dotenv(usecwd=True); "
+            "  yialpha/__init__.py loads .env via load_dotenv(usecwd=True); "
             "running elsewhere leaves DEEPSEEK_API_KEY / proxy unset.\n"
             "  → cd into the project root, then: python web/app.py\n\n"
         )
@@ -95,7 +95,7 @@ async def _lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="YiAgents Web", version="0.1.0", lifespan=_lifespan)
+app = FastAPI(title="YiAlpha Web", version="0.1.0", lifespan=_lifespan)
 
 _CONTENT_SECURITY_POLICY = "; ".join(
     (
@@ -159,7 +159,7 @@ class AnalyzeReq(BaseModel):
     ticker: str
     date: str
     asset_type: str = "auto"
-    # UI language ("en" | "zh"); routed to run_robust via YIAGENTS_OUTPUT_LANGUAGE
+    # UI language ("en" | "zh"); routed to run_robust via YIALPHA_OUTPUT_LANGUAGE
     # so the existing get_language_instruction() localizes the agent reports.
     language: str = "en"
 
@@ -212,7 +212,7 @@ def api_accuracy():
     """Rating↔outcome accuracy report (serves the verify-history artifact).
 
     The scoring itself fetches per-record forward prices — that belongs in the
-    CLI (``yiagents verify-history``), not inside a request handler. This
+    CLI (``yialpha verify-history``), not inside a request handler. This
     endpoint serves the artifact it wrote; ``available=false`` + the hint is
     the honest answer until the operator runs it.
     """

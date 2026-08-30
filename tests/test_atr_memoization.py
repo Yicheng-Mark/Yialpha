@@ -16,7 +16,7 @@ from unittest import mock
 import pandas as pd
 import pytest
 
-import yiagents.graph.trading_graph as tg
+import yialpha.graph.trading_graph as tg
 
 
 def _synthetic_frame() -> pd.DataFrame:
@@ -45,9 +45,9 @@ def test_close_and_atr_computed_once_per_ticker_date():
         return _synthetic_frame()
 
     with (
-        mock.patch("yiagents.dataflows.stockstats_utils.load_ohlcv", fake_loader),
+        mock.patch("yialpha.dataflows.stockstats_utils.load_ohlcv", fake_loader),
         mock.patch(
-            "yiagents.risk.atr_stop.latest_atr_from_frame",
+            "yialpha.risk.atr_stop.latest_atr_from_frame",
             return_value=(104.9, 2.5),
         ),
     ):
@@ -74,11 +74,11 @@ def test_method_delegates_and_converts_none_on_failure(caplog):
         raise RuntimeError("vendor down")
 
     with (
-        mock.patch("yiagents.dataflows.stockstats_utils.load_ohlcv", boom),
+        mock.patch("yialpha.dataflows.stockstats_utils.load_ohlcv", boom),
         caplog.at_level(logging.WARNING),
     ):
-        out1 = tg.YiAgentsGraph._latest_close_and_atr(object(), "MSFT", "2026-01-05")
-        out2 = tg.YiAgentsGraph._latest_close_and_atr(object(), "MSFT", "2026-01-05")
+        out1 = tg.YiAlphaGraph._latest_close_and_atr(object(), "MSFT", "2026-01-05")
+        out2 = tg.YiAlphaGraph._latest_close_and_atr(object(), "MSFT", "2026-01-05")
 
     assert out1 == (None, None)
     assert out2 == (None, None)
@@ -96,9 +96,9 @@ def test_distinct_tickers_do_not_share_memo_entries():
         return _synthetic_frame()
 
     with (
-        mock.patch("yiagents.dataflows.stockstats_utils.load_ohlcv", fake_loader),
+        mock.patch("yialpha.dataflows.stockstats_utils.load_ohlcv", fake_loader),
         mock.patch(
-            "yiagents.risk.atr_stop.latest_atr_from_frame",
+            "yialpha.risk.atr_stop.latest_atr_from_frame",
             side_effect=lambda frame: (10.0, 1.0),
         ),
     ):
@@ -133,11 +133,11 @@ def test_perp_venue_uses_binance_perp_klines_not_yahoo():
 
     with (
         mock.patch(
-            "yiagents.dataflows.binance.binance_klines_frame", fake_binance
+            "yialpha.dataflows.binance.binance_klines_frame", fake_binance
         ),
-        mock.patch("yiagents.dataflows.stockstats_utils.load_ohlcv", fake_yahoo),
+        mock.patch("yialpha.dataflows.stockstats_utils.load_ohlcv", fake_yahoo),
         mock.patch(
-            "yiagents.risk.atr_stop.latest_atr_from_frame",
+            "yialpha.risk.atr_stop.latest_atr_from_frame",
             return_value=(65000.0, 900.0),
         ),
     ):
@@ -170,12 +170,12 @@ def test_asset_type_part_of_memo_key_no_cross_venue_contamination():
         return _synthetic_frame()
 
     with (
-        mock.patch("yiagents.dataflows.stockstats_utils.load_ohlcv", fake_yahoo),
+        mock.patch("yialpha.dataflows.stockstats_utils.load_ohlcv", fake_yahoo),
         mock.patch(
-            "yiagents.dataflows.binance.binance_klines_frame", fake_binance
+            "yialpha.dataflows.binance.binance_klines_frame", fake_binance
         ),
         mock.patch(
-            "yiagents.risk.atr_stop.latest_atr_from_frame",
+            "yialpha.risk.atr_stop.latest_atr_from_frame",
             side_effect=lambda frame: (10.0, 1.0),
         ),
     ):
@@ -199,10 +199,10 @@ def test_perp_venue_failure_fails_soft_like_yahoo(caplog):
         raise RuntimeError("perp vendor down")
 
     with (
-        mock.patch("yiagents.dataflows.binance.binance_klines_frame", boom),
+        mock.patch("yialpha.dataflows.binance.binance_klines_frame", boom),
         caplog.at_level(logging.WARNING),
     ):
-        out = tg.YiAgentsGraph._latest_close_and_atr(
+        out = tg.YiAlphaGraph._latest_close_and_atr(
             object(), "BTCUSDT", "2026-06-01", "crypto_perp"
         )
 

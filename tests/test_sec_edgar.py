@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.dataflows.sec_edgar`` (XBRL fundamentals vendor).
+"""Unit tests for ``yialpha.dataflows.sec_edgar`` (XBRL fundamentals vendor).
 
 Hermetic: no network. ``_sec_get`` status mapping is checked by patching
 ``requests.get``; the CIK/companyfacts paths are checked by patching
@@ -12,8 +12,8 @@ import json
 
 import pytest
 
-from yiagents.dataflows import sec_edgar
-from yiagents.dataflows.errors import NoMarketDataError, VendorRateLimitError
+from yialpha.dataflows import sec_edgar
+from yialpha.dataflows.errors import NoMarketDataError, VendorRateLimitError
 
 # --------------------------------------------------------------------------- #
 # Synthetic SEC payloads
@@ -208,8 +208,8 @@ def test_sec_get_network_error_raises_no_market_data(monkeypatch):
 @pytest.mark.unit
 def test_router_routes_to_sec_edgar_vendor(monkeypatch, tmp_path):
     _patch_fetch(monkeypatch, tmp_path)
-    from yiagents.dataflows import config as cfgmod
-    from yiagents.dataflows.interface import route_to_vendor
+    from yialpha.dataflows import config as cfgmod
+    from yialpha.dataflows.interface import route_to_vendor
 
     orig = cfgmod.get_config()
     try:

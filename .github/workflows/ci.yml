@@ -55,7 +55,7 @@ jobs:
         # raw logs require a GitHub sign-in even on public repos, but the job
         # summary is anonymously visible, which is how failures get diagnosed
         # without repo access.
-        run: pytest -q --cov=yiagents --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
+        run: pytest -q --cov=yialpha --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
       - name: Publish failure summary
         if: failure()
         shell: bash
@@ -92,7 +92,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,web]"
       - name: Run test suite with coverage
-        run: pytest -q --cov=yiagents --cov-report=term-missing
+        run: pytest -q --cov=yialpha --cov-report=term-missing
 
   test-windows:
     # The project is developed on Windows (Git Bash), yet the suite only ever
@@ -125,7 +125,7 @@ jobs:
         shell: bash
         # Same tee + summary pattern as the ubuntu test job: raw logs need a
         # GitHub sign-in, the job summary does not.
-        run: pytest -q --cov=yiagents --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
+        run: pytest -q --cov=yialpha --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
       - name: Publish failure summary
         if: failure()
         shell: bash
@@ -169,7 +169,7 @@ jobs:
         # Scope widened 2026-08-10 from money-path-only (7 files) to 6 packages
         # (~111 files), and 2026-08-14 to add llm_clients (every agent's LLM
         # transport), batch, monitoring, and the four top-level modules.
-        run: mypy --no-site-packages --follow-imports=skip yiagents/execution yiagents/risk yiagents/backtest yiagents/graph yiagents/agents yiagents/dataflows yiagents/cli yiagents/llm_clients yiagents/batch yiagents/monitoring yiagents/reporting.py yiagents/config_snapshot.py yiagents/default_config.py yiagents/logging_config.py
+        run: mypy --no-site-packages --follow-imports=skip yialpha/execution yialpha/risk yialpha/backtest yialpha/graph yialpha/agents yialpha/dataflows yialpha/cli yialpha/llm_clients yialpha/batch yialpha/monitoring yialpha/reporting.py yialpha/config_snapshot.py yialpha/default_config.py yialpha/logging_config.py
 
   smoke-install:
     name: clean-install smoke
@@ -189,7 +189,7 @@ jobs:
           pip install .
           # Catches undeclared runtime deps (e.g. #994 python-dotenv): a bare
           # install must import the package and the CLI module.
-          python -c "import yiagents, yiagents.cli.main; print('clean-install import OK')"
+          python -c "import yialpha, yialpha.cli.main; print('clean-install import OK')"
 
   lockfile:
     # requirements.lock is what the README tells users to install from (line
@@ -218,7 +218,7 @@ jobs:
           # The lock resolves the dependency graph; the import (run from the
           # checkout, so the source tree supplies the package) proves the
           # locked versions satisfy the package's own import-time deps.
-          python -c "import yiagents; print('lockfile install import OK')"
+          python -c "import yialpha; print('lockfile install import OK')"
 
   smoke-extras:
     name: extras install smoke (${{ matrix.label }})

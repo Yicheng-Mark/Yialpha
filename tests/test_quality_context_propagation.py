@@ -20,7 +20,7 @@ from typing import TypedDict
 
 import pytest
 
-from yiagents.dataflows import quality
+from yialpha.dataflows import quality
 
 pytestmark = pytest.mark.unit
 

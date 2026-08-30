@@ -3,14 +3,14 @@ from unittest.mock import patch
 
 import pytest
 
-from yiagents.llm_clients.google_client import GoogleClient
+from yialpha.llm_clients.google_client import GoogleClient
 
 
 @pytest.mark.unit
 class TestGoogleApiKeyStandardization(unittest.TestCase):
     """Verify GoogleClient accepts unified api_key parameter."""
 
-    @patch("yiagents.llm_clients.google_client.NormalizedChatGoogleGenerativeAI")
+    @patch("yialpha.llm_clients.google_client.NormalizedChatGoogleGenerativeAI")
     def test_api_key_handling(self, mock_chat):
         test_cases = [
             ("unified api_key is mapped", {"api_key": "test-key-123"}, "test-key-123"),

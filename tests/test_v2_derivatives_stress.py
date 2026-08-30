@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from yiagents.risk.derivatives_stress import (
+from yialpha.risk.derivatives_stress import (
     MIN_WINDOW,
     DerivativesStressReport,
     compute_stress,
@@ -141,7 +141,7 @@ def test_render_line_carries_score_states_and_flags():
 
 @pytest.mark.unit
 def test_fetcher_fail_open_on_total_transport_failure(monkeypatch):
-    from yiagents.dataflows import binance as bn
+    from yialpha.dataflows import binance as bn
 
     def _explode(*args, **kwargs):
         raise RuntimeError("network down")
@@ -156,7 +156,7 @@ def test_fetcher_fail_open_on_total_transport_failure(monkeypatch):
 
 @pytest.mark.unit
 def test_fetcher_builds_series_from_records(monkeypatch):
-    from yiagents.dataflows import binance as bn
+    from yialpha.dataflows import binance as bn
 
     def _fake_http(path, params, *args, **kwargs):  # noqa: ANN001
         if path == "/fapi/v1/fundingRate":

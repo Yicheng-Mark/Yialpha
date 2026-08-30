@@ -15,8 +15,8 @@ from typing import Any
 
 import pytest
 
-from yiagents.dataflows import browser_data
-from yiagents.dataflows.browser_data import (
+from yialpha.dataflows import browser_data
+from yialpha.dataflows.browser_data import (
     BrowserDataFetcher,
     BrowserFetchResult,
     count_keywords,

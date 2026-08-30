@@ -16,9 +16,9 @@ from __future__ import annotations
 import pytest
 from typer.testing import CliRunner
 
-import yiagents.agents.analysts.market_analyst as ma
-from yiagents.cli.main import app
-from yiagents.dataflows.config import set_config
+import yialpha.agents.analysts.market_analyst as ma
+from yialpha.cli.main import app
+from yialpha.dataflows.config import set_config
 
 runner = CliRunner()
 
@@ -122,7 +122,7 @@ class TestBatteryConfig:
     def test_unknown_battery_names_warn_and_are_ignored(self, caplog):
         set_config({"indicator_battery": ["rsi", "nope"]})
         with caplog.at_level("WARNING",
-                             logger="yiagents.agents.analysts.market_analyst"):
+                             logger="yialpha.agents.analysts.market_analyst"):
             out = ma._catalog_for_run()
         assert "- rsi:" in out and "- macd:" not in out
         assert any("unknown indicators" in r.message for r in caplog.records)
@@ -130,7 +130,7 @@ class TestBatteryConfig:
     def test_all_unknown_battery_falls_back_to_full_catalog(self, caplog):
         set_config({"indicator_battery": ["nope"]})
         with caplog.at_level("WARNING",
-                             logger="yiagents.agents.analysts.market_analyst"):
+                             logger="yialpha.agents.analysts.market_analyst"):
             out = ma._catalog_for_run()
         assert out == ma.INDICATOR_CATALOG  # never leave the analyst tool-less
         assert any("no known indicators" in r.message for r in caplog.records)
@@ -138,7 +138,7 @@ class TestBatteryConfig:
     def test_empty_battery_warns_and_uses_full_catalog(self, caplog):
         set_config({"indicator_battery": []})
         with caplog.at_level("WARNING",
-                             logger="yiagents.agents.analysts.market_analyst"):
+                             logger="yialpha.agents.analysts.market_analyst"):
             out = ma._catalog_for_run()
         assert out == ma.INDICATOR_CATALOG
 
@@ -164,17 +164,17 @@ class TestBatteryConfig:
 
 @pytest.mark.unit
 class TestConfigCheckBattery:
-    """`yiagents config-check` validates the battery against known names."""
+    """`yialpha config-check` validates the battery against known names."""
 
     def test_unset_battery_reports_default(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "deepseek")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-dummy")
         result = runner.invoke(app, ["config-check"])
         assert result.exit_code == 0
         assert "full catalog (default)" in result.output
 
     def test_valid_battery_passes(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "deepseek")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-dummy")
         set_config({"indicator_battery": ["rsi", "atr"]})
         result = runner.invoke(app, ["config-check"])
@@ -182,7 +182,7 @@ class TestConfigCheckBattery:
         assert "all known" in result.output
 
     def test_unknown_battery_flagged_not_fatal(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "deepseek")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-dummy")
         set_config({"indicator_battery": ["rsi", "typo_name"]})
         result = runner.invoke(app, ["config-check"])

@@ -15,7 +15,7 @@ This file breaks that symmetry with two complementary layers:
    kwargs the vendor source passes to every ``ak.*`` / ``bs.*`` call must equal
    a pinned table, and every statement field the renderers reference directly
    must be a member of the official field tables in
-   :mod:`yiagents.dataflows.baostock_fields`. Adding a new call site or field
+   :mod:`yialpha.dataflows.baostock_fields`. Adding a new call site or field
    without pinning it here fails the audit.
 2. **Runtime signature check** (skipped unless the real package is installed):
    ``inspect.signature`` proves the pinned kwarg table is accepted by the REAL
@@ -33,7 +33,7 @@ import inspect
 
 import pytest
 
-from yiagents.dataflows import akshare_vendor as akv, baostock_fields as bsf, baostock_vendor as bsv
+from yialpha.dataflows import akshare_vendor as akv, baostock_fields as bsf, baostock_vendor as bsv
 
 # ---------------------------------------------------------------------------
 # Pinned call contracts: every kwarg the vendors pass to akshare functions.

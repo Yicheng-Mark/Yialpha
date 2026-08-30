@@ -7,7 +7,7 @@ than forward it and crash the run. The GPT-5 family and the o-series accept it.
 
 import pytest
 
-from yiagents.llm_clients.openai_client import (
+from yialpha.llm_clients.openai_client import (
     OpenAIClient,
     _supports_reasoning_effort,
 )

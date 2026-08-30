@@ -1,0 +1,838 @@
+"""SEC EDGAR ownership & short-interest vendor (Form 4 insider trading + FTD).
+
+A new optional category (``sec_ownership``) of two US-only, read-only signals:
+
+* :func:`get_form4_insider_trading` — Form 4 filings (insider buys/sells) for a
+  CIK, pulled from the submissions JSON + each filing's primary XML.
+* :func:`get_ftd_data` — fails-to-deliver balances from the SEC's semi-monthly
+  CNS dissemination files, filtered by ticker.
+
+Both reuse :mod:`yialpha.dataflows.sec_edgar`'s transport layer verbatim —
+``_sec_get`` (UA + SOCKS5 + throttle + status mapping), ``_cached_or_fetch``
+(disk cache + stale fallback), ``_cik_for_ticker`` (US-only CIK resolution).
+``sec_edgar.py`` itself is **not modified**; the private helpers are imported
+across modules within the same package.
+
+The XBRL concept parsers in ``sec_edgar`` are *not* reused: Form 4 is XML and
+FTD is pipe-delimited text, so each gets a small dedicated parser here.
+
+Point-in-time
+-------------
+* **Form 4**: an insider transaction is visible at ``curr_date`` iff its
+  ``filingDate <= curr_date`` (ground truth — the market learns the trade when
+  the Form 4 is filed, ~2 days after the trade date). Empty ``curr_date`` means
+  live mode (no as-of constraint, look-back from today).
+* **FTD**: the data is published as semi-monthly ZIP files
+  (``cnsfails{YYYYMM}{a|b}.zip``); a file covering the half-month ending on
+  ``D`` is treated as visible at ``curr_date`` iff
+  ``D + ftd_pub_lag_days <= curr_date`` (conservative; configurable via
+  ``YIALPHA_FTD_PUB_LAG_DAYS``, default 10). Row-level ``Date <= curr_date``
+  is also enforced. Empty ``curr_date`` means live mode.
+
+US-only
+-------
+* Form 4 needs a CIK, so a non-US ticker raises :class:`NoMarketDataError` (the
+  router turns that into the ``NO_DATA_AVAILABLE`` sentinel; the analyst's
+  grounding rule reports "data not available").
+* FTD is CNS settlement data keyed by ticker/CUSIP, so a non-US ticker simply
+  matches no rows and yields an informative "no fails reported" string (it does
+  not resolve a CIK). This is a deliberate asymmetry, documented per-tool.
+
+Free, keyless. Like ``sec_edgar``, SEC asks for a descriptive ``User-Agent``
+(set ``YIALPHA_SEC_USER_AGENT``).
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import logging
+import os
+import xml.etree.ElementTree as ET
+import zipfile
+from datetime import date, timedelta
+
+from .config import get_config
+from .disk_cache import safe_cache_component
+from .errors import NoMarketDataError
+
+# Reuse sec_edgar's transport verbatim (CIK resolution, GET, cache, throttle).
+from .sec_edgar import (
+    SecNoFileError,
+    _cache_dir,
+    _cached_or_fetch,
+    _cik_for_ticker,
+    _fetch_company_facts,
+)
+
+logger = logging.getLogger(__name__)
+
+_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
+_ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc_nodash}/{doc}"
+# FTD dissemination files are published as semi-monthly ZIPs:
+# ``cnsfails{YYYYMM}{a|b}.zip`` where a = settlement dates 1-15 and
+# b = 16-end-of-month (https://www.sec.gov/foia/docs/failsdata.htm). The member
+# inside is a pipe-delimited text (header: SETTLEMENT DATE|CUSIP|SYMBOL|
+# QUANTITY (FAILS)|DESCRIPTION|PRICE; dates as YYYYMMDD). The previous
+# ".../cnbs{yyyymmdd}.txt" scheme 404'd for every date, and those 404s were
+# swallowed as "normal missing file" — fabricating "No fails-to-deliver
+# reported" for every ticker.
+_FTD_URL = "https://www.sec.gov/files/data/fails-deliver-data/cnsfails{yyyymm}{half}.zip"
+
+# Cap Form 4 filings fetched per call (each is one throttled GET). 25 recent
+# insider filings is far more than a 180-day window normally accumulates and
+# keeps a single analysis under ~30 SEC requests.
+_MAX_FORM4 = 25
+
+
+def _ftd_pub_lag_days() -> int:
+    """Publication-lag (days) before a FTD cutoff file is treated as public."""
+    raw = get_config().get("ftd_pub_lag_days", 10)
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 10
+    return n if n >= 0 else 0
+
+
+def _fetch_submissions(cik: int) -> dict:
+    """Fetch (cached 1 day) the submissions JSON for a CIK."""
+    path = os.path.join(_cache_dir(), f"submissions_{cik}.json")
+    raw = _cached_or_fetch(path, _SUBMISSIONS_URL.format(cik=cik), ttl_days=1.0)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise NoMarketDataError(str(cik), detail=f"could not parse submissions: {exc}") from exc
+
+
+def _fetch_form4_xml(cik: int, accession: str, doc: str) -> bytes:
+    """Fetch (cached 90 days; accession docs are immutable) a Form 4 XML."""
+    acc_nodash = accession.replace("-", "")
+    url = _ARCHIVES_URL.format(cik=cik, acc_nodash=acc_nodash, doc=doc)
+    # EDGAR primaryDocument often carries a rendering prefix with a path
+    # separator ("xslF345X05/wk-form4_20250130.xml"). The URL needs the raw
+    # value; the cache filename must be a single safe component, so flatten
+    # it for the cache key — otherwise the path splits into a nonexistent
+    # subdirectory and the entry never caches.
+    cache_doc = safe_cache_component(doc)
+    path = os.path.join(_cache_dir(), f"form4_{cik}_{acc_nodash}_{cache_doc}")
+    return _cached_or_fetch(path, url, ttl_days=90.0)
+
+
+def _txt(el) -> str:
+    """Return a trimmed element text, or '' for missing/blank."""
+    if el is None or el.text is None:
+        return ""
+    return el.text.strip()
+
+
+# --------------------------------------------------------------------------- #
+# Form 4 parsing
+# --------------------------------------------------------------------------- #
+def _parse_form4(raw: bytes) -> dict:
+    """Parse a Form 4 XML into a compact dict of the non-derivative trades.
+
+    Returns ``{"owner": str, "title": str, "trades": [{"date","code","shares",
+    "price","action","post_shares"}]}``. ``action`` is BUY/SELL/GIFT/OTHER from
+    the SEC transactionCode (A/S/G/...). Derivative-table transactions (options,
+    RSUs) are intentionally skipped — the clean insider signal is the
+    non-derivative common-stock trade.
+    """
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise NoMarketDataError("form4", detail=f"could not parse Form 4 XML: {exc}") from exc
+
+    owner = _txt(root.find("reportingOwner/reportingOwnerId/rptOwnerName"))
+    title = _txt(root.find("reportingOwner/reportingOwnerRelationship/officerTitle"))
+
+    _CODE = {"A": "BUY", "S": "SELL", "G": "GIFT", "M": "OTHER", "P": "BUY",
+             "D": "SELL", "F": "GIFT"}
+    trades = []
+    for txn in root.findall("nonDerivativeTable/nonDerivativeTransaction"):
+        code = _txt(txn.find("transactionCoding/transactionCode"))
+        trades.append({
+            "date": _txt(txn.find("transactionDate/value")),
+            "code": code,
+            "action": _CODE.get(code, "OTHER"),
+            "shares": _txt(txn.find("transactionAmounts/transactionShares/value")),
+            "price": _txt(txn.find("transactionAmounts/transactionPricePerShare/value")),
+            "post_shares": _txt(
+                txn.find("postTransactionAmounts/sharesOwnedFollowingTransaction/value")),
+        })
+    return {"owner": owner, "title": title, "trades": trades}
+
+
+def _num(s: str) -> float | None:
+    try:
+        return float(s.replace(",", ""))
+    except (ValueError, AttributeError):
+        return None
+
+
+def get_form4_insider_trading(
+    ticker: str, curr_date: str | None = None, look_back_days: int = 180
+) -> str:
+    """Recent SEC Form 4 insider transactions for a US ticker, PIT by filingDate.
+
+    Resolves the CIK, enumerates ``form == "4"`` filings from the submissions
+    JSON whose ``filingDate <= curr_date`` and within the look-back window, then
+    fetches + parses each Form 4's non-derivative trades. Renders a per-trade
+    table plus a window summary (buy/sell counts and net dollar flow).
+
+    Non-US / no CIK -> :class:`NoMarketDataError`. No Form 4 in the window ->
+    an informative string (honest "no recent insider activity", not an error).
+    """
+    cik = _cik_for_ticker(ticker)
+    subs = _fetch_submissions(cik)
+
+    # Live mode: no as-of upper bound; anchor the look-back window at today.
+    upper = (curr_date or "")[:10]
+    upper_d = date.fromisoformat(upper) if upper else date.today()
+    lower_d = upper_d - timedelta(days=int(look_back_days))
+
+    recent = (subs.get("filings") or {}).get("recent") or {}
+    forms = recent.get("form") or []
+    accessions = recent.get("accessionNumber") or []
+    filing_dates = recent.get("filingDate") or []
+    primary_docs = recent.get("primaryDocument") or []
+
+    rows = []
+    fetched = 0
+    skipped: list[str] = []
+    # Parallel arrays, most-recent-first in submissions; take the first N that
+    # match the PIT window (filingDate within [lower_d, upper_d]).
+    for i, form in enumerate(forms):
+        if form != "4":
+            continue
+        fd = (filing_dates[i] if i < len(filing_dates) else "")[:10]
+        try:
+            fd_d = date.fromisoformat(fd) if fd else None
+        except ValueError:
+            fd_d = None
+        # PIT: filingDate must be public by curr_date (ground truth).
+        if upper and fd_d and fd_d > upper_d:
+            continue
+        # Lower bound only applies when we have a parseable filing date.
+        if fd_d and fd_d < lower_d:
+            continue
+        if fetched >= _MAX_FORM4:
+            break
+        fetched += 1
+        try:
+            xml_bytes = _fetch_form4_xml(
+                cik, accessions[i], primary_docs[i] if i < len(primary_docs) else ""
+            )
+            parsed = _parse_form4(xml_bytes)
+        except NoMarketDataError as exc:
+            # A filing that is genuinely gone (404) or unparseable skips that
+            # one filing — but a transport failure (SEC unreachable) must
+            # fail the tool: "no insider activity" during an outage would be
+            # a fabricated zero signal.
+            if isinstance(exc, SecNoFileError) or "could not parse" in (exc.detail or ""):
+                skipped.append(accessions[i])
+                logger.debug(
+                    "sec_ownership: skipping Form 4 %s: %s", accessions[i], exc
+                )
+                continue
+            raise
+        for t in parsed["trades"]:
+            rows.append({
+                "date": t["date"], "owner": parsed["owner"], "title": parsed["title"],
+                "action": t["action"], "shares": t["shares"], "price": t["price"],
+                "post_shares": t["post_shares"],
+            })
+
+    out = io.StringIO()
+    out.write(f"# Form 4 Insider Trading for {ticker} (last {look_back_days} days, "
+              f"as of {curr_date or 'now'})\n")
+    out.write(f"# Source: SEC EDGAR Form 4 (PIT: filingDate <= {curr_date or 'now'}; "
+              f"CIK {cik})\n")
+
+    if not rows:
+        out.write(f"\nNo Form 4 transactions for {ticker} in the last "
+                  f"{look_back_days} days (as of {curr_date or 'now'}).")
+        if skipped:
+            out.write(f"\n(Note: {len(skipped)} filing(s) in the window could not "
+                      "be retrieved (no longer available) and were skipped.)")
+        return out.getvalue().rstrip("\n")
+
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    out.write(f"# {len(rows)} non-derivative trade(s) across {fetched} filing(s)\n\n")
+    if skipped:
+        out.write(f"# ({len(skipped)} filing(s) skipped: no longer available)\n\n")
+    out.write("Date       | Insider          | Title        | Action | Shares     "
+              "| Price  | Post-Hold\n")
+    out.write("-" * 88 + "\n")
+    for r in rows:
+        out.write(f"{r['date'] or 'n/a':<10} | {r['owner'][:16]:<16} | "
+                  f"{r['title'][:11]:<11} | {r['action']:<6} | {r['shares']:>10} | "
+                  f"{r['price']:>6} | {r['post_shares']}\n")
+
+    # Window summary: net dollar flow by action.
+    buy_usd = sell_usd = 0.0
+    n_buy = n_sell = 0
+    for r in rows:
+        sh = _num(r["shares"])
+        px = _num(r["price"])
+        if sh is None or px is None:
+            continue
+        if r["action"] == "BUY":
+            buy_usd += sh * px
+            n_buy += 1
+        elif r["action"] == "SELL":
+            sell_usd += sh * px
+            n_sell += 1
+    net = buy_usd - sell_usd
+    tone = "net buyer" if net > 0 else ("net seller" if net < 0 else "balanced")
+    out.write(
+        f"\nSummary (last {look_back_days} days): {n_buy} buy(s) ${buy_usd:,.0f} / "
+        f"{n_sell} sell(s) ${sell_usd:,.0f} -> net {tone} (${net:+,.0f})."
+    )
+    return out.getvalue().rstrip("\n")
+
+
+# --------------------------------------------------------------------------- #
+# FTD (fails-to-deliver)
+# --------------------------------------------------------------------------- #
+def _last_day_of_month(y: int, m: int) -> int:
+    nxt = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
+    return (nxt - timedelta(days=1)).day
+
+
+def _half_month_end(y: int, m: int, half: str) -> date:
+    """The last settlement date covered by a semi-monthly FTD file (a=1-15)."""
+    return date(y, m, 15) if half == "a" else date(y, m, _last_day_of_month(y, m))
+
+
+def _enumerate_ftd_files(start_d: date, visible_end: date) -> list[tuple[str, str]]:
+    """Candidate semi-monthly FTD files ``(yyyymm, 'a'|'b')``, newest first.
+
+    A file is a candidate when its data intersects the look-back window
+    (``half_end >= start_d`` — every row in the file is dated on/before its
+    half-month end) and it is already public (``half_end <= visible_end``, the
+    caller's curr_date minus the publication lag). The caller fetches each; a
+    genuine 404 for a file that should exist (recent half not yet posted) is
+    normal and skipped."""
+    out: list[tuple[str, str]] = []
+    y, m = start_d.year, start_d.month
+    while (y, m) <= (visible_end.year, visible_end.month):
+        for half in ("a", "b"):
+            if _half_month_end(y, m, half) >= start_d \
+                    and _half_month_end(y, m, half) <= visible_end:
+                out.append((f"{y:04d}{m:02d}", half))
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    out.sort(reverse=True)
+    return out
+
+
+def _detect_delimiter(header: str) -> str | None:
+    """Pick the delimiter that splits the header into the most fields."""
+    best, n = "|", header.count("|")
+    for cand in ("\t", ","):
+        c = header.count(cand)
+        if c > n:
+            best, n = cand, c
+    return best if n > 0 else None
+
+
+def _ftd_column_map(header: str) -> dict[str, int]:
+    """Header-driven column index map. Normalizes names so the parser does not
+    depend on the SEC's exact column labels/order (Date/CUSIP/Issuer/Symbol/
+    Total Fails/Price)."""
+    delim = _detect_delimiter(header)
+    parts = header.split(delim) if delim else header.split()
+    m = {}
+    for i, name in enumerate(parts):
+        n = name.strip().lower()
+        if "date" in n:
+            m["date"] = i
+        elif "cusip" in n:
+            m["cusip"] = i
+        elif "symbol" in n or "ticker" in n:
+            m["symbol"] = i
+        elif "issuer" in n or "company" in n:
+            m["issuer"] = i
+        elif "fail" in n:
+            m["fails"] = i
+        elif "price" in n:
+            m["price"] = i
+    return m
+
+
+def _unzip_ftd_member(zip_bytes: bytes) -> bytes:
+    """Extract the pipe-delimited text member from a cnsfails FTD ZIP.
+
+    The ZIP holds a single member (e.g. ``cnsfails202406b``, no extension).
+    Raises :class:`NoMarketDataError` on a corrupt/empty ZIP — that is a data
+    problem, not a "no fails reported" verdict.
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+        names = zf.namelist()
+        if not names:
+            raise NoMarketDataError("ftd", detail="FTD ZIP has no members")
+        return zf.read(names[0])
+    except NoMarketDataError:
+        raise
+    except (zipfile.BadZipFile, OSError, RuntimeError) as exc:
+        raise NoMarketDataError("ftd", detail=f"could not open FTD ZIP: {exc}") from exc
+
+
+def _parse_ftd_text(raw: bytes, ticker: str) -> list[dict]:
+    """Parse a cnsfails FTD text member, returning rows matching ``ticker``
+    (case-insensitive on the symbol column). Header-driven; tolerates ``|`` /
+    tab / comma. Real member header (verified against the live file):
+    ``SETTLEMENT DATE|CUSIP|SYMBOL|QUANTITY (FAILS)|DESCRIPTION|PRICE`` with
+    YYYYMMDD dates."""
+    text = raw.decode("utf-8", errors="replace")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return []
+    cols = _ftd_column_map(lines[0])
+    sym_i = cols.get("symbol")
+    out = []
+    for ln in lines[1:]:
+        parts = ln.split(_detect_delimiter(ln) or "\t")
+        if sym_i is not None and sym_i < len(parts):
+            if parts[sym_i].strip().upper() != ticker.upper():
+                continue
+        else:
+            continue
+        out.append({
+            "date": parts[cols["date"]].strip() if "date" in cols and cols["date"] < len(parts) else "",
+            "fails": parts[cols["fails"]].strip() if "fails" in cols and cols["fails"] < len(parts) else "",
+            "price": parts[cols["price"]].strip() if "price" in cols and cols["price"] < len(parts) else "",
+        })
+    return out
+
+
+def get_ftd_data(
+    ticker: str, curr_date: str | None = None, look_back_days: int = 180
+) -> str:
+    """Recent SEC fails-to-deliver balances for a ticker, PIT-aware.
+
+    Enumerates the semi-monthly FTD ZIP files (``cnsfails{YYYYMM}{a|b}.zip``,
+    a = settlement dates 1-15, b = 16-month-end) whose half-month intersects
+    the look-back window and that are already public by ``curr_date``
+    (half-month end + ``YIALPHA_FTD_PUB_LAG_DAYS``, default 10), fetches each
+    (immutable ZIP, cached long; a genuine 404 — the most recent half not yet
+    posted — is normal and skipped; transport failures propagate instead of
+    faking "no fails"), unzips the pipe-delimited member in memory, and filters
+    rows by ticker + ``Date <= curr_date``. Renders a per-fail-day table
+    plus a window summary (peak fail-day, total fail-days).
+
+    FTD is CNS settlement data keyed by ticker; a non-US ticker simply matches
+    no rows -> an informative "no fails reported" string (it does NOT resolve a
+    CIK, unlike Form 4).
+    """
+    upper = (curr_date or "")[:10]
+    upper_d = date.fromisoformat(upper) if upper else date.today()
+    start_d = upper_d - timedelta(days=int(look_back_days))
+    lag = _ftd_pub_lag_days()
+
+    # Only files whose half-month end + publication lag has elapsed by
+    # curr_date are PIT-visible. The half-month's data must also intersect the
+    # look-back window.
+    visible_end = upper_d - timedelta(days=lag)
+    files = _enumerate_ftd_files(max(start_d, date(2009, 9, 1)), visible_end)
+
+    rows: list[dict] = []
+    for yyyymm, half in files:
+        url = _FTD_URL.format(yyyymm=yyyymm, half=half)
+        path = os.path.join(_cache_dir(), f"ftd_{yyyymm}{half}.zip")
+        try:
+            zip_bytes = _cached_or_fetch(path, url, ttl_days=90.0)
+            raw = _unzip_ftd_member(zip_bytes)
+        except SecNoFileError:
+            # No ZIP for this half (SEC posts the newest halves a few days
+            # after the half closes; older halves are always present) ->
+            # normal, skip.
+            continue
+        # Any other failure (timeout / proxy / 5xx / corrupt zip) propagates:
+        # claiming "no fails reported" while SEC is unreachable (or the file
+        # is corrupt) would be a false zero.
+        for r in _parse_ftd_text(raw, ticker):
+            # Row-level PIT: settlement date must be <= curr_date.
+            d = r["date"]
+            try:
+                d_d = date(int(d[:4]), int(d[4:6]), int(d[6:8]))
+            except (ValueError, IndexError):
+                continue
+            if d_d > upper_d:
+                continue
+            rows.append(r)
+
+    out = io.StringIO()
+    out.write(f"# Fails-to-Deliver for {ticker} (last {look_back_days} days, "
+              f"as of {curr_date or 'now'})\n")
+    out.write(f"# Source: SEC CNS FTD semi-monthly ZIPs (PIT: file half-month end "
+              f"+ {lag}d pub lag <= {curr_date or 'now'})\n")
+
+    if not rows:
+        out.write(f"\nNo fails-to-deliver reported for {ticker} in the last "
+                  f"{look_back_days} days (as of {curr_date or 'now'}).")
+        return out.getvalue().rstrip("\n")
+
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    out.write(f"# {len(rows)} fail-day(s)\n\n")
+    out.write("Date       | Total Fails   | Price\n")
+    out.write("-" * 40 + "\n")
+    for r in rows:
+        out.write(f"{r['date']:<10} | {r['fails']:>12} | {r['price']}\n")
+
+    # Peak fail-day + count.
+    peak = max(rows, key=lambda r: _num(r["fails"]) or 0)
+    peak_v = _num(peak["fails"])
+    out.write(
+        f"\nPeak fail-day: {peak['date']} ({peak_v:,.0f} fails @ ${peak['price']}). "
+        f"Total fail-days in window: {len(rows)}."
+    )
+    return out.getvalue().rstrip("\n")
+
+
+# --------------------------------------------------------------------------- #
+# 13F institutional holdings (bulk Form 13F Data Sets)
+# --------------------------------------------------------------------------- #
+# SEC publishes quarterly bulk ZIPs (COVER + HOLDING TSVs) covering every 13F
+# filer's positions. One ZIP per 3-month filing window (period-end = the last
+# day of Feb/May/Aug/Nov). Reverse aggregation — "who holds this issuer" — is
+# then a single fetch + a local CUSIP filter, no per-filer XML crawl and no EFTS
+# full-text-search dependency.
+_13F_ZIP_BASE = "https://www.sec.gov/files/structureddata/data/form-13f-data-sets/"
+_13F_TOP_N = 15
+_13F_PERIOD_MONTHS = (2, 5, 8, 11)
+_MON_ABBR = ("jan", "feb", "mar", "apr", "may", "jun",
+             "jul", "aug", "sep", "oct", "nov", "dec")
+
+
+def _sec_13f_pub_lag_days() -> int:
+    """Days after a bulk 13F dataset's period-end before it is treated as public.
+
+    SEC releases each quarterly ZIP ~45 days after the window closes (the
+    statutory deadline); configurable via ``YIALPHA_SEC_13F_PUB_LAG_DAYS``
+    (default 45, mirroring that). The lag gates the publication gap honestly —
+    no EFTS fallback fills it (by design)."""
+    raw = get_config().get("sec_13f_pub_lag_days", 45)
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 45
+    return n if n >= 0 else 0
+
+
+def _normalize_cusip(raw: str) -> str:
+    """Strip separators, uppercase, take up to 9 chars (issuer 6 + issue 2 +
+    check digit). Returns '' for missing/garbage input."""
+    if not raw:
+        return ""
+    return raw.strip().upper().replace("-", "").replace(" ", "")[:9]
+
+
+def _extract_cusip(facts: dict, curr_date: str | None) -> str:
+    """PIT extract the issuer's 9-char CUSIP from companyfacts ``dei:EntityCusip``.
+
+    Picks the record with the latest period ``end`` whose ``filed <= curr_date``
+    (live mode: the latest overall), then normalizes. Raises
+    :class:`NoMarketDataError` if the concept or any PIT-visible record is
+    absent — the single-source CUSIP contract (no FTD/13D fallback by design)."""
+    try:
+        records = facts["dei"]["EntityCusip"]["units"]["NONE"]
+    except (KeyError, TypeError) as err:
+        raise NoMarketDataError(
+            "cusip", detail="dei:EntityCusip not reported in companyfacts") from err
+    upper = (curr_date or "")[:10]
+    upper_d = date.fromisoformat(upper) if upper else None
+
+    valid: list[tuple[date, str]] = []
+    for rec in records:
+        val = rec.get("val")
+        if not val:
+            continue
+        end = (rec.get("end") or "")[:10]
+        filed = (rec.get("filed") or "")[:10]
+        if upper_d:
+            try:
+                if filed and date.fromisoformat(filed) > upper_d:
+                    continue
+            except ValueError:
+                continue
+        try:
+            end_d = date.fromisoformat(end) if end else date.min
+        except ValueError:
+            end_d = date.min
+        if upper_d and end_d > upper_d:
+            continue
+        valid.append((end_d, val))
+    if not valid:
+        raise NoMarketDataError(
+            "cusip", detail="no PIT-visible EntityCusip record")
+    valid.sort(key=lambda x: x[0], reverse=True)
+    cusip = _normalize_cusip(valid[0][1])
+    if len(cusip) < 6:
+        raise NoMarketDataError(
+            "cusip", detail=f"EntityCusip too short: {valid[0][1]!r}")
+    return cusip
+
+
+def _13f_report_quarter(period_end: date) -> tuple[int, int]:
+    """Map a dataset period-end (Feb/May/Aug/Nov month-end) to the (year, q) of
+    the report quarter it predominantly covers."""
+    m = period_end.month
+    if m == 2:
+        return (period_end.year - 1, 4)
+    if m == 5:
+        return (period_end.year, 1)
+    if m == 8:
+        return (period_end.year, 2)
+    return (period_end.year, 3)  # Nov -> Q3 (Sep 30 report)
+
+
+def _13f_zip_filename(period_end: date) -> str:
+    """Construct the bulk ZIP filename for a period-end. 2024+ uses
+    ``ddmmmyyyy-ddmmmyyyy_form13f.zip`` (after the Mar-2024 SEC scheme change);
+    2021-2023 used ``{yyyy}q{N}_form13f.zip``."""
+    m = period_end.month
+    if m == 2:
+        start = date(period_end.year - 1, 12, 1)
+    elif m == 5:
+        start = date(period_end.year, 3, 1)
+    elif m == 8:
+        start = date(period_end.year, 6, 1)
+    else:  # 11
+        start = date(period_end.year, 9, 1)
+    if period_end.year >= 2024:
+        return (f"01{_MON_ABBR[start.month - 1]}{start.year}-"
+                f"{period_end.day}{_MON_ABBR[period_end.month - 1]}{period_end.year}"
+                f"_form13f.zip")
+    ry, rq = _13f_report_quarter(period_end)
+    return f"{ry}q{rq}_form13f.zip"
+
+
+def _13f_candidate_period_ends(visible_end: date, lower: date) -> list[date]:
+    """Dataset period-end dates (Feb/May/Aug/Nov month-ends) within [lower,
+    visible_end], most-recent-first."""
+    cands: list[date] = []
+    y, mo = lower.year, lower.month
+    while (y, mo) <= (visible_end.year, visible_end.month):
+        if mo in _13F_PERIOD_MONTHS:
+            d = date(y, mo, _last_day_of_month(y, mo))
+            if lower <= d <= visible_end:
+                cands.append(d)
+        mo += 1
+        if mo > 12:
+            mo = 1
+            y += 1
+    cands.sort(reverse=True)
+    return cands
+
+
+def _tsv_header_lines(raw: bytes) -> tuple[list[str], list[str]]:
+    """Decode a TSV blob into (header_fields, data_lines)."""
+    text = raw.decode("utf-8", errors="replace")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return [], []
+    return [h.strip() for h in lines[0].split("\t")], lines[1:]
+
+
+def _idx(header: list[str], *needles: str) -> int | None:
+    """First column index whose lowercased name contains any needle."""
+    for i, name in enumerate(header):
+        n = name.lower()
+        if any(nd in n for nd in needles):
+            return i
+    return None
+
+
+def _cell(parts: list[str], i: int | None) -> str:
+    if i is None or i >= len(parts):
+        return ""
+    return parts[i].strip()
+
+
+def _parse_13f_tsv(zip_bytes: bytes) -> tuple[list[dict], list[dict]]:
+    """Unzip a bulk 13F ZIP and parse COVER + HOLDING TSVs into row dicts.
+
+    Header-driven (tolerates minor SEC column-label drift). Cover keeps
+    accession / filer CIK / filing date / filing manager; holding keeps
+    accession / CUSIP / issuer / value / shares / share-type / put-call. Raises
+    :class:`NoMarketDataError` on a corrupt or incomplete ZIP."""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile as exc:
+        raise NoMarketDataError("13f", detail=f"could not open 13F ZIP: {exc}") from exc
+    cover_raw = holding_raw = None
+    for name in zf.namelist():
+        low = name.lower()
+        if not low.endswith((".tsv", ".txt")):
+            continue
+        if cover_raw is None and "cover" in low:
+            cover_raw = zf.read(name)
+        elif holding_raw is None and ("holding" in low or "infotable" in low):
+            holding_raw = zf.read(name)
+    if cover_raw is None or holding_raw is None:
+        raise NoMarketDataError(
+            "13f", detail="13F ZIP missing cover/holding TSV members")
+
+    ch, cl = _tsv_header_lines(cover_raw)
+    cai = _idx(ch, "accession")
+    cci = _idx(ch, "filer_cik", "cik")
+    cdi = _idx(ch, "filing_date")
+    cmi = _idx(ch, "filing_manager", "manager")
+    cover = []
+    for ln in cl:
+        p = ln.split("\t")
+        cover.append({"accession": _cell(p, cai), "filer_cik": _cell(p, cci),
+                      "filing_date": _cell(p, cdi), "manager": _cell(p, cmi)})
+
+    hh, hl = _tsv_header_lines(holding_raw)
+    hai = _idx(hh, "accession")
+    hcu = _idx(hh, "cusip")
+    hni = _idx(hh, "name_of_issuer", "issuer")
+    hvi = _idx(hh, "value")
+    hsh = hst = hpc = None
+    for i, name in enumerate(hh):
+        n = name.lower()
+        if "ssh_prnamt_type" in n:
+            hst = i
+        elif "ssh_prnamt" in n:
+            hsh = i
+        elif n == "put_call":
+            hpc = i
+    holding = []
+    for ln in hl:
+        p = ln.split("\t")
+        holding.append({"accession": _cell(p, hai), "cusip": _cell(p, hcu),
+                        "issuer": _cell(p, hni), "value": _cell(p, hvi),
+                        "shares": _cell(p, hsh), "share_type": _cell(p, hst),
+                        "put_call": _cell(p, hpc)})
+    return cover, holding
+
+
+def get_institutional_holdings(
+    ticker: str, curr_date: str | None = None, look_back_days: int = 180
+) -> str:
+    """Top institutional 13F holders of a US ticker as of curr_date, PIT-aware.
+
+    Resolves the CIK, reads the issuer CUSIP from companyfacts
+    (``dei:EntityCusip``, PIT by filed date), locates the most recent bulk 13F
+    Data Set ZIP whose publication lag has elapsed by curr_date, fetches it once
+    (cached 90 days — the file is immutable), and filters the holding table by
+    CUSIP joined to the cover table for filer names. Denoise: drops ``PRN``
+    (principal / bonds) and non-empty ``PUT_CALL`` (options) rows. Aggregates by
+    filing manager and renders the top-N table plus a concentration summary.
+
+    Non-US / no CIK, or no EntityCusip -> :class:`NoMarketDataError` (router
+    ``NO_DATA_AVAILABLE`` sentinel). No 13F ZIP public as of curr_date (the
+    ~45-day window after quarter-end) -> an honest 'not yet published' string.
+    CUSIP with no matching holders -> an honest empty string.
+    """
+    cik = _cik_for_ticker(ticker)
+    facts = _fetch_company_facts(cik)
+    cusip = _extract_cusip(facts, curr_date)
+
+    upper = (curr_date or "")[:10]
+    upper_d = date.fromisoformat(upper) if upper else date.today()
+    lower_d = upper_d - timedelta(days=int(look_back_days))
+    lag = _sec_13f_pub_lag_days()
+    visible_end = upper_d - timedelta(days=lag)
+
+    cands = _13f_candidate_period_ends(visible_end, lower_d)
+
+    out = io.StringIO()
+    out.write(f"# 13F Institutional Holdings for {ticker} (as of {curr_date or 'now'})\n")
+
+    if not cands:
+        out.write(f"\nNo bulk 13F data set was public as of {curr_date or 'now'} "
+                  f"(the most recent report quarter's ZIP publishes ~45 days after "
+                  f"quarter-end). Try a later as-of date.")
+        return out.getvalue().rstrip("\n")
+
+    period_end = cands[0]
+    fname = _13f_zip_filename(period_end)
+    url = _13F_ZIP_BASE + fname
+    cache_path = os.path.join(_cache_dir(), f"13f_{fname}")
+    try:
+        raw = _cached_or_fetch(cache_path, url, ttl_days=90.0)
+        cover_rows, holding_rows = _parse_13f_tsv(raw)
+    except NoMarketDataError as exc:
+        logger.debug("sec_ownership: 13F ZIP fetch/parse failed for %s: %s", ticker, exc)
+        raise
+
+    cover_by_acc = {c["accession"]: c for c in cover_rows if c["accession"]}
+
+    # Reverse aggregate: every holding row matching this issuer's CUSIP.
+    agg: dict[str, dict] = {}
+    for h in holding_rows:
+        if _normalize_cusip(h["cusip"]) != cusip:
+            continue
+        if h["share_type"] == "PRN":          # principal/bonds, not common stock
+            continue
+        if h["put_call"]:                      # options position, not a holding
+            continue
+        val = _num(h["value"])
+        if val is None:
+            continue
+        cov = cover_by_acc.get(h["accession"], {})
+        fd = cov.get("filing_date", "")[:10]
+        if not fd:
+            # Same fail-closed class as the malformed-date branch below: a
+            # holding with NO filing date (missing cover row / blank column)
+            # cannot prove it was filed on time either — an `if fd:` wrapper
+            # here used to skip the PIT check entirely and leak the row.
+            logger.debug(
+                "sec_ownership: dropping 13F row with missing filing_date "
+                "(PIT gate) for %s accession=%s", ticker, h["accession"],
+            )
+            continue
+        try:
+            if date.fromisoformat(fd) > upper_d:
+                continue
+        except ValueError:
+            # Fail-closed like the CUSIP record gate above: a malformed
+            # filing date cannot prove the row was filed on time, so the
+            # holding is dropped instead of bypassing the PIT check
+            # (a `pass` here would leak future 13F holdings).
+            logger.debug(
+                "sec_ownership: dropping 13F row with malformed "
+                "filing_date %r (PIT gate) for %s", fd, ticker,
+            )
+            continue
+        name = cov.get("manager") or cov.get("filer_cik") or h["accession"]
+        slot = agg.setdefault(name, {"shares": 0.0, "value": 0.0, "filing_date": ""})
+        slot["shares"] += _num(h["shares"]) or 0.0
+        slot["value"] += val * 1000.0          # VALUE column is $ thousands
+        if fd and (not slot["filing_date"] or fd > slot["filing_date"]):
+            slot["filing_date"] = fd
+
+    ry, rq = _13f_report_quarter(period_end)
+    rq_label = f"{ry} Q{rq}"
+    out.write(f"# Source: SEC Form 13F Data Sets (report quarter {rq_label}; "
+              f"PIT: dataset period-end {period_end} + {lag}d <= {curr_date or 'now'}; "
+              f"CUSIP {cusip}; CIK {cik})\n")
+    out.write("# Note: 13F data is inherently ~45 days stale (quarter-end as-of).\n")
+
+    if not agg:
+        out.write(f"\nNo 13F institutional holders reported owning {ticker} "
+                  f"(CUSIP {cusip}) in report quarter {rq_label}.")
+        return out.getvalue().rstrip("\n")
+
+    ranked = sorted(agg.items(), key=lambda kv: kv[1]["value"], reverse=True)[:_13F_TOP_N]
+    total_val = sum(s["value"] for s in agg.values())
+    top_val = sum(s["value"] for _, s in ranked)
+    out.write(f"# {len(agg)} holder(s); top {len(ranked)} shown (reported total "
+              f"${total_val / 1e6:,.1f}M)\n\n")
+    out.write("Holder                              | Shares       | Value ($M) | Filing Date\n")
+    out.write("-" * 86 + "\n")
+    for name, s in ranked:
+        out.write(f"{name[:34]:<34} | {s['shares']:>12,.0f} | "
+                  f"{s['value'] / 1e6:>10,.2f} | {s['filing_date'] or 'n/a'}\n")
+    out.write(
+        f"\nSummary: {len(agg)} institutional holder(s) for {ticker} in {rq_label}; "
+        f"top {len(ranked)} = ${top_val / 1e6:,.1f}M "
+        f"({100 * top_val / total_val:.1f}% of reported ${total_val / 1e6:,.1f}M).")
+    return out.getvalue().rstrip("\n")

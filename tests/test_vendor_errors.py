@@ -7,19 +7,19 @@ from unittest import mock
 
 import pytest
 
-from yiagents.dataflows import interface
-from yiagents.dataflows.alpha_vantage_common import (
+from yialpha.dataflows import interface
+from yialpha.dataflows.alpha_vantage_common import (
     AlphaVantageNotConfiguredError,
     AlphaVantageRateLimitError,
 )
-from yiagents.dataflows.config import reset_config, set_config
-from yiagents.dataflows.errors import (
+from yialpha.dataflows.config import reset_config, set_config
+from yialpha.dataflows.errors import (
     NoMarketDataError,
     VendorError,
     VendorNotConfiguredError,
     VendorRateLimitError,
 )
-from yiagents.dataflows.fred import FredNotConfiguredError
+from yialpha.dataflows.fred import FredNotConfiguredError
 
 
 @pytest.mark.unit
@@ -40,7 +40,7 @@ class HierarchyTests(unittest.TestCase):
         self.assertTrue(issubclass(FredNotConfiguredError, ValueError))
 
     def test_symbol_utils_reexports_no_market_data_error(self):
-        from yiagents.dataflows.symbol_utils import (
+        from yialpha.dataflows.symbol_utils import (
             NoMarketDataError as ReExported,
         )
         self.assertIs(ReExported, NoMarketDataError)

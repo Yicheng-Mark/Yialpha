@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from yiagents.cli import utils
+from yialpha.cli import utils
 
 
 def _asks(value):

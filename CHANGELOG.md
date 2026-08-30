@@ -1,14 +1,26 @@
 # Changelog
 
-> **YiAgents** 是基于研究文献（见 [REFERENCES.md](REFERENCES.md)，收录 99 篇相关研究）独立设计的多智能体 LLM 金融交易框架。包名 / import / CLI / env 前缀 `YIAGENTS_*` / 数据目录 `~/.yiagents/` 全程统一。
+> **YiAlpha**（弈·Alpha）是基于研究文献（见 [REFERENCES.md](REFERENCES.md)，收录 99 篇相关研究）独立设计的多智能体 LLM 金融交易框架。包名 / import / CLI / env 前缀 `YIALPHA_*` / 数据目录 `~/.yialpha/` 全程统一。
 
-All notable changes to YiAgents are documented here.
+All notable changes to YiAlpha are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
+
+### Changed
+
+- **Project renamed: YiAgents → YiAlpha（弈·Alpha）.** Full rename across the
+  board with no compatibility layer (pre-1.0, no external dependents):
+  distribution / package / CLI `yialpha`, env prefix `YIALPHA_*` (84 vars),
+  main class `YiAlphaGraph`, user data dir `~/.yialpha/` (one-time wholesale
+  move preserves caches / checkpoints / memory / config history / accuracy
+  products; per-ticker log dirs renamed `YiAlphaStrategy_logs` in lockstep),
+  web UI branding, Dockerfile / compose service + volume names. Bare-named
+  secrets (`DEEPSEEK_API_KEY`, `TUSHARE_TOKEN`, `BINANCE_API_KEY`) are
+  unchanged. Historical entries below keep their original spelling.
 
 ### Added
 

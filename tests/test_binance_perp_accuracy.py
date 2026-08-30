@@ -13,13 +13,13 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from unittest import mock
 
-from yiagents.dataflows import binance as bn, binance_filters as bf
-from yiagents.dataflows.binance_rate_limiter import (
+from yialpha.dataflows import binance as bn, binance_filters as bf
+from yialpha.dataflows.binance_rate_limiter import (
     get_binance_weight_limiter,
     reset_for_test as reset_limiters,
 )
-from yiagents.dataflows.errors import NoMarketDataError
-from yiagents.dataflows.utils import set_analysis_date
+from yialpha.dataflows.errors import NoMarketDataError
+from yialpha.dataflows.utils import set_analysis_date
 
 _DAY_MS = 86_400_000
 

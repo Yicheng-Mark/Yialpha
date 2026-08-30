@@ -40,11 +40,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd  # noqa: E402
 
-from yiagents.dataflows.binance import (  # noqa: E402
+from yialpha.dataflows.binance import (  # noqa: E402
     get_binance_depth_snapshot,
     get_binance_open_interest,
 )
-from yiagents.dataflows.binance_vision import (  # noqa: E402
+from yialpha.dataflows.binance_vision import (  # noqa: E402
     get_binance_vision_book_depth,
     get_binance_vision_metrics,
 )

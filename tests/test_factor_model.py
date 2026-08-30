@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.backtest.factor_model`` + engine wiring.
+"""Unit tests for ``yialpha.backtest.factor_model`` + engine wiring.
 
 Hermetic: no network, no LLM. ``_parse_french_zip`` is exercised with a
 synthetic zip fixture; ``load_factor_returns`` fail-open is checked by
@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from yiagents.backtest.factor_model import (
+from yialpha.backtest.factor_model import (
     FactorAttribution,
     _parse_french_zip,
     factor_attribution,
@@ -163,7 +163,7 @@ def test_load_factor_returns_unknown_model_returns_none(monkeypatch, tmp_path):
 def test_load_factor_returns_fail_open_on_download_failure(monkeypatch, tmp_path):
     """When the downloader can supply nothing (no cache, network down) the
     loader returns None rather than raising — a backtest must never die on it."""
-    from yiagents.backtest import factor_model as fm
+    from yialpha.backtest import factor_model as fm
 
     def _boom(_path, _url, ttl_days=1.0):
         return None
@@ -219,7 +219,7 @@ def _rising_prices(ticker, start, end):
 def test_run_backtest_default_factor_model_leaves_fields_none():
     """factor_model defaults to None -> the four factor fields stay None and the
     run is byte-equivalent to the pre-feature behaviour."""
-    from yiagents.backtest.engine import run_backtest
+    from yialpha.backtest.engine import run_backtest
 
     idx = pd.bdate_range("2024-01-01", periods=60, freq="B")
     dates = [d.strftime("%Y-%m-%d") for d in idx[::6]][:6]
@@ -238,8 +238,8 @@ def test_run_backtest_default_factor_model_leaves_fields_none():
 def test_run_backtest_factor_model_optin_fail_open_offline(monkeypatch):
     """Opting in but with the factor fetch failing (monkeypatched to None) must
     leave the factor fields None and NOT raise — the backtest still succeeds."""
-    from yiagents.backtest import factor_model as fm
-    from yiagents.backtest.engine import run_backtest
+    from yialpha.backtest import factor_model as fm
+    from yialpha.backtest.engine import run_backtest
 
     monkeypatch.setattr(fm, "load_factor_returns", lambda *a, **k: None)
 

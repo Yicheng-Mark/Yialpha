@@ -12,11 +12,11 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from yiagents.backtest.engine import run_backtest
-from yiagents.backtest.report import write_report
-from yiagents.backtest.validation_gate import evaluate_gate
-from yiagents.monitoring.dashboard import write_dashboard
-from yiagents.risk.manager import RiskManager, build_backtest_weight_fn
+from yialpha.backtest.engine import run_backtest
+from yialpha.backtest.report import write_report
+from yialpha.backtest.validation_gate import evaluate_gate
+from yialpha.monitoring.dashboard import write_dashboard
+from yialpha.risk.manager import RiskManager, build_backtest_weight_fn
 
 
 class FakeGraph:
@@ -93,15 +93,15 @@ def test_end_to_end_ab_gate_dashboard(tmp_path):
 @pytest.mark.unit
 def test_kill_switch_config_env_override(monkeypatch):
     """The kill switch must be settable via the documented env var."""
-    from yiagents.default_config import _ENV_OVERRIDES, _apply_env_overrides
+    from yialpha.default_config import _ENV_OVERRIDES, _apply_env_overrides
     # The override mapping is registered.
-    assert _ENV_OVERRIDES["YIAGENTS_KILL_SWITCH"] == "kill_switch"
+    assert _ENV_OVERRIDES["YIALPHA_KILL_SWITCH"] == "kill_switch"
 
     # _apply_env_overrides coerces the env value into the config dict.
-    monkeypatch.setenv("YIAGENTS_KILL_SWITCH", "true")
+    monkeypatch.setenv("YIALPHA_KILL_SWITCH", "true")
     cfg = _apply_env_overrides({"kill_switch": False})
     assert cfg["kill_switch"] is True
 
     # And the browser broker reads the same env var live at order time.
-    from yiagents.execution.browser_broker import KillSwitch
+    from yialpha.execution.browser_broker import KillSwitch
     assert KillSwitch.is_halted() is True

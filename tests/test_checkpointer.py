@@ -1,4 +1,4 @@
-"""Unit tests for ``yiagents.graph.checkpointer`` pure functions and edge cases.
+"""Unit tests for ``yialpha.graph.checkpointer`` pure functions and edge cases.
 
 ``test_checkpoint_resume.py`` already covers the crash-and-resume integration
 round-trip with a real StateGraph. These tests pin the *pure* contracts that
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.graph.checkpointer import (
+from yialpha.graph.checkpointer import (
     _db_path,
     clear_all_checkpoints,
     thread_id,

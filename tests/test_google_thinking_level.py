@@ -9,13 +9,13 @@ from unittest import mock
 
 import pytest
 
-from yiagents.llm_clients.google_client import GoogleClient
+from yialpha.llm_clients.google_client import GoogleClient
 
 
 def _captured_kwargs(model, **kwargs):
     captured = {}
     with mock.patch.object(
-        __import__("yiagents.llm_clients.google_client", fromlist=["x"]),
+        __import__("yialpha.llm_clients.google_client", fromlist=["x"]),
         "NormalizedChatGoogleGenerativeAI",
         lambda **kw: captured.setdefault("kw", kw),
     ):

@@ -10,7 +10,7 @@ import unittest
 from datetime import UTC, datetime
 from unittest import mock
 
-from yiagents.dataflows import binance
+from yialpha.dataflows import binance
 
 _DAY_MS = 86_400_000
 _FUND_MS = 28_800_000  # 8h funding interval
@@ -217,7 +217,7 @@ class TestFundingPagination(unittest.TestCase):
 
 class TestNoDataStillRaises(unittest.TestCase):
     def test_empty_klines_raises_no_market_data(self):
-        from yiagents.dataflows.errors import NoMarketDataError
+        from yialpha.dataflows.errors import NoMarketDataError
         with mock.patch.object(binance, "_http_get", _fake_klines_server([])), \
                 self.assertRaises(NoMarketDataError):
             binance.get_binance_klines("BTCUSDT", "2020-01-01", "2020-01-31")

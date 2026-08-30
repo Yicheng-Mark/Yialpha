@@ -1,10 +1,10 @@
 services:
-  yiagents:
+  yialpha:
     build: .
     env_file:
       - .env
     volumes:
-      - yiagents_data:/home/appuser/.yiagents
+      - yialpha_data:/home/appuser/.yialpha
     tty: true
     stdin_open: true
 
@@ -15,15 +15,15 @@ services:
     profiles:
       - ollama
 
-  yiagents-ollama:
+  yialpha-ollama:
     build: .
     env_file:
       - .env
     environment:
-      - YIAGENTS_LLM_PROVIDER=ollama
+      - YIALPHA_LLM_PROVIDER=ollama
       - OLLAMA_BASE_URL=http://ollama:11434/v1
     volumes:
-      - yiagents_data:/home/appuser/.yiagents
+      - yialpha_data:/home/appuser/.yialpha
     depends_on:
       - ollama
     tty: true
@@ -32,5 +32,5 @@ services:
       - ollama
 
 volumes:
-  yiagents_data:
+  yialpha_data:
   ollama_data:

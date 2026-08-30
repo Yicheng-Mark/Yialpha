@@ -1,7 +1,7 @@
-# YiAgents Web UI
+# YiAlpha Web UI
 
 A small FastAPI app + vanilla HTML/JS frontend that lets you browse past
-YiAgents analyses and submit new ones from a browser — no agent / graph /
+YiAlpha analyses and submit new ones from a browser — no agent / graph /
 dataflow code is touched (the project's "铁律").
 
 - **Browse**: ticker grid (with client-side ticker-text + rating-chip filter)
@@ -17,7 +17,7 @@ dataflow code is touched (the project's "铁律").
   a time (409 while one is running).
 - **i18n**: the 🌐 toggle (top-right) sets BOTH the UI chrome language AND the
   report language. On submit the language is routed to the `run_robust` child
-  via `YIAGENTS_OUTPUT_LANGUAGE`, so the existing `get_language_instruction()`
+  via `YIALPHA_OUTPUT_LANGUAGE`, so the existing `get_language_instruction()`
   localizes every agent's output. Static chrome is translated in place; agent
   markdown is rendered verbatim (no in-browser post-translation).
 - **Accessibility & theming**: global `:focus-visible` ring, `role="img"` +
@@ -29,7 +29,7 @@ dataflow code is touched (the project's "铁律").
 
 ## Run it
 
-From the **project root** (the dir containing `.env`, `yiagents/`, `scripts/`):
+From the **project root** (the dir containing `.env`, `yialpha/`, `scripts/`):
 
 ```bash
 pip install -e ".[web]"          # fastapi + uvicorn (one-time)
@@ -37,7 +37,7 @@ python web/app.py                # serves http://127.0.0.1:8000
 ```
 
 > `web/app.py` refuses to start unless `cwd` is the project root. Why:
-> `yiagents/__init__.py` loads `.env` via `load_dotenv(usecwd=True)`, so starting
+> `yialpha/__init__.py` loads `.env` via `load_dotenv(usecwd=True)`, so starting
 > from elsewhere leaves `DEEPSEEK_API_KEY` and the SOCKS5 proxy unset — the
 > spawned `run_robust` subprocess inherits that env and could not reach DeepSeek
 > or yfinance. On Windows, also set `PYTHONUTF8=1` if your console is GBK
@@ -50,17 +50,17 @@ browser SPA (static/index.html + app.js + charts.js + i18n.js + common.js + them
         │  fetch JSON, poll every 4 s
         ▼
 FastAPI (app.py) ── mount /static and /reports
-  ├─ store.py   read-only scan of ~/.yiagents/logs/* + parse_rating + overlay regex
+  ├─ store.py   read-only scan of ~/.yialpha/logs/* + parse_rating + overlay regex
   ├─ runner.py  asyncio subprocess → scripts/run_robust.py + stdout watcher
-  ├─ health.py  thin alias → yiagents.monitoring.preflight (shared with run_baseline.py)
+  ├─ health.py  thin alias → yialpha.monitoring.preflight (shared with run_baseline.py)
   └─ in-memory TaskRegistry (single-slot busy flag; restart loses history)
         │  subprocess, cwd=project root, env PYTHONUTF8=1
         ▼
 scripts/run_robust.py --tickers <T> --date <D> [--asset-type <X>] --workers 1
    (watchdog + taskkill + complete_report.md success check)
         ▼
-~/.yiagents/logs/<T>/YiAgentsStrategy_logs/full_states_log_<date>.json   ← UI source of truth
-~/.yiagents/logs/reports/<T>_<stamp>/                                    ← download links
+~/.yialpha/logs/<T>/YiAlphaStrategy_logs/full_states_log_<date>.json   ← UI source of truth
+~/.yialpha/logs/reports/<T>_<stamp>/                                    ← download links
 ```
 
 `common.js` (`window.YiUtil`) is the single home for helpers shared by
@@ -75,7 +75,7 @@ scripts/run_robust.py --tickers <T> --date <D> [--asset-type <X>] --workers 1
 | `GET /api/tickers/{t}/runs` | `{ticker, dates:[…], date_ratings:[…], reports:[{dir, mtime, complete}]}` |
 | `GET /api/tickers/{t}/runs/{date}` | rating + overlay + 5 sections + `node_perf?` |
 | `GET /api/compare` | `{tickers:[{ticker, date_ratings:[{date, rating}]}]}` (skips all-unreadable tickers) |
-| `GET /api/accuracy` | serves the `yiagents verify-history` artifact (`{available:false, hint}` until run) |
+| `GET /api/accuracy` | serves the `yialpha verify-history` artifact (`{available:false, hint}` until run) |
 | `GET /api/health` | preflight (deps / key / proxy / yfinance / DeepSeek) — shared implementation with `run_baseline.py --preflight` |
 | `POST /api/analyze` | `{ticker, date, asset_type, language?}` → `{task_id, started_at}` (409 if busy) |
 | `GET /api/tasks/{task_id}` | `{status, elapsed_s, attempt, max_attempts, report_url, …}` |
@@ -96,7 +96,7 @@ scripts/run_robust.py --tickers <T> --date <D> [--asset-type <X>] --workers 1
   `run_robust`'s watchdog's contract, and a second outer watchdog would race it.
 - **`scripts/` is not a package** (no `__init__.py`), so the overlay regex is
   replicated here rather than imported. The preflight checks, by contrast, are
-  shared via `yiagents.monitoring.preflight` (single implementation with
+  shared via `yialpha.monitoring.preflight` (single implementation with
   `run_baseline.py`).
 - **Marked and DOMPurify are vendored** under `static/vendor/` — no CDN at
   runtime. Model/news Markdown is parsed and then sanitized with an explicit

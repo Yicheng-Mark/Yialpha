@@ -1,4 +1,4 @@
-"""Tests for the ``yiagents config-check`` CLI subcommand.
+"""Tests for the ``yialpha config-check`` CLI subcommand.
 
 Verifies that config-check:
 * exits 0 when the selected provider's key is present;
@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from typer.testing import CliRunner
 
-from yiagents.cli.main import app
+from yialpha.cli.main import app
 
 runner = CliRunner()
 
@@ -19,7 +19,7 @@ runner = CliRunner()
 class TestConfigCheck:
     def test_provider_key_present_exits_zero(self, monkeypatch):
         """When the provider's key is set, config-check exits 0."""
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "deepseek")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-dummy")
         result = runner.invoke(app, ["config-check"])
         assert result.exit_code == 0
@@ -27,7 +27,7 @@ class TestConfigCheck:
 
     def test_provider_key_missing_exits_one(self, monkeypatch):
         """When the provider's key is missing, config-check exits 1."""
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "deepseek")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         result = runner.invoke(app, ["config-check"])
         assert result.exit_code == 1
@@ -35,14 +35,14 @@ class TestConfigCheck:
 
     def test_keyless_provider_exits_zero(self, monkeypatch):
         """Ollama (no key required) always passes."""
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "ollama")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "ollama")
         result = runner.invoke(app, ["config-check"])
         assert result.exit_code == 0
         assert "no API key required" in result.output
 
     def test_optional_keys_reported_as_set_or_unset(self, monkeypatch):
         """Optional data sources show SET/unset status without failing."""
-        monkeypatch.setenv("YIAGENTS_LLM_PROVIDER", "deepseek")
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-dummy")
         monkeypatch.setenv("FRED_API_KEY", "dummy-fred")
         monkeypatch.delenv("TUSHARE_TOKEN", raising=False)

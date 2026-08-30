@@ -32,7 +32,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 # noqa: E402 — imports follow the UTF-8 reconfigure guard above; reordering would
 # re-introduce UnicodeEncodeError when printing ❌/✅/中文 on a GBK Windows console.
-from yiagents.logging_config import setup_logging  # noqa: E402
+from yialpha.logging_config import setup_logging  # noqa: E402
 
 setup_logging()  # noqa: E402 — centralised logging before any other import fires
 
@@ -58,10 +58,10 @@ IS_WINDOWS = os.name == "nt"
 _CREATE_FLAGS = subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0
 
 # Default shim location auto-loads sitecustomize at interpreter startup (urllib
-# hard timeout + socket backstop). Override with YIAGENTS_TIMEOUT_SHIM_DIR.
+# hard timeout + socket backstop). Override with YIALPHA_TIMEOUT_SHIM_DIR.
 _DEFAULT_SHIM_DIR = os.environ.get(
-    "YIAGENTS_TIMEOUT_SHIM_DIR",
-    str(Path(os.environ.get("TEMP", str(Path.home()))) / "yiagents_timeout_shim"),
+    "YIALPHA_TIMEOUT_SHIM_DIR",
+    str(Path(os.environ.get("TEMP", str(Path.home()))) / "yialpha_timeout_shim"),
 )
 
 
@@ -117,10 +117,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--reports-root",
         default=str(
-            Path(os.getenv("YIAGENTS_RESULTS_DIR", Path.home() / ".yiagents" / "logs"))
+            Path(os.getenv("YIALPHA_RESULTS_DIR", Path.home() / ".yialpha" / "logs"))
             / "reports"
         ),
-        help="报告根目录（默认 $YIAGENTS_RESULTS_DIR/reports，回退 ~/.yiagents/logs/reports）",
+        help="报告根目录（默认 $YIALPHA_RESULTS_DIR/reports，回退 ~/.yialpha/logs/reports）",
     )
     p.add_argument(
         "--allow-degraded",
@@ -192,7 +192,7 @@ def _core_sentinel_count(reports_root: Path, ticker: str, date: str) -> int | No
     data_quality field (older runs) — unknown, not zero.
     """
     log = (
-        reports_root.parent / ticker / "YiAgentsStrategy_logs"
+        reports_root.parent / ticker / "YiAlphaStrategy_logs"
         / f"full_states_log_{date}.json"
     )
     try:
@@ -294,22 +294,22 @@ def _kill_all_active() -> None:
 
 
 def _apply_robust_llm_cache(child_env: dict, no_llm_cache: bool) -> None:
-    """Set ``YIAGENTS_LLM_CACHE`` on a robust child subprocess env, in place.
+    """Set ``YIALPHA_LLM_CACHE`` on a robust child subprocess env, in place.
 
     Default-on for hang-recovery: a retry replays the completed nodes' cached
     LLM generations and only re-bills the call that actually hung (which never
     produced a generation, so it was never cached). First attempt is a cache
     miss → byte-equivalent to running with the cache off. ``--no-llm-cache``
-    forces it off. A user who already exported ``YIAGENTS_LLM_CACHE`` is
+    forces it off. A user who already exported ``YIALPHA_LLM_CACHE`` is
     respected (``setdefault``) unless ``--no-llm-cache`` explicitly overrides —
     run_robust is live single-config analysis, not an A/B-gate / DSR
     distribution measurement, so the response_cache distribution caveat does
     not apply.
     """
     if no_llm_cache:
-        child_env["YIAGENTS_LLM_CACHE"] = "false"
+        child_env["YIALPHA_LLM_CACHE"] = "false"
     else:
-        child_env.setdefault("YIAGENTS_LLM_CACHE", "true")
+        child_env.setdefault("YIALPHA_LLM_CACHE", "true")
 
 
 def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
@@ -344,7 +344,7 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         cmd_base += ["--asset-type", opts.asset_type]
     # 可测试性 hook：用自定义脚本替换 run_batch 子进程（默认关 = 字节等价）。
     # 用于韧性测试：注入确定崩溃的 crasher 验证看门狗 + 重试契约。
-    _child_script = os.environ.get("YIAGENTS_ROBUST_CHILD_SCRIPT")
+    _child_script = os.environ.get("YIALPHA_ROBUST_CHILD_SCRIPT")
     if _child_script:
         cmd_base = [sys.executable, _child_script] + cmd_base[2:]
 
@@ -362,14 +362,14 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         child_env["PYTHONPATH"] = os.pathsep.join(
             [p for p in [_DEFAULT_SHIM_DIR, child_env.get("PYTHONPATH", "")] if p]
         )
-        child_env.setdefault("YIAGENTS_URLOPEN_HARD_TIMEOUT_S", "20")
-        child_env.setdefault("YIAGENTS_FAULT_DUMP_S", "0")
+        child_env.setdefault("YIALPHA_URLOPEN_HARD_TIMEOUT_S", "20")
+        child_env.setdefault("YIALPHA_FAULT_DUMP_S", "0")
         # --allow-degraded opts the child's data-vacuum gate down to warn as
         # well: without this the child would still raise DataVacuumError at the
         # trader node and never produce the degraded report the operator asked
         # to keep. setdefault — an explicit env var wins over the flag.
         if opts.allow_degraded:
-            child_env.setdefault("YIAGENTS_DATA_VACUUM_POLICY", "warn")
+            child_env.setdefault("YIALPHA_DATA_VACUUM_POLICY", "warn")
         # 让 run_batch 子进程 stdout/stderr 实时 flush：崩溃 traceback 不会闷在块缓冲里
         # 丢失（AAPL#1 偶发崩溃时 a1 日志只剩 7 行就是这个盲区）。字节等价——只改
         # flush 时机，不改输出内容；run_batch 的 LLM 决策不读自己的 stdout。

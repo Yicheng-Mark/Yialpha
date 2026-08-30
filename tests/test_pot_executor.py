@@ -10,16 +10,16 @@ import time
 
 import pytest
 
-import yiagents.agents.utils.pot_executor as pot_executor_module
-from yiagents.agents.utils.pot_executor import PoTEnableSwitch, PoTExecutor, PoTResult
+import yialpha.agents.utils.pot_executor as pot_executor_module
+from yialpha.agents.utils.pot_executor import PoTEnableSwitch, PoTExecutor, PoTResult
 
 
 @pytest.fixture(autouse=True)
 def _explicitly_enable_pot_for_executor_tests(monkeypatch):
     # Production/default behavior is covered separately below. Arithmetic and
     # guard tests need an explicit opt-in to reach the executor.
-    monkeypatch.setenv("YIAGENTS_POT_ENABLED", "true")
-    monkeypatch.setenv("YIAGENTS_ANALYSIS_ONLY", "false")
+    monkeypatch.setenv("YIALPHA_POT_ENABLED", "true")
+    monkeypatch.setenv("YIALPHA_ANALYSIS_ONLY", "false")
     # Production Windows is intentionally blocked until PoT is process-isolated.
     # Unit tests exercise the restricted executor and portable timeout plumbing.
     monkeypatch.setattr(pot_executor_module.platform, "system", lambda: "Linux")
@@ -31,7 +31,7 @@ class TestPoTExecutor:
         return PoTExecutor().run_sandboxed(**kwargs)
 
     def test_runtime_switch_off_rejects_without_running(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_POT_ENABLED", "false")
+        monkeypatch.setenv("YIALPHA_POT_ENABLED", "false")
         res = self._exec(code="result = 42")
         assert PoTEnableSwitch.is_enabled() is False
         assert res.ok is False
@@ -39,7 +39,7 @@ class TestPoTExecutor:
         assert "disabled" in (res.error or "").lower()
 
     def test_analysis_only_cannot_be_overridden_by_pot_flag(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_ANALYSIS_ONLY", "true")
+        monkeypatch.setenv("YIALPHA_ANALYSIS_ONLY", "true")
         res = self._exec(code="result = 42")
         assert PoTEnableSwitch.is_enabled() is False
         assert res.ok is False
@@ -48,7 +48,7 @@ class TestPoTExecutor:
     def test_switch_is_rechecked_after_executor_construction(self, monkeypatch):
         executor = PoTExecutor()
         assert executor.run_sandboxed(code="result = 1").ok is True
-        monkeypatch.setenv("YIAGENTS_ANALYSIS_ONLY", "true")
+        monkeypatch.setenv("YIALPHA_ANALYSIS_ONLY", "true")
         blocked = executor.run_sandboxed(code="result = 2")
         assert blocked.ok is False
         assert blocked.code_ran is False
@@ -61,7 +61,7 @@ class TestPoTExecutor:
         assert "windows" in (res.error or "").lower()
 
     def test_malformed_runtime_switch_fails_closed(self, monkeypatch):
-        monkeypatch.setenv("YIAGENTS_POT_ENABLED", "tru")
+        monkeypatch.setenv("YIALPHA_POT_ENABLED", "tru")
         res = self._exec(code="result = 42")
         assert res.ok is False
         assert res.code_ran is False

@@ -12,9 +12,9 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
-from yiagents.agents.analysts.sentiment_analyst import create_sentiment_analyst
-from yiagents.agents.managers.research_manager import create_research_manager
-from yiagents.agents.schemas import (
+from yialpha.agents.analysts.sentiment_analyst import create_sentiment_analyst
+from yialpha.agents.managers.research_manager import create_research_manager
+from yialpha.agents.schemas import (
     PortfolioDecision,
     PortfolioRating,
     ResearchPlan,
@@ -26,7 +26,7 @@ from yiagents.agents.schemas import (
     render_sentiment_report,
     render_trader_proposal,
 )
-from yiagents.agents.trader.trader import create_trader
+from yialpha.agents.trader.trader import create_trader
 
 # ---------------------------------------------------------------------------
 # Render functions
@@ -157,7 +157,7 @@ def _structured_trader_llm(captured: dict, proposal: TraderProposal | None = Non
 def test_invoke_structured_falls_back_when_result_is_none():
     # A thinking model can answer in plain text, leaving the parser with None.
     # That must fall back to free text, not crash on render(None) (#1051).
-    from yiagents.agents.utils.structured import invoke_structured_or_freetext
+    from yialpha.agents.utils.structured import invoke_structured_or_freetext
 
     structured = MagicMock()
     structured.invoke.return_value = None

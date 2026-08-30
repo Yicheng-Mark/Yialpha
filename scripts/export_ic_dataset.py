@@ -10,8 +10,8 @@ the OHLCV cache + stockstats, so the evidence chain is now fully mechanical:
         && python scripts/prune_indicators_cli.py ic_data/NVDA_5d.csv --json-out ic_data/NVDA_5d.prune.json
 
 Fail-closed contract (never silently wrong data) — enforced by the package
-implementation this delegates to (:mod:`yiagents.backtest.ic_dataset`,
-extracted 2026-08-16 so ``yiagents ic-cycle`` can share it):
+implementation this delegates to (:mod:`yialpha.backtest.ic_dataset`,
+extracted 2026-08-16 so ``yialpha ic-cycle`` can share it):
 
 - Unknown indicator names are rejected upfront (validated against the market
   analyst's INDICATOR_NAMES — the same battery the LLM selects from).
@@ -43,8 +43,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from yiagents.agents.analysts.market_analyst import INDICATOR_NAMES  # noqa: E402
-from yiagents.backtest.ic_dataset import export_ic_datasets  # noqa: E402
+from yialpha.agents.analysts.market_analyst import INDICATOR_NAMES  # noqa: E402
+from yialpha.backtest.ic_dataset import export_ic_datasets  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             f"INDICATOR_NAMES: {sorted(INDICATOR_NAMES)}"
         )
 
-    # Package-side implementation (shared with `yiagents ic-cycle`); this
+    # Package-side implementation (shared with `yialpha ic-cycle`); this
     # wrapper keeps the script's argv contract and per-ticker "next:" hints.
     written = export_ic_datasets(
         args.tickers,

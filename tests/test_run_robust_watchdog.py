@@ -28,8 +28,8 @@ class TestCoreSentinelCount(unittest.TestCase):
 
     def _write_log(self, reports_root: Path, ticker: str, date: str, payload) -> Path:
         # Real layout: full_states_log lives NEXT TO the reports/ dir
-        # (~/.yiagents/logs/<TICKER>/...), i.e. under reports_root.parent.
-        log_dir = reports_root.parent / ticker / "YiAgentsStrategy_logs"
+        # (~/.yialpha/logs/<TICKER>/...), i.e. under reports_root.parent.
+        log_dir = reports_root.parent / ticker / "YiAlphaStrategy_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log = log_dir / f"full_states_log_{date}.json"
         import json as _json
@@ -107,29 +107,29 @@ class TestCoreSentinelCount(unittest.TestCase):
 
 
 class TestRobustLLMCacheEnv(unittest.TestCase):
-    """The robust child subprocess gets YIAGENTS_LLM_CACHE set so retries
+    """The robust child subprocess gets YIALPHA_LLM_CACHE set so retries
     replay completed nodes (hang recovery) instead of re-billing the graph."""
 
     def test_default_enables_cache(self):
         env = {}
         rr._apply_robust_llm_cache(env, no_llm_cache=False)
-        self.assertEqual(env.get("YIAGENTS_LLM_CACHE"), "true")
+        self.assertEqual(env.get("YIALPHA_LLM_CACHE"), "true")
 
     def test_no_llm_cache_forces_off(self):
-        env = {"YIAGENTS_LLM_CACHE": "true"}  # user pre-set on
+        env = {"YIALPHA_LLM_CACHE": "true"}  # user pre-set on
         rr._apply_robust_llm_cache(env, no_llm_cache=True)
-        self.assertEqual(env.get("YIAGENTS_LLM_CACHE"), "false")
+        self.assertEqual(env.get("YIALPHA_LLM_CACHE"), "false")
 
     def test_respects_user_preset_off(self):
-        # A user who exported YIAGENTS_LLM_CACHE=false is respected (setdefault).
-        env = {"YIAGENTS_LLM_CACHE": "false"}
+        # A user who exported YIALPHA_LLM_CACHE=false is respected (setdefault).
+        env = {"YIALPHA_LLM_CACHE": "false"}
         rr._apply_robust_llm_cache(env, no_llm_cache=False)
-        self.assertEqual(env.get("YIAGENTS_LLM_CACHE"), "false")
+        self.assertEqual(env.get("YIALPHA_LLM_CACHE"), "false")
 
     def test_respects_user_preset_on(self):
-        env = {"YIAGENTS_LLM_CACHE": "true"}
+        env = {"YIALPHA_LLM_CACHE": "true"}
         rr._apply_robust_llm_cache(env, no_llm_cache=False)
-        self.assertEqual(env.get("YIAGENTS_LLM_CACHE"), "true")
+        self.assertEqual(env.get("YIALPHA_LLM_CACHE"), "true")
 
 
 class TestMainResilience(unittest.TestCase):

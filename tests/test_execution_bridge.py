@@ -1,4 +1,4 @@
-"""Unit tests for the decision -> OrderRequest bridge (yiagents.execution.bridge).
+"""Unit tests for the decision -> OrderRequest bridge (yialpha.execution.bridge).
 
 Covers the direction truth table (rating priority, Trader-action fallback,
 Hold -> no order), the volume guard, and function purity. Unlike the manual
@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.agents.schemas import (
+from yialpha.agents.schemas import (
     PortfolioDecision,
     PortfolioRating,
     TraderAction,
     TraderProposal,
 )
-from yiagents.execution.bridge import decision_to_order_requests
-from yiagents.execution.domain import (
+from yialpha.execution.bridge import decision_to_order_requests
+from yialpha.execution.domain import (
     Direction,
     Exchange,
     Offset,

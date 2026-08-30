@@ -24,15 +24,15 @@ for _stream in (sys.stdout, sys.stderr):
 # noqa: E402 — imports sit after the UTF-8 reconfigure guard above (Windows GBK shim).
 from pathlib import Path  # noqa: E402
 
-from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
-from yiagents.graph.overlay_fields import parse_overlay  # noqa: E402
-from yiagents.graph.trading_graph import YiAgentsGraph  # noqa: E402
+from yialpha.default_config import DEFAULT_CONFIG  # noqa: E402
+from yialpha.graph.overlay_fields import parse_overlay  # noqa: E402
+from yialpha.graph.trading_graph import YiAlphaGraph  # noqa: E402
 
 
 def run_one(ticker: str, date: str, equity: float, risk: bool) -> dict:
     cfg = DEFAULT_CONFIG.copy()
     cfg["risk_enabled"] = risk
-    ta = YiAgentsGraph(debug=False, config=cfg)
+    ta = YiAlphaGraph(debug=False, config=cfg)
     portfolio_state = {"cash": equity, "equity": equity, "positions": {},
                        "sectors": {}, "returns_history": [], "trade_history": []}
     final_state, rating = ta.propagate(ticker, date, portfolio_state=portfolio_state)
@@ -48,7 +48,7 @@ def run_one(ticker: str, date: str, equity: float, risk: bool) -> dict:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="YiAgents 多日窗口 + 风控序列")
+    p = argparse.ArgumentParser(description="YiAlpha 多日窗口 + 风控序列")
     p.add_argument("--ticker", default="NVDA")
     p.add_argument("--dates", nargs="+", default=[
         "2026-05-14", "2026-05-29", "2026-06-10", "2026-06-18", "2026-06-26"])

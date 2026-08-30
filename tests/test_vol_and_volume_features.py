@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from yiagents.dataflows.vol_estimators import (
+from yialpha.dataflows.vol_estimators import (
     CRYPTO_TRADING_DAYS_PER_YEAR,
     TRADING_DAYS_PER_YEAR,
     close_to_close_vol,
@@ -24,7 +24,7 @@ from yiagents.dataflows.vol_estimators import (
     periods_per_year_for,
     yang_zhang_vol,
 )
-from yiagents.dataflows.volume_features import (
+from yialpha.dataflows.volume_features import (
     obv,
     relative_volume,
     volume_divergence,
@@ -173,7 +173,7 @@ class TestAnnualizationFactor:
         assert float(b / a) == pytest.approx(math.sqrt(365.0 / 252.0), rel=1e-12)
 
     def test_registry_threads_factor_to_vol_features_only(self):
-        from yiagents.dataflows.feature_registry import compute_derived
+        from yialpha.dataflows.feature_registry import compute_derived
 
         rng = np.random.default_rng(12)
         closes = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.02, 80)))
@@ -263,7 +263,7 @@ class TestVolumeDivergence:
 @pytest.mark.unit
 class TestDerivedDispatchThroughConsumers:
     def test_yfinance_bulk_computes_derived_features(self, monkeypatch):
-        import yiagents.dataflows.y_finance as yfin
+        import yialpha.dataflows.y_finance as yfin
 
         frame = _frame(list(np.linspace(100, 130, 60)))
         monkeypatch.setattr(yfin, "load_ohlcv", lambda s, d: frame)
@@ -273,7 +273,7 @@ class TestDerivedDispatchThroughConsumers:
         assert all(float(v) > 0 for v in values)
 
     def test_validator_snapshot_includes_derived(self, monkeypatch):
-        import yiagents.dataflows.market_data_validator as mdv
+        import yialpha.dataflows.market_data_validator as mdv
 
         frame = _frame(list(np.linspace(100, 130, 60)))
         monkeypatch.setattr(mdv, "load_ohlcv", lambda s, d: frame)
@@ -292,9 +292,9 @@ class TestDerivedDispatchThroughConsumers:
         exporter = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(exporter)
         frame = _frame(list(np.linspace(100, 130, 60)))
-        # The exporter delegates to yiagents.backtest.ic_dataset (2026-08-16),
+        # The exporter delegates to yialpha.backtest.ic_dataset (2026-08-16),
         # whose lazy imports resolve against the real dataflow modules.
-        from yiagents.dataflows import stockstats_utils
+        from yialpha.dataflows import stockstats_utils
 
         monkeypatch.setattr(stockstats_utils, "load_ohlcv", lambda t, d: frame)
         result = exporter.main([

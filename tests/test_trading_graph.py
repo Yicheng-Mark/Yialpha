@@ -1,8 +1,8 @@
-"""Unit tests for pure routing/config methods on ``YiAgentsGraph``.
+"""Unit tests for pure routing/config methods on ``YiAlphaGraph``.
 
 The full constructor wires real LLM clients and a compiled LangGraph, so these
 tests follow the established pattern (test_risk_overlay.py, test_p0_p1a.py):
-``YiAgentsGraph.__new__`` bypasses ``__init__`` and we set only the attributes
+``YiAlphaGraph.__new__`` bypasses ``__init__`` and we set only the attributes
 the method-under-test reads. This pins the checkpoint-signature and
 benchmark-resolution contracts without any network or LLM call.
 """
@@ -11,14 +11,14 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.graph.trading_graph import YiAgentsGraph
+from yialpha.graph.trading_graph import YiAlphaGraph
 
 pytestmark = pytest.mark.unit
 
 
-def _bare_graph(config: dict, selected_analysts=("market", "social", "news", "fundamentals")) -> YiAgentsGraph:
+def _bare_graph(config: dict, selected_analysts=("market", "social", "news", "fundamentals")) -> YiAlphaGraph:
     """A graph instance with __init__ skipped — only config + analysts set."""
-    g = YiAgentsGraph.__new__(YiAgentsGraph)
+    g = YiAlphaGraph.__new__(YiAlphaGraph)
     g.config = config
     g.selected_analysts = selected_analysts
     return g

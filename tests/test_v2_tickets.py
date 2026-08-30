@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.risk.tradeability import TicketSide, Tradeability
-from yiagents.tickets import (
+from yialpha.risk.tradeability import TicketSide, Tradeability
+from yialpha.tickets import (
     DEFAULT_HORIZON_DAYS,
     ExecutionTicket,
     TicketStatus,
@@ -20,7 +20,7 @@ from yiagents.tickets import (
     new_ticket_id,
     render_ticket_lines,
 )
-from yiagents.versions import COST_MODEL_VERSION, TICKET_VERSION
+from yialpha.versions import COST_MODEL_VERSION, TICKET_VERSION
 
 
 @pytest.mark.unit
@@ -143,7 +143,7 @@ def test_candidate_builder_perp_leverage_from_shared_math():
     )
     assert t.leverage is not None and t.leverage >= 1.0
     # Same numbers as the overlay's advisory (shared perp_ticket_numbers):
-    from yiagents.risk.perp_ticket import perp_ticket_numbers
+    from yialpha.risk.perp_ticket import perp_ticket_numbers
 
     result = perp_ticket_numbers(60000.0, 900.0, "Buy", 58000.0, 0.05)
     assert result is not None and t.leverage == result[0]

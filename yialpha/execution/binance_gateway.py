@@ -1,0 +1,987 @@
+"""BinanceGateway — concrete Track B execution gateway (official Binance SDK).
+
+This is the first concrete gateway to land on the ``BaseGateway`` skeleton
+(``yialpha/execution/gateway.py``). It drives Binance **order placement** via
+the official modular SDK (``binance-sdk-spot`` / ``binance-sdk-derivatives-
+trading-usds-futures``, both MIT, ``binance-common`` v4.1.0+). It is the
+analysis layer's counterpart for turning a ``PortfolioDecision`` into a real
+(or testnet) order.
+
+Why now: the prior 2026-07-08 verdict ("SDK net-negative — zero SOCKS5
+support") was overturned once ``binance-common`` v4.1.0 added first-class
+proxy support (``ConfigurationRestAPI(proxy=...)`` -> ``utils.parse_proxies``
+emits a requests-compatible dict; ``protocol`` is a free string so
+``socks5h://`` works). The SDK is therefore usable behind this project's
+1080 SOCKS5 VPN for the **execution** track (Track A analysis stays on the
+hand-written read-only REST path — different concern).
+
+Design invariants (every path preserves these):
+
+* **Analysis-only by default.** Live use requires ``YIALPHA_ANALYSIS_ONLY``
+  to be false and both execution-enable flags to be true. When unarmed,
+  ``connect`` builds no client and ``send_order``
+  returns ``REJECTED`` without touching the SDK. The module imports no SDK
+  symbol at top level (lazy import inside ``connect``), so merely importing
+  this module changes nothing — no SDK install required, no graph topology
+  change, no agent-input change. The execution layer stays decoupled from
+  ``yialpha/agents`` and ``yialpha/graph`` (guarded by
+  ``tests/test_execution_isolation.py``).
+* **Fail-closed.** Any uncertainty — switch off, missing keys, not
+  connected, unsupported order type, ambiguous submit — yields a
+  non-submitted ``OrderData`` (``Status.REJECTED``) or a raised
+  ``VendorNotConfiguredError``. The *only* path to ``ALLTRADED`` /
+  ``NOTTRADED`` is: switch on AND keys present AND client built AND
+  ``new_order`` returned a non-error response.
+* **Never blindly re-submit an order.** The SDK only auto-retries
+  GET/DELETE transport errors; a ``new_order`` POST gets zero retry on any
+  HTTP error. We do **not** paper over that: on an ambiguous submit failure
+  (429 / 5xx / network — the order may or may not have reached the book) we
+  query the order by its client id; if found, return the recovered status;
+  if not found, return ``REJECTED`` rather than risk a duplicate fill. An IP
+  ban (418) is never retried. Idempotency relies on ``new_client_order_id``.
+* **Testnet-first.** ``base_path`` defaults to the SDK testnet URL constant;
+  real mainnet requires ``YIALPHA_EXECUTION_MAINNET=true``.
+* **Keys never touch git.** ``BINANCE_API_KEY`` / ``BINANCE_API_SECRET`` are
+  read straight from the environment (no ``YIALPHA_`` prefix — matches the
+  bare ``DEEPSEEK_API_KEY`` secret convention). ``.env`` is gitignored; only
+  stub comment lines are added to ``.env.example``.
+
+Scope (MVP): LIMIT / MARKET **entry** orders, query / cancel, account,
+position. Order shaping (2026-08-16): quantities/prices are quantized to the
+symbol's exchangeInfo tick/step grid before submit, hedge (dual-side) and
+one-way position modes are both mapped, and an opt-in
+``YIALPHA_EXECUTION_LEVERAGE`` sets initial leverage once per symbol.
+Out of scope (later): wiring into the LangGraph graph; user-data
+stream live callbacks (``on_*``); futures conditional orders
+(``STOP_MARKET`` / ``TRAILING_STOP_MARKET`` via ``new_algo_order``);
+order-count budget throttling; ED25519 key auth.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import os
+import secrets
+import threading
+import time
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from typing import Any
+from urllib.parse import urlparse
+
+from ..dataflows.binance_filters import get_symbol_filters, quantize_order
+from ..dataflows.errors import VendorNotConfiguredError
+from .browser_broker import KillSwitch, LiveExecutionSwitch, _coerce_bool_env
+from .domain import (
+    AccountData,
+    CancelRequest,
+    Direction,
+    Exchange,
+    Offset,
+    OrderData,
+    OrderRequest,
+    OrderType,
+    PositionData,
+    Status,
+)
+from .gateway import BaseGateway
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Environment knobs (read directly at call time — mirrors KillSwitch)
+# ---------------------------------------------------------------------------
+
+_ENV_ENABLED = "YIALPHA_EXECUTION_ENABLED"
+_ENV_MAINNET = "YIALPHA_EXECUTION_MAINNET"
+_ENV_KEY = "BINANCE_API_KEY"
+_ENV_SECRET = "BINANCE_API_SECRET"
+_ENV_TIMEOUT_MS = "YIALPHA_EXECUTION_TIMEOUT_MS"
+# Opt-in initial leverage for perp symbols (POST /fapi/v1/leverage, weight 1).
+# 0 / unset = leave each symbol at the account default (leverage affects
+# margin utilization and liquidation distance, not position size).
+_ENV_LEVERAGE = "YIALPHA_EXECUTION_LEVERAGE"
+
+_DEFAULT_TIMEOUT_MS = 10000
+
+# Binance order status string -> vnpy Status.
+_BINANCE_STATUS_MAP = {
+    "NEW": Status.NOTTRADED,
+    "PARTIALLY_FILLED": Status.PARTTRADED,
+    "FILLED": Status.ALLTRADED,
+    "CANCELED": Status.CANCELLED,
+    "CANCELLED": Status.CANCELLED,
+    "PENDING_NEW": Status.SUBMITTING,
+    "PENDING_CANCEL": Status.PARTTRADED,  # still working until confirmed
+    "REJECTED": Status.REJECTED,
+    "EXPIRED": Status.REJECTED,
+}
+
+# Exceptions that can ONLY come from a bug in our own submit path (wrong
+# attribute, bad argument, unbound name, missing key) — never from a Binance
+# transport/business response. These re-raise out of send_order rather than
+# being funnelled into _handle_submit_error (which would mask the defect as a
+# REJECTED order). Importantly this excludes the SDK's own typed exceptions
+# (they subclass Exception, not these builtins), so genuine Binance errors —
+# rate limit, ban, bad request, server error — still reach _handle_submit_error.
+_PROGRAMMING_BUG_ERRORS = (AttributeError, TypeError, NameError, KeyError)
+
+
+class ExecutionEnableSwitch:
+    """Backward-compatible Binance facade over the global execution policy.
+
+    The legacy ``YIALPHA_EXECUTION_ENABLED`` name remains required, but cannot
+    enable trading by itself: :class:`LiveExecutionSwitch` also requires the
+    analysis-only boundary to be explicitly disabled and the new live switch
+    to be explicitly enabled. Values are read at connection and order time.
+    """
+
+    _ENV_VAR = _ENV_ENABLED
+
+    @staticmethod
+    def is_enabled() -> bool:
+        """Return the global three-switch live-execution policy."""
+        return LiveExecutionSwitch.is_enabled()
+
+    @staticmethod
+    def reason() -> str:
+        return LiveExecutionSwitch.reason()
+
+
+# ---------------------------------------------------------------------------
+# Response-normalisation helpers
+# ---------------------------------------------------------------------------
+
+
+def _as_dict(data: object) -> dict | list | None:
+    """Normalise an SDK response object to a plain (camelCase-keyed) dict.
+
+    The SDK's generated pydantic models expose ``to_dict()`` which emits the
+    JSON contract keys (camelCase) — those are the stable field names we read
+    (``status``, ``executedQty``, ``orderId``, ``avgPrice`` ...). Falls back to
+    ``model_dump(by_alias=True)`` or ``dict()``. Lists are mapped element-wise.
+    """
+    if data is None:
+        return None
+    if isinstance(data, list):
+        return [_as_dict(x) for x in data]
+    if isinstance(data, dict):
+        return data
+    if hasattr(data, "to_dict"):
+        try:
+            return data.to_dict() or {}
+        except Exception:  # noqa: BLE001 - best-effort coercion
+            pass
+    if hasattr(data, "model_dump"):
+        try:
+            return data.model_dump(by_alias=True) or {}
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        return dict(data)  # type: ignore[call-overload]  # best-effort coercion
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _as_dict_obj(data: object) -> dict:
+    """Like :func:`_as_dict` but guaranteed to return a ``dict``.
+
+    Use this when iterating a list already produced by ``_as_dict`` (each
+    element is a single object, never a nested list) so the caller can call
+    ``.get()`` without a ``dict | list | None`` union narrowing issue.
+    """
+    result = _as_dict(data)
+    if isinstance(result, dict):
+        return result
+    return {}
+
+
+def _to_float(value, default: float = 0.0) -> float:
+    """Parse a Binance numeric field (stringly-typed) to float."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _resp_data(resp: object) -> object:
+    """Pull the parsed payload from an SDK response object (``.data()`` is a method)."""
+    if resp is None:
+        return None
+    data_fn = getattr(resp, "data", None)
+    if callable(data_fn):
+        try:
+            return data_fn()
+        except Exception:  # noqa: BLE001
+            return None
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# Gateway
+# ---------------------------------------------------------------------------
+
+
+class BinanceGateway(BaseGateway):
+    """Concrete Track B gateway placing Binance orders via the official SDK.
+
+    Handles both ``crypto_perp`` (USDT-M futures) and ``crypto_spot`` product
+    lines, selected by the ``product`` setting. Construction and the enable
+    switch are cheap and side-effect-free; the SDK is imported and the network
+    session built only inside :meth:`connect` once the switch is on and keys
+    are present.
+    """
+
+    default_name = "BINANCE"
+    exchanges = [Exchange.BINANCE]
+    default_setting = {
+        "product": "perp",  # "perp" | "spot"
+        "proxies": None,  # reserved (BaseGateway); we read HTTPS_PROXY env instead
+        "mainnet": False,  # default testnet; mainnet requires explicit opt-in
+    }
+
+    # Strict in-process uniqueness under bursts/clock rollback; the random
+    # process nonce separates independently-running gateway processes.
+    _client_id_lock = threading.Lock()
+    _client_id_last_ns = 0
+    _client_id_nonce = secrets.token_hex(4)
+
+    def __init__(self, gateway_name: str = default_name, *, setting: dict | None = None) -> None:
+        super().__init__(gateway_name, setting=setting)
+        self._product: str = str(self.setting.get("product", "perp")).lower()
+        self._mainnet: bool = bool(self.setting.get("mainnet", False))
+        self._client = None  # SDK facade; built in connect()
+        self._connected: bool = False
+        # Hedge (dual-side) vs one-way position mode, queried at connect for
+        # perp. None = unknown (query failed) — orders are then mapped one-way
+        # and Binance rejects loudly (-4061) rather than us guessing silently.
+        self._hedge_mode: bool | None = None
+        # Symbols whose leverage was already set this connection (one
+        # POST /fapi/v1/leverage per symbol, not per order).
+        self._leverage_set: set[str] = set()
+
+    # ------------------------------------------------------------------
+    # Connection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _proxy_dict() -> dict | None:
+        """Build the SDK ``proxy={protocol,host,port}`` from the env SOCKS5 URL.
+
+        The project carries the VPN as ``HTTPS_PROXY=socks5h://127.0.0.1:1080``
+        in ``.env``; we split it back into the SDK's dict shape so the gateway
+        is consistent with the analysis layer's transport without hard-coding
+        an endpoint here.
+        """
+        url = os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY")
+        if not url:
+            return None
+        parsed = urlparse(url)
+        host = parsed.hostname
+        if not host:
+            return None
+        proxy: dict = {"protocol": parsed.scheme or "socks5h", "host": host}
+        if parsed.port:
+            proxy["port"] = parsed.port
+        return proxy
+
+    def connect(self, setting: dict | None = None) -> None:
+        """Build the SDK client, gated by the enable switch and trading keys.
+
+        Fail-closed: switch off -> inert (no client); keys missing -> raise
+        ``VendorNotConfiguredError`` so a misconfiguration is loud.
+        """
+        if setting:
+            self.setting.update(setting)
+            self._product = str(self.setting.get("product", self._product)).lower()
+            self._mainnet = bool(self.setting.get("mainnet", self._mainnet))
+
+        if not ExecutionEnableSwitch.is_enabled():
+            logger.warning(
+                "BinanceGateway inert: %s off (fail-closed). %s",
+                _ENV_ENABLED,
+                ExecutionEnableSwitch.reason(),
+            )
+            self.close()
+            return
+
+        api_key = os.environ.get(_ENV_KEY)
+        api_secret = os.environ.get(_ENV_SECRET)
+        if not (api_key and api_secret):
+            raise VendorNotConfiguredError(
+                f"{_ENV_ENABLED} is on but {_ENV_KEY}/{_ENV_SECRET} are not set; "
+                "cannot build the Binance execution client."
+            )
+
+        self._client = self._build_client(api_key, api_secret)
+        self._connected = True
+        if self._product == "perp":
+            self._hedge_mode = self._query_hedge_mode()
+        logger.info(
+            "BinanceGateway connected: product=%s, %s%s",
+            self._product,
+            "MAINNET" if self._mainnet else "testnet",
+            (
+                f", position_mode={'hedge(dual-side)' if self._hedge_mode else 'one-way'}"
+                if self._product == "perp" else ""
+            ),
+        )
+
+    def _query_hedge_mode(self) -> bool | None:
+        """Query the account's perp position mode (GET /fapi/v1/positionSide/dual).
+
+        Returns ``True`` (hedge/dual-side), ``False`` (one-way) or ``None``
+        when the query failed (network/permissions) — logged, never raised:
+        connect() must not die on an advisory query. ``None`` maps orders the
+        one-way way; a wrong guess produces a loud Binance -4061 reject, not a
+        silent mis-position.
+        """
+        client = self._client
+        if client is None:
+            return None
+        try:
+            resp = client.rest_api.get_current_position_mode()
+            data = _as_dict(_resp_data(resp)) or {}
+            if not isinstance(data, dict):
+                return None
+            dual = data.get("dualSidePosition")
+            if isinstance(dual, bool):
+                return dual
+            if isinstance(dual, str):
+                return dual.lower() == "true"
+            return None
+        except Exception as exc:  # noqa: BLE001 — advisory query at connect
+            logger.warning(
+                "BinanceGateway: position-mode query failed (%s: %s); mapping "
+                "orders as one-way — a hedge-mode account will reject with "
+                "-4061 rather than mis-position.",
+                type(exc).__name__, exc,
+            )
+            return None
+
+    def _build_client(self, api_key: str, api_secret: str) -> Any:
+        """Lazily import the SDK and construct the per-product facade.
+
+        Imported here (not at module top) so the module is importable without
+        the SDK installed and so unit tests can inject a mock client without
+        any SDK on disk.
+        """
+        try:
+            timeout_ms = int(os.environ.get(_ENV_TIMEOUT_MS, _DEFAULT_TIMEOUT_MS))
+        except ValueError:
+            timeout_ms = _DEFAULT_TIMEOUT_MS
+        proxy = self._proxy_dict()
+        # Fail-closed: a malformed ``YIALPHA_EXECUTION_MAINNET`` must not raise
+        # (``_coerce_bool_env`` throws on unrecognised values); it falls back to
+        # the constructor-supplied ``self._mainnet`` (False by default -> testnet).
+        try:
+            mainnet = self._mainnet or _coerce_bool_env(os.environ.get(_ENV_MAINNET)) is True
+        except ValueError:
+            logger.warning(
+                "YIALPHA_EXECUTION_MAINNET=%r is not a recognised boolean; "
+                "falling back to constructor mainnet=%r (fail-closed).",
+                os.environ.get(_ENV_MAINNET),
+                self._mainnet,
+            )
+            mainnet = self._mainnet
+
+        if self._product == "spot":
+            from binance_common.configuration import ConfigurationRestAPI  # type: ignore
+            from binance_common.constants import (  # type: ignore
+                SPOT_REST_API_PROD_URL,
+                SPOT_REST_API_TESTNET_URL,
+            )
+            from binance_sdk_spot.spot import Spot  # type: ignore
+
+            base = SPOT_REST_API_PROD_URL if mainnet else SPOT_REST_API_TESTNET_URL
+            cfg = ConfigurationRestAPI(
+                api_key=api_key,
+                api_secret=api_secret,
+                base_path=base,
+                proxy=proxy,
+                timeout=timeout_ms,
+            )
+            return Spot(config_rest_api=cfg)
+
+        if self._product == "perp":
+            from binance_common.configuration import ConfigurationRestAPI  # type: ignore
+            from binance_common.constants import (  # type: ignore
+                DERIVATIVES_TRADING_USDS_FUTURES_REST_API_PROD_URL,
+                DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL,
+            )
+            from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (  # type: ignore
+                DerivativesTradingUsdsFutures,
+            )
+
+            base = (
+                DERIVATIVES_TRADING_USDS_FUTURES_REST_API_PROD_URL
+                if mainnet
+                else DERIVATIVES_TRADING_USDS_FUTURES_REST_API_TESTNET_URL
+            )
+            cfg = ConfigurationRestAPI(
+                api_key=api_key,
+                api_secret=api_secret,
+                base_path=base,
+                proxy=proxy,
+                timeout=timeout_ms,
+            )
+            return DerivativesTradingUsdsFutures(config_rest_api=cfg)
+
+        raise ValueError(
+            f"Unsupported Binance product {self._product!r}; expected 'spot' or 'perp'."
+        )
+
+    def close(self) -> None:
+        """Release the SDK session. Safe to call when never connected."""
+        client = self._client
+        if client is not None:
+            # The SDK facades hold a requests session (connection pool); close
+            # it explicitly rather than relying on GC, but guard against SDK
+            # versions that don't expose close()/session so close() stays safe.
+            close_fn = getattr(client, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:  # noqa: BLE001 - teardown must never raise
+                    logger.debug("SDK client.close() raised; ignoring.", exc_info=True)
+            else:
+                session = getattr(client, "session", None)
+                session_close = getattr(session, "close", None)
+                if callable(session_close):
+                    try:
+                        session_close()
+                    except Exception:  # noqa: BLE001
+                        logger.debug("SDK session.close() raised; ignoring.", exc_info=True)
+        self._client = None
+        self._connected = False
+        # A reconnect re-queries both (position mode may have changed server
+        # side; leverage state is per connection session cache).
+        self._hedge_mode = None
+        self._leverage_set.clear()
+
+    def _require_client(self) -> Any:
+        """Return the client or raise — used by explicit query methods."""
+        if self._client is None:
+            raise VendorNotConfiguredError(
+                "BinanceGateway has no client (disabled or connect() not called)."
+            )
+        return self._client
+
+    # ------------------------------------------------------------------
+    # Order placement
+    # ------------------------------------------------------------------
+
+    def send_order(
+        self,
+        req: OrderRequest,
+        *,
+        risk_decision: Any | None = None,
+        equity: float = 0.0,
+        max_weight: float = 0.20,
+        reference_price: float | None = None,
+        reference_prices: Mapping[str, float] | None = None,
+    ) -> OrderData:
+        """Submit ``req`` and return the resulting ``OrderData`` synchronously.
+
+        Fail-closed: the live policy and kill switch are read again on every
+        call; missing risk/equity/reference-price context, not connected, or an
+        unsupported type all produce ``REJECTED``. On an ambiguous submit error
+        (the order may have reached the book) we **query** rather than re-submit.
+
+        .. warning::
+
+            The risk guard is enforced here at the final submission edge, so
+            callers cannot accidentally bypass it. ``Offset.CLOSE`` requests
+            remain eligible during a hard stop because futures sends them as
+            ``reduce_only=true``.
+        """
+        if not ExecutionEnableSwitch.is_enabled():
+            reason = ExecutionEnableSwitch.reason()
+            logger.warning(
+                "BinanceGateway.send_order(%s): execution policy disabled -> "
+                "REJECTED (dynamic fail-closed). %s",
+                req.symbol,
+                reason,
+            )
+            return self._rejected(req, reason=reason)
+
+        if KillSwitch.is_halted():
+            reason = KillSwitch.reason()
+            logger.warning(
+                "BinanceGateway.send_order(%s): kill switch engaged -> REJECTED. %s",
+                req.symbol,
+                reason,
+            )
+            return self._rejected(req, reason=reason)
+
+        client = self._client
+        if client is None:
+            logger.warning(
+                "BinanceGateway.send_order(%s): not connected -> REJECTED (fail-closed).",
+                req.symbol,
+            )
+            return self._rejected(req, reason="gateway not connected")
+
+        # Keep the final quantitative guard at the network edge. The import is
+        # lazy so importing this SDK adapter remains side-effect-free.
+        from .bridge import pre_trade_risk_check_with_audit
+
+        checked, audit = pre_trade_risk_check_with_audit(
+            [req],
+            risk_decision,
+            equity=equity,
+            max_weight=max_weight,
+            reference_price=reference_price,
+            reference_prices=reference_prices,
+        )
+        if not checked:
+            logger.warning(
+                "BinanceGateway.send_order(%s): pre-trade risk gate %s -> REJECTED.",
+                req.symbol,
+                audit.gate,
+            )
+            return self._rejected(req, reason=f"pre-trade risk gate: {audit.gate}")
+        req = checked[0]
+
+        try:
+            side, sdk_type, extra = self._map_order(req)
+        except ValueError as exc:
+            logger.warning("BinanceGateway.send_order(%s): %s", req.symbol, exc)
+            return self._rejected(req, reason=str(exc))
+
+        # Exchange-rule gates (2026-08-16): quantize to the symbol's
+        # tick/step grid (Binance rejects off-grid floats with -1111) and,
+        # when an explicit leverage is configured, confirm it once per
+        # symbol. Both fail closed with a stated reason. The risk reference
+        # price rides along so MARKET orders get the -4014 MIN_NOTIONAL
+        # pre-check instead of a guaranteed exchange reject.
+        ref_px = reference_price or (reference_prices or {}).get(req.symbol)
+        gate_reason = self._shape_to_symbol_rules(req, extra, ref_price=ref_px)
+        if gate_reason is None:
+            gate_reason = self._ensure_leverage(req.symbol)
+        if gate_reason is not None:
+            logger.warning(
+                "BinanceGateway.send_order(%s): %s -> REJECTED (fail-closed).",
+                req.symbol, gate_reason,
+            )
+            return self._rejected(req, reason=gate_reason)
+
+        client_order_id = req.reference or self._gen_client_order_id()
+        kwargs = {
+            "symbol": req.symbol,
+            "side": side,
+            "type": sdk_type,
+            "new_client_order_id": client_order_id,
+            "new_order_resp_type": "RESULT",
+        }
+        kwargs.update(extra)
+
+        # Final guard: re-check the kill switch at the network edge. The entry
+        # check (line ~453) reads it once; an operator may have engaged it
+        # during the quantitative-risk gate above. Honor it so the order is
+        # NOT transmitted. Mirrors the browser broker's submit-edge guard.
+        if KillSwitch.is_halted():
+            reason = KillSwitch.reason()
+            logger.warning(
+                "BinanceGateway.send_order(%s): kill switch engaged at network "
+                "edge -> REJECTED. %s",
+                req.symbol,
+                reason,
+            )
+            return self._rejected(req, reason=f"kill switch at submit edge: {reason}")
+
+        try:
+            resp = client.rest_api.new_order(**kwargs)
+        except Exception as exc:  # noqa: BLE001 - all submit errors funnel here
+            # A *programming* bug (AttributeError/TypeError/NameError/KeyError)
+            # in the submit path is never a Binance transport/business outcome —
+            # funnelling it into _handle_submit_error would mask the defect as a
+            # REJECTED order. Re-raise so the bug surfaces instead of being
+            # silently swallowed by the fail-closed order path.
+            if isinstance(exc, _PROGRAMMING_BUG_ERRORS):
+                logger.error(
+                    "send_order(%s): re-raising %s — looks like a code bug, "
+                    "not a Binance outcome.",
+                    req.symbol, type(exc).__name__, exc_info=True,
+                )
+                raise
+            return self._handle_submit_error(req, client_order_id, exc)
+
+        data = _as_dict(_resp_data(resp)) or {}
+        return self._order_from_response(req, data, client_order_id)
+
+    @classmethod
+    def _gen_client_order_id(cls) -> str:
+        # Strictly monotonic within this process, including concurrent calls and
+        # wall-clock rollback. Prefix + hex tick + separator + 8-char nonce is
+        # currently 34 characters, below Binance's 36-character cap.
+        with cls._client_id_lock:
+            tick = max(time.time_ns(), cls._client_id_last_ns + 1)
+            cls._client_id_last_ns = tick
+        return f"yialpha-{tick:x}-{cls._client_id_nonce}"
+
+    def _map_order(self, req: OrderRequest) -> tuple[str, str, dict]:
+        """Translate an :class:`OrderRequest` to SDK ``new_order`` arguments.
+
+        Returns ``(side, sdk_type, extra_kwargs)``. LIMIT/MARKET only; STOP
+        and friends raise (conditional orders need ``new_algo_order`` on
+        futures — out of MVP scope).
+
+        Position-mode aware (2026-08-16): one-way accounts send
+        ``position_side=BOTH`` + ``reduce_only``; hedge (dual-side) accounts
+        send ``position_side=LONG/SHORT`` per the requested direction with the
+        BUY/SELL side flipped for closes — ``reduce_only`` is INVALID in hedge
+        mode per the SDK signature (``NewOrderReduceOnlyEnum`` doc: "Cannot be
+        sent in Hedge Mode"). The strings "true"/"false" for ``reduce_only``
+        are deliberate: the SDK enum's values are those exact strings.
+        """
+        if req.direction == Direction.LONG:
+            side = "BUY"
+        elif req.direction == Direction.SHORT:
+            side = "SELL"
+        else:
+            raise ValueError(f"direction {req.direction!r} is not placeable on Binance")
+
+        extra: dict = {}
+        if self._product == "perp":
+            close_offsets = {
+                Offset.CLOSE,
+                Offset.CLOSETODAY,
+                Offset.CLOSEYESTERDAY,
+            }
+            is_close = req.offset in close_offsets
+            if self._hedge_mode:
+                # Hedge mode: position_side carries the direction; the order
+                # side flips to unwind (close long = SELL against LONG).
+                extra["position_side"] = (
+                    "LONG" if req.direction == Direction.LONG else "SHORT"
+                )
+                if is_close:
+                    side = "SELL" if side == "BUY" else "BUY"
+                # reduce_only must NOT be sent in hedge mode.
+            else:
+                extra["position_side"] = "BOTH"
+                extra["reduce_only"] = "true" if is_close else "false"
+        elif self._product == "spot" and req.offset != Offset.NONE:
+            # Spot has no exchange-level reduce-only flag. Accepting a futures
+            # CLOSE marker here would silently turn a risk exit into an ordinary
+            # BUY/SELL, so reject rather than pretending the semantic survived.
+            raise ValueError("spot orders do not support futures offset/close semantics")
+
+        if req.type == OrderType.MARKET:
+            sdk_type = "MARKET"
+            extra["quantity"] = req.volume
+        elif req.type == OrderType.LIMIT:
+            sdk_type = "LIMIT"
+            extra["time_in_force"] = "GTC"
+            extra["quantity"] = req.volume
+            extra["price"] = req.price
+        else:
+            raise ValueError(
+                f"order type {req.type!r} unsupported in MVP "
+                "(LIMIT/MARKET only; conditional stops need new_algo_order)"
+            )
+        return side, sdk_type, extra
+
+    # ------------------------------------------------------------------
+    # Exchange-rule gates (exchangeInfo precision / leverage)
+    # ------------------------------------------------------------------
+
+    def _shape_to_symbol_rules(
+        self, req: OrderRequest, extra: dict, ref_price: float | None = None,
+    ) -> str | None:
+        """Quantize ``extra`` to the symbol's tick/step grid; None or reason.
+
+        Fetches the TTL-cached exchangeInfo filters (``LOT_SIZE`` stepSize /
+        ``PRICE_FILTER`` tickSize / ``MIN_NOTIONAL``) and rewrites
+        ``extra["quantity"]`` / ``extra["price"]`` in place. Returns a reject
+        reason when the LLM-sized values cannot be placed honestly (below
+        min qty/notional, over max qty, or the filters are unavailable —
+        fail-closed: Binance would reject a mis-quantized order with -1111
+        anyway, and clamping silently would change the intended exposure).
+
+        ``ref_price`` pre-validates the MIN_NOTIONAL floor for MARKET orders
+        (which carry no price): Binance rejects an under-notional market
+        order AT SUBMIT with -4014, so when the caller supplies its risk
+        reference price we check the floor here instead of letting the
+        exchange do it. Without a reference the check stays undecided.
+        """
+        try:
+            filters = get_symbol_filters(
+                req.symbol,
+                "binance_perp" if self._product == "perp" else "binance_spot",
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-closed gate reason
+            return f"exchangeInfo unavailable ({type(exc).__name__}: {exc})"
+        if filters.status and filters.status != "TRADING":
+            # BREAK/HALT/SETTLING symbols accept no new orders at all; the
+            # shaped values are irrelevant until the venue reopens the book.
+            return f"symbol not trading (exchangeInfo status={filters.status})"
+        shaped = quantize_order(
+            extra.get("price"), float(extra["quantity"]), filters,
+            ref_price=ref_price,
+        )
+        violations = [k for k in ("below_min_qty", "below_min_notional", "over_max_qty")
+                      if shaped[k]]
+        if violations:
+            return (
+                f"symbol rules violation: {', '.join(violations)} "
+                f"(quantized qty={shaped['quantity']}, "
+                f"min_qty={filters.min_qty}, min_notional={filters.min_notional})"
+            )
+        extra["quantity"] = shaped["quantity"]
+        if "price" in extra and shaped["price"] is not None:
+            extra["price"] = shaped["price"]
+        return None
+
+    def _ensure_leverage(self, symbol: str) -> str | None:
+        """Set the configured initial leverage once per symbol; None or reason.
+
+        ``YIALPHA_EXECUTION_LEVERAGE`` (default 0/unset) opts in; 0 leaves
+        each symbol at the account default and this gate is a no-op. With an
+        explicit leverage configured, a failed POST /fapi/v1/leverage rejects
+        the order (fail-closed): leverage moves the liquidation distance, and
+        proceeding on an unconfirmed margin setup is exactly the silent
+        risk-change this codebase refuses.
+        """
+        try:
+            leverage = int(os.environ.get(_ENV_LEVERAGE, "0"))
+        except ValueError:
+            return f"{_ENV_LEVERAGE} is not an integer"
+        if leverage <= 0 or self._product != "perp" or symbol in self._leverage_set:
+            return None
+        client = self._client
+        if client is None:
+            return "gateway not connected"
+        try:
+            client.rest_api.change_initial_leverage(
+                symbol=symbol, leverage=leverage,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-closed gate reason
+            return f"cannot set leverage {leverage}x on {symbol} ({type(exc).__name__}: {exc})"
+        self._leverage_set.add(symbol)
+        return None
+
+    def _handle_submit_error(
+        self, req: OrderRequest, client_order_id: str, exc: BaseException
+    ) -> OrderData:
+        """Recover from a ``new_order`` exception WITHOUT a blind re-submit.
+
+        * IP ban (418 / ``RateLimitBanError``): never retry -> REJECTED.
+        * Transient (429 / 5xx / network): the order may already be live, so
+          query by client id; found -> return recovered status, not found ->
+          REJECTED (no duplicate). We never re-POST.
+        * Anything else (bad request / auth): -> REJECTED.
+        """
+        name = type(exc).__name__
+        status_code = getattr(exc, "status_code", "")
+        body = getattr(exc, "error_message", "") or str(exc)
+
+        if "RateLimitBan" in name or str(status_code) == "418":
+            logger.error(
+                "send_order(%s): Binance IP ban (418) -> REJECTED, not retried. %s",
+                req.symbol,
+                exc,
+            )
+            return self._rejected(req, reason=f"IP ban 418: {body}")
+
+        # Transient = the order may have reached the book despite the error.
+        # 429 (rate limit) is the single most common transient on Binance; we
+        # match it via status code AND via the exception class name, because the
+        # SDK's exception taxonomy has shifted across versions (RateLimitError,
+        # TooManyRequestsError, BinanceAPIException …). Substring matching on
+        # the lowered name keeps us resilient to those renames without having
+        # to import SDK exception types (the SDK is lazily imported).
+        name_lower = name.lower()
+        transient = (
+            name in {"TooManyRequestsError", "ServerError", "NetworkError"}
+            or any(tok in name_lower for tok in ("rate", "limit", "timeout", "network"))
+            or (
+                isinstance(status_code, int)
+                and (status_code >= 500 or status_code == 429)
+            )
+            or str(status_code) == "429"
+        )
+        if transient:
+            recovered = self._safe_query_by_client_id(req, client_order_id)
+            if recovered is not None:
+                logger.warning(
+                    "send_order(%s): submit raised %s; recovered via query as %s.",
+                    req.symbol,
+                    name,
+                    recovered.status.name,
+                )
+                return recovered
+            logger.error(
+                "send_order(%s): submit raised %s and query could not confirm -> "
+                "REJECTED (no blind re-submit). %s",
+                req.symbol,
+                name,
+                exc,
+            )
+            return self._rejected(req, reason=f"ambiguous submit ({name}); not resubmitted")
+
+        logger.warning("send_order(%s): %s -> REJECTED. %s", req.symbol, name, exc)
+        return self._rejected(req, reason=f"{name}: {body}")
+
+    def _safe_query_by_client_id(
+        self, req: OrderRequest, client_order_id: str
+    ) -> OrderData | None:
+        """Best-effort order lookup by client id; None on any failure/absence."""
+        client = self._client
+        if client is None:
+            return None
+        try:
+            if self._product == "perp":
+                resp = client.rest_api.query_order(
+                    symbol=req.symbol, orig_client_order_id=client_order_id
+                )
+            else:
+                resp = client.rest_api.get_order(
+                    symbol=req.symbol, orig_client_order_id=client_order_id
+                )
+            data = _as_dict(_resp_data(resp)) or {}
+            orderid = data.get("orderId")
+            # A real order always carries ``orderId``. An error payload
+            # (e.g. ``{"code": -2013, "msg": "Order does not exist."}``) is
+            # non-empty but has no ``orderId`` — returning None lets the caller
+            # treat the submit as ambiguous (-> REJECTED) instead of falling
+            # through to ``_order_from_response`` which would default the
+            # unknown status to ``SUBMITTING`` (a live, optimistic state).
+            if orderid is None:
+                return None
+            return self._order_from_response(req, data, client_order_id)
+        except Exception as exc:  # noqa: BLE001 - recovery must never raise
+            # None -> the caller treats the submit as ambiguous (-> REJECTED),
+            # which is fail-closed for trading, but the recovery failure itself
+            # should be observable for post-mortem.
+            logger.warning("order recovery lookup failed for %s (client id %s): %s",
+                           req.symbol, client_order_id, exc)
+            return None
+
+    def _order_from_response(
+        self, req: OrderRequest, data: dict, client_order_id: str
+    ) -> OrderData:
+        """Build the ``OrderData`` from a normalised (camelCase) response dict."""
+        binance_status = str(data.get("status", "")).upper()
+        orderid = str(data.get("orderId") or client_order_id)
+        status = _BINANCE_STATUS_MAP.get(binance_status, Status.SUBMITTING)
+        traded = _to_float(data.get("executedQty") or data.get("cumQty"))
+        fill_price = _to_float(data.get("avgPrice") or data.get("price"))
+
+        order = req.create_order_data(orderid=orderid, gateway_name=self.gateway_name)
+        order.status = status
+        order.traded = traded
+        if fill_price:
+            order.price = fill_price
+        update_time = data.get("updateTime")
+        if update_time:
+            with contextlib.suppress(TypeError, ValueError, OSError):
+                order.datetime = datetime.fromtimestamp(int(update_time) / 1000, tz=UTC)
+        return order
+
+    def _rejected(self, req: OrderRequest, *, orderid: str = "", reason: str = "") -> OrderData:
+        """Build a ``REJECTED`` OrderData, logging the reason (OrderData has no msg field)."""
+        logger.warning("BinanceGateway reject [%s]: %s", req.symbol, reason)
+        order = req.create_order_data(
+            orderid=orderid or f"rej-{int(time.time() * 1000)}",
+            gateway_name=self.gateway_name,
+        )
+        order.status = Status.REJECTED
+        return order
+
+    # ------------------------------------------------------------------
+    # Cancel / query
+    # ------------------------------------------------------------------
+
+    def cancel_order(self, req: CancelRequest) -> None:
+        """Cancel by broker order id; raises on failure (explicit action)."""
+        client = self._require_client()
+        try:
+            if self._product == "perp":
+                client.rest_api.cancel_order(symbol=req.symbol, order_id=_as_order_id(req.orderid))
+            else:
+                client.rest_api.delete_order(
+                    symbol=req.symbol, order_id=_as_order_id(req.orderid)
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cancel_order(%s %s) failed: %s", req.symbol, req.orderid, exc)
+            raise
+
+    def query_account(self) -> AccountData:
+        """Return the USDT balance snapshot (single-asset AccountData)."""
+        client = self._require_client()
+        if self._product == "perp":
+            resp = client.rest_api.futures_account_balance_v2()
+            items = _as_dict(_resp_data(resp)) or []
+            for item in items:
+                d = _as_dict_obj(item)
+                if str(d.get("asset", "")).upper() == "USDT":
+                    balance = _to_float(d.get("balance") or d.get("walletBalance"))
+                    available = _to_float(d.get("availableBalance") or d.get("maxWithdrawAmount"))
+                    return AccountData(
+                        gateway_name=self.gateway_name,
+                        accountid="USDT",
+                        balance=balance,
+                        frozen=max(balance - available, 0.0),
+                    )
+            return AccountData(gateway_name=self.gateway_name, accountid="USDT")
+        # spot
+        resp = client.rest_api.get_account()
+        data = _as_dict_obj(_resp_data(resp))
+        for b in data.get("balances") or []:
+            d = _as_dict_obj(b)
+            if str(d.get("asset", "")).upper() == "USDT":
+                free = _to_float(d.get("free"))
+                locked = _to_float(d.get("locked"))
+                return AccountData(
+                    gateway_name=self.gateway_name,
+                    accountid="USDT",
+                    balance=free + locked,
+                    frozen=locked,
+                )
+        return AccountData(gateway_name=self.gateway_name, accountid="USDT")
+
+    def query_position(self) -> list[PositionData]:
+        """Return open positions. Spot has no position concept -> ``[]``."""
+        client = self._require_client()
+        if self._product != "perp":
+            return []
+        resp = client.rest_api.position_information_v3()
+        items = _as_dict(_resp_data(resp)) or []
+        out: list[PositionData] = []
+        for item in items:
+            d = _as_dict_obj(item)
+            amount = _to_float(d.get("positionAmt"))
+            if abs(amount) < 1e-12:
+                continue  # skip flat rows
+            pside = str(d.get("positionSide", "")).upper()
+            if pside == "LONG":
+                direction = Direction.LONG
+            elif pside == "SHORT":
+                direction = Direction.SHORT
+            else:  # BOTH — one-way mode
+                direction = Direction.NET
+            out.append(
+                PositionData(
+                    gateway_name=self.gateway_name,
+                    symbol=str(d.get("symbol", "")),
+                    exchange=Exchange.BINANCE,
+                    direction=direction,
+                    volume=abs(amount),
+                    price=_to_float(d.get("entryPrice")),
+                    pnl=_to_float(d.get("unRealizedProfit")),
+                )
+            )
+        return out
+
+
+def _as_order_id(orderid: str) -> int | str:
+    """Coerce a broker order id to int when possible (SDK futures expects int)."""
+    try:
+        return int(orderid)
+    except (TypeError, ValueError):
+        return orderid

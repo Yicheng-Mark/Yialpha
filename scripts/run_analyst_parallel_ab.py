@@ -9,7 +9,7 @@ iron law is: the concurrency layer must NOT change any agent's decision
 distribution. LLM sampling guarantees byte-level differences run-to-run, so
 the metrics here are DISTRIBUTIONAL, not byte-equality.
 
-Usage (run from the repo root — ``yiagents/__init__.py`` does
+Usage (run from the repo root — ``yialpha/__init__.py`` does
 ``load_dotenv(usecwd=True)`` and needs the ``.env`` next to the cwd):
 
     # Zero-cost verification (synthetic data, no LLM calls, no propagate):
@@ -19,7 +19,7 @@ Usage (run from the repo root — ``yiagents/__init__.py`` does
     # Real gate (real LLM, real propagate; ~10 min per ticker per run):
     python scripts/run_analyst_parallel_ab.py \\
         --tickers AAPL NVDA --date 2026-03-15 --n 10 \\
-        --max-threads 8 --out-dir ~/.yiagents/logs/ab
+        --max-threads 8 --out-dir ~/.yialpha/logs/ab
 
 ``--dry-run`` exercises every metric function and the report writer on
 synthetic data drawn from a fixed seed, so the script is verifiable without
@@ -33,7 +33,7 @@ scikit-learn for the chi-square and TF-IDF fast paths. Neither scipy nor
 sklearn is required — zero-dependency fallbacks (manual chi-square via the
 Wilson-Hilferty approximation; manual TF-IDF + cosine) are implemented
 below and are the active path on this machine, where neither is installed.
-The pure metric functions import no yiagents code, so the unit tests run
+The pure metric functions import no yialpha code, so the unit tests run
 without loading the heavy graph stack.
 """
 
@@ -52,7 +52,7 @@ from random import Random
 
 # Allow running as ``python scripts/run_analyst_parallel_ab.py`` without an
 # editable install: ensure the project root (parent of this scripts/ dir) is
-# on sys.path. Done before any yiagents import (those are lazy, below).
+# on sys.path. Done before any yialpha import (those are lazy, below).
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
@@ -67,7 +67,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 # Centralised logging: make INFO/DEBUG from agents/dataflows visible at runtime
 # (otherwise Python's default WARNING-only root logger silently swallows them).
-from yiagents.logging_config import setup_logging  # noqa: E402
+from yialpha.logging_config import setup_logging  # noqa: E402
 
 setup_logging()  # noqa: E402
 
@@ -105,7 +105,7 @@ RATING_CATEGORIES: tuple[str, ...] = (
 )
 
 # Marker the risk overlay appends to ``final_trade_decision``; see
-# ``yiagents/graph/trading_graph.py:_apply_risk_overlay`` (around line 332).
+# ``yialpha/graph/trading_graph.py:_apply_risk_overlay`` (around line 332).
 _RISK_OVERLAY_MARKER = "## Quantitative Risk Overlay"
 _TARGET_WEIGHT_RE = re.compile(r"\*\*Target Weight\*\*:\s*([\-0-9.]+)%")
 _STOP_LOSS_RE = re.compile(r"\*\*Stop Loss\*\*:\s*\$?([\-0-9.]+)")
@@ -117,7 +117,7 @@ _SPEEDUP_THRESHOLD = 2.5
 
 
 # ---------------------------------------------------------------------------
-# Pure metric functions (no yiagents import; unit-tested directly).
+# Pure metric functions (no yialpha import; unit-tested directly).
 # ---------------------------------------------------------------------------
 
 def rating_histogram(ratings: list[str]) -> dict[str, int]:
@@ -825,10 +825,10 @@ def _dry_run(args) -> int:
 # ---------------------------------------------------------------------------
 
 def _build_graph(leg: str, args):
-    """Build a YiAgentsGraph for one leg. Heavy imports are lazy so the dry-run
-    path and the unit tests don't require the yiagents graph stack."""
-    from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
-    from yiagents.graph.trading_graph import YiAgentsGraph  # noqa: E402
+    """Build a YiAlphaGraph for one leg. Heavy imports are lazy so the dry-run
+    path and the unit tests don't require the yialpha graph stack."""
+    from yialpha.default_config import DEFAULT_CONFIG  # noqa: E402
+    from yialpha.graph.trading_graph import YiAlphaGraph  # noqa: E402
 
     config = DEFAULT_CONFIG.copy()
     # Force batch_workers=1 to isolate the analyst-parallel effect from
@@ -844,13 +844,13 @@ def _build_graph(leg: str, args):
             config["analyst_parallel_max_threads"] = args.max_threads
     else:
         config["analyst_parallel"] = False
-    return YiAgentsGraph(config=config)
+    return YiAlphaGraph(config=config)
 
 
 def _preflight_warn(args) -> None:
     """Warn (not fail) when the shared rate limiter would throttle parallelism."""
     try:
-        from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
+        from yialpha.default_config import DEFAULT_CONFIG  # noqa: E402
     except Exception as exc:  # noqa: BLE001
         print(f"[preflight] could not import DEFAULT_CONFIG: {exc}", file=sys.stderr)
         return
@@ -897,7 +897,7 @@ def _capture_run(graph, ticker: str, date: str) -> dict:
             # via the spec table (the old ("market","social",...) keys never
             # matched and silently left analyst_segment=None).
             try:
-                from yiagents.graph.analyst_execution import ANALYST_NODE_SPECS
+                from yialpha.graph.analyst_execution import ANALYST_NODE_SPECS
                 names = [spec.agent_node for spec in ANALYST_NODE_SPECS.values()]
             except Exception:  # noqa: BLE001 -- keep the gate runnable
                 names = ["Market Analyst", "Sentiment Analyst",
@@ -980,8 +980,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--n", type=int, default=10,
                    help="Runs per leg per ticker (default 10).")
     p.add_argument("--out-dir",
-                   default=os.path.join(Path.home(), ".yiagents", "logs", "ab"),
-                   help="Where to write reports (default ~/.yiagents/logs/ab).")
+                   default=os.path.join(Path.home(), ".yialpha", "logs", "ab"),
+                   help="Where to write reports (default ~/.yialpha/logs/ab).")
     p.add_argument("--max-threads", type=int, default=None,
                    help="analyst_parallel_max_threads for the parallel leg.")
     p.add_argument("--dry-run", action="store_true",

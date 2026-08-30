@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.batch.runner import batch_selected_analysts
+from yialpha.batch.runner import batch_selected_analysts
 
 _BASE = ("market", "social", "news", "fundamentals")
 _THREE = ("market", "social", "news")
@@ -20,8 +20,8 @@ _THREE = ("market", "social", "news")
 @pytest.fixture()
 def _no_network(monkeypatch):
     """Keep the helper hermetic and record warm/filter ordering."""
-    import yiagents.cli.utils as cli_utils
-    import yiagents.dataflows.binance as bn
+    import yialpha.cli.utils as cli_utils
+    import yialpha.dataflows.binance as bn
 
     order: list[str] = []
     monkeypatch.setattr(
@@ -56,8 +56,8 @@ def test_pure_crypto_batch_drops_fundamentals(_no_network, asset_type):
 
 @pytest.mark.unit
 def test_tokenized_stock_perp_keeps_fundamentals(monkeypatch):
-    import yiagents.cli.utils as cli_utils
-    import yiagents.dataflows.binance as bn
+    import yialpha.cli.utils as cli_utils
+    import yialpha.dataflows.binance as bn
 
     monkeypatch.setattr(bn, "warm_equity_perp_bases", lambda: frozenset())
     monkeypatch.setattr(

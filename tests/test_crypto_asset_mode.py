@@ -1,8 +1,8 @@
 import unittest
 
-from yiagents.cli.models import AnalystType, AssetType
-from yiagents.cli.utils import detect_asset_type, filter_analysts_for_asset_type
-from yiagents.graph.propagation import Propagator
+from yialpha.cli.models import AnalystType, AssetType
+from yialpha.cli.utils import detect_asset_type, filter_analysts_for_asset_type
+from yialpha.graph.propagation import Propagator
 
 
 class CryptoAssetModeTests(unittest.TestCase):

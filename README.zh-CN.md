@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/yiagents-logo.svg" alt="YiAgents" width="480">
+  <img src="assets/yialpha-logo.svg" alt="YiAlpha" width="480">
 </p>
 
-<h1 align="center">YiAgents</h1>
+<h1 align="center">YiAlpha</h1>
 
 <p align="center">
   面向研究的 <b>多智能体 LLM 量化交易框架</b>
@@ -21,21 +21,21 @@
 
 > 设计方法学源自 **99 篇** LLM 金融推理 / 多智能体 / 量化风控 / 回测严谨性 / 对抗安全文献（见 [研究基础与文献支撑](#研究基础与文献支撑)，完整文献见 [REFERENCES.md](REFERENCES.md)）。
 >
-> 包名 / import / CLI 命令统一为 `yiagents`，环境变量前缀 `YIAGENTS_*`，数据目录 `~/.yiagents/`。
+> 包名 / import / CLI 命令统一为 `yialpha`，环境变量前缀 `YIALPHA_*`，数据目录 `~/.yialpha/`。
 
 ---
 
 ## 这是什么
 
-YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的分析过程：基本面 / 情绪 / 新闻 / 技术分析师产出观点，多空研究员结构化辩论，交易员给出提案，风控团队与组合经理做最终裁决。在此之上，框架叠加一层**确定性量化风控**（Kelly 仓位 / ATR 止损 / 熔断 / CVaR）和一套**四档验证 + 回测闸门**流程，用于提高分析严谨性。
+YiAlpha 用一组分工明确的 **LLM 智能体**模拟真实交易团队的分析过程：基本面 / 情绪 / 新闻 / 技术分析师产出观点，多空研究员结构化辩论，交易员给出提案，风控团队与组合经理做最终裁决。在此之上，框架叠加一层**确定性量化风控**（Kelly 仓位 / ATR 止损 / 熔断 / CVaR）和一套**四档验证 + 回测闸门**流程，用于提高分析严谨性。
 
-> ⚠️ **仅做分析。** 默认配置不能下单，也不能执行 LLM 生成的 Python。请保持 `YIAGENTS_ANALYSIS_ONLY=true`；报告与回测只是研究证据，不能直接用于资金决策，且**不构成任何金融、投资或交易建议**。
+> ⚠️ **仅做分析。** 默认配置不能下单，也不能执行 LLM 生成的 Python。请保持 `YIALPHA_ANALYSIS_ONLY=true`；报告与回测只是研究证据，不能直接用于资金决策，且**不构成任何金融、投资或交易建议**。
 
 ---
 
 ## 能分析什么
 
-给 YiAgents 一个 **ticker + 日期**，它会从四个维度分析，经过多轮辩论与风控裁决，输出带评级、仓位、止损的结构化交易决策。完整过程（从输入到落盘报告）见[分析流程](#分析流程)一节。
+给 YiAlpha 一个 **ticker + 日期**，它会从四个维度分析，经过多轮辩论与风控裁决，输出带评级、仓位、止损的结构化交易决策。完整过程（从输入到落盘报告）见[分析流程](#分析流程)一节。
 
 **支持的资产**（Yahoo Finance 覆盖范围，用交易所后缀的 ticker；公司身份与 alpha 基准自动按市场解析）：
 
@@ -72,7 +72,7 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 
 ### A 股原生数据
 
-面向 A 股 ticker 的可选原生数据模式：设 `YIAGENTS_A_SHARE_NATIVE=true`（默认关闭；先 `pip install "yiagents[a-share]"` 装数据源）。门控为 **开关 AND `is_a_stock(ticker)`**，美股 / 加密 / 港股运行保持字节等价。两者同时成立时，向分析师追加 12 个 PIT 正确的只读工具：
+面向 A 股 ticker 的可选原生数据模式：设 `YIALPHA_A_SHARE_NATIVE=true`（默认关闭；先 `pip install "yialpha[a-share]"` 装数据源）。门控为 **开关 AND `is_a_stock(ticker)`**，美股 / 加密 / 港股运行保持字节等价。两者同时成立时，向分析师追加 12 个 PIT 正确的只读工具：
 
 | 分析师 | 追加工具（数据源） |
 | ------ | ------ |
@@ -80,13 +80,13 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 | Fundamentals | TTM PE/PB/股息 · 前复权 OHLCV · 利润表 / 资产负债表 / 现金流量表（BaoStock）；资金流 · 龙虎榜（AKShare） |
 | News | 个股中文新闻，东财 via AKShare |
 
-另提供 Tushare 质量档（`pip install "yiagents[a-share-tushare]"` + `TUSHARE_TOKEN`）用于基本面/新闻。数据源均为惰性导入：未装 extra 时默认关闭的运行不受影响。
+另提供 Tushare 质量档（`pip install "yialpha[a-share-tushare]"` + `TUSHARE_TOKEN`）用于基本面/新闻。数据源均为惰性导入：未装 extra 时默认关闭的运行不受影响。
 
 ---
 
 ## 分析流程
 
-所有入口——交互式 `yiagents analyze`、`yiagents batch` 与 Web UI——最终都汇聚到同一个 `YiAgentsGraph.propagate()` 运行。一个 ticker + 一个日期按下表顺序走完整条流水线：
+所有入口——交互式 `yialpha analyze`、`yialpha batch` 与 Web UI——最终都汇聚到同一个 `YiAlphaGraph.propagate()` 运行。一个 ticker + 一个日期按下表顺序走完整条流水线：
 
 | # | 阶段 | 参与节点 | 产出 |
 | --- | --- | --- | --- |
@@ -100,7 +100,7 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 | 8 | 量化叠加 | RiskManager（确定性，无 LLM） | Kelly ¼ 仓位 / ATR 止损 / 回撤熔断 / CVaR 重校仓位、止损与敞口；以标记区块追加进决策 |
 | 9 | 输出与证据 | 报告写入器 | 各阶段 markdown 报告 + 汇总报告 + 机器可读全状态日志；评级解析为信号 |
 
-**一次运行的产物**（CLI 默认 `./reports/<TICKER>_<stamp>/`，编程调用默认 `~/.yiagents/logs/reports/`）：
+**一次运行的产物**（CLI 默认 `./reports/<TICKER>_<stamp>/`，编程调用默认 `~/.yialpha/logs/reports/`）：
 
 ```text
 1_analysts/{market,sentiment,news,fundamentals}.md
@@ -110,7 +110,7 @@ YiAgents 用一组分工明确的 **LLM 智能体**模拟真实交易团队的�
 5_portfolio/decision.md      ← 最终决策（含量化叠加区块）
 complete_report.md           ← 汇总报告；数据质量降级时顶部有 "⚠ DEGRADED RUN" 横幅
 
-~/.yiagents/logs/<TICKER>/YiAgentsStrategy_logs/full_states_log_<date>.json
+~/.yialpha/logs/<TICKER>/YiAlphaStrategy_logs/full_states_log_<date>.json
    ← 机器可读全状态（证据、data_quality、price_at_decision、节点级遥测）；Web 历史页读取此文件
 ```
 
@@ -118,7 +118,7 @@ complete_report.md           ← 汇总报告；数据质量降级时顶部有 "
 
 运行结束后有两个可选闭环：因果记忆日志（`memory_enabled`，默认关闭——见[持久化与恢复](#持久化与恢复)）用已实现收益回溯过往同标的决策、把教训注入下一次运行；离线自我改进链（IC 剪枝 → 配置快照 → 验证闸门——见[回测与验证闸门](#回测与验证闸门)）。
 
-> **报告到底对不对？`yiagents verify-history` 给出可计算的答案。** 扫描每一份存档评级、拉取对应的 PIT 前向收益（现货走 yfinance，永续走 Binance klines），产出方向命中率 + 分评级 / 分标的表——所有数字都带样本量，horizon 未走完的决策记为 pending、绝不半程计分。报告落 `accuracy/accuracy_report.{json,md}`，Web UI 的「评级准确率」视图只读展示（`GET /api/accuracy`）。配套命令 `yiagents memory-resolve` 无需重跑分析即可清扫全部 ticker 的 pending 记忆条目（此前只有同 ticker 重跑才会解析）。
+> **报告到底对不对？`yialpha verify-history` 给出可计算的答案。** 扫描每一份存档评级、拉取对应的 PIT 前向收益（现货走 yfinance，永续走 Binance klines），产出方向命中率 + 分评级 / 分标的表——所有数字都带样本量，horizon 未走完的决策记为 pending、绝不半程计分。报告落 `accuracy/accuracy_report.{json,md}`，Web UI 的「评级准确率」视图只读展示（`GET /api/accuracy`）。配套命令 `yialpha memory-resolve` 无需重跑分析即可清扫全部 ticker 的 pending 记忆条目（此前只有同 ticker 重跑才会解析）。
 
 ---
 
@@ -139,7 +139,7 @@ complete_report.md           ← 汇总报告；数据质量降级时顶部有 "
         │
    ┌────▼───── Risk Management 三方辩论 ───────────────────────┐
    │  Aggressive · Neutral · Conservative                      │
-   │  （max_risk_discuss_rounds / env YIAGENTS_MAX_RISK_ROUNDS）│
+   │  （max_risk_discuss_rounds / env YIALPHA_MAX_RISK_ROUNDS）│
    └───────────────────────────────────────────────────────────┘
         │
    Portfolio Manager（批准 / 否决）
@@ -157,8 +157,8 @@ complete_report.md           ← 汇总报告；数据质量降级时顶部有 "
 ## 安装
 
 ```bash
-conda create -n yiagents python=3.12
-conda activate yiagents
+conda create -n yialpha python=3.12
+conda activate yialpha
 pip install -e .
 
 # 可选 extras
@@ -178,7 +178,7 @@ Docker：
 
 ```bash
 cp .env.example .env        # 填入 API key
-docker compose run --rm yiagents
+docker compose run --rm yialpha
 ```
 
 > `PySocks` 是关键依赖：yfinance 与 Binance vendor 经 SOCKS5 代理访问网络，正是 PySocks 让 `requests` 能透过代理解析主机名，而不是卡在 DNS。
@@ -187,7 +187,7 @@ docker compose run --rm yiagents
 
 ## 配置环境
 
-YiAgents 支持多 LLM 提供商，在 `.env` 里设其一即可（**本仓库脚本默认走 DeepSeek**）：
+YiAlpha 支持多 LLM 提供商，在 `.env` 里设其一即可（**本仓库脚本默认走 DeepSeek**）：
 
 ```bash
 DEEPSEEK_API_KEY=...            # DeepSeek（脚本默认）
@@ -208,54 +208,54 @@ TAVILY_API_KEY=...              # 开放网络搜索（免费档，tvly-dev- 前
 **推荐的 DeepSeek 分工** —— 重裁决走 deep 通道，轻量多轮走 quick 通道（单 ticker 墙钟 ~8–10 分钟）：
 
 ```bash
-YIAGENTS_LLM_PROVIDER=deepseek
-YIAGENTS_DEEP_THINK_LLM=deepseek-v4-pro     # Research Manager / Portfolio Manager
-YIAGENTS_QUICK_THINK_LLM=deepseek-v4-flash  # 4 分析师 / 辩论 / Trader / 反思
-YIAGENTS_OUTPUT_LANGUAGE=Chinese             # 分析师报告与最终决策输出语言
+YIALPHA_LLM_PROVIDER=deepseek
+YIALPHA_DEEP_THINK_LLM=deepseek-v4-pro     # Research Manager / Portfolio Manager
+YIALPHA_QUICK_THINK_LLM=deepseek-v4-flash  # 4 分析师 / 辩论 / Trader / 反思
+YIALPHA_OUTPUT_LANGUAGE=Chinese             # 分析师报告与最终决策输出语言
 ```
 
 **本机代理（重要）：** 若经 SOCKS5 代理访问 Yahoo / Binance / LLM，需安装 PySocks（`pip install "requests[socks]"`）并设 `HTTPS_PROXY`/`HTTP_PROXY`。`preflight` 会自动探测代理端口与 PySocks 依赖。
 
-> 配置项与类型强制的 env 映射见 [yiagents/default_config.py](yiagents/default_config.py)（`_ENV_OVERRIDES`）。拼错的布尔 / 数值会在启动时报错，而非静默用默认值。
+> 配置项与类型强制的 env 映射见 [yialpha/default_config.py](yialpha/default_config.py)（`_ENV_OVERRIDES`）。拼错的布尔 / 数值会在启动时报错，而非静默用默认值。
 
 ---
 
 ## CLI 用法
 
-安装后得到 `yiagents` 命令；也可 `python -m yiagents.cli.main` 从源码运行。CLI 已放入唯一的 `yiagents` 命名空间，避免被环境中的通用顶层 `cli` 包覆盖。
+安装后得到 `yialpha` 命令；也可 `python -m yialpha.cli.main` 从源码运行。CLI 已放入唯一的 `yialpha` 命名空间，避免被环境中的通用顶层 `cli` 包覆盖。
 
-### 单只分析：`yiagents analyze`
+### 单只分析：`yialpha analyze`
 
 ```bash
-yiagents analyze
+yialpha analyze
 ```
 
 交互式选择 ticker、分析日期、输出语言、分析师、研究深度、LLM 提供商与模型，结果边算边显示，结束时输出五段式完整报告并询问是否保存。
 
 ```bash
-yiagents analyze --checkpoint          # 本轮启用检查点（崩溃可续跑）
-yiagents analyze --clear-checkpoints   # 运行前清空所有检查点
+yialpha analyze --checkpoint          # 本轮启用检查点（崩溃可续跑）
+yialpha analyze --clear-checkpoints   # 运行前清空所有检查点
 ```
 
-### 批量并发：`yiagents batch`
+### 批量并发：`yialpha batch`
 
 一次并发分析**同一资产类别**的多只标的，每个标的跑与单票完全相同的完整链路，共享一个 API key。
 
 ```bash
 # 多只美股，同一日期
-yiagents batch -t AAPL -t NVDA -t MSFT -d 2026-06-30
+yialpha batch -t AAPL -t NVDA -t MSFT -d 2026-06-30
 
 # 多只 A 股
-yiagents batch -t 600519.SS -t 000858.SZ -t 601318.SS -d 2026-06-30
+yialpha batch -t 600519.SS -t 000858.SZ -t 601318.SS -d 2026-06-30
 
 # 加密一批（默认 Yahoo 现货）
-yiagents batch -t BTC-USD -t ETH-USD -t SOL-USD -d 2026-06-30 -w 3
+yialpha batch -t BTC-USD -t ETH-USD -t SOL-USD -d 2026-06-30 -w 3
 
 # Binance 永续分析（Track A，只读公共行情）
-yiagents batch -t BTCUSDT -t ETHUSDT -d 2026-06-30 --asset-type crypto_perp
+yialpha batch -t BTCUSDT -t ETHUSDT -d 2026-06-30 --asset-type crypto_perp
 
 # Binance 现货分析（含跨 venue 现货-永续基差）
-yiagents batch -t BTCUSDT -t ETHUSDT -d 2026-06-30 --asset-type crypto_spot
+yialpha batch -t BTCUSDT -t ETHUSDT -d 2026-06-30 --asset-type crypto_spot
 ```
 
 | 参数 | 说明 |
@@ -263,20 +263,20 @@ yiagents batch -t BTCUSDT -t ETHUSDT -d 2026-06-30 --asset-type crypto_spot
 | `-t / --ticker` | 标的代码，重复 `-t` 指定多个；**一个批次只能同一资产类别**（全股票或全加密） |
 | `-d / --date` | 分析日期 `YYYY-MM-DD` |
 | `--asset-type` | `stock` / `crypto` / `crypto_spot` / `crypto_perp` / `auto`（auto = 按首个 ticker 推断，混类会报错） |
-| `-w / --workers` | 并发池大小 K。**默认严格串行（K=1）**；仅当设置 `YIAGENTS_BATCH_CONCURRENCY=true` 或显式传 `-w K>1` 时才启用并发池（此时 `YIAGENTS_BATCH_WORKERS` 决定池大小）；`-w 1` 为显式串行 |
+| `-w / --workers` | 并发池大小 K。**默认严格串行（K=1）**；仅当设置 `YIALPHA_BATCH_CONCURRENCY=true` 或显式传 `-w K>1` 时才启用并发池（此时 `YIALPHA_BATCH_WORKERS` 决定池大小）；`-w 1` 为显式串行 |
 
-**并发是安全的**：每个 worker 线程独占一个图实例（无竞态），记忆日志与 OHLCV 缓存用 filelock 序列化，单票失败不连累整批，且每只标的的分析与串行跑**字节等价**——并发层叠在 `propagate()` 之上，不改任何 agent 输入 / 深度 / 推理参数。详见 [yiagents/batch/runner.py](yiagents/batch/runner.py)。
+**并发是安全的**：每个 worker 线程独占一个图实例（无竞态），记忆日志与 OHLCV 缓存用 filelock 序列化，单票失败不连累整批，且每只标的的分析与串行跑**字节等价**——并发层叠在 `propagate()` 之上，不改任何 agent 输入 / 深度 / 推理参数。详见 [yialpha/batch/runner.py](yialpha/batch/runner.py)。
 
-### 配置校验与审计：`yiagents config-check` / `yiagents snapshot`
+### 配置校验与审计：`yialpha config-check` / `yialpha snapshot`
 
 ```bash
-yiagents config-check     # 校验所选提供商 key、报告可选数据源 env，
+yialpha config-check     # 校验所选提供商 key、报告可选数据源 env，
                           # 并检查 indicator_battery 指标名
-yiagents snapshot record -r "剪枝低IC指标" [-e 证据]
+yialpha snapshot record -r "剪枝低IC指标" [-e 证据]
                           # 追加式配置快照（时间戳 / 原因 / 证据 / git commit），
                           # 永不修改线上配置
-yiagents snapshot diff    # 当前配置与最后一份快照做 diff
-yiagents snapshot list    # 列出已记录的快照
+yialpha snapshot diff    # 当前配置与最后一份快照做 diff
+yialpha snapshot list    # 列出已记录的快照
 ```
 
 ---
@@ -290,7 +290,7 @@ pip install -e ".[web]"          # fastapi + uvicorn（一次性）
 python web/app.py                # 启动 http://127.0.0.1:8000
 ```
 
-> 必须从**项目根**启动（包含 `.env`、`yiagents/`、`scripts/` 的目录）：`yiagents/__init__.py` 用 `load_dotenv(usecwd=True)` 加载 `.env`，在别处启动会令 DeepSeek key 与 SOCKS5 代理缺失，spawn 出来的 `run_robust` 子进程会继承这个坏环境。
+> 必须从**项目根**启动（包含 `.env`、`yialpha/`、`scripts/` 的目录）：`yialpha/__init__.py` 用 `load_dotenv(usecwd=True)` 加载 `.env`，在别处启动会令 DeepSeek key 与 SOCKS5 代理缺失，spawn 出来的 `run_robust` 子进程会继承这个坏环境。
 
 - **浏览**：ticker 网格 → 每只的日期 → 完整报告视图（评级徽章 + 量化风控 overlay 卡片 + 5 个可折叠章节 + 可选 node-perf 柱状图），另有跨票跨日期的评级对比视图（`#/compare`）。
 - **提交**：表单 spawn `scripts/run_robust.py`（与 CLI 同一条看门狗路径）；前端每 4 秒轮询并链接完成的报告。同一时刻只允许一个分析（运行中返回 409）。
@@ -303,11 +303,11 @@ python web/app.py                # 启动 http://127.0.0.1:8000
 ## Python 调用
 
 ```python
-from yiagents.graph.trading_graph import YiAgentsGraph
-from yiagents.default_config import DEFAULT_CONFIG
+from yialpha.graph.trading_graph import YiAlphaGraph
+from yialpha.default_config import DEFAULT_CONFIG
 
-# DEFAULT_CONFIG 已自动套用 YIAGENTS_* 环境变量覆盖
-ta = YiAgentsGraph(debug=True, config=DEFAULT_CONFIG.copy())
+# DEFAULT_CONFIG 已自动套用 YIALPHA_* 环境变量覆盖
+ta = YiAlphaGraph(debug=True, config=DEFAULT_CONFIG.copy())
 
 _, decision = ta.propagate("NVDA", "2026-01-15")
 print(decision)
@@ -324,36 +324,36 @@ config["max_single_sector"] = 0.30     # 单行业 ≤ 30%
 config["max_drawdown_hard_stop"] = 0.15# 回撤熔断
 config["atr_stop_mult"] = 2.0          # 止损 = 最新收盘 - 2×ATR（多头）
 
-ta = YiAgentsGraph(config=config)
+ta = YiAlphaGraph(config=config)
 _, decision = ta.propagate("NVDA", "2026-01-15")
 ```
 
-`ta.save_reports(final_state, ticker)` 可在无头 / API 场景写出与 CLI 相同的报告树。全部配置项见 [yiagents/default_config.py](yiagents/default_config.py)。
+`ta.save_reports(final_state, ticker)` 可在无头 / API 场景写出与 CLI 相同的报告树。全部配置项见 [yialpha/default_config.py](yialpha/default_config.py)。
 
 ---
 
 ## 量化风控叠加层
 
-LLM 定方向，数学定仓位与风险（[yiagents/risk/](yiagents/risk/)）：
+LLM 定方向，数学定仓位与风险（[yialpha/risk/](yialpha/risk/)）：
 
 | 机制 | 文件 | 作用 |
 | ------ | ------ | ------ |
-| Kelly 仓位 | [kelly.py](yiagents/risk/kelly.py) | 按胜率 / 赔率定最优仓位，可调分数 |
-| ATR 止损 | [atr_stop.py](yiagents/risk/atr_stop.py) | 止损 = 收盘 − N×ATR（多头） |
-| 回撤熔断 | [breaker.py](yiagents/risk/breaker.py) | 超过最大回撤即平仓冷却 |
-| CVaR | [cvar.py](yiagents/risk/cvar.py) | 条件风险价值，尾部风险约束 |
-| 总线 | [manager.py](yiagents/risk/manager.py) | 汇聚以上，覆盖单票 / 行业 / 敞口上限 |
+| Kelly 仓位 | [kelly.py](yialpha/risk/kelly.py) | 按胜率 / 赔率定最优仓位，可调分数 |
+| ATR 止损 | [atr_stop.py](yialpha/risk/atr_stop.py) | 止损 = 收盘 − N×ATR（多头） |
+| 回撤熔断 | [breaker.py](yialpha/risk/breaker.py) | 超过最大回撤即平仓冷却 |
+| CVaR | [cvar.py](yialpha/risk/cvar.py) | 条件风险价值，尾部风险约束 |
+| 总线 | [manager.py](yialpha/risk/manager.py) | 汇聚以上，覆盖单票 / 行业 / 敞口上限 |
 
 `risk_enabled` 默认**开启**：风控经理确定性地改写分析报告中的仓位 / 止损 / 敞口，LLM 只保留方向。`scripts/run_baseline.py` 按模式显式设置（`--baseline` 关，建立 Phase-0 基线；`--full` 开，做配对 A/B）。
 
-**V2.0 交易可执行性层（默认开启）**——每次 run 的叠加层还会确定性地构建一张**候选执行票券 ExecutionTicket**（[yiagents/tickets.py](yiagents/tickets.py)，冻结版 [V2 基线](docs/V2_BASELINE.md)中唯一跨阶段交易对象）：
+**V2.0 交易可执行性层（默认开启）**——每次 run 的叠加层还会确定性地构建一张**候选执行票券 ExecutionTicket**（[yialpha/tickets.py](yialpha/tickets.py)，冻结版 [V2 基线](docs/V2_BASELINE.md)中唯一跨阶段交易对象）：
 
 | 机制 | 文件 | 效果 |
 | ------ | ------ | ------ |
-| 往返成本模型 | [cost_model.py](yiagents/risk/cost_model.py) | 按资产类的费率/滑点/资金费估算；回测引擎的费率常量现在以此为单一事实源 |
-| 方向化优势门 | [tradeability.py](yiagents/risk/tradeability.py) | LONG `target/ref−1`，SHORT 镜像（绝不取绝对值）；`net_edge <= 0 → NO_TRADE` |
-| 关键数据门 | [quality.py](yiagents/dataflows/quality.py) | GOOD / DEGRADED_AUXILIARY（社交新闻缺失→仅降置信度）/ DEGRADED_CRITICAL（价格/ATR/基本面缺失→NO_TRADE）/ INVALID |
-| 衍生品压力分 | [derivatives_stress.py](yiagents/risk/derivatives_stress.py) | 仅 perp：滚动 funding/OI/多空比/基差分位 → 拥挤度 0–100 + 标签状态 + 风险旗标（live run） |
+| 往返成本模型 | [cost_model.py](yialpha/risk/cost_model.py) | 按资产类的费率/滑点/资金费估算；回测引擎的费率常量现在以此为单一事实源 |
+| 方向化优势门 | [tradeability.py](yialpha/risk/tradeability.py) | LONG `target/ref−1`，SHORT 镜像（绝不取绝对值）；`net_edge <= 0 → NO_TRADE` |
+| 关键数据门 | [quality.py](yialpha/dataflows/quality.py) | GOOD / DEGRADED_AUXILIARY（社交新闻缺失→仅降置信度）/ DEGRADED_CRITICAL（价格/ATR/基本面缺失→NO_TRADE）/ INVALID |
+| 衍生品压力分 | [derivatives_stress.py](yialpha/risk/derivatives_stress.py) | 仅 perp：滚动 funding/OI/多空比/基差分位 → 拥挤度 0–100 + 标签状态 + 风险旗标（live run） |
 
 PM 的 `PortfolioDecision` 新增可选字段 `confidence / probabilities / expected_return / invalidation / evidence_coverage`；票券与这些字段以增量键入档 `full_states_log`。以上任何一层都不会改写 PM 的评级文本——观点 / 约束 / 状态三层隔离（V2 不变量 I1）。
 
@@ -381,9 +381,9 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 
 > 每次 `propagate()` = 一次完整 LLM 图（4 分析师 + 辩论 + 交易员 + 风控辩论 + PM）。成本随 `tickers × 日期数 × runs` 线性增长。**先 preflight 全绿，再 smoke，最后放大。**
 
-档 2（`--full`）跑基线 vs 风控增强的 A/B，并对每只票独立判定**验证闸门**（[yiagents/backtest/validation_gate.py](yiagents/backtest/validation_gate.py)）：
+档 2（`--full`）跑基线 vs 风控增强的 A/B，并对每只票独立判定**验证闸门**（[yialpha/backtest/validation_gate.py](yialpha/backtest/validation_gate.py)）：
 
-- **Deflated Sharpe Ratio（DSR）** —— 对多次抽样做多重检验校正，惩罚过拟合（[metrics.py](yiagents/backtest/metrics.py)）
+- **Deflated Sharpe Ratio（DSR）** —— 对多次抽样做多重检验校正，惩罚过拟合（[metrics.py](yialpha/backtest/metrics.py)）
 - **是否跑赢买入持有**、PASS / FAIL 结论、改进建议
 - baseline / improved 复用同一份 LLM 决策带；每个 ticker/run 使用全新的有状态 RiskManager
 - 报告、仪表盘、闸门判定写入 `--out`（默认 `backtest_output/`）
@@ -398,7 +398,7 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 - **杠杆 / 强平**：`--leverage > 1` 启用逐仓建模——按 K 线极值（最高/最低价）触发强平、MMR 阶梯取自 `leverageBracket`，强平事件记入运行摘要。默认 1 倍、仅多头。
 - **做空**：`--allow-short` 显式开启（Sell → −1×，收资金费）；仅永续可用。
 
-**指标自改进环（离线、无 LLM）：** Market 分析师的 28 个指标目录可按证据剪枝——`scripts/export_ic_dataset.py` 直接从 PIT 过滤后的 OHLCV 缓存导出 `date, forward_return, <指标>…` 表，`scripts/prune_indicators_cli.py` 按滚动 IC 排名并输出保留/剪枝报告（绝不自动应用），人工审核后的名单落入 `indicator_battery` 配置键，由 `yiagents config-check` 校验；`yiagents snapshot record` 把变更记入追加式审计轨迹。 `yiagents ic-cycle` 一条命令跑完机械部分（导出 → 判定 → 建议），每周的 GitHub workflow 把证据归档为 artifact，`indicator_ic_context`（默认关）把 trailing mean |IC| 作为 advisory 上下文回灌给 market analyst。
+**指标自改进环（离线、无 LLM）：** Market 分析师的 28 个指标目录可按证据剪枝——`scripts/export_ic_dataset.py` 直接从 PIT 过滤后的 OHLCV 缓存导出 `date, forward_return, <指标>…` 表，`scripts/prune_indicators_cli.py` 按滚动 IC 排名并输出保留/剪枝报告（绝不自动应用），人工审核后的名单落入 `indicator_battery` 配置键，由 `yialpha config-check` 校验；`yialpha snapshot record` 把变更记入追加式审计轨迹。 `yialpha ic-cycle` 一条命令跑完机械部分（导出 → 判定 → 建议），每周的 GitHub workflow 把证据归档为 artifact，`indicator_ic_context`（默认关）把 trailing mean |IC| 作为 advisory 上下文回灌给 market analyst。
 
 ```text
 [AAPL] 闸门判定: ✅ PASS | DSR 1.42 | 跑赢B&H True
@@ -413,15 +413,15 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 
 | 开关（env） | 默认 | 作用 |
 | ------ | ------ | ------ |
-| `YIAGENTS_LLM_TIMEOUT_S` | off（未设） | 单次 LLM 读超时（秒）；半开连接 → `APITimeoutError` → SDK 内置重试恢复。**默认 OFF**——生产环境建议设为 120 以防半开 socket 永久挂起（本地慢模型如 Ollama 可不设） |
-| `YIAGENTS_HTTP_KEEPALIVE` | false | 进程级共享 `httpx.Client`，复用 TLS / SOCKS5 连接 |
-| `YIAGENTS_LLM_MAX_RETRIES` | 2 | 单调用重试次数（= langchain 默认，等价） |
-| `YIAGENTS_NODE_PERF_TELEMETRY` | false | 节点级墙钟 + token 遥测；`--profile` 一键开，产物 `node_perf_<date>.json` |
-| `YIAGENTS_STREAM_TELEMETRY` | false | 流式图 + 记录每位分析师墙钟（终态与 invoke 一致） |
-| `YIAGENTS_ANALYST_PARALLEL` | false | 4 分析师在单一包装节点内并行（各自独立子图）。**必须先过 A/B gate 才翻默认** |
-| `YIAGENTS_LLM_RATE_LIMITER` | false | 可选的共享 RPM 限流器 |
-| `YIAGENTS_BINANCE_PROACTIVE_BACKOFF` | false | Binance 永续 vendor 读 `X-MBX-USED-WEIGHT-1M` 头主动退避 |
-| `YIAGENTS_BINANCE_SPOT_MIRROR` | false | 现货走免 key 镜像 `data-api.binance.vision` |
+| `YIALPHA_LLM_TIMEOUT_S` | off（未设） | 单次 LLM 读超时（秒）；半开连接 → `APITimeoutError` → SDK 内置重试恢复。**默认 OFF**——生产环境建议设为 120 以防半开 socket 永久挂起（本地慢模型如 Ollama 可不设） |
+| `YIALPHA_HTTP_KEEPALIVE` | false | 进程级共享 `httpx.Client`，复用 TLS / SOCKS5 连接 |
+| `YIALPHA_LLM_MAX_RETRIES` | 2 | 单调用重试次数（= langchain 默认，等价） |
+| `YIALPHA_NODE_PERF_TELEMETRY` | false | 节点级墙钟 + token 遥测；`--profile` 一键开，产物 `node_perf_<date>.json` |
+| `YIALPHA_STREAM_TELEMETRY` | false | 流式图 + 记录每位分析师墙钟（终态与 invoke 一致） |
+| `YIALPHA_ANALYST_PARALLEL` | false | 4 分析师在单一包装节点内并行（各自独立子图）。**必须先过 A/B gate 才翻默认** |
+| `YIALPHA_LLM_RATE_LIMITER` | false | 可选的共享 RPM 限流器 |
+| `YIALPHA_BINANCE_PROACTIVE_BACKOFF` | false | Binance 永续 vendor 读 `X-MBX-USED-WEIGHT-1M` 头主动退避 |
+| `YIALPHA_BINANCE_SPOT_MIRROR` | false | 现货走免 key 镜像 `data-api.binance.vision` |
 
 遥测一键：`python scripts/run_baseline.py --smoke --profile --ticker <T> --date <D>` 跑完打印「节点→墙钟占比 + token」表，定位真实瓶颈。
 
@@ -429,11 +429,11 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 
 ## 持久化与恢复
 
-**决策日志（显式开启）：** 持久化默认关闭（`YIAGENTS_MEMORY_ENABLED=false`）。开启后，决策写入 `~/.yiagents/memory/trading_memory.md`；历史运行只能看到在其 as-of 日期前已经产生、且收益结果已经可知的记录。没有“结果可用日期”的旧反思不会注入历史提示。路径用 `YIAGENTS_MEMORY_LOG_PATH` 覆盖。
+**决策日志（显式开启）：** 持久化默认关闭（`YIALPHA_MEMORY_ENABLED=false`）。开启后，决策写入 `~/.yialpha/memory/trading_memory.md`；历史运行只能看到在其 as-of 日期前已经产生、且收益结果已经可知的记录。没有“结果可用日期”的旧反思不会注入历史提示。路径用 `YIALPHA_MEMORY_LOG_PATH` 覆盖。
 
-**检查点恢复（opt-in）：** 用 `--checkpoint` 开启，LangGraph 在每个节点后存档，崩溃 / 中断可从最后一个成功步骤续跑，成功完成后自动清理。按 ticker 的 SQLite 库位于 `~/.yiagents/cache/checkpoints/<TICKER>.db`（`YIAGENTS_CACHE_DIR` 覆盖）。
+**检查点恢复（opt-in）：** 用 `--checkpoint` 开启，LangGraph 在每个节点后存档，崩溃 / 中断可从最后一个成功步骤续跑，成功完成后自动清理。按 ticker 的 SQLite 库位于 `~/.yialpha/cache/checkpoints/<TICKER>.db`（`YIALPHA_CACHE_DIR` 覆盖）。
 
-**分析边界：** `YIAGENTS_ANALYSIS_ONLY=true` 为默认值，会阻断全部实盘入口。只有关闭分析模式并同时显式开启新旧两个执行开关后，执行路径才可能工作；网关每次提交前都会重新检查这些开关与 `YIAGENTS_KILL_SWITCH`。PoT 主机代码执行同样默认关闭；在具备真正进程隔离前，Windows 上始终拒绝执行。
+**分析边界：** `YIALPHA_ANALYSIS_ONLY=true` 为默认值，会阻断全部实盘入口。只有关闭分析模式并同时显式开启新旧两个执行开关后，执行路径才可能工作；网关每次提交前都会重新检查这些开关与 `YIALPHA_KILL_SWITCH`。PoT 主机代码执行同样默认关闭；在具备真正进程隔离前，Windows 上始终拒绝执行。
 
 ---
 
@@ -443,7 +443,7 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 | ------ | ------ |
 | [scripts/run_baseline.py](scripts/run_baseline.py) | 四档：preflight / smoke / baseline / full |
 | [scripts/run_robust.py](scripts/run_robust.py) | 按-ticker 子进程编排 + 看门狗 + OS 级强杀重跑（≥1 ticker 首选） |
-| [scripts/run_batch.py](scripts/run_batch.py) | 批量并发分析多只 ticker（等价于 `yiagents batch`） |
+| [scripts/run_batch.py](scripts/run_batch.py) | 批量并发分析多只 ticker（等价于 `yialpha batch`） |
 | [scripts/run_analyst_parallel_ab.py](scripts/run_analyst_parallel_ab.py) | 验证分析师并行与串行分布等价的 A/B 闸门 |
 | [scripts/smoke_structured_output.py](scripts/smoke_structured_output.py) | 针对任意提供商验证三个结构化输出 agent |
 | [scripts/analyze_window.py](scripts/analyze_window.py) | 单票多日决策窗口 + 量化风控叠加层（Kelly / ATR / CVaR） |
@@ -458,7 +458,7 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 
 ```text
 .
-├── yiagents/            # 核心包（内部包名，对外 import 名）
+├── yialpha/            # 核心包（内部包名，对外 import 名）
 │   ├── agents/               # analysts / researchers / managers / trader / risk_mgmt
 │   ├── dataflows/            # yfinance / Alpha Vantage / FRED / Polymarket / Reddit / StockTwits / Binance / 浏览器数据
 │   ├── graph/                # LangGraph 编排：trading_graph / propagation / reflection / signal_processing / perf_telemetry
@@ -471,7 +471,7 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 │   ├── cli/                  # 交互式 CLI（analyze / batch / config-check / snapshot）
 │   ├── default_config.py     # 配置 + env 映射
 │   └── reporting.py
-├── cli/                      # 源码兼容包装；正式入口是 yiagents.cli
+├── cli/                      # 源码兼容包装；正式入口是 yialpha.cli
 ├── web/                      # FastAPI Web UI（原地运行，不打包）
 ├── scripts/                  # run_baseline / run_robust / run_batch / export_ic_dataset / prune_indicators_cli / rank_signals / …
 ├── tests/                    # 测试套件——数据/风控/回测/闸门/多提供商/i18n/并发
@@ -482,12 +482,12 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 
 ## 可复现性
 
-YiAgents 是 LLM 驱动的，**同一 ticker + 日期的两次运行可能不同** —— 这是语言模型研究的固有特性，不是缺陷。来源：
+YiAlpha 是 LLM 驱动的，**同一 ticker + 日期的两次运行可能不同** —— 这是语言模型研究的固有特性，不是缺陷。来源：
 
 - **模型采样非确定性**：即使固定温度，提供商也不保证逐字节一致；推理模型内部推理本身就在采样，波动更大。
 - **当前日期数据在变**：新闻 / StockTwits / Reddit / 币安广场会随时间变化。历史运行会省略仅支持当前快照的社交、预测市场、滚动行情与持仓流数据；有日期的数据仍可能因供应商修订或覆盖范围改变而变化。
 
-降低波动的手段：调低 `temperature`（`YIAGENTS_TEMPERATURE`），或显式选非推理模型。已确定性化的部分：分析公司身份在 agent 运行前由 ticker 解析锁定；市场分析师的精确价格 / 指标取自已校验的数据快照。
+降低波动的手段：调低 `temperature`（`YIALPHA_TEMPERATURE`），或显式选非推理模型。已确定性化的部分：分析公司身份在 agent 运行前由 ticker 解析锁定；市场分析师的精确价格 / 指标取自已校验的数据快照。
 
 回测结果不保证对齐任何已发表数字，请把它当作**研究多智能体分析的脚手架**，而非一条有固定可复制收益的策略。
 
@@ -495,24 +495,24 @@ YiAgents 是 LLM 驱动的，**同一 ticker + 日期的两次运行可能不同
 
 ## 研究基础与文献支撑
 
-YiAgents 的每一层关键机制都对应已发表的研究成果，而非凭空设计。下表把 14 个研究方向映射到框架中的落地位置（代表文献仅作示列，完整 99 篇见 [REFERENCES.md](REFERENCES.md)）：
+YiAlpha 的每一层关键机制都对应已发表的研究成果，而非凭空设计。下表把 14 个研究方向映射到框架中的落地位置（代表文献仅作示列，完整 99 篇见 [REFERENCES.md](REFERENCES.md)）：
 
-| 研究支柱 | 代表文献 | 在 YiAgents 中的落地 |
+| 研究支柱 | 代表文献 | 在 YiAlpha 中的落地 |
 | ------ | ------ | ------ |
-| 基准与"Alpha 幻觉" | FINSABER (Li 2025) · The Alpha Illusion (Jang 2026) · AlphaQuanter (2025) | [validation_gate.py](yiagents/backtest/validation_gate.py)：DSR + 跑赢买入持有判定 |
+| 基准与"Alpha 幻觉" | FINSABER (Li 2025) · The Alpha Illusion (Jang 2026) · AlphaQuanter (2025) | [validation_gate.py](yialpha/backtest/validation_gate.py)：DSR + 跑赢买入持有判定 |
 | 多智能体决策 | Debate or Vote (NeurIPS 2025) · MA-PoP (2026) · S2-MAD (2025) | Bull/Bear 与 Risk 多轮辩论（`max_debate_rounds` / `max_risk_discuss_rounds`） |
-| 推理优化 | FinCoT (2025) · Program-of-Thoughts · Overthinking 早退 (2025) | [fin_cot_prompts](yiagents/default_config.py)：去人格化结构化提示 |
-| 记忆与抗遗忘 | FinMem (TBDATA 2025) · Reflexion (NeurIPS 2023) · AlphaAgent (2025) | [memory 闭环](yiagents/graph/)：决策日志 + 反思 + 跨票教训注入 |
+| 推理优化 | FinCoT (2025) · Program-of-Thoughts · Overthinking 早退 (2025) | [fin_cot_prompts](yialpha/default_config.py)：去人格化结构化提示 |
+| 记忆与抗遗忘 | FinMem (TBDATA 2025) · Reflexion (NeurIPS 2023) · AlphaAgent (2025) | [memory 闭环](yialpha/graph/)：决策日志 + 反思 + 跨票教训注入 |
 | 幻觉与数值验证 | Chain-of-Verification (ICML 2024) · DeBERTa-NLI · HHEM | 数值走解释器 / 校验路径，LLM 只定方向 |
 | LLM + 传统量化 | LLM-MAS-DRL (2024) · AlphaCrafter (2024) · FinCon (2024) | LLM 出观点、量化层定仓位 / 止损的混合架构 |
 | 市场状态识别 | HMM Regime · 级联控制器 (2024) | 趋势 / 震荡 / 高波动 / 危机状态适配（增强模块，路线图） |
-| 风险与仓位 | HRP (Lopez de Prado) · Sentinel/ATR · CVaR 双层 (FinCon) | [risk/](yiagents/risk/)：Kelly + ATR 止损 + 熔断 + CVaR |
-| 回测严谨性 | FinCAD (2025) · CPCV · Deflated Sharpe (Lopez de Prado) | [backtest/](yiagents/backtest/)：参数化前视偏差校正 + DSR |
+| 风险与仓位 | HRP (Lopez de Prado) · Sentinel/ATR · CVaR 双层 (FinCon) | [risk/](yialpha/risk/)：Kelly + ATR 止损 + 熔断 + CVaR |
+| 回测严谨性 | FinCAD (2025) · CPCV · Deflated Sharpe (Lopez de Prado) | [backtest/](yialpha/backtest/)：参数化前视偏差校正 + DSR |
 | 对抗鲁棒性 | MemMorph (2025) · SMSR (2025) · Spotlighting (2025) | 工具调用 / 记忆投毒 / 提示注入防护（路线图） |
 | 成本工程 | GPTCache · 模型级联 · DAG 编排 (2025) | 多提供商路由 + 检查点续跑 + 四档成本递增验证 |
-| 情绪与另类数据 | FinAgent (KDD 2024) · 少样本股票预测 (Deng 2024) | [dataflows/](yiagents/dataflows/)：Reddit / StockTwits / 币安广场 / Polymarket / 浏览器 |
-| 可解释性 | CFA XAI 报告 (2025) · CoT 可视化 | 结构化报告 + [dashboard](yiagents/monitoring/dashboard.py) + 决策日志 |
-| 合规与安全 | EU AI Act · AIBOM (2025) · 零信任架构 | `YIAGENTS_KILL_SWITCH` + 仅研究用途声明 |
+| 情绪与另类数据 | FinAgent (KDD 2024) · 少样本股票预测 (Deng 2024) | [dataflows/](yialpha/dataflows/)：Reddit / StockTwits / 币安广场 / Polymarket / 浏览器 |
+| 可解释性 | CFA XAI 报告 (2025) · CoT 可视化 | 结构化报告 + [dashboard](yialpha/monitoring/dashboard.py) + 决策日志 |
+| 合规与安全 | EU AI Act · AIBOM (2025) · 零信任架构 | `YIALPHA_KILL_SWITCH` + 仅研究用途声明 |
 
 > 标注"路线图"的机制已纳入设计、尚未全部落地。
 
@@ -523,11 +523,11 @@ YiAgents 的每一层关键机制都对应已发表的研究成果，而非凭�
 若本框架对你的工作有帮助，请引用：
 
 ```bibtex
-@misc{yiagents2026,
-      title={YiAgents: A Research-Oriented Multi-Agent LLM Quantitative Trading Framework},
+@misc{yialpha2026,
+      title={YiAlpha: A Research-Oriented Multi-Agent LLM Quantitative Trading Framework},
       author={Mark},
       year={2026},
-      url={https://github.com/zhang12120113-creator/Yiagents},
+      url={https://github.com/zhang12120113-creator/Yialpha},
 }
 ```
 

@@ -3,11 +3,11 @@
 Covers three 2026-08 audit fixes:
 
 - D1: the interactive ``run_analysis`` path streams ``graph.stream`` directly
-  and used to bypass ``YiAgentsGraph._run_graph``'s evidence contract — no
+  and used to bypass ``YiAlphaGraph._run_graph``'s evidence contract — no
   ``full_states_log_<date>.json`` (invisible in the web history) and no
   ``data_quality`` block (the DEGRADED banner never rendered). The CLI now
   calls ``quality.ensure_run_context()`` before streaming and the new public
-  ``YiAgentsGraph.finalize_streamed_run`` after, reusing ``_log_state``.
+  ``YiAlphaGraph.finalize_streamed_run`` after, reusing ``_log_state``.
 - D3: pure-dot tickers ("..") passed the charset check and escaped the
   results directory as a path component.
 - D4: a cancelled region prompt (Esc/Ctrl-C → None) crashed on tuple unpack.
@@ -20,14 +20,14 @@ from types import SimpleNamespace
 
 import pytest
 
-# Imported at MODULE scope on purpose: yiagents.cli.main calls setup_logging()
+# Imported at MODULE scope on purpose: yialpha.cli.main calls setup_logging()
 # at import time, which replaces every root handler — including the one the
 # caplog fixture installs per test. A lazy in-test import would strip caplog's
 # handler right before the warning is emitted (observed: the test passes only
 # when an earlier test imported the module first). Collection happens before
 # any fixture runs, so the import side effect is long done by then.
-from yiagents.cli.main import _store_cli_decision
-from yiagents.dataflows import quality
+from yialpha.cli.main import _store_cli_decision
+from yialpha.dataflows import quality
 
 
 @pytest.fixture(autouse=True)
@@ -66,10 +66,10 @@ def _full_streamed_state(ticker: str = "NVDA", trade_date: str = "2026-06-10") -
 
 
 def _make_graph(tmp_path):
-    """Minimal YiAgentsGraph stand-in exposing finalize_streamed_run."""
-    from yiagents.graph.trading_graph import YiAgentsGraph
+    """Minimal YiAlphaGraph stand-in exposing finalize_streamed_run."""
+    from yialpha.graph.trading_graph import YiAlphaGraph
 
-    graph = YiAgentsGraph.__new__(YiAgentsGraph)  # skip __init__: attrs below suffice
+    graph = YiAlphaGraph.__new__(YiAlphaGraph)  # skip __init__: attrs below suffice
     graph.ticker = None
     graph.log_states_dict = {}
     object.__setattr__(graph, "config", {"results_dir": str(tmp_path / "results")})
@@ -92,7 +92,7 @@ def test_finalize_streamed_run_writes_full_states_log_and_quality(tmp_path):
     final_state = graph.finalize_streamed_run("NVDA", "2026-06-10", final_state)
 
     log_path = (
-        tmp_path / "results" / "NVDA" / "YiAgentsStrategy_logs"
+        tmp_path / "results" / "NVDA" / "YiAlphaStrategy_logs"
         / "full_states_log_2026-06-10.json"
     )
     assert log_path.exists()
@@ -125,7 +125,7 @@ def test_store_cli_decision_uses_get_and_warns_when_missing(tmp_path, caplog):
         memory_log=SimpleNamespace(store_decision=lambda **kw: calls.append(kw))
     )
 
-    with caplog.at_level("WARNING", logger="yiagents.cli.main"):
+    with caplog.at_level("WARNING", logger="yialpha.cli.main"):
         _store_cli_decision(graph, "NVDA", "2026-06-10", {})
 
     assert calls == [{
@@ -143,7 +143,7 @@ def test_store_cli_decision_passes_decision_through(caplog):
         memory_log=SimpleNamespace(store_decision=lambda **kw: calls.append(kw))
     )
 
-    with caplog.at_level("WARNING", logger="yiagents.cli.main"):
+    with caplog.at_level("WARNING", logger="yialpha.cli.main"):
         _store_cli_decision(
             graph, "NVDA", "2026-06-10", {"final_trade_decision": "Rating: BUY"}
         )
@@ -160,7 +160,7 @@ def test_store_cli_decision_passes_decision_through(caplog):
 @pytest.mark.unit
 class TestStreamedRunPinsAnalysisDate:
     def test_pins_clears_and_survives_exceptions(self):
-        from yiagents.dataflows.utils import (
+        from yialpha.dataflows.utils import (
             get_analysis_date,
             pinned_analysis_date,
             set_analysis_date,
@@ -172,7 +172,7 @@ class TestStreamedRunPinsAnalysisDate:
             assert get_analysis_date() == "2026-06-10"
             # The pin is what the vendor-layer clamp reads — a window past the
             # analysis date must be clamped INSIDE the block.
-            from yiagents.dataflows.utils import clamp_end_date
+            from yialpha.dataflows.utils import clamp_end_date
 
             assert clamp_end_date("2026-08-01", get_analysis_date()) == "2026-06-10"
         assert get_analysis_date() is None
@@ -198,7 +198,7 @@ class TestStreamedRunPinsAnalysisDate:
         """
         import inspect
 
-        from yiagents.cli import main as cli_main
+        from yialpha.cli import main as cli_main
 
         src = inspect.getsource(cli_main.run_analysis)
         assert "pinned_analysis_date(selections[\"analysis_date\"])" in src
@@ -214,20 +214,20 @@ class TestStreamedRunPinsAnalysisDate:
 @pytest.mark.unit
 class TestPureDotTickerRejected:
     def test_is_valid_ticker_input_rejects_dot_strings(self):
-        from yiagents.cli.utils import is_valid_ticker_input
+        from yialpha.cli.utils import is_valid_ticker_input
 
         for bad in ("..", "...", ".", " . ", ".."):
             assert not is_valid_ticker_input(bad), bad
 
     def test_is_valid_ticker_input_still_accepts_real_symbols(self):
-        from yiagents.cli.utils import is_valid_ticker_input
+        from yialpha.cli.utils import is_valid_ticker_input
 
         for good in ("", "SPY", "BRK.B", "0700.HK", "GC=F", "^GSPC", "BTC-USD"):
             assert is_valid_ticker_input(good), good
 
     def test_get_ticker_exits_cleanly_on_dot_escape(self, monkeypatch):
         """A '..' that somehow reaches get_ticker exits 1, never builds paths."""
-        from yiagents.cli import utils
+        from yialpha.cli import utils
 
         monkeypatch.setattr(
             utils.questionary, "text",
@@ -238,7 +238,7 @@ class TestPureDotTickerRejected:
         assert exc.value.code == 1
 
     def test_get_ticker_accepts_normal_symbol(self, monkeypatch):
-        from yiagents.cli import utils
+        from yialpha.cli import utils
 
         monkeypatch.setattr(
             utils.questionary, "text",
@@ -256,7 +256,7 @@ class TestPureDotTickerRejected:
 class TestRegionPromptCancel:
     @staticmethod
     def _mock_select(monkeypatch, ask_result):
-        from yiagents.cli import utils
+        from yialpha.cli import utils
 
         monkeypatch.setattr(
             utils.questionary, "select",
@@ -264,7 +264,7 @@ class TestRegionPromptCancel:
         )
 
     def test_cancelled_region_prompts_exit_1(self, monkeypatch):
-        from yiagents.cli import utils
+        from yialpha.cli import utils
 
         for fn in (utils.ask_glm_region, utils.ask_qwen_region, utils.ask_minimax_region):
             self._mock_select(monkeypatch, None)
@@ -273,7 +273,7 @@ class TestRegionPromptCancel:
             assert exc.value.code == 1
 
     def test_region_prompts_return_selection(self, monkeypatch):
-        from yiagents.cli import utils
+        from yialpha.cli import utils
 
         selections = {
             utils.ask_glm_region: ("glm", "https://api.z.ai/api/paas/v4/"),

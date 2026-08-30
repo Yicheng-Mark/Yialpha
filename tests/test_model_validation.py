@@ -3,9 +3,9 @@ import warnings
 
 import pytest
 
-from yiagents.llm_clients.base_client import BaseLLMClient
-from yiagents.llm_clients.model_catalog import get_known_models
-from yiagents.llm_clients.validators import validate_model
+from yialpha.llm_clients.base_client import BaseLLMClient
+from yialpha.llm_clients.model_catalog import get_known_models
+from yialpha.llm_clients.validators import validate_model
 
 
 class DummyLLMClient(BaseLLMClient):

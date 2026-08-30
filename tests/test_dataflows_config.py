@@ -6,8 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-import yiagents.default_config as default_config
-from yiagents.dataflows.config import get_config, set_config, submit_with_context
+import yialpha.default_config as default_config
+from yialpha.dataflows.config import get_config, set_config, submit_with_context
 
 
 @pytest.mark.unit

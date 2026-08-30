@@ -23,15 +23,15 @@ import pandas as pd
 import pytest
 
 from tests.test_backtest_engine import FakeGraph
-from yiagents.backtest.engine import run_backtest
-from yiagents.dataflows import binance_brackets
-from yiagents.dataflows.binance_brackets import (
+from yialpha.backtest.engine import run_backtest
+from yialpha.dataflows import binance_brackets
+from yialpha.dataflows.binance_brackets import (
     Bracket,
     default_brackets,
     get_leverage_brackets,
     mmr_for_notional,
 )
-from yiagents.dataflows.errors import NoMarketDataError
+from yialpha.dataflows.errors import NoMarketDataError
 
 
 def _funding(rate: float):
@@ -324,7 +324,7 @@ def test_flip_resets_entry_basis():
 
 @pytest.mark.unit
 def test_funding_provider_sums_each_utc_day(monkeypatch):
-    from yiagents.backtest.engine import _binance_funding_provider
+    from yialpha.backtest.engine import _binance_funding_provider
 
     def ms(day: str, hour: int) -> int:
         return int(pd.Timestamp(f"{day} {hour:02d}:00", tz="UTC").timestamp()
@@ -346,7 +346,7 @@ def test_funding_provider_sums_each_utc_day(monkeypatch):
         return rows
 
     monkeypatch.setattr(
-        "yiagents.dataflows.binance._paginate_history", fake_paginate,
+        "yialpha.dataflows.binance._paginate_history", fake_paginate,
     )
     s = _binance_funding_provider("BTCUSDT", "2024-01-01", "2024-01-05")
     assert s["2024-01-01"] == pytest.approx(0.0003)
@@ -361,7 +361,7 @@ def test_funding_provider_sums_each_utc_day(monkeypatch):
 
 @pytest.mark.unit
 def test_risk_overlay_stop_fires_in_perp_engine():
-    from yiagents.risk.manager import RiskManager, build_backtest_weight_fn
+    from yialpha.risk.manager import RiskManager, build_backtest_weight_fn
 
     wfn = build_backtest_weight_fn(
         RiskManager(atr_mult=2.0), "BTCUSDT", atr_lookup=lambda date: 2.0,
@@ -401,7 +401,7 @@ def test_risk_overlay_stop_fires_in_perp_engine():
 @pytest.mark.unit
 def test_perp_facts_in_metrics_and_report():
     from tests.test_perp_stop_simulation import _extremes, _stop_weight_fn
-    from yiagents.backtest.report import render_backtest_report
+    from yialpha.backtest.report import render_backtest_report
 
     res = run_backtest(
         FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],

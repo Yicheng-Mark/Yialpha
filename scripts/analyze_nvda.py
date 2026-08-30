@@ -17,12 +17,12 @@ for _stream in (sys.stdout, sys.stderr):
 # noqa: E402 — imports sit after the UTF-8 reconfigure guard above (Windows GBK shim).
 from pathlib import Path  # noqa: E402
 
-from yiagents.default_config import DEFAULT_CONFIG  # noqa: E402
-from yiagents.graph.trading_graph import YiAgentsGraph  # noqa: E402
+from yialpha.default_config import DEFAULT_CONFIG  # noqa: E402
+from yialpha.graph.trading_graph import YiAlphaGraph  # noqa: E402
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="YiAgents 单票深度分析")
+    p = argparse.ArgumentParser(description="YiAlpha 单票深度分析")
     p.add_argument("--ticker", default="NVDA")
     p.add_argument("--date", default="2026-06-26")
     p.add_argument("--out", default="analysis_output")
@@ -30,7 +30,7 @@ def main() -> int:
 
     print(f"\n=== 深度分析：{args.ticker} @ {args.date} ===", flush=True)
     cfg = DEFAULT_CONFIG.copy()
-    ta = YiAgentsGraph(debug=False, config=cfg)
+    ta = YiAlphaGraph(debug=False, config=cfg)
 
     final_state, rating = ta.propagate(args.ticker, args.date)
     if final_state is None:

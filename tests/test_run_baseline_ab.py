@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import scripts.run_baseline as runner
-from yiagents.dataflows.config import get_config, reset_config, set_config
+from yialpha.dataflows.config import get_config, reset_config, set_config
 
 
 @pytest.mark.unit
@@ -18,7 +18,7 @@ def test_validation_graph_disables_persistent_memory(monkeypatch):
         captured.update(kwargs["config"])
         return object()
 
-    monkeypatch.setattr(runner, "YiAgentsGraph", fake_graph)
+    monkeypatch.setattr(runner, "YiAlphaGraph", fake_graph)
     monkeypatch.setitem(runner.DEFAULT_CONFIG, "memory_enabled", True)
 
     runner._build_graph(risk_enabled=False)

@@ -12,11 +12,11 @@ from datetime import date
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
-from yiagents.agents.analysts.market_analyst import create_market_analyst
-from yiagents.agents.utils.agent_utils import build_instrument_context
-from yiagents.cli.models import AnalystType, AssetType
-from yiagents.cli.utils import filter_analysts_for_asset_type
-from yiagents.dataflows.symbol_utils import normalize_symbol, normalize_symbol_for_venue
+from yialpha.agents.analysts.market_analyst import create_market_analyst
+from yialpha.agents.utils.agent_utils import build_instrument_context
+from yialpha.cli.models import AnalystType, AssetType
+from yialpha.cli.utils import filter_analysts_for_asset_type
+from yialpha.dataflows.symbol_utils import normalize_symbol, normalize_symbol_for_venue
 
 
 class NormalizeSymbolForVenueTests(unittest.TestCase):
@@ -284,7 +284,7 @@ class MarketAnalystToolBindingTests(unittest.TestCase):
         explicitly waive the mandates whose tools price the wrong (Yahoo
         spot) market — otherwise the model receives directly contradictory
         instructions ("you must call X" + "X is not available")."""
-        from yiagents.agents.analysts.market_analyst import (
+        from yialpha.agents.analysts.market_analyst import (
             _PERP_HISTORICAL_NUDGE,
             _PERP_NUDGE,
         )

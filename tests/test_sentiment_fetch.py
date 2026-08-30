@@ -2,7 +2,7 @@
 
 ``_fetch_sentiment_sources`` fans the independent fetches (Yahoo news /
 StockTwits / Reddit, plus the crypto-only Binance Square block) across a
-thread pool when ``YIAGENTS_SENTIMENT_PARALLEL_FETCH`` is on, and runs them
+thread pool when ``YIALPHA_SENTIMENT_PARALLEL_FETCH`` is on, and runs them
 sequentially when off. Each block lands in a fixed slot, so the two paths
 must produce identical results -- this test pins that.
 
@@ -17,8 +17,8 @@ The fourth slot is the Binance Square crypto-sentiment block:
 
 import pytest
 
-import yiagents.agents.analysts.sentiment_analyst as sent
-from yiagents.dataflows.config import get_config, set_config
+import yialpha.agents.analysts.sentiment_analyst as sent
+from yialpha.dataflows.config import get_config, set_config
 
 
 class _Stub:
@@ -192,9 +192,9 @@ def test_default_flag_is_off(monkeypatch):
     # to today's sequential behaviour) unless the env var is set.
     import importlib
 
-    monkeypatch.delenv("YIAGENTS_SENTIMENT_PARALLEL_FETCH", raising=False)
+    monkeypatch.delenv("YIALPHA_SENTIMENT_PARALLEL_FETCH", raising=False)
     assert importlib.reload(sent)._SENTIMENT_PARALLEL_FETCH is False
-    monkeypatch.setenv("YIAGENTS_SENTIMENT_PARALLEL_FETCH", "true")
+    monkeypatch.setenv("YIALPHA_SENTIMENT_PARALLEL_FETCH", "true")
     assert importlib.reload(sent)._SENTIMENT_PARALLEL_FETCH is True
     importlib.reload(sent)  # restore module to its process-default state
 

@@ -17,7 +17,7 @@ from urllib.error import HTTPError
 
 import pytest
 
-from yiagents.dataflows import quality, stocktwits
+from yialpha.dataflows import quality, stocktwits
 
 
 def _raise(exc):

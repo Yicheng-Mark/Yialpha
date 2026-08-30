@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import pytest
 
-from yiagents.execution.bridge import pre_trade_risk_check
-from yiagents.execution.domain import Direction, Exchange, Offset, OrderRequest, OrderType
-from yiagents.risk.breaker import BreakerState
-from yiagents.risk.manager import RiskDecision
+from yialpha.execution.bridge import pre_trade_risk_check
+from yialpha.execution.domain import Direction, Exchange, Offset, OrderRequest, OrderType
+from yialpha.risk.breaker import BreakerState
+from yialpha.risk.manager import RiskDecision
 
 pytestmark = pytest.mark.unit
 

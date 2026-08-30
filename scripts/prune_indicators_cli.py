@@ -43,7 +43,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from yiagents.backtest.ic import (
+from yialpha.backtest.ic import (
     build_ic_report,
     consecutive_below_threshold,
     factor_turnover,

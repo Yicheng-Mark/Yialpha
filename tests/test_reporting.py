@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from yiagents.graph.trading_graph import YiAgentsGraph
-from yiagents.reporting import write_report_tree
+from yialpha.graph.trading_graph import YiAlphaGraph
+from yialpha.reporting import write_report_tree
 
 
 def _state():
@@ -51,7 +51,7 @@ def test_report_prefers_final_risk_adjusted_decision(tmp_path):
 @pytest.mark.unit
 def test_save_reports_explicit_path(tmp_path):
     # Unbound: with an explicit save_path, the method doesn't touch self/config.
-    out = YiAgentsGraph.save_reports(None, _state(), "AAPL", save_path=tmp_path)
+    out = YiAlphaGraph.save_reports(None, _state(), "AAPL", save_path=tmp_path)
     assert (tmp_path / "complete_report.md").exists()
     assert out == tmp_path / "complete_report.md"
 
@@ -59,7 +59,7 @@ def test_save_reports_explicit_path(tmp_path):
 @pytest.mark.unit
 def test_save_reports_defaults_under_results_dir(tmp_path):
     mock_self = SimpleNamespace(config={"results_dir": str(tmp_path)})
-    out = YiAgentsGraph.save_reports(mock_self, _state(), "AAPL")
+    out = YiAlphaGraph.save_reports(mock_self, _state(), "AAPL")
     assert out.exists()
     assert out.parent.parent.name == "reports"  # results_dir/reports/AAPL_<stamp>/...
     assert out.parent.name.startswith("AAPL_")

@@ -1,9 +1,9 @@
-"""Tests for yiagents/logging_config.setup_logging.
+"""Tests for yialpha/logging_config.setup_logging.
 
 These verify:
 - A RichHandler is installed on the root logger
 - The function is idempotent (no duplicate handlers)
-- YIAGENTS_LOG_LEVEL env var is respected
+- YIALPHA_LOG_LEVEL env var is respected
 - Third-party loggers are silenced to WARNING
 - Invalid level names raise ValueError
 """
@@ -14,7 +14,7 @@ import logging
 
 import pytest
 
-from yiagents.logging_config import setup_logging
+from yialpha.logging_config import setup_logging
 
 
 @pytest.fixture(autouse=True)
@@ -69,14 +69,14 @@ def test_explicit_level():
 
 
 def test_env_var_override(monkeypatch):
-    """YIAGENTS_LOG_LEVEL should be read when no explicit level is given."""
-    monkeypatch.setenv("YIAGENTS_LOG_LEVEL", "DEBUG")
+    """YIALPHA_LOG_LEVEL should be read when no explicit level is given."""
+    monkeypatch.setenv("YIALPHA_LOG_LEVEL", "DEBUG")
     setup_logging()
     assert logging.getLogger().level == logging.DEBUG
 
 
 def test_env_var_warning_level(monkeypatch):
-    monkeypatch.setenv("YIAGENTS_LOG_LEVEL", "WARNING")
+    monkeypatch.setenv("YIALPHA_LOG_LEVEL", "WARNING")
     setup_logging()
     assert logging.getLogger().level == logging.WARNING
 
@@ -107,18 +107,18 @@ def test_noisy_loggers_silenced():
 
 def test_invalid_level_raises():
     """A misspelled level should fail loudly."""
-    with pytest.raises(ValueError, match="Invalid YIAGENTS_LOG_LEVEL"):
+    with pytest.raises(ValueError, match="Invalid YIALPHA_LOG_LEVEL"):
         setup_logging("VERBSE")
 
 
 def test_invalid_env_level_raises(monkeypatch):
-    monkeypatch.setenv("YIAGENTS_LOG_LEVEL", "trce")
-    with pytest.raises(ValueError, match="Invalid YIAGENTS_LOG_LEVEL"):
+    monkeypatch.setenv("YIALPHA_LOG_LEVEL", "trce")
+    with pytest.raises(ValueError, match="Invalid YIALPHA_LOG_LEVEL"):
         setup_logging()
 
 
 def test_explicit_overrides_env(monkeypatch):
-    """Explicit level arg wins over YIAGENTS_LOG_LEVEL."""
-    monkeypatch.setenv("YIAGENTS_LOG_LEVEL", "WARNING")
+    """Explicit level arg wins over YIALPHA_LOG_LEVEL."""
+    monkeypatch.setenv("YIALPHA_LOG_LEVEL", "WARNING")
     setup_logging("ERROR")
     assert logging.getLogger().level == logging.ERROR

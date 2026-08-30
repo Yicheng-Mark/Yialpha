@@ -21,9 +21,9 @@ import pandas as pd
 import pytest
 from stockstats import wrap
 
-from yiagents.dataflows.feature_registry import DERIVED_FEATURES, compute_derived
-from yiagents.dataflows.indicator_catalog import INDICATORS
-from yiagents.dataflows.stockstats_utils import compute_indicator
+from yialpha.dataflows.feature_registry import DERIVED_FEATURES, compute_derived
+from yialpha.dataflows.indicator_catalog import INDICATORS
+from yialpha.dataflows.stockstats_utils import compute_indicator
 
 
 def _synthetic_ohlcv(rows: int = 400, capitalized: bool = False) -> pd.DataFrame:

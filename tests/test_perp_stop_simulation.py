@@ -26,7 +26,7 @@ import pandas as pd
 import pytest
 
 from tests.test_backtest_engine import FakeGraph
-from yiagents.backtest.engine import run_backtest
+from yialpha.backtest.engine import run_backtest
 
 
 def _flat(ticker, start, end, level: float = 100.0):

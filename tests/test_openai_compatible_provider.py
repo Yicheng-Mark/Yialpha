@@ -7,9 +7,9 @@ model name is accepted, and the env backend URL precedence (#978).
 
 import pytest
 
-from yiagents.llm_clients.api_key_env import get_api_key_env
-from yiagents.llm_clients.factory import create_llm_client
-from yiagents.llm_clients.validators import validate_model
+from yialpha.llm_clients.api_key_env import get_api_key_env
+from yialpha.llm_clients.factory import create_llm_client
+from yialpha.llm_clients.validators import validate_model
 
 # Note: assert by class NAME, not isinstance — other tests reload the
 # openai_client module, which would otherwise create a second class identity.
@@ -61,14 +61,14 @@ def test_any_model_accepted_no_forced_key():
     # The key env exists (read for keyed relays) but the provider is marked
     # key-optional, so the CLI never forces a prompt and keyless servers work.
     assert get_api_key_env("openai_compatible") == "OPENAI_COMPATIBLE_API_KEY"
-    from yiagents.llm_clients.openai_client import OPENAI_COMPATIBLE_PROVIDERS
+    from yialpha.llm_clients.openai_client import OPENAI_COMPATIBLE_PROVIDERS
     assert OPENAI_COMPATIBLE_PROVIDERS["openai_compatible"].key_optional is True
 
 
 @pytest.mark.unit
 def test_env_backend_url_precedence():
     # #978: explicit env URL wins over the menu/default regardless of provider source.
-    from yiagents.cli.utils import resolve_backend_url
+    from yialpha.cli.utils import resolve_backend_url
     assert resolve_backend_url("openai", "https://api.openai.com/v1", env_url="http://proxy/v1") == "http://proxy/v1"
     assert resolve_backend_url("openai", "https://api.openai.com/v1", env_url=None) == "https://api.openai.com/v1"
     assert resolve_backend_url("deepseek", None, None) == "https://api.deepseek.com"

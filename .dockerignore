@@ -33,7 +33,7 @@ eval_results
 htmlcov
 .mimosa
 analysis_output
-# tests/ is not needed at runtime (the wheel build only packages yiagents*),
+# tests/ is not needed at runtime (the wheel build only packages yialpha*),
 # and .venv-dev contains a full pytest/dev install.
 tests
 Dockerfile

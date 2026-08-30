@@ -17,7 +17,7 @@ _START = (datetime.now(UTC) - timedelta(days=130)).strftime("%Y-%m-%d")
 
 # noqa: E402 — module-level constant assignments (_TODAY/_START) precede this
 # import; reordering would break the timestamp-instantiation pattern.
-from yiagents.dataflows.binance import (  # noqa: E402
+from yialpha.dataflows.binance import (  # noqa: E402
     get_binance_basis,
     get_binance_funding_rate,
     get_binance_klines,

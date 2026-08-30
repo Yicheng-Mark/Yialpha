@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from yiagents.backtest.cache import DecisionCache
+from yialpha.backtest.cache import DecisionCache
 
 
 def test_legacy_cache_entry_is_miss_and_evicted(tmp_path):

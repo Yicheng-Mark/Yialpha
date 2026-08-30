@@ -3,7 +3,7 @@
 
   var theme = null;
   try {
-    theme = localStorage.getItem("yiagents_theme");
+    theme = localStorage.getItem("yialpha_theme");
   } catch (_) {
     // Storage may be unavailable in hardened/private browser contexts.
   }

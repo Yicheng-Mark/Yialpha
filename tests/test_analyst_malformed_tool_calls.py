@@ -20,10 +20,10 @@ import logging
 import pytest
 from langchain_core.messages import AIMessage
 
-from yiagents.agents.analysts.fundamentals_analyst import create_fundamentals_analyst
-from yiagents.agents.analysts.market_analyst import create_market_analyst
-from yiagents.agents.analysts.news_analyst import create_news_analyst
-from yiagents.agents.utils.agent_utils import (
+from yialpha.agents.analysts.fundamentals_analyst import create_fundamentals_analyst
+from yialpha.agents.analysts.market_analyst import create_market_analyst
+from yialpha.agents.analysts.news_analyst import create_news_analyst
+from yialpha.agents.utils.agent_utils import (
     MALFORMED_TOOL_CALLS_SENTINEL,
     final_analyst_report,
 )
@@ -79,7 +79,7 @@ class TestFinalAnalystReportHelper:
         msg = AIMessage(content="", invalid_tool_calls=[
             {"name": "get_news", "args": "{bad json", "error": "parsing"},
         ])
-        with caplog.at_level(logging.WARNING, logger="yiagents.agents.utils.agent_utils"):
+        with caplog.at_level(logging.WARNING, logger="yialpha.agents.utils.agent_utils"):
             out = final_analyst_report(msg, agent_name="Market Analyst", ticker="NVDA")
         assert out == MALFORMED_TOOL_CALLS_SENTINEL
         assert any(
@@ -92,7 +92,7 @@ class TestFinalAnalystReportHelper:
             content="partial but real text",
             invalid_tool_calls=[{"name": "t", "args": "{", "error": "e"}],
         )
-        with caplog.at_level(logging.WARNING, logger="yiagents.agents.utils.agent_utils"):
+        with caplog.at_level(logging.WARNING, logger="yialpha.agents.utils.agent_utils"):
             out = final_analyst_report(msg, agent_name="News Analyst", ticker="TSLA")
         assert out == "partial but real text"
         assert any(r.levelno == logging.WARNING for r in caplog.records)
@@ -123,7 +123,7 @@ class TestAnalystsEmitSentinel:
     def test_sentinel_written_to_state(self, factory, report_key, agent_name, caplog):
         llm = _ScriptedLLM(_invalid_tool_message())
         node = factory(llm)
-        with caplog.at_level(logging.WARNING, logger="yiagents.agents.utils.agent_utils"):
+        with caplog.at_level(logging.WARNING, logger="yialpha.agents.utils.agent_utils"):
             update = node(_state("AMD"))
         assert update[report_key] == MALFORMED_TOOL_CALLS_SENTINEL
         assert any(
