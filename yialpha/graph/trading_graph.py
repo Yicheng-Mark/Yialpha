@@ -796,8 +796,13 @@ class YiAlphaGraph:
         except Exception as exc:  # noqa: BLE001 -- ticket must never break a run
             logger.warning("candidate ticket build failed for %s: %s", ticker, exc)
         if ticket is not None:
+            bridge_block = self._link_ticket_to_ledger(
+                ticket, final_state, ticker, str(trade_date), asset_type, close
+            )
             final_state["execution_ticket"] = ticket.model_dump()
             overlay += render_ticket_lines(ticket)
+            if bridge_block:
+                overlay += bridge_block
         overlay += (
             f"- **Drawdown Regime**: {decision.breaker.regime}"
             f" ({decision.breaker.current_drawdown:.1%})\n"
@@ -818,6 +823,145 @@ class YiAlphaGraph:
             else "risk_overlay_no_price"
         )
         return final_state
+
+    def _link_ticket_to_ledger(
+        self,
+        ticket,
+        final_state,
+        ticker: str,
+        trade_date: str,
+        asset_type: str,
+        close: float | None,
+    ) -> str:
+        """V2.1 record stage: link the ticket into the ledger + bridge targets.
+
+        Two flag-gated, fail-soft steps:
+
+        1. With a ledger run context bound (``prediction_ledger`` on): fill
+           the ticket's linkage keys (``run_id`` / ``evidence_ids`` /
+           ``prediction_ids``) and mirror the ticket into the central ledger
+           DB so the outcome computer can join decision-time cost legs.
+        2. For stock perps with ``stock_perp_fair_value`` on: convert the
+           PM's USD underlying target into a USDT contract target through
+           the deterministic Fair Value Bridge (live-only USDT/USD from the
+           inverted Binance spot USDCUSDT price), record the conversion
+           chain on the ticket, and return a markdown disclosure block for
+           the overlay. A missing FX rate records the gap and a shadow
+           DEGRADED_CRITICAL verdict — enforcement arrives with the V2.4
+           enforced mode.
+
+        Returns "" (no overlay addition) whenever a gate is closed or a leg
+        is genuinely absent; an exception anywhere is logged and swallowed —
+        the record stage must never break the run it is describing.
+        """
+        from yialpha.ledger.run_context import current_ledger_run_context
+
+        context = current_ledger_run_context()
+        if context is not None and context.run_id:
+            try:
+                from yialpha.ledger.evidence import evidence_ids_for_run
+                from yialpha.ledger.predictions import predictions_for_run
+                from yialpha.ledger.tickets_mirror import attach_ticket
+
+                ticket.run_id = context.run_id
+                ticket.evidence_ids = evidence_ids_for_run(context.run_id)
+                ticket.prediction_ids = [
+                    record.prediction_id
+                    for record in predictions_for_run(context.run_id)
+                ]
+                attach_ticket(
+                    ticket_id=ticket.ticket_id,
+                    decision_id=ticket.decision_id,
+                    run_id=context.run_id,
+                    payload=ticket.model_dump(),
+                    ticket_version=ticket.ticket_version,
+                )
+            except Exception:  # noqa: BLE001 -- record stage must never break a run
+                logger.warning(
+                    "ticket ledger linkage failed for %s on %s",
+                    ticker,
+                    trade_date,
+                    exc_info=True,
+                )
+        if asset_type != "crypto_perp" or not self.config.get("stock_perp_fair_value"):
+            return ""
+        try:
+            from yialpha.graph import routing as routing_module
+            from yialpha.perp import quote_fx as quote_fx_module
+            from yialpha.perp.fair_value import fair_value_bridge, render_bridge_block
+
+            instrument_class = (
+                context.instrument_class if context is not None else None
+            ) or routing_module.instrument_class(asset_type, ticker)
+            if instrument_class != "stock_perp":
+                return ""
+            pm_fields = final_state.get("pm_decision_fields") or {}
+
+            def _as_float(value) -> float | None:
+                try:
+                    return float(value) if value is not None else None
+                except (TypeError, ValueError):
+                    return None
+
+            underlying_target = _as_float(pm_fields.get("underlying_price_target"))
+            if (
+                underlying_target is None
+                and str(pm_fields.get("price_target_currency") or "").upper() == "USD"
+            ):
+                # PM quoted the target on the underlying in USD directly.
+                underlying_target = _as_float(pm_fields.get("price_target"))
+            if underlying_target is None:
+                return ""
+            fx = quote_fx_module.usdt_usd_as_of(trade_date)
+            mark_close = self._latest_mark_close(ticker, trade_date)
+            current_basis = (
+                (close - mark_close) / mark_close
+                if close is not None and mark_close
+                else None
+            )
+            result = fair_value_bridge(
+                underlying_target,
+                fx.rate if fx is not None else None,
+                current_basis,
+            )
+            ticket.underlying_target = underlying_target
+            ticket.price_target_basis = "last"
+            if result.contract_target_usdt is not None:
+                ticket.contract_target = result.contract_target_usdt
+            if fx is not None:
+                ticket.quote_fx = {
+                    "rate": fx.rate,
+                    "source": fx.source,
+                    "available_at": fx.available_at,
+                    "replayability": fx.replayability,
+                }
+            if close is not None or mark_close is not None:
+                ticket.basis_snapshot = {
+                    "last_close": close,
+                    "mark_close": mark_close,
+                    "last_vs_mark": current_basis,
+                }
+            block = (
+                "\n"
+                + quote_fx_module.render_fx_line(fx)
+                + "\n\n"
+                + render_bridge_block(result)
+                + "\n"
+            )
+            if fx is None:
+                block += (
+                    "- ⚠ shadow verdict: DEGRADED_CRITICAL / NO_TRADE recorded "
+                    "(enforcement arrives with the V2.4 enforced mode)\n"
+                )
+            return block
+        except Exception:  # noqa: BLE001 -- record stage must never break a run
+            logger.warning(
+                "fair-value bridge wiring failed for %s on %s",
+                ticker,
+                trade_date,
+                exc_info=True,
+            )
+            return ""
 
     @staticmethod
     def _render_perp_ticket(
@@ -1323,6 +1467,49 @@ class YiAlphaGraph:
 
         run_scope.ensure_run_scope()
 
+        # V2.1 record stage: bind the ledger run context (one run_id for the
+        # whole run, inherited by every node task) and register the run row.
+        # Flag-gated — off means the entire ledger pipeline (evidence rows,
+        # blind predictions, ticket linkage/mirror) is a no-op and the run's
+        # state/log bytes stay identical to the pre-V2.1 behavior.
+        ledger_run_id: str | None = None
+        if self.config.get("prediction_ledger"):
+            try:
+                from yialpha.agents.utils import prediction_tools as _prediction_tools
+                from yialpha.graph import routing as _routing
+                from yialpha.ledger import run_context as _ledger_run_context
+                from yialpha.ledger.evidence import register_run
+                from yialpha.tickets import new_run_id
+
+                ledger_run_id = new_run_id()
+                _instrument_class = _routing.instrument_class(asset_type, company_name)
+                _ledger_run_context.set_ledger_run_context(
+                    ledger_run_id,
+                    company_name,
+                    asset_type,
+                    instrument_class=_instrument_class,
+                    analysis_as_of=str(trade_date),
+                )
+                register_run(
+                    run_id=ledger_run_id,
+                    ticker=company_name,
+                    asset_type=asset_type,
+                    instrument_class=_instrument_class,
+                    analysis_as_of=str(trade_date),
+                )
+                # Bind the prediction capture registry in this parent context
+                # so ToolNode tasks share one buffer per run (same ContextVar
+                # contract as the quality ledger above).
+                _prediction_tools.ensure_prediction_capture_scope()
+            except Exception:  # noqa: BLE001 -- record stage must never break a run
+                logger.warning(
+                    "ledger run-context binding failed for %s; recording disabled "
+                    "for this run",
+                    company_name,
+                    exc_info=True,
+                )
+                ledger_run_id = None
+
         try:
             # Initialize state — inject memory log context for PM and the
             # deterministically resolved instrument identity for all agents.
@@ -1381,6 +1568,11 @@ class YiAlphaGraph:
                 asset_type=asset_type,
             )
 
+            # V2.1: the ledger run id rides on state — key presence (not a
+            # null value) is the "this run was recorded" signal downstream.
+            if ledger_run_id:
+                final_state["run_id"] = ledger_run_id
+
             # Store current state for reflection.
             self.curr_state = final_state
 
@@ -1428,6 +1620,12 @@ class YiAlphaGraph:
             # same process). The batch runner copies a fresh context per worker,
             # so this is belt-and-braces for non-batch callers.
             set_analysis_date(None)
+            # Drop the ledger run context with it: a later run in the same
+            # context must not attribute evidence/predictions/tickets to this
+            # finished run.
+            from yialpha.ledger import run_context as _ledger_run_context_final
+
+            _ledger_run_context_final.reset_ledger_run_context()
 
     def _log_state(self, trade_date, final_state):
         """Log the final state to a JSON file.
@@ -1534,6 +1732,11 @@ class YiAlphaGraph:
             "pm_decision_fields": final_state.get("pm_decision_fields") or {},
             "execution_ticket": final_state.get("execution_ticket"),
         }
+        # V2.1: ledger run id — present only when the record-stage pipeline
+        # ran (prediction_ledger on). Key presence (not a null value) keeps
+        # flag-off logs byte-identical to the pre-V2.1 shape.
+        if final_state.get("run_id"):
+            entry["run_id"] = final_state["run_id"]
         # Write-and-drop: nothing downstream reads PAST dates from this dict
         # (the on-disk JSON below is the durable record), but a multi-date
         # backtest or a long-lived web process would otherwise accumulate

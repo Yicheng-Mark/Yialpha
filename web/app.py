@@ -219,6 +219,27 @@ def api_accuracy():
     return store.load_accuracy_report()
 
 
+@app.get("/api/runs/{run_id}/predictions")
+def api_run_predictions(run_id: str):
+    """Blind analyst predictions recorded for one ledger run (read-only)."""
+    payload = store.load_run_predictions(run_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"no recorded run {run_id}")
+    return payload
+
+
+@app.get("/api/outcomes")
+def api_outcomes(limit: int = 500):
+    """Forward-outcome rows with net-return attribution (read-only ledger)."""
+    return store.load_outcomes(limit=max(1, min(limit, 2000)))
+
+
+@app.get("/api/calibration")
+def api_calibration():
+    """Prediction calibration scoreboard (serves the ledger read-only)."""
+    return store.load_calibration()
+
+
 @app.get("/api/health")
 def api_health():
     # sync def → Starlette threadpools it; the yfinance/DeepSeek probes block

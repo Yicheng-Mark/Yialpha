@@ -35,12 +35,23 @@ from yialpha.agents.utils.agent_utils import (
     get_volume_features,
     web_search_market,
 )
+from yialpha.agents.utils.prediction_tools import (
+    begin_prediction_capture,
+    make_submit_prediction_tool,
+    settle_prediction_capture,
+)
 from yialpha.agents.utils.prompt_builder import build_collaborator_prompt, build_fincot_prompt
 from yialpha.dataflows import indicator_catalog
 from yialpha.dataflows.config import get_config
 from yialpha.dataflows.market_regime import format_regime_context
 from yialpha.dataflows.symbol_utils import is_a_stock
 from yialpha.dataflows.utils import is_historical_date
+from yialpha.ledger.models import (
+    REPLAYABILITY_LIVE_ONLY,
+    REPLAYABILITY_PIT_REPLAYABLE,
+    SCOPE_CONTRACT,
+)
+from yialpha.ledger.run_context import record_evidence_block
 
 logger = logging.getLogger(__name__)
 
@@ -502,6 +513,21 @@ def create_market_analyst(llm):
         if bind_web_search:
             tools.append(web_search_market)
 
+        # V2.1 record stage: blind-prediction capture (config: prediction_ledger,
+        # perp runs only — the market analyst forecasts the CONTRACT). The
+        # tool's description is the only prompt surface; flag off / non-perp
+        # runs keep the tool list — and therefore the tool_names prompt —
+        # byte-identical to the baseline. begin is a no-op without a bound
+        # ledger run context (the tool then answers with an explanatory
+        # string instead of raising).
+        predictions_armed = (
+            bool(get_config().get("prediction_ledger"))
+            and state.get("asset_type") == "crypto_perp"
+        )
+        if predictions_armed:
+            tools.append(make_submit_prediction_tool(ticker))
+            begin_prediction_capture("market", ticker, SCOPE_CONTRACT)
+
         system_message = _system_message()
 
         # Composite regime context (config: regime_context, default ON;
@@ -606,6 +632,25 @@ def create_market_analyst(llm):
                     "model output. Cite it like tool data; the tools remain "
                     "available for drill-down beyond these figures.)"
                 )
+                # V2.1 record stage: the injected block becomes one evidence
+                # row (no-op without a run context / flag off; payload-hash
+                # dedupe collapses tool-loop re-injections). Replayability is
+                # content-based: a live bundle mixes PIT series with live
+                # snapshots (depth/ADL/premium) so it is LIVE_ONLY, while a
+                # historical bundle carries only date-bounded klines and is
+                # PIT_REPLAYABLE.
+                record_evidence_block(
+                    "perp_market_bundle",
+                    "binance_perp",
+                    ticker,
+                    SCOPE_CONTRACT,
+                    rendered_block,
+                    replayability=(
+                        REPLAYABILITY_PIT_REPLAYABLE
+                        if historical
+                        else REPLAYABILITY_LIVE_ONLY
+                    ),
+                )
 
         # A-share market nudge uses the SAME double gate (flag AND is_a_stock)
         # as the tool extension above, so the prompt only changes when the
@@ -638,6 +683,13 @@ def create_market_analyst(llm):
         )
 
         result = chain.invoke(llm_messages)
+
+        # Blind-prediction settlement, FINAL loop round only (no pending tool
+        # calls): flushing mid-loop could write rows whose evidence chain then
+        # grows on later rounds, colliding with the rows' immutability check.
+        # An empty buffer records the no-call quality sentinel instead.
+        if predictions_armed and not getattr(result, "tool_calls", None):
+            settle_prediction_capture("market", ticker)
 
         # Shared final-report extraction: "" while tool calls are pending,
         # content on the final answer, and a visible sentinel (plus WARNING)

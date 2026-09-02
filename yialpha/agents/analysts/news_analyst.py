@@ -15,11 +15,22 @@ from yialpha.agents.utils.agent_utils import (
     get_prediction_markets,
     web_search,
 )
+from yialpha.agents.utils.prediction_tools import (
+    begin_prediction_capture,
+    make_submit_prediction_tool,
+    settle_prediction_capture,
+)
 from yialpha.agents.utils.prompt_builder import build_collaborator_prompt
 from yialpha.dataflows.binance import stock_perp_underlying
 from yialpha.dataflows.config import get_config, submit_with_context
 from yialpha.dataflows.symbol_utils import is_a_stock
 from yialpha.dataflows.utils import is_historical_date
+from yialpha.ledger.models import (
+    REPLAYABILITY_LIVE_ONLY,
+    SCOPE_CONTRACT,
+    SCOPE_UNDERLYING,
+)
+from yialpha.ledger.run_context import record_evidence_block
 
 logger = logging.getLogger(__name__)
 
@@ -323,6 +334,27 @@ def create_news_analyst(llm):
                 fut_contract = submit_with_context(pool, _contract_angle)
                 company_block = fut_company.result()
                 perp_block = fut_contract.result()
+            # V2.1 record stage: one evidence row per injected angle (no-op
+            # without a run context / flag off; payload-hash dedupe collapses
+            # tool-loop re-injections). Both digests are current-retrieval
+            # views — the vendor chain has no archive and Tavily no as-of
+            # boundary — so both are conservatively LIVE_ONLY.
+            record_evidence_block(
+                "news_company_digest",
+                "news_data",
+                underlying,
+                SCOPE_UNDERLYING,
+                company_block,
+                replayability=REPLAYABILITY_LIVE_ONLY,
+            )
+            record_evidence_block(
+                "news_contract_digest",
+                "news_data",
+                ticker,
+                SCOPE_CONTRACT,
+                perp_block,
+                replayability=REPLAYABILITY_LIVE_ONLY,
+            )
             stock_perp_instruction = _STOCK_PERP_INSTRUCTION
             evidence_message = _render_evidence_message(
                 _stock_perp_news_section(
@@ -333,6 +365,24 @@ def create_news_analyst(llm):
                     company_block=company_block,
                     perp_block=perp_block,
                 )
+            )
+
+        # V2.1 record stage: blind-prediction capture (config: prediction_ledger,
+        # perp runs only). The news analyst forecasts the UNDERLYING equity on
+        # a tokenized-stock perp and the contract itself on a pure-crypto
+        # perp. The tool's description is the only prompt surface; flag off /
+        # non-perp runs keep the tool list — and therefore the tool_names
+        # prompt — byte-identical to the baseline.
+        predictions_armed = (
+            bool(get_config().get("prediction_ledger")) and asset_type == "crypto_perp"
+        )
+        prediction_instrument = underlying or ticker
+        if predictions_armed:
+            tools.append(make_submit_prediction_tool(prediction_instrument))
+            begin_prediction_capture(
+                "news",
+                prediction_instrument,
+                SCOPE_UNDERLYING if underlying else SCOPE_CONTRACT,
             )
 
         system_message = (
@@ -371,6 +421,12 @@ def create_news_analyst(llm):
             else state["messages"]
         )
         result = chain.invoke(llm_messages)
+
+        # Blind-prediction settlement, FINAL loop round only (no pending tool
+        # calls — see the market analyst's note): flush captured entries or
+        # record the no-call quality sentinel. Fail-soft either way.
+        if predictions_armed and not getattr(result, "tool_calls", None):
+            settle_prediction_capture("news", prediction_instrument)
 
         # Shared final-report extraction: "" while tool calls are pending,
         # content on the final answer, and a visible sentinel (plus WARNING)

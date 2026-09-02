@@ -1657,6 +1657,64 @@ def verify_history_cmd(
     console.print(f"[dim]Markdown: {md_path}[/dim]")
 
 
+@app.command("scoreboard")
+def scoreboard_cmd(
+    results_dir: str = typer.Option(
+        "", "--results-dir",
+        help="Where to write scoreboard/ (default: results_dir from config).",
+    ),
+    limit: int = typer.Option(
+        200, "--limit",
+        help="Max due predictions to score in this pass.",
+    ),
+):
+    """Compute due ledger outcomes and render the calibration scoreboard.
+
+    Runs the forward outcome writer over every due-and-unscored ledger
+    prediction (perp klines + funding history + ticket-cost attribution),
+    then aggregates the complete outcomes into per-slice calibration metrics
+    (directional accuracy, Brier, log loss, ECE) and writes
+    ``<results_dir>/scoreboard/scoreboard.{json,md}`` (atomic tmp+replace).
+    Cells below the V3 sample threshold are display only — no weight
+    adjustment anywhere.
+    """
+    import json as _json
+    from datetime import UTC as _UTC, datetime as _datetime
+
+    from yialpha.ledger.outcome_compute import compute_outcomes as _compute_outcomes
+    from yialpha.ledger.scoreboard import (
+        build_scoreboard as _build_scoreboard,
+        render_scoreboard_markdown as _render_scoreboard_markdown,
+    )
+
+    report = _compute_outcomes(
+        _datetime.now(_UTC).isoformat(timespec="seconds"), limit=limit
+    )
+    board = _build_scoreboard()
+    markdown = _render_scoreboard_markdown(board)
+
+    root = Path(results_dir) if results_dir else Path(str(DEFAULT_CONFIG["results_dir"]))
+    out_dir = root / "scoreboard"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "scoreboard.json"
+    md_path = out_dir / "scoreboard.md"
+    for path, text in (
+        (json_path, _json.dumps(board, indent=2, ensure_ascii=False)),
+        (md_path, markdown),
+    ):
+        tmp_path = path.with_name(path.name + ".tmp")
+        tmp_path.write_text(text, encoding="utf-8")
+        tmp_path.replace(path)
+
+    console.print(markdown)
+    console.print(
+        f"Outcomes: {report.considered} considered | {report.completed} complete | "
+        f"{report.incomplete} incomplete | {report.failed} failed"
+    )
+    console.print(f"[dim]JSON: {json_path}[/dim]")
+    console.print(f"[dim]Markdown: {md_path}[/dim]")
+
+
 @app.command("memory-resolve")
 def memory_resolve_cmd(
     tickers: list[str] = typer.Option(

@@ -216,6 +216,13 @@ class PortfolioDecision(BaseModel):
     ``evidence_coverage``. They feed the ExecutionTicket and the V2.1
     attribution ledger; a model that omits them keeps rendering byte-identical
     to the pre-V2 markdown.
+
+    V2.1 additions (all optional, additive — no version bump): the
+    currency/basis qualifiers and the USD underlying target that feed the
+    stock-perp Fair Value Bridge (``price_target_currency``,
+    ``price_target_basis``, ``underlying_price_target``,
+    ``underlying_target_currency``). Renderers ignore them entirely, so a
+    decision without them stays byte-identical to the pre-V2.1 markdown.
     """
 
     rating: PortfolioRating = Field(
@@ -288,14 +295,87 @@ class PortfolioDecision(BaseModel):
             "carried NO_DATA placeholders."
         ),
     )
+    price_target_currency: str | None = Field(
+        default=None,
+        description=(
+            "Optional currency of price_target: exactly one of USD or USDT "
+            "(case-insensitive). Only meaningful when the instrument's quote "
+            "currency differs from the target's."
+        ),
+    )
+    price_target_basis: str | None = Field(
+        default=None,
+        description=(
+            "Optional price basis of the target: exactly one of 'last' "
+            "(last-traded price) or 'mark' (mark price), case-insensitive."
+        ),
+    )
+    underlying_price_target: float | None = Field(
+        default=None,
+        description=(
+            "Optional price target on the UNDERLYING asset, in USD — the leg "
+            "the perp Fair Value Bridge converts into a USDT contract target. "
+            "Omit for instruments whose target is already single-currency."
+        ),
+    )
+    underlying_target_currency: str | None = Field(
+        default=None,
+        description=(
+            "Optional currency of underlying_price_target: USD only "
+            "(case-insensitive). The bridge accepts no other underlying unit."
+        ),
+    )
 
     @field_validator(
         "price_target", "confidence", "expected_return", "evidence_coverage",
+        "underlying_price_target",
         mode="before",
     )
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
+
+    @field_validator("price_target_currency")
+    @classmethod
+    def _price_target_currency_upper(cls, v: str | None) -> str | None:
+        """Normalize case; only USD / USDT (case-insensitive) are accepted."""
+        if v is None:
+            return v
+        normalized = v.strip().upper()
+        if normalized not in ("USD", "USDT"):
+            raise ValueError(
+                f"price_target_currency must be one of USD, USDT "
+                f"(case-insensitive), got {v!r}"
+            )
+        return normalized
+
+    @field_validator("underlying_target_currency")
+    @classmethod
+    def _underlying_target_currency_upper(cls, v: str | None) -> str | None:
+        """Normalize case; the underlying target leg is USD-denominated only."""
+        if v is None:
+            return v
+        normalized = v.strip().upper()
+        if normalized != "USD":
+            raise ValueError(
+                f"underlying_target_currency must be USD (case-insensitive), "
+                f"got {v!r}"
+            )
+        return normalized
+
+    @field_validator("price_target_basis")
+    @classmethod
+    def _price_target_basis_lower(cls, v: str | None) -> str | None:
+        """Normalize case; only last / mark (case-insensitive) are accepted."""
+        if v is None:
+            return v
+        normalized = v.strip().lower()
+        if normalized not in ("last", "mark"):
+            raise ValueError(
+                f"price_target_basis must be 'last' or 'mark' "
+                f"(case-insensitive), got {v!r}"
+            )
+        return normalized
 
 
 def render_pm_decision(decision: PortfolioDecision) -> str:

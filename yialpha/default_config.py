@@ -213,6 +213,13 @@ _ENV_OVERRIDES = {
     # indicator_ic_context comment in DEFAULT_CONFIG). Default off keeps the
     # prompt byte-equivalent to the A/B baseline.
     "YIALPHA_INDICATOR_IC_CONTEXT":         "indicator_ic_context",
+    # V2.1 Measurability (record/shadow stage): persistent instrument
+    # registry, blind-prediction ledger, stock-perp fair-value bridge. All
+    # three record and disclose without changing legacy decisions; see the
+    # matching comments in DEFAULT_CONFIG.
+    "YIALPHA_INSTRUMENT_REGISTRY":          "instrument_registry",
+    "YIALPHA_PREDICTION_LEDGER":            "prediction_ledger",
+    "YIALPHA_STOCK_PERP_FAIR_VALUE":        "stock_perp_fair_value",
 }
 
 
@@ -439,6 +446,37 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # rows. Set false (or pass summary=false per call) for the raw daily
     # CSV, subject to the output cap.
     "binance_vision_summary": True,
+    # --- V2.1 Measurability (record/shadow; perp runs only) --------------------
+    # Persistent instrument registry (yialpha.instruments.registry). ON by
+    # default: every exchangeInfo warm snapshots ALL USDT-M symbols
+    # (underlyingType, filters, onboard dates) into the central ledger DB, so
+    # perp classification (stock_perp / pure_crypto_perp / unknown_perp) is
+    # evidence-based, point-in-time (available_at <= analysis_as_of) and
+    # survives restarts. Record stage: an unclassifiable perp becomes
+    # unknown_perp with disclosure but does NOT yet veto the ticket (that
+    # enforcement arrives with the V2.4 enforced mode). Set false to keep the
+    # pre-V2.1 in-memory classification only (byte-equivalent).
+    "instrument_registry": True,
+    # Blind analyst predictions (yialpha.ledger.predictions). ON by default:
+    # the submit_prediction tool is appended to the four analysts' toolkits
+    # on crypto_perp runs ONLY, filing one immutable, pre-debate,
+    # multi-horizon forecast set per analyst per run into the prediction
+    # ledger. Record stage: predictions never influence decisions. Set false
+    # for byte-equivalent tool lists.
+    "prediction_ledger": True,
+    # Stock-perp fair-value bridge (yialpha.perp.fair_value). ON by default:
+    # converts a USD underlying target into a USDT contract target via
+    # USDT/USD (inverted Binance spot USDCUSDT price) plus expected basis,
+    # recording the full conversion chain on the ticket. Record stage: a
+    # missing FX rate records a shadow DEGRADED_CRITICAL verdict without
+    # vetoing. Set false to disable the bridge entirely.
+    "stock_perp_fair_value": True,
+    # Central SQLite ledger DB (env YIALPHA_LEDGER_DB). One append-first
+    # database holds instrument snapshots, run evidence, blind predictions,
+    # outcomes and ticket mirrors (V2.4 adds positions/portfolio snapshots).
+    "ledger_db_path": os.getenv(
+        "YIALPHA_LEDGER_DB", os.path.join(_YIALPHA_HOME, "ledger", "portfolio.db")
+    ),
     # Phase 4: global kill switch (env: YIALPHA_KILL_SWITCH). Halt = no
     # new orders submitted by the browser broker; read live at order time.
     "kill_switch": False,

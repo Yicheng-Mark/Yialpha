@@ -18,6 +18,15 @@ session calendar, perp onboard date with as-of listing classification).
 Everything is computed from the warmed exchangeInfo snapshot (or the static
 seed) — describe_instrument NEVER fetches, so every entrance stays
 network-free and deterministic.
+
+V2.1 (record stage): when the ``instrument_registry`` config flag is on, the
+perp path additionally consults the persistent point-in-time registry
+(:mod:`yialpha.instruments.registry`, populated by the exchangeInfo warm
+hook). Persisted exchangeInfo evidence beats the in-memory warm/seed sets,
+and a symbol the warm/seed path would label pure-crypto ONLY by default
+(warm failed, base not in seed) is honestly reported as ``"unknown_perp"``
+instead of a fabricated classification. With the flag OFF the behavior is
+byte-identical to the pre-registry predicate.
 """
 from __future__ import annotations
 
@@ -28,18 +37,39 @@ from yialpha.dataflows.binance import (
     equity_perp_listing_info,
     stock_perp_underlying,
 )
+from yialpha.dataflows.config import get_config
+from yialpha.instruments.registry import (
+    SOURCE_EXCHANGEINFO,
+    SOURCE_REGISTRY_EMPTY,
+    classify_perp,
+)
+
+# Session calendars. Pure-crypto contracts trade continuously; a
+# tokenized-stock perp follows Binance's PUBLISHED TradFi sessions (PR5
+# corrected the old "trades 24/7" assumption), and its filings/earnings land
+# on the US session calendar; plain equities follow their listing exchange.
+# V2.1: the canonical definitions live in yialpha.instruments.sessions;
+# imported here so this module keeps re-exporting the same names for every
+# existing ``from yialpha.graph.routing import SESSION_*`` importer.
+from yialpha.instruments.sessions import (
+    SESSION_BINANCE_TRADFI,
+    SESSION_CONTINUOUS,
+    SESSION_EXCHANGE,
+)
 
 #: The crypto asset-type family (CLI ``AssetType`` values as plain strings —
 #: the graph layer threads asset_type as str, not the CLI enum).
 CRYPTO_FAMILY = frozenset({"crypto", "crypto_spot", "crypto_perp"})
 
-#: Session calendars. Pure-crypto contracts trade continuously; a
-#: tokenized-stock perp follows Binance's PUBLISHED TradFi sessions (PR5
-#: corrected the old "trades 24/7" assumption), and its filings/earnings land
-#: on the US session calendar; plain equities follow their listing exchange.
-SESSION_CONTINUOUS = "continuous_24_7"
-SESSION_BINANCE_TRADFI = "binance_published_tradfi_sessions"
-SESSION_EXCHANGE = "listing_exchange_sessions"
+#: An unresolvable perpetual: no registry evidence and no positive warm/seed
+#: classification (or an explicitly unsupported contract type, e.g. a
+#: commodity / non-US-equity perp). Never treated as having fundamentals.
+UNKNOWN_PERP = "unknown_perp"
+
+
+def _instrument_registry_enabled() -> bool:
+    """True when the V2.1 instrument registry consult is switched on."""
+    return bool(get_config().get("instrument_registry"))
 
 
 def instrument_class(asset_type: str | None, ticker: str) -> str:
@@ -47,19 +77,47 @@ def instrument_class(asset_type: str | None, ticker: str) -> str:
 
     Returns one of ``"equity"`` (plain stock), ``"crypto_spot"`` (spot
     crypto, incl. the legacy auto-detected ``crypto`` mode), ``"stock_perp"``
-    (Binance tokenized-stock USDT-M perpetual, e.g. MUUSDT → Micron) or
-    ``"pure_crypto_perp"`` (a pure-crypto perpetual, e.g. BTCUSDT).
-    ``stock_perp_underlying`` resolves against the warmed exchangeInfo
-    EQUITY listing with the static seed fallback — no network here.
+    (Binance tokenized-stock USDT-M perpetual, e.g. MUUSDT → Micron),
+    ``"pure_crypto_perp"`` (a pure-crypto perpetual, e.g. BTCUSDT), or —
+    only when the ``instrument_registry`` flag is ON — ``"unknown_perp"``
+    (an unresolvable or explicitly unsupported contract, e.g. a commodity or
+    non-US-equity perp). ``stock_perp_underlying`` resolves against the
+    warmed exchangeInfo EQUITY listing with the static seed fallback — no
+    network here.
+
+    Registry consult (flag ON, perp path only): the lookup key is the same
+    normalized symbol convention the base matching uses — compact uppercase
+    (``MU-USDT`` → ``MUUSDT``), with a USDC-quoted input probing its USDT
+    twin (:func:`yialpha.instruments.registry.classify_perp` owns the exact
+    rule). Persisted ``binance_exchangeinfo`` evidence beats the warm/seed
+    answer; with no registry knowledge a POSITIVE warm/seed classification
+    stands (no regression for seed/historical-replay symbols), while a
+    pure-crypto-by-default answer (warm failed AND base not in seed) is
+    reported as ``"unknown_perp"`` instead of a fabricated class. Flag OFF:
+    byte-identical to the legacy predicate.
     """
     asset = str(asset_type or "stock")
     if asset not in CRYPTO_FAMILY:
         return "equity"
     if asset in ("crypto", "crypto_spot"):
         return "crypto_spot"
-    if stock_perp_underlying(ticker):
-        return "stock_perp"
-    return "pure_crypto_perp"
+    warm_answer = "stock_perp" if stock_perp_underlying(ticker) else "pure_crypto_perp"
+    if not _instrument_registry_enabled():
+        return warm_answer
+    record = classify_perp(ticker)
+    if record.classification_source == SOURCE_EXCHANGEINFO:
+        # Persisted exchangeInfo evidence beats the in-memory warm/seed sets
+        # — including an "unknown_perp" for unsupported contract types.
+        return record.instrument_class
+    if record.classification_source == SOURCE_REGISTRY_EMPTY:
+        # No registry knowledge: keep a positive classification; a
+        # pure-by-default answer is honestly downgraded to unknown.
+        if warm_answer == "stock_perp":
+            return warm_answer
+        return UNKNOWN_PERP
+    # Future source tiers (registry/warm_cache/static_seed rows) do not
+    # override the warm answer at the record stage.
+    return warm_answer
 
 
 #: High-confidence ETF bases among the equity universe (tokenized perps and
@@ -104,8 +162,10 @@ def fundamentals_applicable(asset_type: str | None, ticker: str) -> bool:
     Equities always qualify; a crypto-family instrument qualifies ONLY when
     it is a tokenized-stock perpetual (the analyst then reads the UNDERLYING
     US equity through the remap in the tool layer). Pure crypto has no
-    company fundamentals — the caller must skip the analyst entirely rather
-    than run it into an honest-but-billed no-data LLM turn.
+    company fundamentals, and ``"unknown_perp"`` (unresolvable or explicitly
+    unsupported contract type — registry flag ON) is treated the same way —
+    the caller must skip the analyst entirely rather than run it into an
+    honest-but-billed no-data LLM turn.
     """
     return instrument_class(asset_type, ticker) in ("equity", "stock_perp")
 
@@ -179,7 +239,11 @@ def describe_instrument(
     seed mode); ``as_of`` (``YYYY-MM-DD``) turns the onboard date into a
     historical listing verdict — the classification answers "was this
     contract live then", which a current-state exchangeInfo call alone
-    cannot.
+    cannot. With the ``instrument_registry`` flag ON, a persisted registry
+    row (same warm payload, PIT-queryable) enriches the descriptor's
+    onboard/status (and, for a stock perp unknown to this process's warm
+    cache, the underlying symbol) whenever it carries more than the
+    in-memory listing cache.
     """
     ticker = str(ticker)
     asset = str(asset_type or "stock")
@@ -215,13 +279,35 @@ def describe_instrument(
             as_of=as_of,
             listed_asof=None,
         )
-    # Perps (stock_perp / pure_crypto_perp).
+    # Perps (stock_perp / pure_crypto_perp / unknown_perp).
     underlying = stock_perp_underlying(ticker)
+    record = classify_perp(ticker) if _instrument_registry_enabled() else None
+    registry_evidence = (
+        record is not None and record.classification_source == SOURCE_EXCHANGEINFO
+    )
+    if (
+        registry_evidence
+        and record is not None
+        and record.instrument_class == "stock_perp"
+        and record.underlying_symbol
+        and underlying is None
+    ):
+        # A persistent registry row can resolve the underlying equity even
+        # when THIS process never warmed the listing (fresh process after a
+        # restart). The warm answer (with its Yahoo aliases) still wins.
+        underlying = record.underlying_symbol
     compact = ticker.upper()
     listing = equity_perp_listing_info()
     base = _etf_base(asset_type, ticker)
     entry: dict[str, Any] = listing.get(base) or {}
     onboard_date = entry.get("onboard_date")
+    status = entry.get("status")
+    if registry_evidence and record is not None:
+        # Registry rows carry onboard/status for EVERY perp (the in-memory
+        # listing cache covers EQUITY bases only) — prefer them when the
+        # listing cache has nothing.
+        onboard_date = onboard_date or record.onboard_date
+        status = status or record.status
     listed_asof: bool | None = None
     if as_of is not None and isinstance(onboard_date, str):
         listed_asof = onboard_date <= as_of
@@ -242,7 +328,7 @@ def describe_instrument(
         ),
         underlying_equity=underlying,
         onboard_date=onboard_date,
-        listing_status=entry.get("status") or "unknown",
+        listing_status=status or "unknown",
         as_of=as_of,
         listed_asof=listed_asof,
     )
