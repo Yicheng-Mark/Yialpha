@@ -101,7 +101,7 @@ def _decision_fields_dict(decision) -> dict:
             "neutral": decision.probabilities.neutral,
             "bear": decision.probabilities.bear,
         }
-    return {
+    fields = {
         "rating": decision.rating.value,
         "price_target": decision.price_target,
         "time_horizon": decision.time_horizon,
@@ -112,6 +112,19 @@ def _decision_fields_dict(decision) -> dict:
         "evidence_coverage": decision.evidence_coverage,
         "schema_version": SCHEMA_VERSION,
     }
+    # V2.1 fair-value linkage fields (additive). Only NON-None values ride
+    # along, so a PM that does not emit them keeps pm_decision_fields — and
+    # therefore the logged state JSON — byte-identical to the pre-V2.1 shape.
+    for optional_key in (
+        "price_target_currency",
+        "price_target_basis",
+        "underlying_price_target",
+        "underlying_target_currency",
+    ):
+        value = getattr(decision, optional_key, None)
+        if value is not None:
+            fields[optional_key] = value
+    return fields
 
 
 def create_portfolio_manager(llm):

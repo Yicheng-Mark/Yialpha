@@ -127,6 +127,36 @@ def _runtime_prefetch_bundles_off():
 
 
 @pytest.fixture(autouse=True)
+def _runtime_ledger_isolated(tmp_path):
+    """Point the V2 ledger DB at a per-test tmp file and hold the V2.1
+    record/shadow flags OFF (production defaults are ON).
+
+    Same contract as ``_perp_bundle_off_by_default`` /
+    ``_runtime_prefetch_bundles_off``: tests opt in with ``set_config`` in
+    the test body (set_config merges, so the opt-in wins). Named to sort
+    AFTER ``_isolate_config`` (pytest runs same-scope autouse conftest
+    fixtures alphabetically): the reset there restores the production
+    defaults, so this fixture must run later to hold them off. The ledger
+    connection cache is dropped around each test so a connection opened for
+    the previous test's tmp path never serves the current test.
+    """
+    from yialpha.dataflows.config import set_config
+    from yialpha.ledger.sqlite import reset_ledger_state_for_test
+
+    set_config(
+        {
+            "ledger_db_path": str(tmp_path / "ledger" / "portfolio.db"),
+            "instrument_registry": False,
+            "prediction_ledger": False,
+            "stock_perp_fair_value": False,
+        }
+    )
+    reset_ledger_state_for_test()
+    yield
+    reset_ledger_state_for_test()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_perp_overlay_mark(monkeypatch):
     """The perp risk overlay's Mark Reference bullet fetches mark klines
     (network). Stub it to None (the production fail-soft degradation) so any

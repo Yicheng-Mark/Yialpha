@@ -1822,6 +1822,29 @@ def equity_perp_listing_info() -> dict[str, dict]:
         return dict(_EQUITY_PERP_LISTING_CACHE)
 
 
+def _persist_instrument_registry(symbol_rows: list) -> None:
+    """Append the fresh exchangeInfo payload to the PIT instrument registry.
+
+    Same payload the warm itself just fetched — ZERO extra HTTP. Gated on
+    the ``instrument_registry`` config flag (V2.1 record stage; off = the
+    warm path is byte-identical to pre-registry). Fail-soft: any failure
+    downgrades to a WARNING and never aborts the warm — the in-memory
+    classification caches remain authoritative for this run either way.
+    """
+    try:
+        if not get_config().get("instrument_registry"):
+            return
+        from yialpha.instruments.registry import snapshot_instruments
+        from yialpha.ledger.sqlite import utc_now_iso
+
+        snapshot_instruments(
+            [row for row in symbol_rows if isinstance(row, dict)],
+            available_at=utc_now_iso(),
+        )
+    except Exception as exc:  # noqa: BLE001 — registry persistence is fail-soft
+        logger.warning("instrument registry snapshot skipped: %s", exc)
+
+
 def warm_equity_perp_bases() -> frozenset[str]:
     """Fetch the live EQUITY perp listing once per TTL window (perp-run start).
 
@@ -1832,6 +1855,10 @@ def warm_equity_perp_bases() -> frozenset[str]:
     listing snapshot is current-state (no as-of date): it gates analyst
     ELIGIBILITY only, never data content — the fundamentals vendors
     themselves remain PIT-correct by date.
+
+    With the ``instrument_registry`` flag on, the same payload is also
+    appended to the persistent instrument registry (fail-soft WARNING; the
+    registry is the record-stage PIT store that survives restarts).
 
     A failed fetch is NOT cached: the seed is returned for THIS call only, so
     the next perp-run start re-attempts the live listing instead of serving a
@@ -1917,6 +1944,10 @@ def warm_equity_perp_bases() -> frozenset[str]:
                 "onboard_date": onboard_date,
                 "status": str(row.get("status") or "TRADING"),
             }
+        # Record stage (V2.1): persist the WHOLE payload (all symbol rows,
+        # not just EQUITY) into the PIT instrument registry — same response,
+        # no second request. Fail-soft inside; flag-gated.
+        _persist_instrument_registry(symbols)
         _EQUITY_PERP_BASES_CACHE = bases
         _EQUITY_PERP_LISTING_CACHE = listing
         _EQUITY_PERP_WARMED_AT_MONO = time.monotonic()

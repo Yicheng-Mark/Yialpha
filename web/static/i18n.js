@@ -155,6 +155,21 @@
       accuracy_col_hitrate: "命中率",
       accuracy_generated: "报告生成时间",
 
+      // calibration (V2.1 prediction ledger scoreboard — same page, below accuracy)
+      calibration_title: "盲预测校准",
+      calibration_sub: "分析师辩论前提交的多周期盲预测对照已实现净收益（方向准确率 / Brier / 对数损失 / ECE）；由 yialpha scoreboard 计算，本页只读展示。",
+      calibration_empty_title: "尚无校准计分板",
+      calibration_empty: "先在终端运行 yialpha scoreboard（补算到期 outcome 并生成校准报告）。",
+      calibration_overall: "总体",
+      calibration_by_analyst: "分分析师",
+      calibration_by_horizon: "分周期（天）",
+      calibration_col_slice: "切片",
+      calibration_col_acc: "方向准确率",
+      calibration_col_brier: "Brier",
+      calibration_col_logloss: "对数损失",
+      calibration_col_ece: "ECE",
+      calibration_below_note: "⚠ 样本数低于 V3 门槛（{n}）的切片仅展示，不参与任何权重调整。",
+
       // health
       health_title: "环境自检",
       health_sub: "复刻 preflight 五项（依赖 / key / 代理 / yfinance / DeepSeek）。含网络探测，稍等数秒。",
@@ -308,6 +323,21 @@
       accuracy_col_dirn: "directional n",
       accuracy_col_hitrate: "hit rate",
       accuracy_generated: "report generated",
+
+      // calibration (V2.1 prediction ledger scoreboard — same page, below accuracy)
+      calibration_title: "Blind-Prediction Calibration",
+      calibration_sub: "Pre-debate multi-horizon analyst predictions vs realized net returns (directional accuracy / Brier / log loss / ECE); computed by yialpha scoreboard, this page is read-only.",
+      calibration_empty_title: "No calibration scoreboard yet",
+      calibration_empty: "Run yialpha scoreboard in a terminal first — it computes due outcomes and builds the calibration report.",
+      calibration_overall: "Overall",
+      calibration_by_analyst: "By analyst",
+      calibration_by_horizon: "By horizon (days)",
+      calibration_col_slice: "slice",
+      calibration_col_acc: "directional acc",
+      calibration_col_brier: "Brier",
+      calibration_col_logloss: "log loss",
+      calibration_col_ece: "ECE",
+      calibration_below_note: "⚠ Cells below the V3 sample threshold ({n}) are display-only — no weight adjustment.",
 
       health_title: "Environment Check",
       health_sub: "Replicates the 5 preflight checks (deps / key / proxy / yfinance / DeepSeek). Network probes take a few seconds.",

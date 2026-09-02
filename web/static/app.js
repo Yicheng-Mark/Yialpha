@@ -735,11 +735,71 @@
   // is shown WITH its sample size — a hit rate without n misleads.
   // Backend contract: GET /api/accuracy → {available, direction, hold_*,
   // by_rating, by_ticker, total_runs, scored, pending, holding_days, ...}.
+  // V2.1 calibration scoreboard: rides on the accuracy page as an independent
+  // section (its data source is the prediction ledger DB, not the
+  // verify-history artifact). Backend contract: GET /api/calibration →
+  // {available, overall, by_analyst, by_instrument_class, by_horizon_days,
+  // by_direction, by_evidence_bucket, v3_min_samples_per_cell, ...} where
+  // every cell carries {n, directional_accuracy, brier_score, log_loss,
+  // calibration_error, below_v3_min_samples}.
+  function calibrationSection(cal) {
+    if (!cal || !cal.available || !cal.overall) {
+      return `
+        <div class="empty-state">
+          <div class="empty-icon" aria-hidden="true">🎚️</div>
+          <p class="empty-title">${t("calibration_empty_title")}</p>
+          <p class="empty-desc">${t("calibration_empty")}</p>
+          <p><code>yialpha scoreboard</code></p>
+        </div>`;
+    }
+    const pct = (x) => (x == null ? "—" : (100 * x).toFixed(1) + "%");
+    const num = (x) => (x == null ? "—" : Number(x).toFixed(4));
+    const header = `
+      <tr>
+        <th>${esc(t("calibration_col_slice"))}</th>
+        <th>${esc(t("accuracy_col_n"))}</th>
+        <th>${esc(t("calibration_col_acc"))}</th>
+        <th>${esc(t("calibration_col_brier"))}</th>
+        <th>${esc(t("calibration_col_logloss"))}</th>
+        <th>${esc(t("calibration_col_ece"))}</th>
+      </tr>`;
+    const row = (label, c) => `
+      <tr>
+        <th>${esc(String(label))}${c.below_v3_min_samples ? " ⚠" : ""}</th>
+        <td>${c.n}</td>
+        <td>${pct(c.directional_accuracy)}</td>
+        <td>${num(c.brier_score)}</td>
+        <td>${num(c.log_loss)}</td>
+        <td>${num(c.calibration_error)}</td>
+      </tr>`;
+    const sliceTable = (titleKey, cells) => `
+      <div class="cmp-table-wrap">
+        <div class="subhead">${t(titleKey)}</div>
+        <table class="cmp-table"><thead>${header}</thead><tbody>${
+          Object.entries(cells || {}).map(([k, c]) => row(k, c)).join("")
+        }</tbody></table>
+      </div>`;
+    return `
+      <h1 class="page-title">${t("calibration_title")}</h1>
+      <p class="page-sub">${t("calibration_sub")}</p>
+      <div class="cmp-table-wrap">
+        <div class="subhead">${t("calibration_overall")}</div>
+        <table class="cmp-table"><thead>${header}</thead><tbody>${row("overall", cal.overall)}</tbody></table>
+      </div>
+      ${sliceTable("calibration_by_analyst", cal.by_analyst)}
+      ${sliceTable("calibration_by_horizon", cal.by_horizon_days)}
+      <p class="muted">${t("calibration_below_note").replace("{n}", cal.v3_min_samples_per_cell ?? 30)}</p>`;
+  }
+
   async function renderAccuracy() {
     view().innerHTML = `<p class="muted" role="status">${t("common_loading")}</p>`;
     let data;
     try { data = await fetchJSON("/api/accuracy"); }
     catch (e) { renderError(e); return; }
+    // Independent of the accuracy artifact above: fetch best-effort, degrade
+    // to the empty state instead of failing the whole page.
+    let cal = null;
+    try { cal = await fetchJSON("/api/calibration"); } catch (_e) { cal = null; }
 
     if (!data.available) {
       view().innerHTML = `
@@ -749,7 +809,8 @@
           <p class="empty-title">${t("accuracy_empty_title")}</p>
           <p class="empty-desc">${t("accuracy_empty")}</p>
           <p><code>yialpha verify-history</code></p>
-        </div>`;
+        </div>
+        ${calibrationSection(cal)}`;
       return;
     }
 
@@ -799,7 +860,8 @@
       <div class="cmp-table-wrap">
         <div class="subhead">${t("accuracy_by_ticker")}</div>
         <table class="cmp-table"><thead>${header}</thead><tbody>${tickerRows}</tbody></table>
-      </div>`;
+      </div>
+      ${calibrationSection(cal)}`;
   }
 
   // ----------------------------- new analysis -----------------------------

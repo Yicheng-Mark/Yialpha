@@ -24,12 +24,23 @@ from yialpha.agents.utils.agent_utils import (
     web_search_fundamentals,
 )
 from yialpha.agents.utils.pot_tool import make_pot_compute_tool
+from yialpha.agents.utils.prediction_tools import (
+    begin_prediction_capture,
+    make_submit_prediction_tool,
+    settle_prediction_capture,
+)
 from yialpha.agents.utils.prompt_builder import build_collaborator_prompt
 from yialpha.agents.utils.valuation_tools import get_valuation_metrics
 from yialpha.dataflows.binance import stock_perp_underlying
 from yialpha.dataflows.config import get_config
 from yialpha.dataflows.symbol_utils import is_a_stock
 from yialpha.dataflows.utils import is_historical_date
+from yialpha.ledger.models import (
+    REPLAYABILITY_LIVE_ONLY,
+    SCOPE_CONTRACT,
+    SCOPE_UNDERLYING,
+)
+from yialpha.ledger.run_context import record_evidence_block
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +267,27 @@ def create_fundamentals_analyst(llm):
         if bind_web_search:
             tools.append(web_search_fundamentals)
 
+        # V2.1 record stage: blind-prediction capture (config: prediction_ledger,
+        # perp runs only). Fundamentals reads the UNDERLYING equity on a
+        # tokenized-stock perp (pure-crypto perps never reach here — the
+        # routing skip above), so it forecasts the underlying when there is
+        # one and the contract otherwise. The tool's description is the only
+        # prompt surface; flag off / non-perp runs keep the tool list — and
+        # therefore the tool_names prompt — byte-identical to the baseline.
+        prediction_underlying = stock_perp_underlying(ticker)
+        prediction_instrument = prediction_underlying or ticker
+        predictions_armed = (
+            bool(get_config().get("prediction_ledger"))
+            and state.get("asset_type") == "crypto_perp"
+        )
+        if predictions_armed:
+            tools.append(make_submit_prediction_tool(prediction_instrument))
+            begin_prediction_capture(
+                "fundamentals",
+                prediction_instrument,
+                SCOPE_UNDERLYING if prediction_underlying else SCOPE_CONTRACT,
+            )
+
         system_message = (
             "You are a researcher tasked with analyzing fundamental information over the past week about a company. Please write a comprehensive report of the company's fundamental information such as financial documents, company profile, basic company financials, and company financial history to gain a full view of the company's fundamental information to inform traders. Focus on the most decision-relevant figures rather than exhaustive detail, and tie every claim to a specific number and reporting period pulled from the tools. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + " Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."
@@ -346,6 +378,21 @@ def create_fundamentals_analyst(llm):
                     "model prose. Cite its figures like tool data; the tools "
                     "remain available for drill-down beyond these statements.)"
                 )
+                # V2.1 record stage: the injected bundle becomes one evidence
+                # row scoped to the company the statements describe (the
+                # underlying equity on perp runs). No-op without a run
+                # context / flag off; payload-hash dedupe collapses tool-loop
+                # re-injections. SEC filings are archival but the merged
+                # overview carries live valuation views, so the mixed block
+                # is conservatively LIVE_ONLY.
+                record_evidence_block(
+                    "fundamentals_bundle",
+                    "fundamental_data",
+                    stock_perp_underlying(ticker) or ticker,
+                    SCOPE_UNDERLYING,
+                    rendered_block,
+                    replayability=REPLAYABILITY_LIVE_ONLY,
+                )
 
         prompt = build_collaborator_prompt(include_tools=True)
 
@@ -366,6 +413,12 @@ def create_fundamentals_analyst(llm):
             else state["messages"]
         )
         result = chain.invoke(llm_messages)
+
+        # Blind-prediction settlement, FINAL loop round only (no pending tool
+        # calls — see the market analyst's note): flush captured entries or
+        # record the no-call quality sentinel. Fail-soft either way.
+        if predictions_armed and not getattr(result, "tool_calls", None):
+            settle_prediction_capture("fundamentals", prediction_instrument)
 
         # Shared final-report extraction: "" while tool calls are pending,
         # content on the final answer, and a visible sentinel (plus WARNING)

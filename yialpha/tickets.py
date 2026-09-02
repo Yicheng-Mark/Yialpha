@@ -20,7 +20,7 @@ import uuid
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from yialpha.risk.cost_model import estimate_round_trip_cost
 from yialpha.risk.perp_ticket import perp_ticket_numbers
@@ -60,6 +60,11 @@ def new_decision_id() -> str:
     return "D" + uuid.uuid4().hex[:12]
 
 
+def new_run_id() -> str:
+    """Fresh unique run id (``R`` + 12 hex chars) — the ledger key chain root."""
+    return "R" + uuid.uuid4().hex[:12]
+
+
 class ExecutionTicket(BaseModel):
     """The frozen V2 ticket schema (see docs/V2_BASELINE.md).
 
@@ -95,8 +100,31 @@ class ExecutionTicket(BaseModel):
     cost_model_version: str = COST_MODEL_VERSION
     veto_reasons: list[str] = Field(default_factory=list)
     resize_reasons: list[str] = Field(default_factory=list)
+    # V2.1 fair-value linkage (all optional, default None — populated only
+    # for stock perps behind the ``stock_perp_fair_value`` flag, wired in a
+    # later batch; additive per the baseline rule, so TICKET_VERSION stays
+    # "v1" and build_candidate_ticket never fills these).
+    underlying_target: float | None = None
+    contract_target: float | None = None
+    price_target_basis: str | None = None
+    quote_fx: dict | None = None
+    basis_snapshot: dict | None = None
     analysis_as_of: str | None = None
     ticket_version: str = TICKET_VERSION
+
+    @field_validator("price_target_basis")
+    @classmethod
+    def _validate_price_target_basis(cls, v: str | None) -> str | None:
+        """Accept None / "last" / "mark" (case-insensitive), normalize lowercase."""
+        if v is None:
+            return v
+        normalized = v.strip().lower()
+        if normalized not in ("last", "mark"):
+            raise ValueError(
+                f"price_target_basis must be 'last' or 'mark' (case-insensitive), "
+                f"got {v!r}"
+            )
+        return normalized
 
 
 def build_candidate_ticket(

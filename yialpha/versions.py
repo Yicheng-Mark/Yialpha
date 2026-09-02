@@ -19,8 +19,14 @@ Which constant versions what:
 ``TICKET_VERSION``
     :class:`yialpha.tickets.ExecutionTicket` field semantics.
 ``FEATURE_VERSION``
-    Reserved for V2.1: the definition of forecast features (horizon ladder,
-    direction/prob_up semantics) that attribution depends on.
+    v2 (since V2.1 Measurability): the forecast-feature contract that
+    attribution depends on — the frozen horizon ladder
+    ``HORIZON_LADDER_DAYS = (1, 5, 21)`` (days on the instrument's own
+    session calendar), ``direction in {up, down, flat}`` with ``prob_up`` =
+    P(return > 0) over the horizon, and all return legs (expected_return /
+    price / funding / basis / fees / slippage) quoted as signed fractions of
+    notional, with funding PnL computed as ``-sign x notional x rate``.
+    v1 had no consumers (reserved only).
 ``REGIME_VERSION``
     Reserved for V2.2: the ``RegimeState`` definitions (trend/volatility/
     positioning classifiers). Changing a classifier's thresholds or inputs
@@ -32,5 +38,5 @@ from __future__ import annotations
 SCHEMA_VERSION = "v1"
 COST_MODEL_VERSION = "v1"
 TICKET_VERSION = "v1"
-FEATURE_VERSION = "v1"
+FEATURE_VERSION = "v2"
 REGIME_VERSION = "v1"

@@ -207,6 +207,80 @@ def load_node_perf(ticker: str, date: str) -> dict | None:
         return None
 
 
+def load_run_predictions(run_id: str) -> dict | None:
+    """Blind analyst predictions for one ledger run (read-only).
+
+    Returns None when the run_id is unknown (the UI maps that to 404). Reads
+    the central V2 ledger DB; absent DB degrades to an empty-but-known run
+    only when the runs table has no row — both paths are honest about what
+    was recorded.
+    """
+    from yialpha.ledger.sqlite import get_connection, ledger_exists
+
+    if not ledger_exists():
+        return None
+    try:
+        row = get_connection(readonly=True).execute(
+            "SELECT run_id FROM runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+    except Exception:  # noqa: BLE001 -- read-only UI path degrades, never raises
+        return None
+    if row is None:
+        return None
+    from dataclasses import asdict, is_dataclass
+
+    from yialpha.ledger.evidence import evidence_ids_for_run
+    from yialpha.ledger.predictions import predictions_for_run
+
+    records = predictions_for_run(run_id)
+    return {
+        "run_id": run_id,
+        "prediction_ids": [record.prediction_id for record in records],
+        "predictions": [
+            asdict(record) if is_dataclass(record) else dict(record)
+            for record in records
+        ],
+        "evidence_ids": evidence_ids_for_run(run_id),
+    }
+
+
+def load_outcomes(limit: int = 500) -> dict:
+    """Forward-outcome rows with net-return attribution legs (read-only)."""
+    from dataclasses import asdict, is_dataclass
+
+    from yialpha.ledger.outcomes import all_outcomes
+    from yialpha.ledger.sqlite import ledger_exists
+
+    if not ledger_exists():
+        return {"available": False, "hint": "yialpha scoreboard", "outcomes": []}
+    return {
+        "available": True,
+        "outcomes": [
+            asdict(row) if is_dataclass(row) else dict(row)
+            for row in all_outcomes(limit=limit)
+        ],
+    }
+
+
+def load_calibration() -> dict:
+    """Prediction calibration scoreboard (read-only; scoring is a CLI job).
+
+    Mirrors :func:`load_accuracy_report`'s honesty contract: without the
+    ledger DB (or before the operator ever runs ``yialpha scoreboard``),
+    return ``available=False`` + the hint instead of a fabricated
+    zero-everything table that would read as perfect calibration.
+    """
+    from yialpha.ledger.scoreboard import build_scoreboard
+    from yialpha.ledger.sqlite import ledger_exists
+
+    if not ledger_exists():
+        return {"available": False, "hint": "yialpha scoreboard"}
+    try:
+        return {"available": True, **build_scoreboard()}
+    except Exception:  # noqa: BLE001 -- read-only UI path degrades, never raises
+        return {"available": False, "hint": "yialpha scoreboard"}
+
+
 def load_run(ticker: str, date: str) -> dict | None:
     """Full report view: rating badge + overlay card + 5 collapsible sections."""
     path = _strategy_dir(ticker) / f"full_states_log_{date}.json"

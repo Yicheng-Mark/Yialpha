@@ -41,6 +41,7 @@ the sentiment header (band + score + confidence) is deterministic across
 runs and providers instead of free-form per-model prose.
 """
 
+import logging
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -54,6 +55,12 @@ from yialpha.agents.utils.agent_utils import (
     get_language_instruction,
     get_news,
 )
+from yialpha.agents.utils.prediction_tools import (
+    begin_prediction_capture,
+    dispatch_prediction_tool_calls,
+    make_submit_prediction_tool,
+    settle_prediction_capture,
+)
 from yialpha.agents.utils.prompt_builder import build_collaborator_prompt
 from yialpha.agents.utils.structured import (
     NO_EXTERNAL_TOOLS,
@@ -65,6 +72,14 @@ from yialpha.dataflows.config import get_config, submit_with_context
 from yialpha.dataflows.reddit import fetch_reddit_posts
 from yialpha.dataflows.stocktwits import fetch_stocktwits_messages
 from yialpha.dataflows.utils import is_historical_date
+from yialpha.ledger.models import (
+    REPLAYABILITY_LIVE_ONLY,
+    SCOPE_CONTRACT,
+    SCOPE_UNDERLYING,
+)
+from yialpha.ledger.run_context import record_evidence_block
+
+logger = logging.getLogger(__name__)
 
 # Opt-in (default OFF = byte-equivalent sequential fetch). Fan out the
 # independent source fetches on a thread pool. Each block is written to a
@@ -402,8 +417,54 @@ def create_sentiment_analyst(llm):
             )
         )
 
-        profile, _stocktwits_ticker = _source_profile(state.get("asset_type"), ticker)
+        profile, stocktwits_ticker = _source_profile(state.get("asset_type"), ticker)
         cap, cap_reason = _confidence_cap(profile, binance_square_block)
+
+        # V2.1 record stage: one evidence row per fetched block the evidence
+        # message carries (placeholders included — the ledger records what
+        # the analyst actually saw). No-op without a run context /
+        # prediction_ledger off; every social/news feed here is a
+        # current-snapshot API, so all rows are LIVE_ONLY. Scope follows the
+        # query target: the contract symbol on perp runs, the underlying
+        # equity elsewhere; StockTwits cashtags are always equity-scoped.
+        _evidence_scope = (
+            SCOPE_CONTRACT
+            if state.get("asset_type") == "crypto_perp"
+            else SCOPE_UNDERLYING
+        )
+        record_evidence_block(
+            "sentiment_news",
+            "news_data",
+            ticker,
+            _evidence_scope,
+            news_block,
+            replayability=REPLAYABILITY_LIVE_ONLY,
+        )
+        record_evidence_block(
+            "sentiment_stocktwits",
+            "social",
+            stocktwits_ticker,
+            SCOPE_UNDERLYING,
+            stocktwits_block,
+            replayability=REPLAYABILITY_LIVE_ONLY,
+        )
+        record_evidence_block(
+            "sentiment_reddit",
+            "social",
+            ticker,
+            _evidence_scope,
+            reddit_block,
+            replayability=REPLAYABILITY_LIVE_ONLY,
+        )
+        if binance_square_block is not None:
+            record_evidence_block(
+                "binance_square",
+                "social",
+                ticker,
+                SCOPE_CONTRACT,
+                binance_square_block,
+                replayability=REPLAYABILITY_LIVE_ONLY,
+            )
 
         system_message = _build_system_message(
             ticker=ticker,
@@ -430,6 +491,31 @@ def create_sentiment_analyst(llm):
             binance_square_block=binance_square_block,
         )
         llm_messages = formatted_messages + [evidence_message]
+
+        # V2.1 record stage: blind-prediction capture (config: prediction_ledger,
+        # perp runs only — the sentiment analyst forecasts the CONTRACT). This
+        # path is structured-output (schema-only tool binding, no tool loop),
+        # so the shared submit_prediction tool cannot ride the report call: a
+        # dedicated bound round lets the model file its blind forecasts from
+        # the SAME evidence before the report is written, and the node itself
+        # executes the returned tool calls. Flag off / non-perp runs invoke
+        # nothing extra — byte-identical behavior.
+        if (
+            get_config().get("prediction_ledger")
+            and state.get("asset_type") == "crypto_perp"
+        ):
+            begin_prediction_capture("sentiment", ticker, SCOPE_CONTRACT)
+            try:
+                response = llm.bind_tools(
+                    [make_submit_prediction_tool(ticker)]
+                ).invoke(llm_messages)
+                dispatch_prediction_tool_calls(response)
+            except Exception:  # noqa: BLE001 — capture must never break the report
+                logger.warning(
+                    "sentiment blind-prediction round failed for %s", ticker,
+                    exc_info=True,
+                )
+            settle_prediction_capture("sentiment", ticker)
 
         report_text = invoke_structured_or_freetext(
             structured_llm,
