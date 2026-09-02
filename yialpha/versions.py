@@ -28,9 +28,40 @@ Which constant versions what:
     notional, with funding PnL computed as ``-sign x notional x rate``.
     v1 had no consumers (reserved only).
 ``REGIME_VERSION``
-    Reserved for V2.2: the ``RegimeState`` definitions (trend/volatility/
-    positioning classifiers). Changing a classifier's thresholds or inputs
-    bumps this so historical regime tags never silently mix definitions.
+    v2 (since V2.2 Context): the frozen ``RegimeState`` classifier
+    definitions in :mod:`yialpha.regime.state` — the contract this stamp
+    protects. Changing ANY definition below bumps this so historical regime
+    tags never silently mix definitions (the id preimage starts with the
+    version string, so a bump also mints disjoint ids). Frozen definitions:
+
+    * **trend / underlying_trend** — daily close vs SMA50/SMA200 on the
+      series' own candles: ``up`` iff close > both SMAs, ``down`` iff below
+      both, else ``range``; requires 200 rows.
+    * **realized_vol_pct** — stdev (ddof=1) of the last 20 daily returns of
+      the perp close series, in percent, NOT annualized.
+    * **funding_pct** — net trailing-7-day funding settlement sum (signed
+      fraction).
+    * **oi_pct** — latest OI's percentile in the trailing 30-day window.
+    * **lsr_crowding** — latest global-account long/short ratio;
+      **taker_aggression** — latest daily taker buy/sell ratio.
+    * **spot_perp_basis_bps / index_mark_basis_bps** — (perp/spot − 1)×1e4
+      and (last/index − 1)×1e4 on 8/35-day windows.
+    * **overnight_gap_bps** — (latest open / prior close − 1)×1e4.
+    * **spread/depth/liquidity regimes** — live book: spread tight ≤ 2 bps /
+      normal ≤ 10 / wide; ±50bps band notional deep ≥ $2M / normal ≥
+      $500k / thin; combined ample/constrained/normal per the documented
+      rule.
+    * **market_stress** — any-trigger composite: |funding| ≥ 1%/7d,
+      |spot basis| ≥ 50 bps, |index basis| ≥ 50 bps, |overnight gap| ≥
+      100 bps, or OI ≥ 90th pct with +10% 1d build.
+    * **session_state** — NYSE-equivalent Eastern buckets (pre_market
+      04:00–09:30 / regular 09:30–16:00 / post_market 16:00–20:00 / closed;
+      date-only as-of names the weekday session, weekends closed).
+    * **listing_age_days** — calendar days from the registry PIT
+      ``onboard_date``; **confidence_components** — per-family availability
+      weights in [0, 1].
+
+    v1 was reserved only (no consumers).
 """
 
 from __future__ import annotations
@@ -39,4 +70,4 @@ SCHEMA_VERSION = "v1"
 COST_MODEL_VERSION = "v1"
 TICKET_VERSION = "v1"
 FEATURE_VERSION = "v2"
-REGIME_VERSION = "v1"
+REGIME_VERSION = "v2"

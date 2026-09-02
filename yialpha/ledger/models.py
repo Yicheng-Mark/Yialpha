@@ -393,7 +393,9 @@ class AnalystPrediction:
 
     One instance per horizon; a revision row carries the root id in
     ``original_prediction_id`` and its 1-based position in the chain in
-    ``debate_revision`` (``None`` on original rows).
+    ``debate_revision`` (``None`` on original rows). ``regime_id`` (V2.2)
+    names the run's ``RegimeState`` row — ``None`` for rows written before
+    the regime stage or with it off.
     """
 
     prediction_id: str
@@ -417,6 +419,7 @@ class AnalystPrediction:
     original_prediction_id: str | None
     debate_revision: int | None
     revision_reason: str | None
+    regime_id: str | None = None
 
 
 def row_to_prediction(row: sqlite3.Row) -> AnalystPrediction:
@@ -447,6 +450,7 @@ def row_to_prediction(row: sqlite3.Row) -> AnalystPrediction:
             else None
         ),
         revision_reason=row["revision_reason"],
+        regime_id=row["regime_id"],
     )
 
 
@@ -458,6 +462,7 @@ class OutcomeRecord:
     ``legs_missing`` lists data legs the writer could not source; a row with
     ``status='pending'``/``'incomplete'`` stays on the
     :func:`yialpha.ledger.outcomes.pending_predictions` worklist.
+    ``regime_id`` (V2.2) carries the scored prediction's regime through.
     """
 
     outcome_id: str
@@ -477,6 +482,7 @@ class OutcomeRecord:
     legs_missing: tuple[str, ...]
     outcome_available_at: str | None
     computed_at: str
+    regime_id: str | None = None
 
 
 def row_to_outcome(row: sqlite3.Row) -> OutcomeRecord:
@@ -499,6 +505,7 @@ def row_to_outcome(row: sqlite3.Row) -> OutcomeRecord:
         legs_missing=decode_json_list(row["legs_missing"]),
         outcome_available_at=row["outcome_available_at"],
         computed_at=row["computed_at"],
+        regime_id=row["regime_id"],
     )
 
 

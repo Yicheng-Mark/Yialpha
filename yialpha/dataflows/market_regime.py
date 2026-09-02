@@ -278,18 +278,22 @@ def classify_trend_state(df) -> dict | None:
     }
 
 
-def classify_vol_state(df, asset_type: str | None = None) -> dict | None:
+def classify_vol_state(
+    df, asset_type: str | None = None, instrument_class: str | None = None,
+) -> dict | None:
     """Volatility state: rvol_20 percentile vs its trailing 252 values.
 
     Labels: low (<25th), normal, high (>75th), extreme (>90th). ``None``
     when the rvol history is too short to rank against. The percentile is
     scale-invariant, but the reported annualized level uses the asset's own
-    calendar (365 for 24/7 crypto, 252 otherwise) so the displayed number
-    matches the indicator tools' scale.
+    calendar — refined by ``instrument_class`` when known (V2.2: a
+    tokenized-stock perp annualizes on its weekday-session count, not the
+    24/7 crypto 365) — so the displayed number matches the indicator tools'
+    scale.
     """
     rvol = close_to_close_vol(
         df, window=_VOL_WINDOW,
-        periods_per_year=periods_per_year_for(asset_type),
+        periods_per_year=periods_per_year_for(asset_type, instrument_class),
     )
     history = rvol.dropna()
     if len(history) < 30:
@@ -332,6 +336,22 @@ def _a_share_breadth_part(ticker: str, curr_date: str) -> str | None:
     )
 
 
+def _regime_vol_class(ticker: str, asset_type: str | None) -> str | None:
+    """Instrument class refining the vol state's annualization (V2.2 fix).
+
+    Deterministic, flag-independent: on a ``crypto_perp`` run the warm/seed
+    EQUITY base map decides — a tokenized-stock perp (``stock_perp``)
+    annualizes its weekday-session candles on the sessions-per-year factor,
+    not the 24/7 crypto 365; a pure-crypto perp stays continuous. Non-perp
+    runs return ``None`` (the asset-type rule already covers them).
+    """
+    if asset_type != "crypto_perp":
+        return None
+    from .binance import stock_perp_underlying
+
+    return "stock_perp" if stock_perp_underlying(ticker) else "pure_crypto_perp"
+
+
 def format_regime_context(
     ticker: str, curr_date: str, asset_type: str | None = None,
 ) -> str | None:
@@ -344,8 +364,10 @@ def format_regime_context(
     it informs the analyst and the risk debate, it never gates tools.
 
     ``asset_type`` (e.g. from the graph state) annualizes the vol state on
-    the asset's own calendar — 365 for 24/7 crypto, 252 otherwise — so the
-    reported level matches the Binance indicator tools' scale.
+    the asset's own calendar — 365 for 24/7 crypto, 252 otherwise, and a
+    tokenized-stock perp (derived via the EQUITY base map) on its
+    weekday-session factor — so the reported level matches the Binance
+    indicator tools' scale.
     """
     try:
         data = _load_regime_ohlcv(ticker, curr_date, asset_type)
@@ -359,7 +381,11 @@ def format_regime_context(
             f"trend={trend['trend']} ({trend['stack']}, ADX {trend['adx']:.0f} "
             f"{trend['adx_strength']})"
         )
-    vol = classify_vol_state(data, asset_type) if data is not None else None
+    vol = (
+        classify_vol_state(data, asset_type, _regime_vol_class(ticker, asset_type))
+        if data is not None
+        else None
+    )
     if vol is not None:
         parts.append(
             f"vol={vol['label']} (rvol20 {vol['rvol_20']:.0%} annualized, "

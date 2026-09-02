@@ -53,7 +53,8 @@ from yialpha.ledger.sqlite import (
 #: Literal signature — the ledger must never carry a typo'd status).
 OUTCOME_STATUSES = frozenset({"complete", "pending", "incomplete"})
 
-#: Every ``outcomes`` column, in INSERT/SELECT order (matches the v1 DDL).
+#: Every ``outcomes`` column, in INSERT/SELECT order (v1 DDL order + the
+#: migration-v2 ``regime_id`` tail column).
 _OUTCOME_COLUMNS = (
     "outcome_id",
     "prediction_id",
@@ -72,6 +73,7 @@ _OUTCOME_COLUMNS = (
     "legs_missing",
     "outcome_available_at",
     "computed_at",
+    "regime_id",
 )
 
 
@@ -92,15 +94,17 @@ def write_outcome(
     legs_missing: Sequence[str] | None = None,
     outcome_available_at: str | None = None,
     ticket_id: str | None = None,
+    regime_id: str | None = None,
 ) -> str:
     """Append one outcome row; returns the deterministic ``outcome_id``.
 
     ``outcome_id`` derives from ``(prediction_id, horizon_days)``
     (:func:`yialpha.ledger.models.new_outcome_id`); ``horizon_days`` must sit
     on the frozen ladder and ``status`` in ``{complete, pending,
-    incomplete}``. Unknown predictions raise ``sqlite3.IntegrityError``
-    (foreign key). Rewrites follow the immutability contract described in
-    the module docstring.
+    incomplete}``. ``regime_id`` (V2.2) is the prediction's regime carried
+    through — part of content identity like every stored column. Unknown
+    predictions raise ``sqlite3.IntegrityError`` (foreign key). Rewrites
+    follow the immutability contract described in the module docstring.
     """
     if status not in OUTCOME_STATUSES:
         raise ValueError(f"status {status!r} not in {sorted(OUTCOME_STATUSES)}")
@@ -124,13 +128,14 @@ def write_outcome(
         "legs_missing": encode_json_list(legs_missing) if legs_missing else None,
         "outcome_available_at": outcome_available_at,
         "computed_at": utc_now_iso(),
+        "regime_id": regime_id,
     }
     with ledger_transaction() as cur:
         existing = cur.execute(
             "SELECT outcome_id, prediction_id, run_id, ticket_id, horizon_days, "
             "status, contract_price_return, underlying_return, basis_return, "
             "funding_pnl, fees, slippage, liquidation_loss, net_return, "
-            "legs_missing, outcome_available_at, computed_at "
+            "legs_missing, outcome_available_at, computed_at, regime_id "
             "FROM outcomes WHERE outcome_id = ?",
             (outcome_id,),
         ).fetchone()
@@ -150,8 +155,8 @@ def write_outcome(
             "(outcome_id, prediction_id, run_id, ticket_id, horizon_days, status, "
             "contract_price_return, underlying_return, basis_return, funding_pnl, "
             "fees, slippage, liquidation_loss, net_return, legs_missing, "
-            "outcome_available_at, computed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "outcome_available_at, computed_at, regime_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             tuple(values[column] for column in _OUTCOME_COLUMNS),
         )
     return outcome_id
@@ -191,6 +196,7 @@ def pending_predictions(now_as_of: str) -> list[dict[str, Any]]:
             "p.prediction_scope, p.horizon_days, p.direction, p.prob_up, "
             "p.expected_return, p.target_price, p.target_currency, "
             "p.analysis_as_of, p.original_prediction_id, p.debate_revision, "
+            "p.regime_id, "
             "r.ticker, r.asset_type, r.instrument_class "
             "FROM predictions p JOIN runs r ON r.run_id = p.run_id "
             "WHERE NOT EXISTS (SELECT 1 FROM outcomes o "
@@ -223,6 +229,7 @@ def pending_predictions(now_as_of: str) -> list[dict[str, Any]]:
                 "analysis_as_of": row["analysis_as_of"],
                 "original_prediction_id": row["original_prediction_id"],
                 "debate_revision": row["debate_revision"],
+                "regime_id": row["regime_id"],
                 "ticker": row["ticker"],
                 "asset_type": row["asset_type"],
                 "instrument_class": row["instrument_class"],
@@ -241,7 +248,7 @@ def outcomes_for_prediction(prediction_id: str) -> list[OutcomeRecord]:
             "SELECT outcome_id, prediction_id, run_id, ticket_id, horizon_days, "
             "status, contract_price_return, underlying_return, basis_return, "
             "funding_pnl, fees, slippage, liquidation_loss, net_return, "
-            "legs_missing, outcome_available_at, computed_at "
+            "legs_missing, outcome_available_at, computed_at, regime_id "
             "FROM outcomes WHERE prediction_id = ? ORDER BY horizon_days",
             (prediction_id,),
         )
@@ -260,7 +267,7 @@ def all_outcomes(limit: int = 500) -> list[OutcomeRecord]:
             "SELECT outcome_id, prediction_id, run_id, ticket_id, horizon_days, "
             "status, contract_price_return, underlying_return, basis_return, "
             "funding_pnl, fees, slippage, liquidation_loss, net_return, "
-            "legs_missing, outcome_available_at, computed_at "
+            "legs_missing, outcome_available_at, computed_at, regime_id "
             "FROM outcomes ORDER BY computed_at DESC, outcome_id DESC LIMIT ?",
             (limit,),
         )

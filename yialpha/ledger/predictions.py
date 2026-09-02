@@ -50,7 +50,8 @@ from yialpha.ledger.sqlite import (
 )
 from yialpha.versions import FEATURE_VERSION, SCHEMA_VERSION
 
-#: Every ``predictions`` column, in INSERT/SELECT order (matches the v1 DDL).
+#: Every ``predictions`` column, in INSERT/SELECT order (v1 DDL order + the
+#: migration-v2 ``regime_id`` tail column).
 _PREDICTION_COLUMNS = (
     "prediction_id",
     "run_id",
@@ -73,6 +74,7 @@ _PREDICTION_COLUMNS = (
     "original_prediction_id",
     "debate_revision",
     "revision_reason",
+    "regime_id",
 )
 
 #: Columns that define content identity — everything except ``created_at``.
@@ -110,6 +112,7 @@ def _insert_entries(
     original_prediction_id: str | None,
     debate_revision: int | None,
     revision_reason: str | None,
+    regime_id: str | None = None,
 ) -> list[str]:
     """Check-then-insert a batch of rows on an open transaction cursor.
 
@@ -145,13 +148,15 @@ def _insert_entries(
             "original_prediction_id": original_prediction_id,
             "debate_revision": debate_revision,
             "revision_reason": revision_reason,
+            "regime_id": regime_id,
         }
         existing = cur.execute(
             "SELECT prediction_id, run_id, analyst, instrument_id, prediction_scope, "
             "horizon_days, direction, prob_up, expected_return, target_price, "
             "target_currency, price_basis, confidence, evidence_ids, analysis_as_of, "
             "created_at, schema_version, feature_version, original_prediction_id, "
-            "debate_revision, revision_reason FROM predictions WHERE prediction_id = ?",
+            "debate_revision, revision_reason, regime_id FROM predictions "
+            "WHERE prediction_id = ?",
             (prediction_id,),
         ).fetchone()
         if existing is not None:
@@ -171,8 +176,8 @@ def _insert_entries(
             "horizon_days, direction, prob_up, expected_return, target_price, "
             "target_currency, price_basis, confidence, evidence_ids, "
             "analysis_as_of, created_at, schema_version, feature_version, "
-            "original_prediction_id, debate_revision, revision_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "original_prediction_id, debate_revision, revision_reason, regime_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             tuple(values[column] for column in _PREDICTION_COLUMNS),
         )
         prediction_ids.append(prediction_id)
@@ -187,6 +192,7 @@ def submit_predictions(
     entries: Sequence[Mapping[str, Any] | PredictionEntry],
     analysis_as_of: str,
     evidence_ids: Sequence[str] | None = None,
+    regime_id: str | None = None,
 ) -> list[str]:
     """Write one analyst's blind predictions for the run; returns the new ids.
 
@@ -195,9 +201,13 @@ def submit_predictions(
     inserted in ONE :func:`ledger_transaction` so a crash can never strand
     half a submission. Rows are stamped with the current ``SCHEMA_VERSION``
     and ``FEATURE_VERSION``. ``evidence_ids`` (optional) is stored as a
-    sorted JSON array. Raises ``sqlite3.IntegrityError`` for an unknown
-    ``run_id`` (foreign key) and ``ValueError`` on any invalid entry or
-    conflicting resubmission of an existing prediction id.
+    sorted JSON array. ``regime_id`` (V2.2, optional) names the run's
+    ``RegimeState`` row; it is part of content identity, so resubmitting
+    the same prediction id under a DIFFERENT regime is an immutability
+    conflict — a prediction row names exactly the context it was decided
+    under. Raises ``sqlite3.IntegrityError`` for an unknown ``run_id``
+    (foreign key) and ``ValueError`` on any invalid entry or conflicting
+    resubmission of an existing prediction id.
     """
     validate_scope(prediction_scope)
     validated = _validated_entries(entries)
@@ -214,6 +224,7 @@ def submit_predictions(
             original_prediction_id=None,
             debate_revision=None,
             revision_reason=None,
+            regime_id=regime_id,
         )
 
 
@@ -241,7 +252,7 @@ def revise_prediction(
             "horizon_days, direction, prob_up, expected_return, target_price, "
             "target_currency, price_basis, confidence, evidence_ids, analysis_as_of, "
             "created_at, schema_version, feature_version, original_prediction_id, "
-            "debate_revision, revision_reason FROM predictions "
+            "debate_revision, revision_reason, regime_id FROM predictions "
             "WHERE prediction_id = ?",
             (original_prediction_id,),
         ).fetchone()
@@ -269,6 +280,7 @@ def revise_prediction(
             original_prediction_id=str(root_id),
             debate_revision=next_revision,
             revision_reason=revision_reason,
+            regime_id=original["regime_id"],
         )
 
 
@@ -288,7 +300,8 @@ def predictions_for_run(run_id: str) -> list[AnalystPrediction]:
             "horizon_days, direction, prob_up, expected_return, target_price, "
             "target_currency, price_basis, confidence, evidence_ids, analysis_as_of, "
             "created_at, schema_version, feature_version, original_prediction_id, "
-            "debate_revision, revision_reason FROM predictions WHERE run_id = ? "
+            "debate_revision, revision_reason, regime_id FROM predictions "
+            "WHERE run_id = ? "
             "ORDER BY horizon_days, debate_revision, prediction_id",
             (run_id,),
         )
@@ -308,7 +321,7 @@ def prediction_by_id(prediction_id: str) -> AnalystPrediction | None:
             "horizon_days, direction, prob_up, expected_return, target_price, "
             "target_currency, price_basis, confidence, evidence_ids, analysis_as_of, "
             "created_at, schema_version, feature_version, original_prediction_id, "
-            "debate_revision, revision_reason FROM predictions "
+            "debate_revision, revision_reason, regime_id FROM predictions "
             "WHERE prediction_id = ?",
             (prediction_id,),
         )
@@ -328,7 +341,7 @@ def revisions_of(original_prediction_id: str) -> list[AnalystPrediction]:
             "horizon_days, direction, prob_up, expected_return, target_price, "
             "target_currency, price_basis, confidence, evidence_ids, analysis_as_of, "
             "created_at, schema_version, feature_version, original_prediction_id, "
-            "debate_revision, revision_reason FROM predictions "
+            "debate_revision, revision_reason, regime_id FROM predictions "
             "WHERE original_prediction_id = ? "
             "ORDER BY debate_revision, horizon_days",
             (original_prediction_id,),

@@ -23,6 +23,26 @@
 | V2.1-F | run_id 穿链/ticket linkage+mirror/bridge 接线/Web API（主智能体） | ✅ 完成（9 新测试；fair_value basis 改诊断项 16 测试） |
 | V2.1 门禁 | 全量三绿 + byte-compat → commit + tag v2.1.0 | ✅ **2819 passed / ruff clean / mypy 159 文件 clean** |
 
+## V2.2 Context（shadow 默认）— ✅ 完成（2026-09-03，2844 passed / ruff clean / mypy 160 文件 clean）
+
+批次：单一大子智能体（无并行冲突，避免接口错配）。冻结决定：
+- 新包 `yialpha/regime/`（state.py：RegimeState + regime_id=sha256(REGIME_VERSION+canonical inputs) 确定性哈希 + render 块；compute.py：perp 共用/纯币/股票永续三组字段，只用既有 PIT seam）
+- **迁移 v2**：新表 regimes（regime_id PK + payload + regime_version + analysis_as_of + computed_at）；predictions/outcomes 各加 regime_id 列（additive ALTER）
+- 注入：market analyst（仅 perp run）evidence 消息（flag `regime_state` 生产默认开/conftest 关）；ticket.regime_id 填充；predictions 提交时带 regime_id（run context 扩展或 prediction_tools 传递）
+- REGIME_VERSION→v2；scoreboard 增 by_regime 切片；vol_estimators 年化按 instrument_class 走 sessions.py（遗留项收口）
+- 历史回放仅 PIT 源；不可得→regime_id=None+披露（不泄漏）
+
+### 18. V2.2 落点（2026-09-03）
+
+- **RegimeState 契约**：regime_id = "G"+sha256(REGIME_VERSION + canonical sorted JSON(全部输入字段，剔除 regime_id/regime_version/computed_at))[:12]；computed_at 剔除是幂等关键（同输入重算同 id → INSERT OR IGNORE 去重）；missing_inputs 参与 preimage（缺腿的 regime 是**另一个** regime，不与完整版合并）。全数值/分类输入缺失 → 返回 None（披露"regime unavailable"，绝不伪造 id）。
+- **分类器冻结**（REGIME_VERSION v2，详见 versions.py/state.py docstring）：trend=close vs SMA50/200（both-above=up/both-below=down/else range，需 200 行）；realized_vol_pct=20 日收益 stdev（ddof=1，百分比，**不年化**）；funding_pct=7 日结算净和；oi_pct=30 日窗口分位；stress 触发=|funding|≥1%/7d ∨ |basis|≥50bps ∨ |gap|≥100bps ∨ OI≥90pct+1d+10%；depth=spread≤2/≤10bps + ±50bps notional ≥$2M/≥$500k；session=NYSE-equivalent ET 桶（date-only=工作日 regular/周末 closed，DST 用手写 2nd-Sun-3月..1st-Sun-11月 规则，免 tzdata）。earnings_calendar/sector_index 为诚实缺口（None+missing，不造数）。
+- **历史 PIT 过滤**：`is_historical_date(end_date)` 为真 → 深度等 LIVE_ONLY 腿**不 fetch 不泄漏**（missing_inputs 记 "depth_bands"），只用 klines/funding 历史/OI/LSR/taker 窗口（30 日保留期外自然降级为 missing）。market analyst 注入 replayability：历史=PIT_REPLAYABLE / live=LIVE_ONLY（镜像 bundle 契约）。
+- **迁移 v2**：ALTER 无 IF NOT EXISTS → 每个 ALTER 独立小事务 + "duplicate column name" OperationalError 吞掉（并发竞态败者视为成功；独立事务保证 duplicate 错误不会回滚 CREATE TABLE）。schema_meta='2' 最后写。
+- **穿链**：LedgerRunContext.regime_id 加性字段（set_ledger_run_context 同名 keyword，嵌在 prediction_ledger 门内——flag off 无 context 无 regime）；`_run_graph` 在 run 绑定后计算+upsert+**重新 force-bind** context（analyst 从 regime_by_id 读存储块，**不重算**）；final_state/log entry `regime_id` 键存在性=信号（off 字节不变）；ticket.regime_id 从 context 填（off 保持 None，pinned 测试钉住）；predictions regime_id 计入**内容比较**（同 id 换 regime=不可变冲突）；outcome 行经 pending dict 透传 regime_id。
+- **vol 年化收口**：`vol_estimators.sessions_per_year(instrument_class)` 经 `trading_sessions_between` 固定窗口（2025-01-01→2026-01-01）派生：stock_perp=261（2025 工作日数——可推导的 ~252 类因子；Binance 假日历未机器验证，252 纯惯例无法重构，已 docstring 披露）、pure_crypto_perp=365、其他=252。`periods_per_year_for(asset_type, instrument_class=None)` 加性参数，已知类优先；无类判定保持历史行为（纯币/股票字节不变，仅 stock_perp 路径变化）。接线：binance_indicator_tools（venue=perp 时用 `stock_perp_underlying` 判类）+ market_regime.classify_vol_state（新 instrument_class keyword，format_regime_context 判类传入）。
+- **conftest**：`_runtime_ledger_isolated` 增 `"regime_state": False`；.env.example 增 YIALPHA_REGIME_STATE 注释行（双向覆盖测试钉）。
+- **测试**：tests/test_regime_state.py（25 个）：id 确定性/输入敏感/版本隔离/computed_at 剔除、纯币 live 装配、历史模式 LIVE 腿零调用零泄漏、stock_perp 装配+诚实缺口、全缺→None、session 桶、迁移 v2 幂等+重复列恢复、store 往返、predictions 带载+regime 冲突、outcome 透传、`_run_graph` 穿链 flag on/off/uncomputable、ticket 填充 on/None off、analyst 注入 on/off 字节不变+PIT tag、scoreboard by_regime+no_regime 桶、sessions_per_year 双类钉值、indicator 工具年化因数捕获。
+
 ## 已冻结的契约决定
 
 1. **中央账本**：单文件 SQLite，config `ledger_db_path`（默认 `~/.yialpha/ledger/portfolio.db`，env `YIALPHA_LEDGER_DB`）。WAL + busy_timeout=5000 + BEGIN IMMEDIATE 原子提交；版本管理用 **schema_meta 表**（`schema_version` 行，非 PRAGMA user_version——Mimosa 钩子拦 f-string PRAGMA）；append-only（无 UPDATE 路径）。迁移 v1 = runs / instrument_snapshots / evidence / predictions / outcomes / tickets 六表（DDL 见 `yialpha/ledger/sqlite.py::_migrate`）。**所有 SQL 必须字面量+参数绑定**（Mimosa 钩子拦截变量 SQL，已两次拦截验证）。

@@ -441,7 +441,7 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
         # reach back): visible fail-closed record, prediction stays due.
         outcome_id = write_outcome(
             prediction_id, run_id, horizon, status="incomplete",
-            legs_missing=[LEG_CONTRACT_PRICE],
+            legs_missing=[LEG_CONTRACT_PRICE], regime_id=item.get("regime_id"),
         )
         return detail("incomplete", legs_missing=(LEG_CONTRACT_PRICE,), outcome_id=outcome_id)
     exit_bar = _last_close_at_or_before(series, end_date)
@@ -523,6 +523,7 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
         legs_missing=sorted(missing) or None,
         outcome_available_at=exit_bar.bar_date,
         ticket_id=ticket_id,
+        regime_id=item.get("regime_id"),
     )
     return detail(
         status,

@@ -1,11 +1,12 @@
 """SQLite storage seam for the V2 ledgers (one central append-first database).
 
 All V2 ledgers — instrument registry snapshots, run evidence, blind analyst
-predictions, outcomes, ticket mirrors (and, from V2.4, positions / portfolio
-snapshots) — share ONE SQLite file so cross-ledger joins and atomic
-multi-table commits stay local to a single database. The path comes from the
-config key ``ledger_db_path`` (default ``~/.yialpha/ledger/portfolio.db``,
-overridable with the ``YIALPHA_LEDGER_DB`` environment variable).
+predictions, outcomes, ticket mirrors, regime states (V2.2), (and, from V2.4,
+positions / portfolio snapshots) — share ONE SQLite file so cross-ledger
+joins and atomic multi-table commits stay local to a single database. The
+path comes from the config key ``ledger_db_path`` (default
+``~/.yialpha/ledger/portfolio.db``, overridable with the ``YIALPHA_LEDGER_DB``
+environment variable).
 
 Contract (docs/V2_BASELINE.md):
 
@@ -47,7 +48,7 @@ from pathlib import Path
 # Highest schema version this binary knows. Bump + add a migration block in
 # _migrate() whenever a ledger table is renamed/removed/redefined (additive
 # optional columns with defaults do not need a migration).
-_KNOWN_SCHEMA_VERSION = 1
+_KNOWN_SCHEMA_VERSION = 2
 
 _ledger_lock = threading.Lock()
 _local = threading.local()
@@ -262,6 +263,61 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 ("1",),
             )
+    if version < 2:
+        # v2 (V2.2 Context): the regimes table + the regime_id linkage
+        # columns on predictions/outcomes. CREATE TABLE is idempotent
+        # (IF NOT EXISTS); SQLite's ALTER TABLE has no IF NOT EXISTS, so each
+        # ALTER runs in its OWN tiny transaction with a duplicate-column
+        # recovery — two processes racing this migration both pass the
+        # version check above, and the loser must read "duplicate column
+        # name" as SUCCESS (the column exists) rather than aborting with a
+        # half-migrated DB. A separate transaction per ALTER also means the
+        # duplicate error can never roll back the CREATE TABLE above.
+        with ledger_transaction(conn=conn) as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS regimes (
+                    regime_id       TEXT PRIMARY KEY,
+                    payload         TEXT NOT NULL,
+                    regime_version  TEXT NOT NULL,
+                    analysis_as_of  TEXT,
+                    ticker          TEXT,
+                    instrument_class TEXT,
+                    computed_at     TEXT NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_regimes_ticker ON regimes (ticker)"
+            )
+        _alter_predictions_add_regime_id(conn)
+        _alter_outcomes_add_regime_id(conn)
+        with ledger_transaction(conn=conn) as cur:
+            cur.execute(
+                "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("2",),
+            )
+
+
+def _alter_predictions_add_regime_id(conn: sqlite3.Connection) -> None:
+    """Idempotent ``predictions.regime_id`` column (see the v2 block above)."""
+    try:
+        with ledger_transaction(conn=conn) as cur:
+            cur.execute("ALTER TABLE predictions ADD COLUMN regime_id TEXT")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
+
+
+def _alter_outcomes_add_regime_id(conn: sqlite3.Connection) -> None:
+    """Idempotent ``outcomes.regime_id`` column (see the v2 block above)."""
+    try:
+        with ledger_transaction(conn=conn) as cur:
+            cur.execute("ALTER TABLE outcomes ADD COLUMN regime_id TEXT")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
 
 
 def get_connection(*, readonly: bool = False) -> sqlite3.Connection:

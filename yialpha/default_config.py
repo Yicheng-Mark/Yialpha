@@ -220,6 +220,8 @@ _ENV_OVERRIDES = {
     "YIALPHA_INSTRUMENT_REGISTRY":          "instrument_registry",
     "YIALPHA_PREDICTION_LEDGER":            "prediction_ledger",
     "YIALPHA_STOCK_PERP_FAIR_VALUE":        "stock_perp_fair_value",
+    # V2.2 Context: versioned point-in-time RegimeState per perp run.
+    "YIALPHA_REGIME_STATE":                 "regime_state",
 }
 
 
@@ -471,6 +473,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # missing FX rate records a shadow DEGRADED_CRITICAL verdict without
     # vetoing. Set false to disable the bridge entirely.
     "stock_perp_fair_value": True,
+    # V2.2 Context stage (yialpha.regime): ON by default (shadow). Per
+    # crypto_perp run, a versioned point-in-time RegimeState (REGIME_VERSION
+    # v2) is computed from the existing PIT seams, stored in the regimes
+    # table, and its id threaded onto predictions / tickets / outcomes; the
+    # market analyst additionally sees the stored block as marked external
+    # evidence. Uncomputable regime -> disclosed as unavailable, never a
+    # fake id. Set false for byte-identical pre-V2.2 prompts and state.
+    "regime_state": True,
     # Central SQLite ledger DB (env YIALPHA_LEDGER_DB). One append-first
     # database holds instrument snapshots, run evidence, blind predictions,
     # outcomes and ticket mirrors (V2.4 adds positions/portfolio snapshots).

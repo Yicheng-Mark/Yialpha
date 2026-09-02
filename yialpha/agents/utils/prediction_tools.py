@@ -385,6 +385,7 @@ def flush_predictions() -> list[str]:
                     entries=list(capture.entries),
                     analysis_as_of=context.analysis_as_of,
                     evidence_ids=evidence_ids,
+                    regime_id=context.regime_id,
                 )
             )
             capture.submitted = True

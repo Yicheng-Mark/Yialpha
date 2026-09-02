@@ -23,6 +23,12 @@ import math
 import numpy as np
 import pandas as pd
 
+from yialpha.instruments.sessions import (
+    SESSION_BINANCE_TRADFI,
+    SESSION_CONTINUOUS,
+    trading_sessions_between,
+)
+
 #: Annualization factor for daily-frequency vol estimates (equity convention).
 TRADING_DAYS_PER_YEAR = 252.0
 
@@ -31,14 +37,56 @@ TRADING_DAYS_PER_YEAR = 252.0
 #: sqrt(252/365) ≈ 0.83 (a ~17% error on every vol-based reading).
 CRYPTO_TRADING_DAYS_PER_YEAR = 365.0
 
+#: Fixed representative year the class-based sessions/year factor is derived
+#: over (deterministic: the factor must never depend on today's date).
+_SESSIONS_WINDOW = ("2025-01-01", "2026-01-01")
 
-def periods_per_year_for(asset_type: str | None) -> float:
+
+def sessions_per_year(instrument_class: str | None) -> float:
+    """Sessions per year for an instrument class, derived from its session
+    calendar via :func:`yialpha.instruments.sessions.trading_sessions_between`
+    over :data:`_SESSIONS_WINDOW`.
+
+    * ``pure_crypto_perp`` → the continuous count over the 365-day window
+      (exactly 365 — every day trades);
+    * ``stock_perp`` → the weekday-session count over the same window (261
+      for 2025). This is the DERIVABLE TradFi factor: Binance's holiday
+      calendar is not yet machine-verified (see the sessions module
+      caveat), so the classic 252 convention cannot be reconstructed — the
+      weekday count is the honest, calendar-based ~252-class answer.
+    * anything else (``unknown_perp`` / ``equity`` / ``None``) → the 252
+      equity convention (the historical default).
+    """
+    if instrument_class == "pure_crypto_perp":
+        return float(
+            trading_sessions_between(SESSION_CONTINUOUS, *_SESSIONS_WINDOW)
+        )
+    if instrument_class == "stock_perp":
+        return float(
+            trading_sessions_between(SESSION_BINANCE_TRADFI, *_SESSIONS_WINDOW)
+        )
+    return TRADING_DAYS_PER_YEAR
+
+
+def periods_per_year_for(
+    asset_type: str | None, instrument_class: str | None = None
+) -> float:
     """Annualization factor for a daily series of ``asset_type``.
 
     Crypto (spot and perp) trades every calendar day; equities/A-shares keep
     the 252-session convention. Unknown/None defaults to 252 (the historical
     behaviour), matching the backtest engine's ``periods_per_year`` rule.
+
+    ``instrument_class`` (V2.2 determinism fix) refines the crypto_perp
+    case: a tokenized-stock perp (``stock_perp``) follows Binance's
+    published TradFi sessions, not 24/7 — annualizing its weekday-session
+    candles at 365 overstated annualized vol by sqrt(365/261) ≈ 1.18. A
+    known class wins over the asset-type rule; ``None``/unknown keeps the
+    historical asset-type behaviour (byte-identical for pure crypto and
+    equities — only stock-perp paths change).
     """
+    if instrument_class is not None:
+        return sessions_per_year(instrument_class)
     if (asset_type or "").startswith("crypto"):
         return CRYPTO_TRADING_DAYS_PER_YEAR
     return TRADING_DAYS_PER_YEAR
