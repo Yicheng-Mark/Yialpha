@@ -194,6 +194,15 @@ _ENV_OVERRIDES = {
     # prompt. The pre-existing YIALPHA_MARKET_REGIME turbulence-only
     # opt-in for the conservative debater is unchanged.
     "YIALPHA_REGIME_CONTEXT":               "regime_context",
+    # Deterministic perp market bundle (see the perp_market_bundle comment
+    # in DEFAULT_CONFIG): crypto_perp market analyst prefetch injection.
+    "YIALPHA_PERP_BUNDLE":                  "perp_market_bundle",
+    # Deterministic fundamentals bundle (see the fundamentals_bundle comment
+    # in DEFAULT_CONFIG): fundamentals analyst prefetch injection.
+    "YIALPHA_FUNDAMENTALS_BUNDLE":          "fundamentals_bundle",
+    # Vision archive summary mode (see the binance_vision_summary comment
+    # in DEFAULT_CONFIG): distribution + tail instead of raw daily CSV.
+    "YIALPHA_VISION_SUMMARY":               "binance_vision_summary",
     # Data-vacuum gate policy: "reject" (default — a run with zero successful
     # core data calls fails at the trader node with DataVacuumError instead of
     # producing a data-vacuum HOLD report) or "warn" (old behaviour: report +
@@ -394,6 +403,42 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # neither trend nor volatility state has enough history. Set false to
     # restore the pre-2026-08-15 bare prompt.
     "regime_context": True,
+    # Deterministic perp market bundle (see yialpha.dataflows.perp_bundle).
+    # ON by default for crypto_perp runs: before the market analyst's LLM
+    # turn, ONE parallel prefetch assembles the decision-critical numbers
+    # (last/mark/index closes + bases, funding, OI, 3-vantage LSR, taker
+    # flow, fixed-bps depth bands with slippage estimates, ADL, spot-perp
+    # basis) and injects them as advisory context — the LLM no longer
+    # decides WHETHER the core market facts get fetched. Every component is
+    # fail-soft with per-field status disclosed; the tools stay bound for
+    # drill-down; a missing CORE price leg records a quality sentinel that
+    # vetoes the ticket (NO_TRADE). Set false to restore the tools-only
+    # prompt.
+    "perp_market_bundle": True,
+    # Deterministic fundamentals bundle (see
+    # yialpha.dataflows.fundamentals_bundle). ON by default: before the
+    # fundamentals analyst's LLM turn, ONE parallel prefetch assembles the
+    # core fundamentals evidence — the merged SEC+Yahoo overview and the
+    # three quarterly statements (for ETFs the fund snapshot REPLACES the
+    # company statements; native A-share statements ride along when
+    # a_share_native is on) — and rides the final USER message as marked
+    # untrusted evidence. The LLM no longer decides WHETHER the core
+    # fundamentals get fetched; fetches run through route_to_vendor inside
+    # submit_with_context workers so the quality ledger sees the same
+    # evidence a model-issued tool call produces, and run_cached pins the
+    # fetch to once per run however many tool-loop re-entries the node
+    # sees. Fail-soft per component with status disclosed. Set false to
+    # restore the tools-only prompt.
+    "fundamentals_bundle": True,
+    # Vision archive summary mode (see yialpha.dataflows.binance_vision):
+    # at the daily grain, the vision tools render a distribution table over
+    # the FULL multi-year window + a recent tail (metrics: per-column
+    # stats + 30-day tail; bookDepth: per-band stats + liquidity-thin
+    # streak + 14-day tail) instead of raw CSV rows. ON by default — the
+    # LLM-facing answer for deep history is statistics, not thousands of
+    # rows. Set false (or pass summary=false per call) for the raw daily
+    # CSV, subject to the output cap.
+    "binance_vision_summary": True,
     # Phase 4: global kill switch (env: YIALPHA_KILL_SWITCH). Halt = no
     # new orders submitted by the browser broker; read live at order time.
     "kill_switch": False,
@@ -508,13 +553,18 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # e.g. "yfinance,alpha_vantage". "default" uses all available vendors.
     # The four core categories chain yfinance -> alpha_vantage (fundamentals
     # additionally -> sec_edgar) so a single-vendor outage degrades to the
-    # backup instead of a data vacuum; yfinance stays first because it is
-    # keyless and unlimited — alpha_vantage's free tier is rate-limited, so it
-    # must only ever serve as the tail of the chain.
+    # backup instead of a data vacuum; yfinance stays first in the price/
+    # indicator/news chains because it is keyless and unlimited —
+    # alpha_vantage's free tier is rate-limited, so it must only ever serve
+    # as the tail of the chain. FUNDAMENTALS are the deliberate exception
+    # (PR5, 2026-09): SEC EDGAR leads because its filings carry the REAL
+    # ``filed`` date — period visibility is point-in-time ground truth, not
+    # the period_end+45-day heuristic yfinance/AV are stuck with (a 10-Q
+    # filed 38 days after period end is genuinely public at day 38).
     "data_vendors": {
         "core_stock_apis": "yfinance,alpha_vantage",       # Options: alpha_vantage, yfinance
         "technical_indicators": "yfinance,alpha_vantage",  # Options: alpha_vantage, yfinance
-        "fundamental_data": "yfinance,alpha_vantage,sec_edgar",  # Options: alpha_vantage, yfinance, sec_edgar
+        "fundamental_data": "sec_edgar,yfinance,alpha_vantage",  # Options: alpha_vantage, yfinance, sec_edgar
         "news_data": "yfinance,alpha_vantage",             # Options: alpha_vantage, yfinance
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
@@ -531,6 +581,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "data_vacuum_policy": "reject",
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {
+        # The overview MERGES SEC filing facts with Yahoo's real-time
+        # valuation (market cap, PE, beta; live runs only) instead of riding
+        # the category chain, where SEC-first would serve its seven filing
+        # facts and never read the valuation fields. The STATEMENTS stay on
+        # the SEC-first category chain above — filings are their PIT ground
+        # truth. Set "get_fundamentals": "sec_edgar,yfinance,alpha_vantage"
+        # (or any chain) to restore plain chaining.
+        "get_fundamentals": "fundamentals_overview",
         # Example: "get_stock_data": "alpha_vantage",  # Override category default
     },
     # Benchmark for alpha calculation in the reflection layer.

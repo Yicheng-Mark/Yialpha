@@ -26,8 +26,9 @@ OVERLAY_MARKER = "## Quantitative Risk Overlay"
 #: Per-field regexes over the overlay bullet block. ``position_value`` is the
 #: parenthetical dollar amount after the target weight (absent when the
 #: overlay uses list form without it); every other field is a plain bullet.
-#: ``suggested_leverage`` / ``liquidation_price`` / ``funding_note`` are
-#: perp-only bullets (crypto_perp runs; absent on stock/spot overlays).
+#: ``suggested_leverage`` / ``liquidation_price`` / ``funding_note`` /
+#: ``stop_trigger_basis`` are perp-only bullets (crypto_perp runs; absent on
+#: stock/spot overlays).
 OVERLAY_FIELDS: dict[str, str] = {
     "action": r"\*\*Action\*\*:\s*(.+)",
     "target_weight": r"\*\*Target Weight\*\*:\s*([0-9.]+%)",
@@ -37,6 +38,7 @@ OVERLAY_FIELDS: dict[str, str] = {
     "suggested_leverage": r"\*\*Suggested Leverage\*\*:\s*≤\s*([0-9.]+)x",
     "liquidation_price": r"\*\*Est\. Liquidation Price\*\*:\s*([-0-9.]+)",
     "funding_note": r"\*\*Funding \(7d\)\*\*:\s*(.+)",
+    "stop_trigger_basis": r"\*\*Stop Trigger Basis\*\*:\s*(.+)",
     "regime": r"\*\*Drawdown Regime\*\*:\s*(\S+)",
     "rationale": r"\*\*Rationale\*\*:\s*(.+)",
 }

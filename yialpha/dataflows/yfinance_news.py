@@ -11,6 +11,7 @@ from dateutil.relativedelta import relativedelta
 
 from .config import get_config
 from .disk_cache import cached_or_fetch, vendor_cache_dir
+from .errors import NoMarketDataError
 from .stockstats_utils import yf_retry
 from .symbol_utils import normalize_symbol
 from .utils import current_pit_end
@@ -165,7 +166,14 @@ def get_news_yfinance(
         news = yf_retry(lambda: stock.get_news(count=article_limit))
 
         if not news:
-            return f"No news found for {ticker}{resolved}"
+            # EMPTY is a typed soft-miss, not a success: raising lets the
+            # router's vendor chain fall through to the next configured
+            # vendor (alpha_vantage). A plain "No news found" string used
+            # to count as a successful fetch and silently masked the whole
+            # fallback chain (PR5, 2026-09).
+            raise NoMarketDataError(
+                ticker, canonical, "yfinance returned no news items",
+            )
 
         # Parse date range for filtering
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
@@ -190,7 +198,12 @@ def get_news_yfinance(
             filtered_count += 1
 
         if filtered_count == 0:
-            return f"No news found for {ticker}{resolved} between {start_date} and {end_date}"
+            # Same soft-miss contract: the symbol may simply be covered by
+            # the next vendor in the chain for this window.
+            raise NoMarketDataError(
+                ticker, canonical,
+                f"no yfinance news within {start_date}..{end_date}",
+            )
 
         return f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n{news_str}"
 
@@ -255,7 +268,12 @@ def get_global_news_yfinance(
                 break
 
         if not all_news:
-            return f"No global news found for {curr_date}"
+            # Typed soft-miss (same contract as get_news_yfinance): an empty
+            # result must reach the router's vendor chain, not count as a
+            # successful fetch that masks the fallback.
+            raise NoMarketDataError(
+                curr_date, curr_date, "yfinance Search returned no news items",
+            )
 
         # Calculate date range
         curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
@@ -278,10 +296,13 @@ def get_global_news_yfinance(
             news_str += "\n"
             kept += 1
 
-        # All candidates fell outside the window -> say so rather than return an
-        # empty-bodied report (#993).
+        # All candidates fell outside the window -> typed soft-miss, not an
+        # empty-bodied report (#993): the next vendor may cover the window.
         if kept == 0:
-            return f"No global news found between {start_date} and {curr_date}"
+            raise NoMarketDataError(
+                curr_date, curr_date,
+                f"no yfinance global news within {start_date}..{curr_date}",
+            )
 
         return f"## Global Market News, from {start_date} to {curr_date}:\n\n{news_str}"
 

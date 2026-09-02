@@ -58,7 +58,7 @@ class DataflowsConfigIsolationTests(unittest.TestCase):
         )
         self.assertEqual(
             fresh["data_vendors"]["fundamental_data"],
-            "yfinance,alpha_vantage,sec_edgar",
+            "sec_edgar,yfinance,alpha_vantage",
         )
         self.assertEqual(
             fresh["data_vendors"]["news_data"], "yfinance,alpha_vantage"
@@ -71,6 +71,40 @@ class DataflowsConfigIsolationTests(unittest.TestCase):
         fresh = get_config()
         self.assertEqual(fresh["tool_vendors"]["get_stock_data"], "alpha_vantage")
         self.assertEqual(fresh["tool_vendors"]["get_news"], "alpha_vantage")
+
+    def test_overview_defaults_to_aggregate_vendor_statements_stay_sec_first(self):
+        # The overview MERGES SEC filing facts + Yahoo valuation; the three
+        # statements ride the SEC-first category chain untouched.
+        self.assertEqual(
+            get_config()["tool_vendors"].get("get_fundamentals"),
+            "fundamentals_overview",
+        )
+        self.assertEqual(
+            get_config()["data_vendors"]["fundamental_data"],
+            "sec_edgar,yfinance,alpha_vantage",
+        )
+        from yialpha.dataflows.interface import VENDOR_METHODS, get_vendor
+
+        self.assertEqual(
+            get_vendor("fundamental_data", "get_fundamentals"),
+            "fundamentals_overview",
+        )
+        self.assertEqual(
+            get_vendor("fundamental_data", "get_income_statement"),
+            "sec_edgar,yfinance,alpha_vantage",
+        )
+        # The aggregate vendor resolves to the merge implementation.
+        from yialpha.dataflows.fundamentals_overview import (
+            get_fundamentals as aggregate_overview,
+        )
+
+        self.assertIs(
+            VENDOR_METHODS["get_fundamentals"]["fundamentals_overview"],
+            aggregate_overview,
+        )
+
+    def test_fundamentals_bundle_defaults_on(self):
+        self.assertIs(get_config()["fundamentals_bundle"], True)
 
     def test_submit_with_context_propagates_config_to_worker_thread(self):
         set_config({"context_probe": 987654})

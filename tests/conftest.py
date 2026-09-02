@@ -92,3 +92,50 @@ def _isolated_binance_history_memo():
     reset_history_memo_for_test()
     yield
     reset_history_memo_for_test()
+
+
+@pytest.fixture(autouse=True)
+def _perp_bundle_off_by_default():
+    """Hermetic tests: the deterministic perp market bundle (default ON in
+    production for crypto_perp market analysts) issues real network
+    prefetches. Keep it OFF here unless a test explicitly opts in with
+    mocked fetchers (``set_config({"perp_market_bundle": True})`` in the
+    test body — set_config merges, so the opt-in wins over this fixture).
+    """
+    from yialpha.dataflows.config import set_config
+
+    set_config({"perp_market_bundle": False})
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _runtime_prefetch_bundles_off():
+    """Hermetic tests: the deterministic fundamentals bundle (default ON in
+    production) issues real vendor prefetches through the router. Keep it
+    OFF here unless a test explicitly opts in with mocked fetchers
+    (``set_config({"fundamentals_bundle": True})`` in the test body —
+    set_config merges, so the opt-in wins over this fixture).
+
+    Named to sort AFTER ``_isolate_config`` (pytest runs same-scope autouse
+    conftest fixtures alphabetically): the reset there restores the
+    production default True, so this fixture must run later to hold it off.
+    """
+    from yialpha.dataflows.config import set_config
+
+    set_config({"fundamentals_bundle": False})
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_perp_overlay_mark(monkeypatch):
+    """The perp risk overlay's Mark Reference bullet fetches mark klines
+    (network). Stub it to None (the production fail-soft degradation) so any
+    test running the perp overlay stays hermetic; a test asserting the mark
+    bullet monkeypatches the method with a value, which shadows this
+    class-level stub.
+    """
+    from yialpha.graph.trading_graph import YiAlphaGraph
+
+    monkeypatch.setattr(
+        YiAlphaGraph, "_latest_mark_close", lambda self, t, d: None,
+    )

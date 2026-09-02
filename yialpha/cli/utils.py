@@ -5,7 +5,6 @@ import questionary
 from dotenv import find_dotenv, set_key
 from rich.console import Console
 
-from yialpha.dataflows.binance import stock_perp_underlying
 from yialpha.dataflows.utils import safe_ticker_component
 from yialpha.llm_clients.api_key_env import get_api_key_env
 from yialpha.llm_clients.model_catalog import get_model_options
@@ -123,17 +122,21 @@ def filter_analysts_for_asset_type(
     # perp (exchangeInfo underlyingType == EQUITY, e.g. MUUSDT tracking
     # Micron) keeps it: the analyst reads the UNDERLYING US equity through
     # the normal stock vendors (remap + nudge live in the analyst layer).
+    # The applicability predicate lives in yialpha.graph.routing (shared
+    # with the fundamentals node's runtime skip) so every entrance agrees;
     # STOCK is not in the drop set -> returns the full list unchanged
     # (baseline behavior); ticker defaults to "" so existing callers/tests
     # that never pass one keep the pre-perp-underlying behavior.
-    if asset_type == AssetType.CRYPTO_PERP and stock_perp_underlying(ticker):
-        return list(analysts)
+    from yialpha.graph.routing import fundamentals_applicable
+
     if asset_type not in (
         AssetType.CRYPTO,
         AssetType.CRYPTO_PERP,
         AssetType.CRYPTO_SPOT,
     ):
         return analysts
+    if fundamentals_applicable(asset_type.value, ticker):
+        return list(analysts)
     return [
         analyst
         for analyst in analysts

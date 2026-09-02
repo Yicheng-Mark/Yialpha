@@ -180,6 +180,7 @@ def cached_or_fetch(
     ttl_days: float,
     vendor: str,
     fail_open: bool = False,
+    stale_cap_days: float | None = None,
 ) -> bytes | None:
     """Serve ``base_dir/filename`` from a fresh cache, else fetch and cache.
 
@@ -197,6 +198,10 @@ def cached_or_fetch(
       cache directory must never fail a data call that already succeeded).
 
     ``ttl_days`` may be fractional (e.g. ``1/24`` for one hour).
+    ``stale_cap_days`` optionally tightens the stale-serve ceiling for THIS
+    caller below the global ``data_cache_max_stale_days`` — minute-scale
+    data (social feeds) must not be served days old even though the global
+    cap allows it; the tighter of the two caps wins.
     """
     # Sanitized + containment-checked inside cache_file_path; the validated
     # Path is the only object ever opened for this cache entry.
@@ -229,14 +234,19 @@ def cached_or_fetch(
                 if stale_mtime is not None
                 else _mtime_age_days(validated)
             )
-            cap = max_stale_days()
+            global_cap = max_stale_days()
+            cap = (
+                min(global_cap, stale_cap_days)
+                if stale_cap_days is not None
+                else global_cap
+            )
             if age > cap:
                 # Fail-closed: an arbitrarily old cache is worse than an
                 # honest error — the vendor layer turns this into its typed
                 # error and the router records a sentinel.
                 logger.warning(
                     "%s: fetch failed and cache %s is %.1f days old (over the "
-                    "%.0f-day cap); refusing to serve stale data",
+                    "%.4f-day cap); refusing to serve stale data",
                     vendor, validated, age, cap,
                 )
                 if fail_open:

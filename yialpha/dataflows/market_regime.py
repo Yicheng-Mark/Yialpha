@@ -16,8 +16,10 @@ already happened). Turbulence is **market-level and ex-ante** (today's return
 is abnormal vs the recent calm) — a leading stress cue the conservative risk
 debater can weigh. The two are complementary, not redundant.
 
-Point-in-time safety is inherited from ``load_ohlcv`` (already filters rows to
-``<= curr_date``), so a backtest cannot peek at a future return.
+Point-in-time safety is inherited from the loaders (``load_ohlcv`` filters
+rows to ``<= curr_date``; the crypto-family branch is PIT-clamped inside
+``binance_klines_frame`` via the pinned analysis date), so a backtest cannot
+peek at a future return.
 
 This module is advisory-only and **fail-soft**: any data/numerical failure
 returns ``None`` (and logs) rather than propagating — the caller simply omits
@@ -59,7 +61,76 @@ _DEFAULT_MIN_PERIODS = 60
 _ELEVATED_SIGMA = 2.5
 
 
-def resolve_market_benchmark(ticker: str) -> str:
+#: Crypto-native default benchmark for crypto-family runs (loaded from
+#: Binance, the same venue family as the analyzed instrument).
+_CRYPTO_NATIVE_BENCHMARK = "BTCUSDT"
+
+
+def _binance_venue_for_asset(asset_type: str | None) -> str | None:
+    """Binance klines venue for the crypto family, ``None`` for the Yahoo path.
+
+    Mirrors the risk overlay's venue split (trading_graph
+    ``_memoized_close_and_atr``): a crypto_perp must not read its regime off
+    the Yahoo series ``load_ohlcv`` normalizes BTCUSDT into (BTC-USD spot —
+    a different instrument at a different basis), and a tokenized-stock perp
+    has no Yahoo symbol at all (its regime line silently vanished). Legacy
+    ``crypto`` (auto-detected spot) deliberately stays on Yahoo, matching the
+    overlay's own historical choice for that mode.
+    """
+    if asset_type == "crypto_perp":
+        return "binance_perp"
+    if asset_type == "crypto_spot":
+        return "binance_spot"
+    return None
+
+
+def _load_regime_ohlcv(
+    symbol: str, curr_date: str, asset_type: str | None,
+):
+    """Asset-aware OHLCV for the regime line (see ``_binance_venue_for_asset``).
+
+    The Binance branch needs a window wide enough for the trend/vol
+    components: 200 rows for the SMA200 trend state and ~252 for the vol
+    percentile rank — 500 calendar days of 24/7 candles covers both with
+    margin. PIT-clamped inside ``binance_klines_frame``.
+    """
+    venue = _binance_venue_for_asset(asset_type)
+    if venue is None:
+        return load_ohlcv(symbol, curr_date)
+    from datetime import datetime, timedelta
+
+    from .binance import binance_klines_frame
+
+    lookback = (
+        datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=500)
+    ).strftime("%Y-%m-%d")
+    frame = binance_klines_frame(symbol, lookback, curr_date, "1d", venue, "last")
+    # binance_klines_frame is Date-INDEXED; load_ohlcv returns Date as a
+    # COLUMN — the regime components (sort_values("Date"), stockstats wrap)
+    # consume the Yahoo shape, so normalise here rather than at every
+    # consumer.
+    return frame.reset_index()
+
+
+def _benchmark_load_asset_type(
+    benchmark: str, asset_type: str | None,
+) -> str | None:
+    """Asset type the BENCHMARK's OHLCV should load under.
+
+    A USDT/USDC pair benchmark on a crypto-family run loads from Binance
+    (same venue family as the instrument); anything else (SPY, QQQ, … —
+    including the equity-market context benchmark of a tokenized-stock perp)
+    stays on the Yahoo path.
+    """
+    if _binance_venue_for_asset(asset_type) is None:
+        return None
+    base = benchmark.upper().replace("-", "")
+    return asset_type if base.endswith(("USDT", "USDC")) else None
+
+
+def resolve_market_benchmark(
+    ticker: str, asset_type: str | None = None,
+) -> str:
     """Resolve a market benchmark symbol for ``ticker``.
 
     The single implementation of the benchmark-resolution rule (the graph's
@@ -67,9 +138,10 @@ def resolve_market_benchmark(ticker: str) -> str:
     it was a verbatim copy before): ``benchmark_ticker`` overrides
     everything; otherwise the suffix map in config matches the ticker's
     exchange suffix; the empty-suffix entry (SPY by default) is the
-    fallback. Note: crypto tickers have no suffix and therefore resolve to
-    SPY — a cross-asset risk-on/off proxy. Set ``benchmark_ticker`` for a
-    crypto-native benchmark (e.g. BTCUSDT).
+    fallback — EXCEPT on crypto-family runs, whose suffix-less tickers
+    default to the crypto-native :data:`_CRYPTO_NATIVE_BENCHMARK` instead of
+    SPY. A tokenized-stock perp keeps the SPY equity-market context: its
+    risk narrative is the underlying company's market, not BTC's.
     """
     config = get_config()
     explicit = config.get("benchmark_ticker")
@@ -80,6 +152,13 @@ def resolve_market_benchmark(ticker: str) -> str:
     for suffix, benchmark in benchmark_map.items():
         if suffix and ticker_upper.endswith(suffix.upper()):
             return benchmark
+    if _binance_venue_for_asset(asset_type) == "binance_perp":
+        from .binance import stock_perp_underlying
+
+        if not stock_perp_underlying(ticker):
+            return _CRYPTO_NATIVE_BENCHMARK
+    elif _binance_venue_for_asset(asset_type) == "binance_spot":
+        return _CRYPTO_NATIVE_BENCHMARK
     return benchmark_map.get("", "SPY")
 
 
@@ -89,16 +168,18 @@ def compute_turbulence(
     *,
     window: int = _DEFAULT_WINDOW,
     min_periods: int = _DEFAULT_MIN_PERIODS,
+    asset_type: str | None = None,
 ) -> float | None:
-    """Compute the single-asset turbulence index for ``symbol`` at ``curr_date``.
+    """Compute the single-asset turbulence index for ``symbol`` at ``curr_date`.
 
     Returns the squared z-score of the most recent daily return against the
     trailing ``window`` returns (excluding the current day), or ``None`` when
     there is too little history, the variance is degenerate, or data fetch
-    fails. PIT-safe via ``load_ohlcv``.
+    fails. PIT-safe via the asset-aware regime loader (``asset_type`` routes
+    crypto-family symbols to Binance, everything else to ``load_ohlcv``).
     """
     try:
-        data = load_ohlcv(symbol, curr_date)
+        data = _load_regime_ohlcv(symbol, curr_date, asset_type)
     except Exception as exc:  # noqa: BLE001 — advisory signal must be fail-soft
         logger.warning("turbulence: OHLCV fetch failed for %s: %s", symbol, exc)
         return None
@@ -267,7 +348,7 @@ def format_regime_context(
     reported level matches the Binance indicator tools' scale.
     """
     try:
-        data = load_ohlcv(ticker, curr_date)
+        data = _load_regime_ohlcv(ticker, curr_date, asset_type)
     except Exception:  # noqa: BLE001 — advisory signal must be fail-soft
         data = None
 
@@ -287,8 +368,11 @@ def format_regime_context(
     if trend is None and vol is None:
         return None
 
-    benchmark = resolve_market_benchmark(ticker)
-    turb = compute_turbulence(benchmark, curr_date)
+    benchmark = resolve_market_benchmark(ticker, asset_type)
+    turb = compute_turbulence(
+        benchmark, curr_date,
+        asset_type=_benchmark_load_asset_type(benchmark, asset_type),
+    )
     if turb is not None:
         sigma = math.sqrt(turb) if turb > 0 else 0.0
         label = "elevated" if sigma >= _ELEVATED_SIGMA else "normal"

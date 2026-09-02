@@ -105,6 +105,32 @@ class MarkPriceKlinesTests(unittest.TestCase):
             )
 
 
+class KlinesHeaderPriceBasisTests(unittest.TestCase):
+    """The CSV header must disclose which price basis the rows are on —
+    last/mark/index artifacts are indistinguishable from the columns alone."""
+
+    def _header(self, price_type: str) -> str:
+        base = _today_ms() - 5 * _DAY_MS
+        rows = [_kline(base + i * _DAY_MS, 100.0, 101.0, 99.0, 100.5)
+                for i in range(6)]
+        with mock.patch.object(bn, "_http_get", _klines_server(rows)):
+            out = bn.get_binance_klines(
+                "BTCUSDT", "2026-01-01", _today_iso(), price_type=price_type,
+            )
+        return out
+
+    def test_header_states_each_price_basis(self):
+        self.assertIn("# Price basis: last (", self._header("last"))
+        self.assertIn("# Price basis: mark (", self._header("mark"))
+        self.assertIn("# Price basis: index (", self._header("index"))
+
+    def test_mark_header_names_liquidation_anchor(self):
+        self.assertIn("liquidat", self._header("mark").splitlines()[1])
+
+    def test_index_header_names_volume_zero(self):
+        self.assertIn("volume is 0", self._header("index").splitlines()[1])
+
+
 class FundingCadenceTests(unittest.TestCase):
     def test_4h_cadence_stated_in_header(self):
         base = int(datetime(2026, 8, 1, tzinfo=UTC).timestamp() * 1000)
@@ -235,20 +261,26 @@ class StalenessGuardTests(unittest.TestCase):
 
 class FuturesDataWindowPITTests(unittest.TestCase):
     def test_start_only_clamps_to_pinned_analysis_date(self):
-        set_analysis_date("2026-08-01")
+        # Pin RELATIVE to now: /futures/data/* retains only the last 30 days,
+        # so an absolute pinned date ages out of the retention horizon and
+        # the window helper correctly raises (the 2026-08-01 pin turned into
+        # a time bomb on 2026-09-01). 7 days ago stays inside forever.
+        pinned = (datetime.now(UTC) - timedelta(days=7)).strftime("%Y-%m-%d")
+        start = (datetime.now(UTC) - timedelta(days=14)).strftime("%Y-%m-%d")
+        set_analysis_date(pinned)
         try:
             extra, end_iso, reaches_now, end_ms, coverage_note = bn._futures_data_window(
-                "BTCUSDT", "BTCUSDT", 7, "2026-07-25", None,
+                "BTCUSDT", "BTCUSDT", 7, start, None,
             )
         finally:
             set_analysis_date(None)
-        self.assertEqual(end_iso, "2026-08-01")
+        self.assertEqual(end_iso, pinned)
         self.assertFalse(reaches_now)
         # 8 daily rows fit the 500-row cap: no truncation, no note.
         self.assertEqual(coverage_note, "")
-        # endTime must be within the pinned day (2026-08-01 end-of-day UTC).
+        # endTime must be within the pinned day (end-of-day UTC).
         end_dt = datetime.fromtimestamp(extra["endTime"] / 1000, tz=UTC)
-        self.assertEqual(end_dt.date().isoformat(), "2026-08-01")
+        self.assertEqual(end_dt.date().isoformat(), pinned)
         # end_ms (the ms-based trim anchor) is the same end-of-day instant.
         self.assertEqual(end_ms, extra["endTime"])
 

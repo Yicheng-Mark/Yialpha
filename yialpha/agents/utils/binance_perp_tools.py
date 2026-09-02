@@ -41,8 +41,12 @@ def get_binance_klines(
     Returns:
         str: Header + CSV of OHLCV candles for the requested range.
     """
+    # _qualifier labels the quality sentinel with the price basis so an
+    # index-kline miss grades auxiliary (settlement anchor) while last/mark
+    # stay the critical price book — see quality._is_critical_failure.
     return route_to_vendor(
-        "get_binance_klines", symbol, start_date, end_date, interval, price_type
+        "get_binance_klines", symbol, start_date, end_date, interval, price_type,
+        _qualifier=price_type,
     )
 
 

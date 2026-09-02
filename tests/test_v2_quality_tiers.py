@@ -113,3 +113,159 @@ def test_critical_categories_cover_price_and_fundamentals_only():
     assert "news_data" not in quality.CRITICAL_CATEGORIES
     assert "macro_data" not in quality.CRITICAL_CATEGORIES
     assert "prediction_markets" not in quality.CRITICAL_CATEGORIES
+
+
+# ---------------------------------------------------------------------------
+# Method-level severity inside the Binance price categories: the klines /
+# indicator engines are critical; enrichment tools never veto.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_perp_enrichment_failure_never_vetoes():
+    # A tokenized-stock perp structurally lacks a spot leg, so basis tools
+    # error; vision/depth can be unavailable. None of these may push the
+    # tier to DEGRADED_CRITICAL (the historical false-NO_TRADE bug) — they
+    # degrade to auxiliary and are disclosed.
+    events = [
+        _event("get_binance_basis", quality.KIND_OPTIONAL_UNAVAILABLE),
+        _event("get_binance_spot_perp_basis", quality.KIND_OPTIONAL_UNAVAILABLE),
+        _event("get_binance_vision_metrics", quality.KIND_OPTIONAL_UNAVAILABLE),
+        _event("get_binance_depth_snapshot", quality.KIND_OPTIONAL_UNAVAILABLE),
+        _event("get_binance_funding_rate", quality.KIND_OPTIONAL_UNAVAILABLE),
+    ]
+    out = classify_quality(events, {"get_binance_klines"})
+    assert out["tier"] == TIER_DEGRADED_AUXILIARY
+    assert out["critical_data_available"] is True
+    assert out["critical_missing"] == []
+    assert len(out["auxiliary_degraded"]) == 5
+
+
+@pytest.mark.unit
+def test_perp_indicator_engine_failure_is_critical():
+    # The actual kline/indicator book failing MUST veto — historically this
+    # was the inverse: the unregistered method name classified as auxiliary
+    # while a decorative basis failure was critical.
+    for method in ("get_binance_klines", "get_binance_indicators",
+                   "get_binance_spot_klines", "get_binance_spot_indicators"):
+        out = classify_quality(
+            [_event(method, quality.KIND_OPTIONAL_UNAVAILABLE)],
+            {"get_stock_data"},
+        )
+        assert out["tier"] == TIER_DEGRADED_CRITICAL, method
+        assert out["critical_missing"] == [f"{method}(optional_unavailable)"]
+
+
+@pytest.mark.unit
+def test_indicator_methods_are_registered_in_category_table():
+    # The indicator tools record sentinels under their own names; those names
+    # must resolve in TOOLS_CATEGORIES or classify_quality silently drops
+    # them to the unknown-method auxiliary branch.
+    from yialpha.dataflows.interface import get_category_for_method
+
+    assert get_category_for_method("get_binance_indicators") == "binance_perp"
+    assert get_category_for_method("get_binance_spot_indicators") == "binance_spot"
+    assert "get_binance_indicators" in quality._PERP_CORE_METHODS
+    assert "get_binance_spot_indicators" in quality._PERP_CORE_METHODS
+
+
+# ---------------------------------------------------------------------------
+# Qualifier-level severity: an INDEX-kline miss is enrichment (settlement
+# fair-value anchor), not a lost price book — last/mark stay critical.
+# ---------------------------------------------------------------------------
+
+
+def _qevent(method: str, kind: str, qualifier: str) -> dict:
+    return {
+        "method": method, "kind": kind, "detail": "test", "qualifier": qualifier,
+    }
+
+
+@pytest.mark.unit
+def test_index_kline_failure_is_auxiliary():
+    out = classify_quality(
+        [_qevent("get_binance_klines", quality.KIND_OPTIONAL_UNAVAILABLE, "index")],
+        {"get_binance_klines"},
+    )
+    assert out["tier"] == TIER_DEGRADED_AUXILIARY
+    assert out["critical_missing"] == []
+    assert out["auxiliary_degraded"] == [
+        "get_binance_klines[index](optional_unavailable)",
+    ]
+
+
+@pytest.mark.unit
+def test_mark_kline_failure_stays_critical():
+    out = classify_quality(
+        [_qevent("get_binance_klines", quality.KIND_OPTIONAL_UNAVAILABLE, "mark")],
+        {"get_stock_data"},
+    )
+    assert out["tier"] == TIER_DEGRADED_CRITICAL
+    assert out["critical_missing"] == [
+        "get_binance_klines[mark](optional_unavailable)",
+    ]
+
+
+@pytest.mark.unit
+def test_unqualified_kline_failure_stays_critical():
+    # Defensive back-compat: a klines sentinel recorded WITHOUT a qualifier
+    # (e.g. the bundle's core-leg sentinel) still grades critical.
+    out = classify_quality(
+        [_event("get_binance_klines", quality.KIND_OPTIONAL_UNAVAILABLE)],
+        {"get_stock_data"},
+    )
+    assert out["tier"] == TIER_DEGRADED_CRITICAL
+
+
+@pytest.mark.unit
+def test_record_sentinel_carries_qualifier():
+    quality.ensure_run_context()
+    try:
+        quality.record_sentinel(
+            "get_binance_klines", quality.KIND_OPTIONAL_UNAVAILABLE,
+            "down", qualifier="index",
+        )
+        events = quality.snapshot_quality()
+    finally:
+        quality.reset_quality()
+    assert events[0]["qualifier"] == "index"
+    # Events without a qualifier keep the empty-string shape (uniform dict).
+    quality.ensure_run_context()
+    try:
+        quality.record_sentinel("get_news", quality.KIND_NO_DATA)
+        assert quality.snapshot_quality()[0]["qualifier"] == ""
+    finally:
+        quality.reset_quality()
+
+
+@pytest.mark.unit
+def test_qualifier_flows_through_the_router(monkeypatch):
+    # The tool layer passes _qualifier=price_type; the router's optional-
+    # category sentinel must carry it so classify grades index as auxiliary.
+    import yialpha.dataflows.interface as iface
+
+    def refuse(symbol, start, end, interval="1d", price_type="last"):
+        from yialpha.dataflows.errors import NoMarketDataError
+
+        raise NoMarketDataError(symbol, symbol, "index endpoint down")
+
+    monkeypatch.setattr(
+        iface, "VENDOR_METHODS",
+        {
+            **iface.VENDOR_METHODS,
+            "get_binance_klines": {"binance": refuse},
+        },
+    )
+    quality.ensure_run_context()
+    try:
+        out = iface.route_to_vendor(
+            "get_binance_klines", "BTCUSDT", "2026-01-01", "2026-01-31",
+            "1d", "index", _qualifier="index",
+        )
+        events = quality.snapshot_quality()
+    finally:
+        quality.reset_quality()
+    assert out.startswith("NO_DATA_AVAILABLE")
+    assert events[0]["method"] == "get_binance_klines"
+    assert events[0]["kind"] == quality.KIND_OPTIONAL_UNAVAILABLE
+    assert events[0]["qualifier"] == "index"

@@ -33,7 +33,9 @@ def _rendered_overlay() -> str:
 
 def _rendered_perp_overlay() -> str:
     """A crypto_perp overlay: the perp ticket bullets sit between Entry
-    Reference and Drawdown Regime (exact shape _render_perp_ticket emits)."""
+    Reference and Drawdown Regime (exact shape _render_perp_ticket emits —
+    the liq bullet carries the MMR/fee assumption note and is followed by
+    the stop-trigger-basis disclosure)."""
     overlay = (
         f"\n\n---\n\n{OVERLAY_MARKER}\n\n"
         "- **Action**: BUY\n"
@@ -43,7 +45,12 @@ def _rendered_perp_overlay() -> str:
         "- **Suggested Leverage**: ≤ 5.0x (liq-dist 12.5x · vol 10.0x · "
         "conviction 5.0x · hard 20x)\n"
         "- **Est. Liquidation Price**: 90.1 (19.9% from entry; the stop at "
-        "104.5 fires first by design)\n"
+        "104.5 fires first by design; includes MMR 0.50% + fee 0.05%; "
+        "default bracket ladder @ assumed 50,000 USDT notional (real tier "
+        "rises with size))\n"
+        "- **Stop Trigger Basis**: CONTRACT_PRICE (Binance conditional-order "
+        "default; liquidation itself is judged on MARK price — the two can "
+        "diverge)\n"
         "- **Funding (7d)**: +0.031% net over 7d (longs pay)\n"
         "- **Drawdown Regime**: NORMAL (2.1%)\n"
         "- **Rationale**: quarter-Kelly cap binds\n"
@@ -71,8 +78,11 @@ def test_roundtrip_extracts_perp_ticket_fields():
     out = parse_overlay(_rendered_perp_overlay())
     assert out is not None
     assert out["suggested_leverage"] == "5.0"
+    # The MMR/fee assumption note lives inside the parentheses and must not
+    # bleed into the parsed number.
     assert out["liquidation_price"] == "90.1"
     assert out["funding_note"] == "+0.031% net over 7d (longs pay)"
+    assert out["stop_trigger_basis"].startswith("CONTRACT_PRICE")
     # The pre-existing stock fields still parse around the perp bullets.
     assert out["stop_loss"] == "104.50"
     assert out["regime"] == "NORMAL"
@@ -96,4 +106,5 @@ def test_field_map_covers_expected_keys():
         "action", "target_weight", "position_value",
         "stop_loss", "entry", "regime", "rationale",
         "suggested_leverage", "liquidation_price", "funding_note",
+        "stop_trigger_basis",
     }

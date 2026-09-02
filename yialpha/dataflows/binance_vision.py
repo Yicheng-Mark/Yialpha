@@ -28,8 +28,10 @@ underscore names and bookDepth columns do not match reality):
 
   IMPORTANT: unlike klines, these two datasets have NO monthly aggregates
   (S3 listing under ``monthly/metrics`` / ``monthly/bookDepth`` returns zero
-  keys) — a window costs ONE request per day, cached forever after. The
-  ``_MAX_ARCHIVE_FILES`` guard bounds that to ~13 months per call.
+  keys) — a window costs ONE request per NEW day, cached forever after. The
+  parsed multi-year STORE (:mod:`yialpha.dataflows.binance_vision_store`,
+  PR6) bounds new downloads to ~13 months per call while serving synced
+  history without limit.
 
 Each ``.zip`` carries a sibling ``.CHECKSUM`` (``<sha256>  <filename>``,
 sha256sum format); every download here is verified fail-closed — a
@@ -62,7 +64,6 @@ import hashlib
 import io
 import logging
 import zipfile
-from collections import deque
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 
@@ -70,10 +71,11 @@ import pandas as pd
 import requests
 
 from .binance import _validate_outbound_url
+from .config import get_config
 from .disk_cache import cached_or_fetch, vendor_cache_dir
 from .errors import NoMarketDataError, VendorRateLimitError
 from .symbol_utils import normalize_symbol_for_venue
-from .utils import current_pit_end, proxy_map, safe_ticker_component
+from .utils import current_pit_end, proxy_map
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +88,15 @@ _VENDOR_CACHE = "binance_vision"
 # Archived files are immutable once published — a cached copy never goes
 # stale, so the TTL only needs to outlive any plausible process lifetime.
 _ARCHIVE_TTL_DAYS = 3650.0
-# Runaway guard: these datasets publish DAILY files only (no monthly
-# aggregates — verified 2026-08-17), so the window costs one request per day.
-# 400 files ≈ 13 months; beyond that, refuse loudly instead of silently
-# truncating (the exact failure mode this repo exists to prevent).
-_MAX_ARCHIVE_FILES = 400
+# Per-call SYNC budget for the parsed store (PR6): NEW days are attempted
+# most-recent-first (downloads AND 404 misses — a miss is a real network
+# round trip and must not be free) until this many attempts are spent;
+# already-synced days are read without limit, so multi-year windows work
+# across successive queries (coverage deepens incrementally instead of
+# being refused). 400 files ≈ 13 months of new history per call — the same
+# bound the old hard cap enforced, now a rate bound instead of a coverage
+# ceiling.
+_SYNC_BUDGET_FILES = 400
 _MAX_OUTPUT_ROWS = 2000
 _MAX_RAW_ROWS = 20000
 
@@ -109,6 +115,17 @@ class _ArchiveHttpError(Exception):
 
 class _ChecksumError(Exception):
     """Checksum missing or mismatched — the archive cannot be trusted."""
+
+
+class _ChecksumMissingError(_ChecksumError):
+    """The archive EXISTS but its CHECKSUM sidecar 404s.
+
+    Distinct from a mismatch/unparseable checksum (corruption signals, which
+    stay fail-closed): the sync loop treats a missing sidecar like a missing
+    day — record, skip, retry on the 24h backoff — instead of aborting the
+    whole incremental sync. The day is still never served: only
+    checksum-verified frames enter the store.
+    """
 
 
 def _validate_vision_url(url: str) -> None:
@@ -186,7 +203,9 @@ def _fetch_verified_zip(url: str) -> bytes:
     try:
         checksum_body = _fetch(f"{url}.CHECKSUM")
     except _ArchiveMissingError as exc:
-        raise _ChecksumError(f"CHECKSUM file missing for {filename}") from exc
+        raise _ChecksumMissingError(
+            f"CHECKSUM file missing for {filename}"
+        ) from exc
     expected = _expected_sha256(checksum_body, filename)
     actual = hashlib.sha256(raw).hexdigest()
     if expected != actual:
@@ -300,74 +319,38 @@ def _archive_plan(
     return plan
 
 
-def _load_dataset_range(
+def _load_window_from_store(
     dataset: str, symbol: str,
     start_dt: datetime, end_dt: datetime,
     symbol_for_error: str, canonical: str,
-) -> tuple[pd.DataFrame, int]:
-    """Download + concat every archive file covering the window.
+) -> tuple[pd.DataFrame, object, dict]:
+    """Sync + load the window through the parsed multi-year store (PR6).
 
-    Returns ``(df, missing_days)`` — ``missing_days`` counts daily files that
-    404'd INSIDE the window (pre-listing day, unpublished day, or a day the
-    dataset does not cover); callers surface it in the header so an interior
-    hole reads as "day missing", not as a silently shorter series (the
-    resampling shaper would otherwise render the gap as continuous).
-
-    A 404 on a daily file is skipped and counted; all-missing raises the
-    typed no-data error with an instructive detail.
+    Returns ``(df, sync_report, qa)``. The store makes coverage
+    INCREMENTAL: days already synced are read without limit (multi-year
+    windows work), new days download most-recent-first until the per-call
+    budget is spent, 404 days are remembered (retried at most once per day),
+    and the semantic QA (interior holes, low-row days) rides the header so
+    a gap never reads as a calm continuous series. Raises the typed no-data
+    error when nothing is available for the window.
     """
-    safe_ticker_component(symbol)  # defense-in-depth: symbol is a path component
-    work: deque[tuple[str, str]] = deque(_archive_plan(dataset, symbol, start_dt, end_dt))
-    if len(work) > _MAX_ARCHIVE_FILES:
-        raise NoMarketDataError(
-            symbol_for_error, canonical,
-            f"window needs {len(work)} {dataset} daily archive files (cap "
-            f"{_MAX_ARCHIVE_FILES} ≈ 13 months; one request per day, cached "
-            f"forever) — narrow the date range",
-        )
-    frames: list[pd.DataFrame] = []
-    missing = 0
-    while work:
-        url, fname = work.popleft()
-        try:
-            raw = _load_zip(url)
-            frames.append(_zip_csv_dataframe(raw, fname))
-        except _ArchiveMissingError:
-            missing += 1
-            logger.debug("data.binance.vision: %s not published; skipped", fname)
-    if not frames:
-        raise NoMarketDataError(
-            symbol_for_error, canonical,
-            f"no {dataset} archive files found for the window — the dataset is "
-            f"not published for this symbol or the dates precede its listing",
-        )
-    if missing:
-        logger.info(
-            "data.binance.vision %s %s: %d daily file(s) missing in window "
-            "(pre-listing / unpublished days)",
-            dataset, symbol, missing,
-        )
-    df = pd.concat(frames, ignore_index=True)
-    tcol = next(
-        (c for c in ("create_time", "creation_time", "timestamp") if c in df.columns),
-        None,
+    from .binance_vision_store import VisionStore
+
+    store = VisionStore()
+    report = store.sync(
+        dataset, symbol, start_dt, end_dt, budget=_SYNC_BUDGET_FILES,
     )
-    if tcol is None:
+    df = store.load(dataset, symbol, start_dt, end_dt)
+    qa = store.qa(dataset, symbol, start_dt, end_dt)
+    if df.empty:
         raise NoMarketDataError(
             symbol_for_error, canonical,
-            f"{dataset} archive CSV has no time column (columns: {list(df.columns)})",
+            f"no {dataset} archive data found for the window — the dataset "
+            f"is not published for this symbol or the dates precede its "
+            f"listing ({report.missing} day(s) 404'd, "
+            f"{report.unsynced} unsynced within the per-call budget)",
         )
-    ts = pd.to_datetime(df[tcol], utc=True, errors="coerce")
-    df = df.assign(_ts=ts).dropna(subset=["_ts"])
-    df = df[(df["_ts"] >= start_dt) & (df["_ts"] <= end_dt)]
-    # Dedupe key: metrics has ONE row per timestamp, but bookDepth has one
-    # row per (timestamp, percentage) band — deduping on the timestamp alone
-    # would silently drop every band but the last.
-    dedupe_keys = [tcol] + (
-        ["percentage"] if "percentage" in df.columns else []
-    )
-    df = df.sort_values("_ts").drop_duplicates(subset=dedupe_keys, keep="last")
-    return df.reset_index(drop=True), missing
+    return df, report, qa
 
 
 # ---- output shaping -----------------------------------------------------------
@@ -487,14 +470,139 @@ def _enforce_output_cap(
         raise NoMarketDataError(
             symbol_for_error, canonical,
             f"{len(shaped)} output rows exceed the {_MAX_OUTPUT_ROWS}-row cap — "
-            f"narrow the window or request a coarser interval",
+            f"narrow the window, request a coarser interval, or use the "
+            f"daily summary mode (summary=true)",
         )
     return shaped
+
+
+def _coverage_notes(report, qa: dict) -> str:
+    """Header notes from the sync report + semantic QA — every absence is
+    disclosed: interior holes, budget-unsynced days, low-row days."""
+    notes = ""
+    interior = qa.get("interior_missing_days") or []
+    if interior:
+        notes += (
+            f"# ⚠ {len(interior)} archive day(s) missing inside the window "
+            "(pre-listing / unpublished days)\n"
+        )
+    if report is not None and getattr(report, "unsynced", 0) > 0:
+        notes += (
+            f"# ⚠ store covers {report.synced_days_count} of "
+            f"{report.window_days} window days (per-call sync budget "
+            f"{report.budget} files; coverage deepens incrementally — "
+            "re-query to extend history)\n"
+        )
+    low = qa.get("low_row_days") or []
+    if low:
+        notes += (
+            f"# ⚠ {len(low)} synced day(s) carry far fewer rows than the "
+            "median day (truncated / partially published file(s))\n"
+        )
+    return notes
+
+
+def _stats_table(shaped: pd.DataFrame, cols: list[str]) -> str:
+    """Per-column distribution stats over the FULL window (count/mean/
+    p10/median/p90/min/max/first/last) — the summary the LLM reads instead
+    of thousands of raw rows."""
+    rows = [
+        "stat," + ",".join(cols),
+    ]
+    series = {c: pd.to_numeric(shaped[c], errors="coerce") for c in cols}
+
+    def _fmt(v: float) -> str:
+        return "" if pd.isna(v) else f"{v:.6g}"
+
+    defs = (
+        ("count", lambda s: s.count()),
+        ("mean", lambda s: s.mean()),
+        ("p10", lambda s: s.quantile(0.10)),
+        ("median", lambda s: s.quantile(0.50)),
+        ("p90", lambda s: s.quantile(0.90)),
+        ("min", lambda s: s.min()),
+        ("max", lambda s: s.max()),
+        ("first", lambda s: s.iloc[0] if len(s) else float("nan")),
+        ("last", lambda s: s.iloc[-1] if len(s) else float("nan")),
+    )
+    for label, fn in defs:
+        rows.append(label + "," + ",".join(_fmt(fn(series[c])) for c in cols))
+    return "\n".join(rows)
+
+
+def _render_metrics_summary(shaped: pd.DataFrame, tail_rows: int = 30) -> str:
+    """Distribution summary + recent tail for the daily metrics frame."""
+    cols = [c for c in shaped.columns if c != "time"]
+    tail = shaped.tail(tail_rows)
+    return (
+        "## Distribution over the full window (daily aggregates)\n"
+        + _stats_table(shaped, cols)
+        + f"\n\n## Recent tail (last {len(tail)} day(s))\n"
+        + tail.to_csv(index=False)
+    )
+
+
+_DEPTH_TAIL_DAYS = 14
+
+
+def _render_depth_summary(shaped: pd.DataFrame) -> str:
+    """Per-band depth summary + liquidity-thin streak + recent tail.
+
+    The audit's liquidation-cascade question — "how long has the tight
+    band been thin?" — needs a streak, not a mean: the longest run of
+    consecutive days where the tightest band's best side fell below its
+    own p25."""
+
+    stats_rows = ["percentage,days,mean_notional,p10_notional,min_notional,mean_depth"]
+    for pct, grp in shaped.groupby("percentage"):
+        notional = pd.to_numeric(grp["notional"], errors="coerce").dropna()
+        depth = pd.to_numeric(grp["depth"], errors="coerce").dropna()
+        if notional.empty:
+            continue
+        stats_rows.append(
+            f"{pct:.1f},{len(notional)},{notional.mean():.6g},"
+            f"{notional.quantile(0.10):.6g},{notional.min():.6g},"
+            f"{(depth.mean() if not depth.empty else float('nan')):.6g}"
+        )
+
+    collapse_note = ""
+    if "percentage" in shaped.columns and not shaped.empty:
+        tightest = min(abs(float(p)) for p in shaped["percentage"].unique())
+        band = shaped[shaped["percentage"].abs() == tightest].copy()
+        if not band.empty:
+            per_day = band.groupby("time")["notional"].apply(
+                lambda s: pd.to_numeric(s, errors="coerce").max()
+            ).dropna()
+            if len(per_day) >= 5:
+                threshold = per_day.quantile(0.25)
+                thin = (per_day < threshold).to_numpy()
+                streak = best = 0
+                for flag in thin:
+                    streak = streak + 1 if flag else 0
+                    best = max(best, streak)
+                if best > 0:
+                    collapse_note = (
+                        f"\n## Liquidity-thin streak\n"
+                        f"Longest run of consecutive days with the ±{tightest:g}% "
+                        f"band's best-side notional below its own p25: "
+                        f"{best} day(s) (window p25 = "
+                        f"{threshold:.6g}).\n"
+                    )
+
+    tail = shaped.tail(_DEPTH_TAIL_DAYS * max(1, shaped["percentage"].nunique()))
+    return (
+        "## Per-band distribution over the full window (daily means)\n"
+        + "\n".join(stats_rows)
+        + collapse_note
+        + f"\n## Recent tail (last {_DEPTH_TAIL_DAYS} day(s))\n"
+        + tail.to_csv(index=False)
+    )
 
 
 def _vision_header(
     title: str, label: str, start_dt: datetime, end_dt: datetime,
     note: str, interval: str, rows: int, semantics: str = "",
+    rows_note: str | None = None,
 ) -> str:
     header = (
         f"# {title} for {label} from {start_dt.date()} to {end_dt.date()}\n"
@@ -504,7 +612,9 @@ def _vision_header(
     if note:
         header += note
     header += f"# interval: {interval}\n"
-    header += f"# Total records: {rows}\n"
+    # rows_note overrides the plain record count (summary mode reports what
+    # the numbers summarize instead of a raw row count).
+    header += rows_note or f"# Total records: {rows}\n"
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     if semantics:
         header += semantics
@@ -521,6 +631,7 @@ def get_binance_vision_metrics(
     start_date: str,
     end_date: str,
     interval: str = "1d",
+    summary: bool | None = None,
 ) -> str:
     """Deep-history derivative metrics for a Binance USDT-M perp (archived).
 
@@ -536,14 +647,22 @@ def get_binance_vision_metrics(
     across funding cycles, IC work on positioning features, and PIT-correct
     positioning context for historical replay dates.
 
+    Multi-year queries run through the parsed local STORE (PR6): synced
+    days are read without limit, new days download most-recent-first under
+    a per-call budget (~400 files ≈ 13 months of NEW history per call) and
+    coverage deepens across successive queries — every hole (404 day,
+    unsynced day, low-row day) is disclosed in the header.
+
     ``interval`` resamples the 5m source: ``"1d"`` (default) reports the
     day-close open interest and day-mean ratios; ``"5m"`` returns raw rows.
-    Columns: ``time, open_interest, open_interest_value,
-    top_trader_account_long_short_ratio, top_trader_long_short_ratio,
-    global_long_short_ratio, taker_buy_sell_ratio``. Every zip is
-    sha256-verified before use. The window is PIT-clamped to the run's
-    analysis date and capped at the last published archive day (publication
-    lags ~1 day); one request per day, cached forever after.
+    At the daily grain, ``summary`` (default on, config
+    ``binance_vision_summary``) renders a distribution table over the FULL
+    window (count/mean/p10/median/p90/min/max/first/last per column) plus a
+    recent 30-day tail — instead of thousands of raw rows; pass
+    ``summary=False`` for the raw daily CSV (subject to the output cap).
+    Every zip is sha256-verified before use. The window is PIT-clamped to
+    the run's analysis date and capped at the last published archive day
+    (publication lags ~1 day).
     """
     if interval not in _METRICS_INTERVALS:
         raise ValueError(
@@ -552,7 +671,7 @@ def get_binance_vision_metrics(
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
     start_dt, end_dt, note = _resolve_window(symbol, canonical, start_date, end_date)
     try:
-        df, missing_days = _load_dataset_range(
+        df, report, qa = _load_window_from_store(
             "metrics", canonical, start_dt, end_dt, symbol, canonical,
         )
         shaped = _shape_metrics(df, interval, symbol, canonical)
@@ -560,20 +679,32 @@ def get_binance_vision_metrics(
         raise NoMarketDataError(
             symbol, canonical, f"data.binance.vision metrics unavailable: {exc}",
         ) from exc
-    if missing_days:
-        note += (
-            f"# ⚠ {missing_days} archive day(s) missing inside the window "
-            "(pre-listing / unpublished days)\n"
-        )
+    note += _coverage_notes(report, qa)
     if shaped.empty:
         raise NoMarketDataError(
             symbol, canonical,
             f"no metrics rows in [{start_dt.date()}, {end_dt.date()}]",
         )
-    shaped = _enforce_output_cap(shaped, symbol, canonical)
+    use_summary = (
+        summary if summary is not None
+        else get_config().get("binance_vision_summary", True)
+    ) and interval == "1d"
+    if use_summary:
+        body = _render_metrics_summary(shaped)
+        rows_note = (
+            f"# Total records summarized: {len(shaped)} daily rows "
+            f"({qa.get('first_day')} → {qa.get('last_day')} synced)\n"
+            "# summary mode: distribution over the full window + recent "
+            "tail; pass summary=false for the raw daily CSV\n"
+        )
+    else:
+        shaped = _enforce_output_cap(shaped, symbol, canonical)
+        body = shaped.to_csv(index=False)
+        rows_note = None
     header = _vision_header(
         "Perp USDT-M deep-history metrics (OI/long-short/taker)",
-        _label(symbol, canonical), start_dt, end_dt, note, interval, len(shaped),
+        _label(symbol, canonical), start_dt, end_dt, note, interval,
+        len(shaped),
         semantics=(
             "# open_interest: base-asset units (day-close for 1d); "
             "open_interest_value: USDT; top_trader_account_long_short_ratio / "
@@ -582,8 +713,9 @@ def get_binance_vision_metrics(
             "traders' accounts long-dominated (top-vs-global divergence is a "
             "contrary signal); taker_buy_sell_ratio > 1 = taker buy pressure.\n"
         ),
+        rows_note=rows_note,
     )
-    return header + shaped.to_csv(index=False)
+    return header + body
 
 
 def get_binance_vision_book_depth(
@@ -591,6 +723,7 @@ def get_binance_vision_book_depth(
     start_date: str,
     end_date: str,
     interval: str = "1d",
+    summary: bool | None = None,
 ) -> str:
     """Historical order-book depth for a Binance USDT-M perp (archived).
 
@@ -601,10 +734,16 @@ def get_binance_vision_book_depth(
     thin book into a falling price means slippage amplifies forced selling;
     a thick book absorbing a dump signals real demand.
 
-    ``interval`` resamples (mean per band): ``"1d"`` default (~12 band rows
-    per day), ``"1h"`` / ``"5m"`` finer. Columns: ``time, percentage, depth,
-    notional`` (depth in base-asset units, notional in USD). PIT-clamped,
-    sha256-verified, same failure contract as the metrics tool.
+    Multi-year queries run through the parsed local STORE (PR6): synced
+    days are read without limit (the raw output cap no longer bounds
+    history), new days download most-recent-first under a per-call budget,
+    and every hole is disclosed. At the daily grain ``summary`` (default
+    on, config ``binance_vision_summary``) renders per-band distributions
+    (mean/p10/min notional per signed band), the longest liquidity-thin
+    streak (consecutive days with the tightest band below its own p25) and
+    a recent 14-day tail; pass ``summary=False`` for the raw per-band daily
+    CSV (subject to the output cap). PIT-clamped, sha256-verified, same
+    failure contract as the metrics tool.
     """
     if interval not in _DEPTH_INTERVALS:
         raise ValueError(
@@ -613,7 +752,7 @@ def get_binance_vision_book_depth(
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
     start_dt, end_dt, note = _resolve_window(symbol, canonical, start_date, end_date)
     try:
-        df, missing_days = _load_dataset_range(
+        df, report, qa = _load_window_from_store(
             "bookDepth", canonical, start_dt, end_dt, symbol, canonical,
         )
         shaped = _shape_book_depth(df, interval, symbol, canonical)
@@ -621,17 +760,28 @@ def get_binance_vision_book_depth(
         raise NoMarketDataError(
             symbol, canonical, f"data.binance.vision bookDepth unavailable: {exc}",
         ) from exc
-    if missing_days:
-        note += (
-            f"# ⚠ {missing_days} archive day(s) missing inside the window "
-            "(pre-listing / unpublished days)\n"
-        )
+    note += _coverage_notes(report, qa)
     if shaped.empty:
         raise NoMarketDataError(
             symbol, canonical,
             f"no bookDepth rows in [{start_dt.date()}, {end_dt.date()}]",
         )
-    shaped = _enforce_output_cap(shaped, symbol, canonical)
+    use_summary = (
+        summary if summary is not None
+        else get_config().get("binance_vision_summary", True)
+    ) and interval == "1d"
+    if use_summary:
+        body = _render_depth_summary(shaped)
+        rows_note = (
+            f"# Total records summarized: {len(shaped)} daily band rows "
+            f"({qa.get('first_day')} → {qa.get('last_day')} synced)\n"
+            "# summary mode: per-band distribution + liquidity streak + "
+            "recent tail; pass summary=false for the raw per-band CSV\n"
+        )
+    else:
+        shaped = _enforce_output_cap(shaped, symbol, canonical)
+        body = shaped.to_csv(index=False)
+        rows_note = None
     header = _vision_header(
         "Perp USDT-M order-book depth history",
         _label(symbol, canonical), start_dt, end_dt, note, interval, len(shaped),
@@ -640,5 +790,6 @@ def get_binance_vision_book_depth(
             "depth = base-asset units, notional = USD; thin depth into a "
             "falling price = slippage / liquidation-cascade risk.\n"
         ),
+        rows_note=rows_note,
     )
-    return header + shaped.to_csv(index=False)
+    return header + body

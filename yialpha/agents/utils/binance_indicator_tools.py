@@ -72,8 +72,15 @@ def _indicators_core(
     look_back_days: int,
     venue: str,
     indicators: str,
+    method_name: str = "get_binance_indicators",
 ) -> str:
-    """Shared implementation behind the perp/spot indicator tools."""
+    """Shared implementation behind the perp/spot indicator tools.
+
+    ``method_name`` is the quality-evidence identity: the sentinel must be
+    attributed to the tool the analyst actually invoked (spot failures
+    recorded under the perp name would poison the perp run's tier and vice
+    versa).
+    """
     names = (
         [n.strip() for n in indicators.split(",") if n.strip()]
         if indicators
@@ -105,7 +112,7 @@ def _indicators_core(
         )
     except Exception as exc:  # noqa: BLE001 — typed degrade, never crash the node
         quality.record_sentinel(
-            "get_binance_indicators",
+            method_name,
             quality.KIND_OPTIONAL_UNAVAILABLE,
             f"{symbol} ({venue}): {type(exc).__name__}: {exc}",
         )
@@ -117,7 +124,7 @@ def _indicators_core(
 
     if frame.empty or len(frame) < 30:
         quality.record_sentinel(
-            "get_binance_indicators",
+            method_name,
             quality.KIND_OPTIONAL_UNAVAILABLE,
             f"{symbol} ({venue}): fewer than 30 daily bars up to {curr_date}",
         )
@@ -155,7 +162,7 @@ def _indicators_core(
 
     if not columns:
         quality.record_sentinel(
-            "get_binance_indicators",
+            method_name,
             quality.KIND_OPTIONAL_UNAVAILABLE,
             f"{symbol} ({venue}): no requested indicator computable",
         )
@@ -211,7 +218,10 @@ def get_binance_indicators(
     exact indicator claim; the funding/OI/positioning tools remain the
     perp-native signals.
     """
-    return _indicators_core(symbol, curr_date, look_back_days, venue, indicators)
+    return _indicators_core(
+        symbol, curr_date, look_back_days, venue, indicators,
+        method_name="get_binance_indicators",
+    )
 
 
 @tool
@@ -229,4 +239,7 @@ def get_binance_spot_indicators(
     when you deliberately want the perpetual). Use for any exact indicator
     claim on a crypto_spot run.
     """
-    return _indicators_core(symbol, curr_date, look_back_days, venue, indicators)
+    return _indicators_core(
+        symbol, curr_date, look_back_days, venue, indicators,
+        method_name="get_binance_spot_indicators",
+    )

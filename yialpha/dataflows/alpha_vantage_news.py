@@ -1,5 +1,36 @@
 from .alpha_vantage_common import _make_api_request, format_datetime_for_api
+from .errors import NoMarketDataError
 from .utils import current_pit_end
+
+
+def _refuse_empty_feed(raw, symbol: str, canonical: str):
+    """An empty NEWS_SENTIMENT feed is a soft miss, not a success.
+
+    Alpha Vantage answers a covered-but-empty ticker/window with HTTP 200
+    ``{"feed": []}``. Returning that text as a payload used to mask the
+    router's fall-through to the next vendor AND record a core success for
+    an empty answer. Raise the typed no-data error instead (the same
+    contract as yfinance's empty-news path) so the router records
+    KIND_NO_DATA and tries the next vendor. Non-JSON bodies and non-empty
+    feeds pass through untouched.
+    """
+    import json
+
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return raw
+    if (
+        isinstance(parsed, dict)
+        and isinstance(parsed.get("feed"), list)
+        and not parsed["feed"]
+    ):
+        raise NoMarketDataError(
+            symbol, canonical,
+            "alpha_vantage returned an empty news feed for this "
+            "symbol/window",
+        )
+    return raw
 
 
 def get_news(ticker, start_date, end_date) -> dict[str, str] | str:
@@ -27,12 +58,14 @@ def get_news(ticker, start_date, end_date) -> dict[str, str] | str:
         "time_to": format_datetime_for_api(end_date),
     }
 
-    return _make_api_request("NEWS_SENTIMENT", params)
+    return _refuse_empty_feed(
+        _make_api_request("NEWS_SENTIMENT", params), ticker, ticker,
+    )
 
 def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict[str, str] | str:
     """Returns global market news & sentiment data without ticker-specific filtering.
 
-    Covers broad market topics like financial markets, economy, and more.
+    Covers broad market topics like financial markets, economy, macro, and monetary policy.
 
     Args:
         curr_date: Current date in yyyy-mm-dd format.
@@ -60,7 +93,10 @@ def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict
         "limit": str(limit),
     }
 
-    return _make_api_request("NEWS_SENTIMENT", params)
+    return _refuse_empty_feed(
+        _make_api_request("NEWS_SENTIMENT", params),
+        "GLOBAL_NEWS", "GLOBAL_NEWS",
+    )
 
 
 def get_insider_transactions(symbol: str) -> dict[str, str] | str:

@@ -15,14 +15,30 @@ filtering therefore happens in memory after the fetch, and the raw feed is
 cached on disk per scene (5-minute TTL) so a batch run over many symbols
 collapses to one network round per scene instead of one per symbol.
 
+Freshness contract (2026-09 PR4): the cache wrapper stores the TRUE fetch
+timestamp next to the payload, and that — never the render clock — is what
+the block reports. A fetch failure serves stale data only up to
+:data:`_MAX_STALE_MINUTES` (15), renders an explicit ``STALE`` marker with
+the real age, and records a stale-cache sentinel; beyond the cap the scene
+degrades honestly instead of wearing today's timestamp on old bytes. Scenes
+fetch independently (one scene failing drops only itself — partial feeds are
+rendered with a failure note), and a per-scene singleflight lock collapses
+concurrent batch workers onto one network round.
+
+Recency contract: posts dated after the ``as_of`` day are dropped (PIT), the
+matching set is partitioned into a trailing :data:`_POST_RECENCY_DAYS` window
+vs older posts (recent first, engagement-ranked), and the block header
+discloses the split plus the oldest/newest matching post times — an old
+high-view post can still be evidence, but never masquerades as today's
+chatter. Zero matching posts is an HONEST answer (explicit
+Neutral/insufficient guidance + feed-wide hot-coin table), not a degradation.
+
 Degradation contract: this fetcher is invoked DIRECTLY by the sentiment
 analyst (not through ``route_to_vendor``), whose node contract requires a
-string return — so a transport/HTTP/shape failure still returns a
-``<binance_square unavailable: ...>`` placeholder, BUT it also records a
-``KIND_OPTIONAL_UNAVAILABLE`` data-quality sentinel so the run's evidence
-chain captures the degradation (mirroring stocktwits.py). A feed that simply
-has zero posts mentioning the target coin is an HONEST answer (placeholder
-text + feed-wide hot-coin table), not a degradation, and records no sentinel.
+string return — so a transport/HTTP/shape failure of EVERY scene still
+returns a ``<binance_square unavailable: ...>`` placeholder, BUT it also
+records a ``KIND_OPTIONAL_UNAVAILABLE`` data-quality sentinel so the run's
+evidence chain captures the degradation (mirroring stocktwits.py).
 
 Point-in-time: the endpoint exposes only the current feed. Callers gate on
 ``is_historical_date`` (the sentiment analyst does, same as StockTwits/Reddit)
@@ -32,7 +48,9 @@ Security: the request URL is a module constant, validated by
 :func:`_validated_feed_url` (https/http scheme only; localhost/loopback/
 private/reserved hosts rejected) before every request. The ticker-derived base
 asset passes :func:`yialpha.dataflows.utils.safe_ticker_component` before it
-is used in any regex.
+is used in any regex. Rendered post text is capped at
+:data:`_MAX_BODY_CHARS` and travels to the LLM as untrusted evidence content,
+never as system instructions.
 """
 
 from __future__ import annotations
@@ -41,16 +59,17 @@ import ipaddress
 import json
 import logging
 import re
+import time
 import urllib.parse
 import uuid
 from collections import Counter
-from datetime import UTC, datetime
-from functools import partial
+from datetime import UTC, datetime, timedelta
 
 import requests
 
+from ..batch.locks import FileLock
 from . import quality
-from .disk_cache import cached_or_fetch, vendor_cache_dir
+from .disk_cache import cache_file_path, cached_or_fetch, vendor_cache_dir
 from .netretry import with_transient_retry
 from .utils import proxy_map, safe_ticker_component
 
@@ -75,6 +94,18 @@ _TIMEOUT: tuple[float, float] = (5.0, 20.0)
 #: chatter, but burst re-asks (batch runs over many symbols) must collapse to
 #: one network round per scene.
 _CACHE_TTL_DAYS = 5.0 / 1440.0
+
+#: Minute-scale social chatter must never be served as "current" when it is
+#: not: a fetch failure may serve stale cache for at most this many minutes
+#: (rendered with an explicit STALE marker + the true fetch time), after
+#: which the scene degrades to unavailable instead of wearing today's clock
+#: on old bytes. Tighter than the global data_cache_max_stale_days on purpose.
+_MAX_STALE_MINUTES = 15.0
+
+#: Matching posts inside this trailing window (ending at the run's as-of day)
+#: are "recent"; older ones still render but are partitioned behind them and
+#: disclosed (oldest/newest post times in the header).
+_POST_RECENCY_DAYS = 3
 
 #: Anonymous device identity, generated per process. The reference project
 #: hard-codes one shared UUID across all its users — a shared fingerprint that
@@ -106,6 +137,11 @@ _QUOTE_SUFFIXES = ("USDT", "USDC", "BUSD", "FDUSD", "TUSD", "USD", "PERP")
 _MULTIPLIER_PREFIXES = ("1000", "1M")
 
 _METHOD = "fetch_binance_square_block"
+
+#: Cache payload wrapper version. v2 files carry ``fetched_at_ms`` beside the
+#: response so the TRUE fetch time survives cache hits; the new filename
+#: (feed_v2_*) simply ignores any legacy v1 bytes still on disk.
+_CACHE_WRAPPER_VERSION = "v2"
 
 
 def _validated_feed_url(url: str) -> str:
@@ -200,13 +236,12 @@ def _fetch_scene_bytes(scene: str) -> bytes:
     )
 
 
-def _parse_posts(raw: bytes) -> list[dict]:
-    """Extract real posts (``vos`` entries) from one scene's response body.
+def _posts_from_response(data: object) -> list[dict]:
+    """Extract real posts from one scene's PARSED response object.
 
-    Raises ``ValueError`` on any shape deviation — the caller degrades that to
-    the placeholder + sentinel instead of feeding half-parsed data onward.
+    Raises ``ValueError`` on any shape deviation — the caller degrades that
+    scene to a failure note instead of feeding half-parsed data onward.
     """
-    data = json.loads(raw)
     if not isinstance(data, dict) or data.get("success") is not True:
         raise ValueError(f"feed response not success: {str(data)[:120]}")
     inner = data.get("data")
@@ -214,6 +249,55 @@ def _parse_posts(raw: bytes) -> list[dict]:
     if not isinstance(vos, list):
         raise ValueError("feed response has no data.vos list")
     return [p for p in vos if isinstance(p, dict) and p.get("cardType") in _POST_CARD_TYPES]
+
+
+def _parse_posts(raw: bytes) -> list[dict]:
+    """Bytes-shaped wrapper kept for callers/tests parsing a raw scene body."""
+    return _posts_from_response(json.loads(raw))
+
+
+def _cached_scene(scene: str) -> tuple[list[dict], float]:
+    """(posts, fetched_at_ms) for one scene, through the freshness-aware cache.
+
+    The cache file stores ``{"fetched_at_ms": ..., "response": {...}}`` so the
+    TRUE fetch time travels with the payload (the render clock must never
+    masquerade as the fetch clock). A per-scene singleflight lock — threads
+    AND processes, via the shared file lock — collapses concurrent batch
+    workers racing the same expiring cache entry onto one network round
+    instead of last-writer-wins fetch storms.
+    """
+    cache_dir = vendor_cache_dir("binance_square")
+    filename = f"feed_{_CACHE_WRAPPER_VERSION}_{scene}.json"
+
+    def _fetch_wrapped() -> bytes:
+        body = _fetch_scene_bytes(scene)
+        # Validate the shape BEFORE caching: a wrapper whose response cannot
+        # be parsed would poison the cache for the whole TTL window.
+        data = json.loads(body)
+        posts = _posts_from_response(data)
+        wrapper = {
+            "fetched_at_ms": int(time.time() * 1000),
+            "post_count": len(posts),
+            "response": data,
+        }
+        return json.dumps(wrapper).encode()
+
+    lock = FileLock(str(cache_file_path(cache_dir, filename)))
+    with lock:
+        raw = cached_or_fetch(
+            cache_dir,
+            filename,
+            _fetch_wrapped,
+            ttl_days=_CACHE_TTL_DAYS,
+            vendor="binance_square",
+            stale_cap_days=_MAX_STALE_MINUTES / (60.0 * 24.0),
+        )
+    assert raw is not None  # fail_open never set: fetch errors re-raise
+    wrapper = json.loads(raw)
+    if not isinstance(wrapper, dict) or "response" not in wrapper:
+        raise ValueError("cache wrapper has no response payload")
+    fetched_ms = float(wrapper.get("fetched_at_ms") or 0.0)
+    return _posts_from_response(wrapper["response"]), fetched_ms
 
 
 def _post_codes(post: dict) -> set[str]:
@@ -264,6 +348,15 @@ def _utc_date(ts: object) -> str:
         return "?"
 
 
+def _post_ts(post: dict) -> float | None:
+    """Post date as unix SECONDS (the feed's ``date`` field), or None."""
+    try:
+        ts = float(post.get("date"))  # type: ignore[arg-type]
+        return ts if ts > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _int_or_zero(value: object) -> int:
     """Coerce a JSON count field (int, numeric str, or None) to int."""
     try:
@@ -299,17 +392,118 @@ _FOOTER = (
     "data, and do not quote numbers from posts as market data."
 )
 
+_ZERO_MATCH_GUIDANCE = (
+    "Guidance: report social sentiment for the target as Neutral / insufficient "
+    "evidence — do NOT substitute the feed-wide hot-coin mood for the target "
+    "asset."
+)
 
-def _render_block(posts: list[dict], candidates: tuple[str, ...], base: str) -> str:
-    fetched_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
-    matching = [p for p in posts if _mentions(p, candidates)]
-    matching.sort(
-        key=lambda p: (-_int_or_zero(p.get("viewCount")), -_int_or_zero(p.get("date")))
+
+def _render_block(
+    posts: list[dict],
+    candidates: tuple[str, ...],
+    base: str,
+    fetched_ms: float,
+    as_of: str | None,
+    failed_scenes: list[str],
+    scene_fetched_ms: dict[str, float] | None = None,
+) -> str:
+    """Render the prompt block: freshness, recency split, ranked posts.
+
+    Every temporal claim comes from real data: ``fetched_ms`` is the cache
+    wrapper's stored fetch time (never the render clock), the STALE marker
+    fires exactly when the served snapshot is older than the fresh TTL, and
+    the recency split/oldest-newest range come from the posts' own dates.
+    ``scene_fetched_ms`` (per successfully-served scene) makes freshness
+    PER-SCENE: a mixed feed — one scene fresh, another stale-served from
+    cache — is labelled MIXED with the stale scenes named, never
+    wholesale "fresh" off the newest scene's timestamp.
+    """
+    now_ms = time.time() * 1000.0
+    fetched_dt = (
+        datetime.fromtimestamp(fetched_ms / 1000.0, tz=UTC) if fetched_ms > 0 else None
+    )
+    fetched_at = (
+        fetched_dt.strftime("%Y-%m-%d %H:%M UTC") if fetched_dt is not None else "?"
+    )
+    stale_ttl_ms = _CACHE_TTL_DAYS * 86_400_000.0
+    freshness = "fresh"
+    if fetched_dt is not None and (now_ms - fetched_ms) > stale_ttl_ms:
+        freshness = (
+            f"STALE — live fetch failed; snapshot is "
+            f"{(now_ms - fetched_ms) / 60_000.0:.0f} min old"
+        )
+    if scene_fetched_ms:
+        stale_scenes = sorted(
+            s for s, ms in scene_fetched_ms.items()
+            if (now_ms - ms) > stale_ttl_ms
+        )
+        if stale_scenes and len(stale_scenes) < len(scene_fetched_ms):
+            ages = ", ".join(
+                f"{s} {max(0.0, now_ms - scene_fetched_ms[s]) / 60_000.0:.0f} min old"
+                for s in stale_scenes
+            )
+            freshness = (
+                f"MIXED — live fetch failed for: {ages} (stale snapshots "
+                "served from cache); remaining scenes fresh"
+            )
+
+    # Recency window anchored on the run's as-of day (default: today UTC).
+    try:
+        as_of_day = datetime.strptime(
+            as_of or datetime.now(UTC).strftime("%Y-%m-%d"), "%Y-%m-%d"
+        ).replace(tzinfo=UTC)
+    except ValueError:
+        as_of_day = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    window_start = as_of_day - timedelta(days=_POST_RECENCY_DAYS)
+    as_of_eod = as_of_day + timedelta(days=1)
+
+    # PIT: a post dated after the as-of day is future content for this run.
+    def _in_window(post: dict) -> bool:
+        ts = _post_ts(post)
+        return ts is not None and window_start.timestamp() <= ts < as_of_eod.timestamp()
+
+    def _is_future(post: dict) -> bool:
+        ts = _post_ts(post)
+        return ts is not None and ts >= as_of_eod.timestamp()
+
+    matching = [
+        p for p in posts
+        if _mentions(p, candidates) and not _is_future(p)
+    ]
+    # PIT hot coins: a future-dated post (clock skew, publisher error) is
+    # future content for this run and must not pollute the feed-wide coin
+    # tally or the scanned count either — the same filter `matching` gets.
+    pit_posts = [p for p in posts if not _is_future(p)]
+    recent = [p for p in matching if _in_window(p)]
+    older = [p for p in matching if not _in_window(p)]
+    match_ts = [t for t in (_post_ts(p) for p in matching) if t is not None]
+    recency_note = (
+        f"{len(recent)} of {len(matching)} within the last "
+        f"{_POST_RECENCY_DAYS} days (as of {as_of_day.strftime('%Y-%m-%d')})"
+    )
+    if match_ts:
+        recency_note += (
+            f"; matching posts span {_utc_date(min(match_ts))} → "
+            f"{_utc_date(max(match_ts))} UTC"
+        )
+    if len(older) > 0:
+        recency_note += (
+            f"; {len(older)} older matching post{'s' if len(older) != 1 else ''} "
+            "kept for context, dated in-line"
+        )
+
+    scenes_note = (
+        f"scenes ok: {', '.join(s for s in _SCENES if s not in failed_scenes)}"
+        if failed_scenes
+        else ", ".join(_SCENES)
     )
     head = (
-        f"Binance Square recommended feed (global crypto social) — {len(posts)} "
-        f"posts scanned (scenes: {', '.join(_SCENES)}), fetched {fetched_at}. "
-        f"Posts mentioning {base}: {len(matching)}."
+        f"Binance Square recommended feed (global crypto social) — {len(pit_posts)} "
+        f"posts scanned ({scenes_note}"
+        + (f"; FAILED: {', '.join(failed_scenes)} — partial feed" if failed_scenes else "")
+        + f"), fetched {fetched_at} ({freshness}). "
+        f"Posts mentioning {base}: {len(matching)} ({recency_note})."
     )
 
     if not matching:
@@ -317,11 +511,21 @@ def _render_block(posts: list[dict], candidates: tuple[str, ...], base: str) -> 
             head
             + f"\n\nNo posts mentioning {base} appear in the current feed — the "
             "asset is not a current topic of Square chatter. The feed-wide hot "
-            f"coins below still show overall market mood.\n\n{_hot_coins_line(posts)}\n\n{_FOOTER}"
+            f"coins below still show overall market mood.\n\n{_ZERO_MATCH_GUIDANCE}"
+            f"\n\n{_hot_coins_line(pit_posts)}\n\n{_FOOTER}"
         )
 
+    # Recent matching posts first (engagement-ranked), older ones behind them.
+    ranked = sorted(
+        recent + older,
+        key=lambda p: (
+            0 if _in_window(p) else 1,
+            -_int_or_zero(p.get("viewCount")),
+            -_int_or_zero(p.get("date")),
+        ),
+    )
     lines = []
-    for post in matching[:_MAX_SYMBOL_POSTS]:
+    for post in ranked[:_MAX_SYMBOL_POSTS]:
         author = str(post.get("authorName") or post.get("username") or "?")
         views = _int_or_zero(post.get("viewCount"))
         likes = _int_or_zero(post.get("likeCount"))
@@ -342,51 +546,61 @@ def _render_block(posts: list[dict], candidates: tuple[str, ...], base: str) -> 
         + "\n\n"
         + "\n".join(lines)
         + "\n\n"
-        + _hot_coins_line(posts)
+        + _hot_coins_line(pit_posts)
         + "\n\n"
         + _FOOTER
     )
 
 
-def fetch_binance_square_block(ticker: str) -> str:
+def fetch_binance_square_block(ticker: str, as_of: str | None = None) -> str:
     """Fetch the Binance Square feed and render a prompt block for ``ticker``.
 
-    Returns a formatted plaintext block (symbol-matching posts ranked by
-    views, feed-wide hot-coin mentions, anti-fabrication footer) ready for
-    prompt injection. Returns a placeholder string — never raises — when the
-    endpoint is unreachable or the response shape is unexpected, recording a
-    data-quality sentinel so the degradation stays visible. A malformed ticker
-    raises ``ValueError`` (fail-closed, same contract as stocktwits.py).
+    ``as_of`` (``YYYY-MM-DD``, default today UTC) anchors the recency window
+    and the point-in-time post filter. Returns a formatted plaintext block
+    (symbol-matching posts partitioned by recency and ranked by views,
+    feed-wide hot-coin mentions, anti-fabrication footer) ready for evidence
+    injection. Returns a placeholder string — never raises — when EVERY scene
+    is unreachable/unparseable/stale-beyond-cap, recording a data-quality
+    sentinel so the degradation stays visible; one scene failing renders a
+    partial feed with a failure note. A malformed ticker raises ``ValueError``
+    (fail-closed, same contract as stocktwits.py).
     """
     candidates = base_asset_candidates(ticker)
 
-    try:
-        posts: list[dict] = []
-        seen_ids: set[str] = set()
-        for scene in _SCENES:
-            raw = cached_or_fetch(
-                vendor_cache_dir("binance_square"),
-                f"feed_{scene}.json",
-                partial(_fetch_scene_bytes, scene),
-                ttl_days=_CACHE_TTL_DAYS,
-                vendor="binance_square",
+    posts: list[dict] = []
+    seen_ids: set[str] = set()
+    failed: list[tuple[str, Exception]] = []
+    fetched_ms = 0.0
+    scene_fetched_ms: dict[str, float] = {}
+    for scene in _SCENES:
+        try:
+            scene_posts, scene_fetched_ms_value = _cached_scene(scene)
+        except (requests.RequestException, json.JSONDecodeError, ValueError, OSError) as exc:
+            logger.warning(
+                "Binance Square scene %r failed for %s: %s", scene, ticker, exc
             )
-            assert raw is not None  # fail_open never set: fetch errors re-raise
-            for post in _parse_posts(raw):
-                post_id = str(post.get("id") or "")
-                if post_id and post_id in seen_ids:
-                    continue
-                if post_id:
-                    seen_ids.add(post_id)
-                posts.append(post)
-    except (requests.RequestException, json.JSONDecodeError, ValueError, OSError) as exc:
-        logger.warning("Binance Square fetch failed for %s: %s", ticker, exc)
+            failed.append((scene, exc))
+            continue
+        scene_fetched_ms[scene] = scene_fetched_ms_value
+        if scene_fetched_ms_value > fetched_ms:
+            fetched_ms = scene_fetched_ms_value
+        for post in scene_posts:
+            post_id = str(post.get("id") or "")
+            if post_id and post_id in seen_ids:
+                continue
+            if post_id:
+                seen_ids.add(post_id)
+            posts.append(post)
+
+    failed_scenes = [scene for scene, _exc in failed]
+    if failed and not posts:
+        detail = "; ".join(f"{scene}: {type(exc).__name__}" for scene, exc in failed)
         quality.record_sentinel(
             _METHOD,
             quality.KIND_OPTIONAL_UNAVAILABLE,
-            f"transport/parse failure: {type(exc).__name__}: {exc}",
+            f"all scenes failed ({detail})",
         )
-        return f"<binance_square unavailable: {type(exc).__name__}>"
+        return f"<binance_square unavailable: all feed scenes failed ({detail})>"
 
     if not posts:
         return (
@@ -394,4 +608,7 @@ def fetch_binance_square_block(ticker: str) -> str:
             "returned an empty feed>"
         )
 
-    return _render_block(posts, candidates, candidates[0])
+    return _render_block(
+        posts, candidates, candidates[0], fetched_ms, as_of, failed_scenes,
+        scene_fetched_ms=scene_fetched_ms,
+    )

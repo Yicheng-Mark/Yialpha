@@ -354,8 +354,13 @@ def test_perp_run_renders_ticket_bullets(monkeypatch):
     # Deterministic math: entry 100, atr 2 -> atr_pct 2%, strength Buy=2.
     # L_vol = 0.30/0.02 = 15x; L_conv(2, conservative) = 5x -> L = 5x.
     assert "≤ 5.0x" in md
-    # Liq at 100*(1-1/5) = 80; stop = 100-2*2 = 96 fires first by design.
-    assert "80" in md and "96" in md
+    # MMR-aware liq at 100×(1−1/5+0.005+0.0005) = 80.55 — MMR tiers at the
+    # DISCLOSED assumed 50,000 USDT notional (0.50%), never at the entry
+    # price; stop = 100−2×2 = 96 fires first by design (verified at render).
+    # The trigger basis is disclosed on its own bullet.
+    assert "80.55" in md and "96" in md
+    assert "**Stop Trigger Basis**: CONTRACT_PRICE" in md
+    assert "MARK price" in md
 
 
 @pytest.mark.unit
@@ -406,6 +411,88 @@ def test_perp_ticket_skipped_without_price_or_atr(monkeypatch):
 
 
 @pytest.mark.unit
+def test_perp_ticket_renders_mark_reference(monkeypatch):
+    # PR3: the ticket carries the MARK-price basis next to the last-price
+    # entry reference — liquidation distance claims anchor on mark. Entry
+    # 100 (mocked last close), mark 99.5 -> last−mark ≈ +50.3 bps; liq
+    # 80.55 at 5x (MMR @ assumed 50k notional) is 19.0% BELOW the mark.
+    g = _make_graph(risk_enabled=True)
+    monkeypatch.setattr(
+        g, "_latest_close_and_atr",
+        lambda t, d, at="stock": (100.0, 2.0),
+    )
+    monkeypatch.setattr(g, "_latest_mark_close", lambda t, d: 99.5)
+    md = _perp_overlay_md(g)
+    assert "**Mark Reference**: 99.5" in md
+    assert "+50.3 bps" in md
+    assert "19.0% from current mark 99.5 to liq" in md
+    assert "liquidations trigger on MARK" in md
+
+
+@pytest.mark.unit
+def test_perp_ticket_mark_already_breached_renders_warning():
+    # P0: a long whose mark has fallen THROUGH the estimated liquidation
+    # level must never read as a calm positive "X% to liq" — the breach is
+    # the headline and the stop-first claim is withdrawn.
+    from types import SimpleNamespace
+
+    from yialpha.graph.trading_graph import YiAlphaGraph
+
+    decision = SimpleNamespace(
+        rating="Buy", action="buy", target_weight=0.10,
+        stop_loss=None, entry_price=100.0,
+    )
+    out = YiAlphaGraph._render_perp_ticket(
+        "BTCUSDT", "2020-01-15", "Buy", decision, 100.0, 2.0,
+        mark_close=79.0,  # below the long liq estimate 80.55
+    )
+    assert "ALREADY breached the estimated liquidation level" in out
+    assert "stop-first ordering no longer holds" in out
+    assert "from current mark" not in out
+
+
+@pytest.mark.unit
+def test_perp_overlay_mark_unavailable_omits_bullet(monkeypatch):
+    g = _make_graph(risk_enabled=True)
+    monkeypatch.setattr(
+        g, "_latest_close_and_atr",
+        lambda t, d, at="stock": (100.0, 2.0),
+    )
+    monkeypatch.setattr(g, "_latest_mark_close", lambda t, d: None)
+    md = _perp_overlay_md(g)
+    assert "Mark Reference" not in md
+    assert "Est. Liquidation Price" in md  # the ticket itself still renders
+
+
+@pytest.mark.unit
+def test_perp_price_book_failure_records_core_sentinel(monkeypatch):
+    # PR3 gate: when the overlay's perp price/ATR load FAILS, the failure
+    # must reach the quality chain (get_binance_klines core sentinel →
+    # DEGRADED_CRITICAL → ticket NO_TRADE) instead of vanishing into a
+    # "Stop-loss not set" warning on an otherwise-tradable-looking report.
+    from yialpha.dataflows import quality
+    from yialpha.graph import trading_graph as tg
+
+    def boom(ticker, trade_date, asset_type="stock"):
+        raise RuntimeError("klines endpoint down")
+
+    monkeypatch.setattr(tg, "_memoized_close_and_atr", boom)
+    g = _make_graph(risk_enabled=True)
+    quality.ensure_run_context()
+    try:
+        md = _perp_overlay_md(g)
+        events = quality.snapshot_quality()
+    finally:
+        quality.reset_quality()
+
+    assert "Stop-loss not set" in md
+    core = [e for e in events if e["method"] == "get_binance_klines"]
+    assert core and core[0]["kind"] == quality.KIND_OPTIONAL_UNAVAILABLE
+    # The veto lands on the ticket rendered into the same decision markdown.
+    assert "NO_TRADE (critical_data_missing)" in md
+
+
+@pytest.mark.unit
 def test_perp_ticket_math_module_pinned():
     """The extracted module reproduces the script's documented caps exactly."""
     from yialpha.risk.perp_ticket import (
@@ -420,14 +507,88 @@ def test_perp_ticket_math_module_pinned():
     assert detail["L_vol"] == pytest.approx(10.0)
     assert detail["L_hard"] == pytest.approx(20.0)
 
-    assert liquidation_price(100.0, 5.0, "long", "crypto_perp") == pytest.approx(80.0)
-    assert liquidation_price(100.0, 5.0, "short", "crypto_perp") == pytest.approx(120.0)
+    # MMR-aware trigger (the backtest engine's formula): long
+    # 100×(1−1/5+0.005+0.0005) = 80.55, short mirrored 119.45. The static
+    # default bracket at the ASSUMED 50k USDT notional gives MMR 0.50% +
+    # 5bps fee est.
+    assert liquidation_price(100.0, 5.0, "long", "crypto_perp") == pytest.approx(80.55)
+    assert liquidation_price(100.0, 5.0, "short", "crypto_perp") == pytest.approx(119.45)
     assert liquidation_price(100.0, 1.0, "long", "crypto_perp") is None
     assert liquidation_price(100.0, 5.0, "long", "crypto_spot") is None
 
     assert take_profits(100.0, 96.0, "long") == pytest.approx([106.0, 112.0, 120.0])
     assert take_profits(100.0, 104.0, "short") == pytest.approx([94.0, 88.0, 80.0])
     assert take_profits(None, 96.0, "long") == []
+
+
+@pytest.mark.unit
+def test_liquidation_formula_matches_backtest_engine():
+    """The advisory liq price is the SAME MMR-aware trigger the backtest
+    engine simulates (backtest/engine.py): entry×(1−1/L+MMR+fee) for longs,
+    mirrored for shorts — ticket and simulated equity curve cannot disagree.
+    MMR tiers at the notional PASSED to the ticket (the same
+    notional→bracket lookup engine.py does), not at the entry price."""
+    from yialpha.dataflows.binance_brackets import (
+        DEFAULT_USDT_M_BRACKETS,
+        mmr_for_notional,
+    )
+    from yialpha.risk.perp_ticket import LIQ_FEE_RATE_EST, liquidation_price
+
+    for entry, lev, notional in (
+        (100.0, 5.0, 10_000.0), (60_000.0, 10.0, 250_000.0), (123.4, 3.0, 60_000.0),
+    ):
+        mmr = mmr_for_notional(DEFAULT_USDT_M_BRACKETS, notional)
+        assert liquidation_price(
+            entry, lev, "long", "crypto_perp", notional=notional,
+        ) == pytest.approx(entry * (1.0 - 1.0 / lev + mmr + LIQ_FEE_RATE_EST))
+        assert liquidation_price(
+            entry, lev, "short", "crypto_perp", notional=notional,
+        ) == pytest.approx(entry * (1.0 + 1.0 / lev - mmr - LIQ_FEE_RATE_EST))
+
+
+@pytest.mark.unit
+def test_liquidation_gets_closer_as_mmr_tier_rises():
+    """Bigger notional → higher MMR bracket → liq CLOSER to entry. The old
+    1/L-only formula could not see position-size risk at all and placed the
+    estimate farther than reality (systematically understating it)."""
+    from yialpha.risk.perp_ticket import liquidation_price
+
+    ratio_small = (
+        liquidation_price(100.0, 10.0, "long", "crypto_perp", notional=1_000.0)
+        / 100.0
+    )
+    ratio_large = (
+        liquidation_price(100.0, 10.0, "long", "crypto_perp", notional=200_000.0)
+        / 100.0
+    )
+    # 1k notional: MMR 0.40% → long liq ratio 0.9045; 200k notional: MMR
+    # 0.60% → 0.9065 — higher tier, less room to the trigger. Assert the
+    # ordering, not the decimals.
+    assert ratio_small < ratio_large
+
+
+@pytest.mark.unit
+def test_perp_ticket_numbers_disclose_liq_assumptions():
+    from yialpha.risk.perp_ticket import ASSUMED_NOTIONAL_USDT, perp_ticket_numbers
+
+    result = perp_ticket_numbers(100.0, 2.0, "Buy", None, 0.1)
+    assert result is not None
+    _lev, detail, liq, _stop = result
+    assert liq is not None
+    # Default: MMR tiers at the DISCLOSED assumed notional (50k USDT →
+    # 0.50%), never at the entry price pretending to be a position size.
+    assert detail["liq_mmr"] == pytest.approx(0.005)
+    assert detail["liq_fee_rate"] == pytest.approx(0.0005)
+    assert "assumed 50,000 USDT notional" in detail["liq_mmr_basis"]
+    assert "rises with size" in detail["liq_mmr_basis"]
+    # An explicit real notional overrides the assumption and says so.
+    sized = perp_ticket_numbers(100.0, 2.0, "Buy", None, 0.1, notional=200_000.0)
+    assert sized is not None
+    _l, sized_detail, sized_liq, _s = sized
+    assert sized_liq is not None
+    assert sized_detail["liq_mmr"] == pytest.approx(0.006)
+    assert "notional 200,000 USDT" in sized_detail["liq_mmr_basis"]
+    assert ASSUMED_NOTIONAL_USDT == 50_000.0
 
 
 @pytest.mark.unit

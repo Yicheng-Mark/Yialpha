@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from contextlib import AbstractContextManager
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -134,6 +134,26 @@ def _memoized_close_and_atr(
     frame = load_ohlcv(ticker, str(trade_date))
     close, atr = latest_atr_from_frame(frame)
     return float(close), float(atr)
+
+
+@lru_cache(maxsize=4096)
+def _memoized_mark_close(ticker: str, trade_date: str) -> float:
+    """Mark-price close for one date (perp only; mirrors the (close, ATR)
+    memo's PIT argument). Mark is the price Binance liquidates against —
+    the overlay reports it next to the last-price entry reference so the
+    liquidation distance claims carry their true trigger basis. Raises on
+    failure so failures are never cached; the caller degrades to None."""
+    from datetime import datetime, timedelta
+
+    from yialpha.dataflows.binance import KLINE_CLOSE_COLUMN, binance_klines_frame
+
+    lookback = (
+        datetime.strptime(str(trade_date), "%Y-%m-%d") - timedelta(days=10)
+    ).strftime("%Y-%m-%d")
+    frame = binance_klines_frame(
+        ticker, lookback, str(trade_date), "1d", "binance_perp", "mark",
+    )
+    return float(frame[KLINE_CLOSE_COLUMN].iloc[-1])
 
 
 class YiAlphaGraph:
@@ -570,7 +590,42 @@ class YiAlphaGraph:
         except Exception as exc:  # noqa: BLE001
             logger.warning("risk overlay could not load price/ATR for %s on %s: %s",
                            ticker, trade_date, exc)
+            if asset_type == "crypto_perp":
+                # The overlay's price book is a CORE input (PR3): its
+                # absence must reach the quality chain — DEGRADED_CRITICAL →
+                # ticket NO_TRADE — instead of vanishing into a "Stop-loss
+                # not set" warning on an otherwise-tradable-looking report.
+                from yialpha.dataflows import quality as _quality
+
+                _quality.record_sentinel(
+                    "get_binance_klines",
+                    _quality.KIND_OPTIONAL_UNAVAILABLE,
+                    f"{ticker}: overlay price/ATR unavailable for {trade_date}: "
+                    f"{type(exc).__name__}: {exc}",
+                )
             return None, None
+
+    def _latest_mark_close(self, ticker, trade_date) -> float | None:
+        """Best-effort mark-price close (perp overlay bullet; None degrades).
+
+        Mark is a CORE price leg on a perp run (liquidations trigger on it):
+        a fetch failure records the same core sentinel the bundle's price
+        legs do, so a decision without its mark basis cannot pass as clean.
+        """
+        try:
+            return _memoized_mark_close(ticker, str(trade_date))
+        except Exception as exc:  # noqa: BLE001
+            logger.info("mark close unavailable for %s on %s: %s",
+                        ticker, trade_date, exc)
+            from yialpha.dataflows import quality as _quality
+
+            _quality.record_sentinel(
+                "get_binance_klines",
+                _quality.KIND_OPTIONAL_UNAVAILABLE,
+                f"{ticker}: overlay mark-price close unavailable for {trade_date}: "
+                f"{type(exc).__name__}: {exc}",
+            )
+            return None
 
     @staticmethod
     def _risk_disabled_warning(reason: str) -> str:
@@ -672,10 +727,25 @@ class YiAlphaGraph:
             + (f" of equity ({decision.position_value:,.0f})" if decision.position_value else "")
             + "\n"
         )
+        # Perp live runs: the last daily candle is still forming — its close
+        # IS the live price, but the ATR feeding the stop/leverage math is
+        # computed on completed bars only (atr_stop). Disclose the two bases
+        # so the reader does not treat them as one consistent snapshot.
+        forming_price_note = ""
+        if (
+            asset_type == "crypto_perp"
+            and str(trade_date) == datetime.now(UTC).strftime("%Y-%m-%d")
+        ):
+            forming_price_note = (
+                " (live forming candle; ATR on completed bars only)"
+            )
         if decision.stop_loss is not None:
             overlay += f"- **Stop Loss**: {decision.stop_loss:.2f}\n"
         if decision.entry_price is not None:
-            overlay += f"- **Entry Reference**: {decision.entry_price:.2f}\n"
+            overlay += (
+                f"- **Entry Reference**: {decision.entry_price:.2f}"
+                f"{forming_price_note}\n"
+            )
         # A sized position with no stop-loss is the silent-degradation signal:
         # it fires both when price/ATR data failed to load (close is None) AND
         # when the stop computation itself threw inside RiskManager.decide
@@ -695,6 +765,7 @@ class YiAlphaGraph:
             overlay += self._render_perp_ticket(
                 ticker, str(trade_date), rating, decision, close, atr,
                 funding_total_7d=funding_total_7d,
+                mark_close=self._latest_mark_close(ticker, str(trade_date)),
             )
             overlay += self._render_stress_line(ticker, str(trade_date))
         # V2.0: the Candidate ExecutionTicket — the single cross-stage trading
@@ -757,6 +828,7 @@ class YiAlphaGraph:
         close: float | None,
         atr: float | None,
         funding_total_7d: float | None = None,
+        mark_close: float | None = None,
     ) -> str:
         """Deterministic perp advisory bullets for the risk overlay.
 
@@ -771,14 +843,19 @@ class YiAlphaGraph:
         implementation, two consumers, zero drift.
         ``funding_total_7d`` is the SAME trailing 7-day settlement sum the
         risk gate priced (fetched once by the caller); None formats as an
-        explicit n/a. Failures degrade to a missing bullet, never a broken
-        overlay.
+        explicit n/a. ``mark_close`` carries the mark-price basis
+        (liquidations trigger on MARK, not last) next to the last-price
+        entry reference. Failures degrade to a missing bullet, never a
+        broken overlay.
         """
         if close is None or close <= 0.0 or atr is None or atr <= 0.0:
             return ""
         weight = decision.target_weight
         if weight == 0.0:
             return ""
+        # Signed side for the breach/ordering checks below — same source of
+        # truth as perp_ticket_numbers (the sign of the final weight).
+        direction = "long" if weight > 0.0 else "short"
         entry = decision.entry_price if decision.entry_price else close
 
         from yialpha.risk.perp_ticket import perp_ticket_numbers
@@ -797,12 +874,79 @@ class YiAlphaGraph:
             f"{detail['L_vol']:.1f}x · conviction {detail['L_conv']:.1f}x · "
             f"hard {detail['L_hard']:.0f}x)\n"
         ]
+        if mark_close is not None and mark_close > 0:
+            basis_bps = (entry / mark_close - 1.0) * 1e4
+            mark_note = (
+                f" (last−mark {basis_bps:+.1f} bps; liquidation judges on MARK)"
+            )
+            if liq is not None:
+                # Liquidation judges on MARK; for a long the level sits below
+                # entry (mirrored for a short). A mark already THROUGH the
+                # level is a breach — render the warning, never a positive
+                # "X% to liq" distance off an abs().
+                breached = (
+                    mark_close <= liq
+                    if direction == "long"
+                    else mark_close >= liq
+                )
+                if breached:
+                    mark_note = (
+                        f" (last−mark {basis_bps:+.1f} bps; ⚠️ MARK "
+                        f"{_p(mark_close)} has ALREADY breached the estimated "
+                        f"liquidation level {_p(liq)} — the stop-first "
+                        "ordering no longer holds)"
+                    )
+                else:
+                    mark_off = abs(liq / mark_close - 1.0)
+                    mark_note = (
+                        f" (last−mark {basis_bps:+.1f} bps; {mark_off:.1%} from "
+                        f"current mark {_p(mark_close)} to liq — liquidations "
+                        "trigger on MARK)"
+                    )
+            lines.append(f"- **Mark Reference**: {_p(mark_close)}{mark_note}\n")
         if liq is not None:
             off = abs(liq / entry - 1.0)
+            # The stop-first claim is VERIFIED at render time, not asserted:
+            # the stop triggers on CONTRACT_PRICE (last) while liquidation
+            # judges on MARK, so it only holds when the stop sits beyond the
+            # liq level AND (when known) mark has not already crossed it.
+            # Today's LIQ_SAFETY≥1 construction makes stop_beyond_liq hold
+            # by design; the branch stays as a guard against future math
+            # changes and mark divergence at render time.
+            stop_beyond_liq = (
+                stop > liq if direction == "long" else stop < liq
+            )
+            mark_safe = mark_close is None or (
+                mark_close > liq if direction == "long" else mark_close < liq
+            )
+            if stop_beyond_liq and mark_safe:
+                order_note = f"the stop at {_p(stop)} fires first by design"
+            elif not stop_beyond_liq:
+                order_note = (
+                    f"⚠️ the stop at {_p(stop)} does NOT sit beyond the "
+                    "estimated liquidation level — the stop-first ordering "
+                    "is NOT guaranteed"
+                )
+            else:
+                order_note = (
+                    "⚠️ MARK has crossed the estimated liquidation level — "
+                    "the stop-first ordering no longer holds"
+                )
+            mmr_note = (
+                f"includes MMR {detail['liq_mmr']:.2%} + fee "
+                f"{detail['liq_fee_rate']:.2%}; {detail.get('liq_mmr_basis', '')}"
+                if "liq_mmr" in detail
+                else ""
+            )
             lines.append(
                 f"- **Est. Liquidation Price**: {_p(liq)} "
-                f"({off:.1%} from entry; the stop at {_p(stop)} "
-                "fires first by design)\n"
+                f"({off:.1%} from entry; {order_note}"
+                f"{'; ' + mmr_note if mmr_note else ''})\n"
+            )
+            from yialpha.risk.perp_ticket import STOP_TRIGGER_BASIS
+
+            lines.append(
+                f"- **Stop Trigger Basis**: {STOP_TRIGGER_BASIS}\n"
             )
         lines.append(
             "- **Funding (7d)**: "
@@ -1170,6 +1314,14 @@ class YiAlphaGraph:
         from yialpha.dataflows import tavily as tavily_vendor
 
         tavily_vendor.reset_run_budget()
+        # Fresh per-run bundle/news prefetch scope: the LLM tool loop re-enters
+        # analyst nodes, and the deterministic prefetches must fetch exactly
+        # ONCE per run — not once per tool-call round, and never one run's
+        # live snapshot carried into the next (same ContextVar contract as
+        # the quality ledger and the Tavily budget).
+        from yialpha.dataflows import run_scope
+
+        run_scope.ensure_run_scope()
 
         try:
             # Initialize state — inject memory log context for PM and the
@@ -1295,6 +1447,12 @@ class YiAlphaGraph:
             quality.snapshot_quality(), quality.snapshot_core_successes()
         )
         quality.reset_quality()
+        # Drop the per-run prefetch scope with the ledger: a live bundle
+        # snapshot is run-scoped by contract and must never serve a later
+        # run in the same process.
+        from yialpha.dataflows import run_scope
+
+        run_scope.reset_run_scope()
         # Snapshot the scoped web-search usage BEFORE anything else in this
         # method could run another charge; the counters themselves were reset
         # at run start (_run_graph), so this is the run's final tally.

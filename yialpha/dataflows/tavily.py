@@ -322,7 +322,8 @@ def _sentinel(detail: str) -> str:
 
 
 def get_web_search(
-    query: str, max_results: int = 5, scope: str = "news"
+    query: str, max_results: int = 5, scope: str = "news",
+    days: int | None = None,
 ) -> str:
     """Search the open web via Tavily and format results as a cited digest.
 
@@ -333,6 +334,11 @@ def get_web_search(
         scope: Budget scope charging this call — one of the analysts that
             binds a web_search instance ("news" / "market" / "fundamentals").
             Default "news" keeps pre-scoping callers unchanged.
+        days: Optional recency window (Tavily ``topic=news`` semantics: the
+            API only honours ``days`` together with the news topic). When
+            set, the request is scoped to news from the last ``days`` days
+            and per-result ``published_date`` values (when the API returns
+            them) ride the digest so the recency claim is verifiable.
 
     Returns:
         A markdown digest: one numbered entry per result with title, source
@@ -390,6 +396,12 @@ def get_web_search(
         "search_depth": "basic",  # 1 credit/call; "advanced" costs 2 and is
         # no better for the analyst's headline-angle use case.
     }
+    if days is not None and days > 0:
+        # Tavily only honours ``days`` together with the news topic; a plain
+        # query ignores the window silently, so the topic rides the request
+        # whenever a recency bound is asked for.
+        payload["topic"] = "news"
+        payload["days"] = int(days)
 
     response = None
     last_key_status: object = "?"
@@ -467,6 +479,11 @@ def get_web_search(
         lines.append(f"{i}. **{title}**")
         if url:
             lines.append(f"   Source: {url}")
+        published = str(r.get("published_date") or "").strip()
+        if published:
+            # News-topic responses carry published_date; rendering it makes
+            # the caller's recency window verifiable instead of asserted.
+            lines.append(f"   Published: {published}")
         if content:
             lines.append(f"   {content}")
     lines.append(

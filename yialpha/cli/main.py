@@ -1263,6 +1263,11 @@ def run_analysis(checkpoint: bool | None = None, asset_type: str = "auto"):
         from yialpha.dataflows import tavily as tavily_vendor
 
         tavily_vendor.reset_run_budget()
+        # Same mirror for the per-run bundle/news prefetch scope (single
+        # fetch per run however many tool-loop re-entries the nodes see).
+        from yialpha.dataflows import run_scope
+
+        run_scope.ensure_run_scope()
         # Resolve the instrument identity once here so all agents anchor to
         # the real company (#814); the CLI builds state directly rather than
         # going through propagate(), so this must happen on the CLI path too.

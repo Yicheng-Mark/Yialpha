@@ -6,6 +6,7 @@ the news path: a broker symbol like XAUUSD must resolve to the same Yahoo symbol
 hit the right instrument instead of failing/mismatching.
 """
 import pandas as pd
+import pytest
 
 import yialpha.agents.utils.agent_utils as au
 import yialpha.dataflows.y_finance as yfin
@@ -68,10 +69,17 @@ def test_news_lookup_normalizes_symbol(monkeypatch):
             return []
 
     monkeypatch.setattr(ynews.yf, "Ticker", FakeTicker)
-    monkeypatch.setattr(ynews, "yf_retry", lambda fn: fn())
+    monkeypatch.setattr(ynews, "yf_retry", lambda fn, **kw: fn())
 
-    out = ynews.get_news_yfinance("XAUUSD", "2025-01-01", "2025-01-10")
+    # PR5 typed soft-miss: an EMPTY result raises NoMarketDataError (carrying
+    # both the user's ticker and the canonical symbol) instead of returning
+    # an "No news found" string — a plain string counted as success and
+    # masked the router's alpha_vantage fallback.
+    from yialpha.dataflows.errors import NoMarketDataError
+
+    with pytest.raises(NoMarketDataError) as excinfo:
+        ynews.get_news_yfinance("XAUUSD", "2025-01-01", "2025-01-10")
 
     assert seen["symbol"] == "GC=F"   # news queried with the canonical symbol
-    assert "XAUUSD" in out            # the user's ticker stays in the report
-    assert "GC=F" in out              # provenance noted
+    assert "XAUUSD" in str(excinfo.value)   # the user's ticker stays in the error
+    assert "GC=F" in str(excinfo.value)     # provenance noted

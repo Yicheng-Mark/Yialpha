@@ -395,6 +395,50 @@ def _get_stock_stats_bulk(
     return result_dict
 
 
+#: Labeled real-time overview fields shared by this vendor's overview and the
+#: SEC+Yahoo aggregate (yialpha.dataflows.fundamentals_overview) — ONE list so
+#: the two renderings can never drift apart.
+_OVERVIEW_FIELDS = [
+    ("Name", "longName"),
+    ("Sector", "sector"),
+    ("Industry", "industry"),
+    ("Market Cap", "marketCap"),
+    ("PE Ratio (TTM)", "trailingPE"),
+    ("Forward PE", "forwardPE"),
+    ("PEG Ratio", "pegRatio"),
+    ("Price to Book", "priceToBook"),
+    ("EPS (TTM)", "trailingEps"),
+    ("Forward EPS", "forwardEps"),
+    ("Dividend Yield", "dividendYield"),
+    ("Beta", "beta"),
+    ("52 Week High", "fiftyTwoWeekHigh"),
+    ("52 Week Low", "fiftyTwoWeekLow"),
+    ("50 Day Average", "fiftyDayAverage"),
+    ("200 Day Average", "twoHundredDayAverage"),
+    ("Revenue (TTM)", "totalRevenue"),
+    ("Gross Profit", "grossProfits"),
+    ("EBITDA", "ebitda"),
+    ("Net Income", "netIncomeToCommon"),
+    ("Profit Margin", "profitMargins"),
+    ("Operating Margin", "operatingMargins"),
+    ("Return on Equity", "returnOnEquity"),
+    ("Return on Assets", "returnOnAssets"),
+    ("Debt to Equity", "debtToEquity"),
+    ("Current Ratio", "currentRatio"),
+    ("Book Value", "bookValue"),
+    ("Free Cash Flow", "freeCashflow"),
+]
+
+
+def _overview_lines(info: dict) -> list[str]:
+    """Render the labeled overview lines for a non-empty ``.info`` dict."""
+    return [
+        f"{label}: {info.get(key)}"
+        for label, key in _OVERVIEW_FIELDS
+        if info.get(key) is not None
+    ]
+
+
 def get_fundamentals(
     ticker: Annotated[str, "ticker symbol of the company"],
     curr_date: Annotated[str | None, "current date, yyyy-mm-dd"] = None
@@ -421,46 +465,11 @@ def get_fundamentals(
         if not info:
             raise NoMarketDataError(ticker, canonical, "no fundamentals returned")
 
-        fields = [
-            ("Name", info.get("longName")),
-            ("Sector", info.get("sector")),
-            ("Industry", info.get("industry")),
-            ("Market Cap", info.get("marketCap")),
-            ("PE Ratio (TTM)", info.get("trailingPE")),
-            ("Forward PE", info.get("forwardPE")),
-            ("PEG Ratio", info.get("pegRatio")),
-            ("Price to Book", info.get("priceToBook")),
-            ("EPS (TTM)", info.get("trailingEps")),
-            ("Forward EPS", info.get("forwardEps")),
-            ("Dividend Yield", info.get("dividendYield")),
-            ("Beta", info.get("beta")),
-            ("52 Week High", info.get("fiftyTwoWeekHigh")),
-            ("52 Week Low", info.get("fiftyTwoWeekLow")),
-            ("50 Day Average", info.get("fiftyDayAverage")),
-            ("200 Day Average", info.get("twoHundredDayAverage")),
-            ("Revenue (TTM)", info.get("totalRevenue")),
-            ("Gross Profit", info.get("grossProfits")),
-            ("EBITDA", info.get("ebitda")),
-            ("Net Income", info.get("netIncomeToCommon")),
-            ("Profit Margin", info.get("profitMargins")),
-            ("Operating Margin", info.get("operatingMargins")),
-            ("Return on Equity", info.get("returnOnEquity")),
-            ("Return on Assets", info.get("returnOnAssets")),
-            ("Debt to Equity", info.get("debtToEquity")),
-            ("Current Ratio", info.get("currentRatio")),
-            ("Book Value", info.get("bookValue")),
-            ("Free Cash Flow", info.get("freeCashflow")),
-        ]
-
-        lines = []
-        for label, value in fields:
-            if value is not None:
-                lines.append(f"{label}: {value}")
-
         # yfinance returns a stub dict (e.g. {"trailingPegRatio": None}) for
         # unknown symbols, so `info` is truthy but every field is empty. Treat
         # "no usable fields" as no data rather than emitting a bare header the
         # agent might fabricate around.
+        lines = _overview_lines(info)
         if not lines:
             raise NoMarketDataError(ticker, canonical, "no fundamental fields returned")
 
