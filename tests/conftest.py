@@ -128,7 +128,7 @@ def _runtime_prefetch_bundles_off():
 
 @pytest.fixture(autouse=True)
 def _runtime_ledger_isolated(tmp_path):
-    """Point the V2 ledger DB at a per-test tmp file and hold the V2.1
+    """Point the V2 ledger DB at a per-test tmp file and hold the V2.1/V2.2
     record/shadow flags OFF (production defaults are ON).
 
     Same contract as ``_perp_bundle_off_by_default`` /
@@ -149,6 +149,7 @@ def _runtime_ledger_isolated(tmp_path):
             "instrument_registry": False,
             "prediction_ledger": False,
             "stock_perp_fair_value": False,
+            "regime_state": False,
         }
     )
     reset_ledger_state_for_test()

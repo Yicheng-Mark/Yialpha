@@ -18,8 +18,11 @@ prediction (direction / ``prob_up`` / evidence chain) and its run
   ``sum(|bin| / n * |accuracy(bin) - confidence(bin)|)``.
 
 Slices: overall, by analyst, by ``instrument_class`` (run row), by
-``horizon_days``, by direction, and by evidence-coverage bucket
-(``len(evidence_ids)``: ``0`` / ``1-2`` / ``3+``).
+``horizon_days``, by direction, by evidence-coverage bucket
+(``len(evidence_ids)``: ``0`` / ``1-2`` / ``3+``), and by regime
+(the prediction's ``regime_id``; rows without one bucket under
+``"no_regime"`` — predictions written before V2.2 or with the regime
+stage off never silently merge into a real regime cell).
 
 **V3 discipline** (:data:`V3_MIN_SAMPLES_PER_CELL`): every cell with fewer
 samples is flagged ``below_v3_min_samples`` and rendered with a display-only
@@ -74,7 +77,7 @@ def _scored_rows() -> list[dict[str, Any]]:
         get_connection(readonly=True)
         .execute(
             "SELECT o.prediction_id, o.horizon_days, o.net_return, "
-            "p.analyst, p.direction, p.prob_up, p.evidence_ids, "
+            "p.analyst, p.direction, p.prob_up, p.evidence_ids, p.regime_id, "
             "r.instrument_class "
             "FROM outcomes o "
             "JOIN predictions p ON p.prediction_id = o.prediction_id "
@@ -98,6 +101,9 @@ def _scored_rows() -> list[dict[str, Any]]:
                 str(row["instrument_class"]) if row["instrument_class"] else "unknown"
             ),
             "evidence_n": len(decode_json_list(row["evidence_ids"])),
+            "regime_id": (
+                str(row["regime_id"]) if row["regime_id"] else "no_regime"
+            ),
         }
         for row in rows
     ]
@@ -208,6 +214,7 @@ def build_scoreboard(*, min_samples_display: int = 1) -> dict[str, Any]:
         "by_horizon_days": _slice(rows, "horizon_days", min_samples_display),
         "by_direction": _slice(rows, "direction", min_samples_display),
         "by_evidence_bucket": _slice(rows, "evidence_n", min_samples_display),
+        "by_regime": _slice(rows, "regime_id", min_samples_display),
     }
 
 
@@ -240,6 +247,7 @@ def render_scoreboard_markdown(scoreboard: dict[str, Any]) -> str:
         ("By horizon (days)", "horizon_days", scoreboard["by_horizon_days"]),
         ("By direction", "direction", scoreboard["by_direction"]),
         ("By evidence coverage", "evidence bucket", scoreboard["by_evidence_bucket"]),
+        ("By regime", "regime_id", scoreboard["by_regime"]),
     ]
     for title, column, cells in sections:
         lines += [f"## {title}", ""]

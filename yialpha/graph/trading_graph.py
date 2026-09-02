@@ -869,6 +869,10 @@ class YiAlphaGraph:
                     record.prediction_id
                     for record in predictions_for_run(context.run_id)
                 ]
+                # V2.2: the run's regime id from the (re-bound) run context —
+                # None while the regime stage is off/uncomputable, which is
+                # exactly the ticket's pre-V2.2 value.
+                ticket.regime_id = context.regime_id
                 attach_ticket(
                     ticket_id=ticket.ticket_id,
                     decision_id=ticket.decision_id,
@@ -1473,6 +1477,7 @@ class YiAlphaGraph:
         # blind predictions, ticket linkage/mirror) is a no-op and the run's
         # state/log bytes stay identical to the pre-V2.1 behavior.
         ledger_run_id: str | None = None
+        regime_run_id: str | None = None
         if self.config.get("prediction_ledger"):
             try:
                 from yialpha.agents.utils import prediction_tools as _prediction_tools
@@ -1509,6 +1514,54 @@ class YiAlphaGraph:
                     exc_info=True,
                 )
                 ledger_run_id = None
+            # V2.2 Context stage: compute the run's RegimeState (perp runs,
+            # flag regime_state), persist it, and re-bind the run context
+            # with regime_id so predictions/tickets carry it and the market
+            # analyst can inject the stored block WITHOUT recomputing. A
+            # None regime (uncomputable inputs) leaves regime_id unset — the
+            # analyst discloses "regime unavailable", never a fake id.
+            if (
+                ledger_run_id
+                and self.config.get("regime_state")
+                and asset_type == "crypto_perp"
+            ):
+                try:
+                    from dataclasses import asdict
+
+                    from yialpha.ledger.regime_store import upsert_regime
+                    from yialpha.ledger.run_context import set_ledger_run_context
+                    from yialpha.regime.compute import compute_regime_state
+
+                    _regime = compute_regime_state(
+                        company_name,
+                        asset_type,
+                        _instrument_class,
+                        str(trade_date),
+                        end_date=str(trade_date),
+                    )
+                    if _regime is not None and _regime.regime_id:
+                        upsert_regime({
+                            **asdict(_regime),
+                            "ticker": company_name,
+                            "instrument_class": _instrument_class,
+                        })
+                        set_ledger_run_context(
+                            ledger_run_id,
+                            company_name,
+                            asset_type,
+                            instrument_class=_instrument_class,
+                            analysis_as_of=str(trade_date),
+                            regime_id=_regime.regime_id,
+                        )
+                        regime_run_id = _regime.regime_id
+                except Exception:  # noqa: BLE001 -- context stage must never break a run
+                    logger.warning(
+                        "regime state computation failed for %s; regime unavailable "
+                        "for this run",
+                        company_name,
+                        exc_info=True,
+                    )
+                    regime_run_id = None
 
         try:
             # Initialize state — inject memory log context for PM and the
@@ -1572,6 +1625,10 @@ class YiAlphaGraph:
             # null value) is the "this run was recorded" signal downstream.
             if ledger_run_id:
                 final_state["run_id"] = ledger_run_id
+            # V2.2: same key-presence contract for the regime id (present
+            # only when the regime stage computed and stored a state).
+            if regime_run_id:
+                final_state["regime_id"] = regime_run_id
 
             # Store current state for reflection.
             self.curr_state = final_state
@@ -1737,6 +1794,10 @@ class YiAlphaGraph:
         # flag-off logs byte-identical to the pre-V2.1 shape.
         if final_state.get("run_id"):
             entry["run_id"] = final_state["run_id"]
+        # V2.2: regime id — same key-presence contract (regime_state on AND
+        # a computable regime; flag-off / uncomputable logs lack the key).
+        if final_state.get("regime_id"):
+            entry["regime_id"] = final_state["regime_id"]
         # Write-and-drop: nothing downstream reads PAST dates from this dict
         # (the on-disk JSON below is the durable record), but a multi-date
         # backtest or a long-lived web process would otherwise accumulate

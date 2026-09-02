@@ -31,6 +31,11 @@ reconstructed later — one non-replayable leg is enough to break that:
   live runs (depth bands, ADL and the premium snapshot are live views);
   ``PIT_REPLAYABLE`` on historical replay runs, where the bundle carries
   only the date-bounded kline bases.
+* market_analyst regime block (V2.2, perp runs with ``regime_state``) →
+  ``regime_state`` / ``binance_perp`` / contract symbol / ``CONTRACT`` —
+  ``PIT_REPLAYABLE`` on historical replay runs (only date-bounded legs
+  feed the regime there) and ``LIVE_ONLY`` on live runs (the live order
+  book feeds the liquidity legs).
 * fundamentals_analyst fundamentals bundle → ``fundamentals_bundle`` /
   ``fundamental_data`` / underlying equity symbol (perp runs) or the
   ticker itself / ``UNDERLYING`` — ``LIVE_ONLY`` (SEC statements are
@@ -81,6 +86,8 @@ class LedgerRunContext:
     that UTC day). ``instrument_class`` is the routing verdict
     (``equity`` / ``crypto_spot`` / ``stock_perp`` / ``pure_crypto_perp`` /
     ``unknown_perp``) or ``None`` when the caller did not classify.
+    ``regime_id`` (V2.2, additive) names the run's ``RegimeState`` row —
+    ``None`` while the regime stage is off, uncomputable, or not yet bound.
     """
 
     run_id: str
@@ -88,6 +95,7 @@ class LedgerRunContext:
     asset_type: str
     instrument_class: str | None
     analysis_as_of: str
+    regime_id: str | None = None
 
 
 _RUN_CONTEXT: ContextVar[LedgerRunContext | None] = ContextVar(
@@ -101,12 +109,15 @@ def set_ledger_run_context(
     asset_type: str,
     instrument_class: str | None = None,
     analysis_as_of: str = "",
+    regime_id: str | None = None,
 ) -> LedgerRunContext:
     """Force-bind the run context (graph runner, one call per run).
 
     Returns the bound value so callers can log it. Batch/run orchestration
     calls this in the PARENT context before the graph runs; node tasks
-    inherit the frozen value.
+    inherit the frozen value. The V2.2 regime stage re-binds mid-run with
+    ``regime_id`` once the regime is computed — force-set semantics, so the
+    re-bind is just the same call with the extra key.
     """
     context = LedgerRunContext(
         run_id=str(run_id),
@@ -114,6 +125,7 @@ def set_ledger_run_context(
         asset_type=str(asset_type),
         instrument_class=instrument_class,
         analysis_as_of=analysis_as_of,
+        regime_id=regime_id,
     )
     _RUN_CONTEXT.set(context)
     return context
@@ -125,13 +137,14 @@ def ensure_ledger_run_context(
     asset_type: str,
     instrument_class: str | None = None,
     analysis_as_of: str = "",
+    regime_id: str | None = None,
 ) -> None:
     """Bind the run context only when absent (retried pipelines keep the
     original — the run row, and everything anchored to it, is never
     rewritten mid-flight)."""
     if _RUN_CONTEXT.get() is None:
         set_ledger_run_context(
-            run_id, ticker, asset_type, instrument_class, analysis_as_of
+            run_id, ticker, asset_type, instrument_class, analysis_as_of, regime_id
         )
 
 

@@ -23,11 +23,11 @@ from langchain_core.tools import tool
 from stockstats import wrap
 
 from yialpha.dataflows import quality
-from yialpha.dataflows.binance import binance_klines_frame
+from yialpha.dataflows.binance import binance_klines_frame, stock_perp_underlying
 from yialpha.dataflows.feature_registry import DERIVED_FEATURES, compute_derived
 from yialpha.dataflows.indicator_catalog import INDICATORS
 from yialpha.dataflows.stockstats_utils import compute_indicator
-from yialpha.dataflows.vol_estimators import CRYPTO_TRADING_DAYS_PER_YEAR
+from yialpha.dataflows.vol_estimators import periods_per_year_for
 
 #: Default battery for crypto: trend + momentum + volatility groups (the
 #: perp-appropriate set; positioning/funding live in their own perp tools).
@@ -134,6 +134,19 @@ def _indicators_core(
         )
 
     frame_reset = frame.reset_index()
+    # Vol annualization by instrument class (V2.2 determinism fix): a
+    # tokenized-stock perp follows Binance's published TradFi sessions, so
+    # its weekday-session candles annualize on the sessions-per-year factor
+    # (via instruments.sessions), NOT the 24/7 crypto 365 — the crypto
+    # factor overstated stock-perp vol by sqrt(365/261) ≈ 1.18. The class
+    # signal is the deterministic warm/seed base map (no ledger, no flag):
+    # an EQUITY base means stock_perp, anything else on Binance candles is
+    # pure crypto.
+    instrument_class = (
+        "stock_perp" if venue == "perp" and stock_perp_underlying(symbol) else
+        "pure_crypto_perp"
+    )
+    periods = periods_per_year_for("crypto_perp", instrument_class)
     # The wrap() copy is load-bearing: stockstats converts/adds columns on the
     # frame it wraps, and frame_reset stays the read-only source below.
     sdf = wrap(frame_reset.copy())
@@ -146,11 +159,8 @@ def _indicators_core(
                 # internally; rvol/ewma_vol/rel_vol_20 are read-only) — the
                 # old per-name full-frame copy was one DataFrame copy per
                 # derived indicator, ~12 per tool call.
-                # Crypto candles are a 24/7 daily series: annualize the vol
-                # estimators with 365 — the 252 equity default understates
-                # every vol reading by sqrt(252/365) ≈ 0.83 (P1, 2026-08-16).
                 derived = compute_derived(
-                    frame_reset, name, periods_per_year=CRYPTO_TRADING_DAYS_PER_YEAR,
+                    frame_reset, name, periods_per_year=periods,
                 )
                 if derived is None:
                     raise RuntimeError("registry miss")
