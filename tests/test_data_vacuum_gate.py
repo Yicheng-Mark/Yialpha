@@ -289,14 +289,19 @@ def test_default_vendor_chains_have_fallback():
     vendors = DEFAULT_CONFIG["data_vendors"]
     assert vendors["core_stock_apis"] == "yfinance,alpha_vantage"
     assert vendors["technical_indicators"] == "yfinance,alpha_vantage"
-    assert vendors["fundamental_data"] == "yfinance,alpha_vantage,sec_edgar"
+    # PR5 (2026-09): fundamentals are SEC-FIRST — EDGAR filings carry the
+    # real ``filed`` date (point-in-time ground truth), unlike the
+    # period_end+45-day heuristic yfinance/AV apply. yfinance follows as the
+    # keyless unlimited supplement; AV stays last.
+    assert vendors["fundamental_data"] == "sec_edgar,yfinance,alpha_vantage"
     assert vendors["news_data"] == "yfinance,alpha_vantage"
-    # yfinance (keyless, unlimited) must lead every chain; the rate-limited
-    # free-tier AV may only ever serve as fallback.
+    # alpha_vantage (rate-limited free tier) must never precede the keyless
+    # vendors in any chain.
     for chain in vendors.values():
         parts = chain.split(",")
         if "alpha_vantage" in parts:
-            assert parts[0] == "yfinance"
+            assert parts.index("alpha_vantage") == len(parts) - 1
+            assert "yfinance" in parts
 
 
 @pytest.mark.unit

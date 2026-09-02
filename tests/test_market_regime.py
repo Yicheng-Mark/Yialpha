@@ -105,6 +105,122 @@ class TestComputeTurbulence:
 
 
 # ---------------------------------------------------------------------------
+# Asset-aware venue routing: a crypto_perp/crypto_spot regime line reads
+# Binance — the Yahoo load_ohlcv path must see ZERO calls (BTCUSDT would be
+# silently remapped to the BTC-USD spot index, a different instrument at a
+# different basis; a tokenized-stock perp has no Yahoo symbol at all).
+# ---------------------------------------------------------------------------
+
+
+def _perp_frame(n=260, start="2025-01-01"):
+    closes = [100.0 + (i % 5) * 0.8 + i * 0.03 for i in range(n)]
+    # Named "Date" index — the exact shape binance_klines_frame yields (the
+    # regime loader reset_index()es it back into the Yahoo column shape).
+    idx = pd.date_range(start, periods=n, freq="D", name="Date")
+    return pd.DataFrame(
+        {
+            "Open": closes,
+            "High": [c + 1.0 for c in closes],
+            "Low": [c - 1.0 for c in closes],
+            "Close": closes,
+            "Adj Close": closes,
+            "Volume": [10.0] * n,
+        },
+        index=idx,
+    )
+
+
+@pytest.mark.unit
+class TestAssetAwareRegimeVenue:
+    def test_crypto_perp_instrument_loads_from_binance_never_yahoo(self, monkeypatch):
+        import yialpha.dataflows.binance as bn
+
+        def boom(sym, d):
+            raise AssertionError(
+                f"Yahoo load_ohlcv must not serve a crypto_perp regime line "
+                f"(called with symbol={sym})"
+            )
+
+        monkeypatch.setattr(mr, "load_ohlcv", boom)
+        seen: dict = {}
+
+        def fake_klines(symbol, start, end, interval="1d",
+                        venue="binance_perp", price_type="last"):
+            seen["venue"] = venue
+            return _perp_frame()
+
+        monkeypatch.setattr(bn, "binance_klines_frame", fake_klines)
+        monkeypatch.setattr(bn, "stock_perp_underlying", lambda t: None)
+
+        line = mr.format_regime_context(
+            "BTCUSDT", "2025-12-31", asset_type="crypto_perp",
+        )
+        assert seen.get("venue") == "binance_perp"
+        assert line is not None and "trend=" in line and "vol=" in line
+
+    def test_crypto_spot_uses_spot_venue(self, monkeypatch):
+        import yialpha.dataflows.binance as bn
+
+        monkeypatch.setattr(
+            mr, "load_ohlcv",
+            lambda sym, d: _ohlcv_frame(_closes_from_returns([0.001] * 300)),
+        )
+        seen: dict = {}
+
+        def fake_klines(symbol, start, end, interval="1d",
+                        venue="binance_spot", price_type="last"):
+            seen["venue"] = venue
+            return _perp_frame()
+
+        monkeypatch.setattr(bn, "binance_klines_frame", fake_klines)
+        line = mr.format_regime_context(
+            "BTCUSDT", "2025-12-31", asset_type="crypto_spot",
+        )
+        assert seen.get("venue") == "binance_spot"
+        assert line is not None
+
+    def test_legacy_crypto_mode_stays_on_yahoo(self, monkeypatch):
+        # Byte-equivalence for the legacy auto-detected mode: the risk
+        # overlay deliberately keeps crypto spot on the Yahoo index source,
+        # and the regime line matches that venue choice.
+        import yialpha.dataflows.binance as bn
+
+        def must_not_fetch(*a, **k):
+            raise AssertionError("legacy crypto mode must not hit Binance")
+
+        monkeypatch.setattr(bn, "binance_klines_frame", must_not_fetch)
+        monkeypatch.setattr(
+            mr, "load_ohlcv", lambda sym, d: _perp_frame().reset_index(),
+        )
+        line = mr.format_regime_context(
+            "BTC-USD", "2025-12-31", asset_type="crypto",
+        )
+        assert line is not None and "trend=" in line
+
+    def test_pure_perp_benchmark_defaults_to_btcusdt(self, monkeypatch):
+        import yialpha.dataflows.binance as bn
+
+        monkeypatch.setattr(mr, "get_config", lambda: {"benchmark_map": {"": "SPY"}})
+        monkeypatch.setattr(bn, "stock_perp_underlying", lambda t: None)
+        assert mr.resolve_market_benchmark("ETHUSDT", "crypto_perp") == "BTCUSDT"
+        assert mr.resolve_market_benchmark("BTCUSDT", "crypto_spot") == "BTCUSDT"
+
+    def test_stock_perp_benchmark_stays_spy(self, monkeypatch):
+        # A tokenized-stock perp's market narrative is the underlying
+        # equity's — SPY remains its context benchmark.
+        import yialpha.dataflows.binance as bn
+
+        monkeypatch.setattr(mr, "get_config", lambda: {"benchmark_map": {"": "SPY"}})
+        monkeypatch.setattr(bn, "stock_perp_underlying", lambda t: "MU")
+        assert mr.resolve_market_benchmark("MUUSDT", "crypto_perp") == "SPY"
+
+    def test_stock_benchmark_resolution_unchanged(self, monkeypatch):
+        monkeypatch.setattr(mr, "get_config", lambda: {"benchmark_map": {"": "SPY"}})
+        assert mr.resolve_market_benchmark("AAPL", "stock") == "SPY"
+        assert mr.resolve_market_benchmark("AAPL") == "SPY"  # default arg
+
+
+# ---------------------------------------------------------------------------
 # Byte-equivalence of the conservative debater wiring
 # ---------------------------------------------------------------------------
 

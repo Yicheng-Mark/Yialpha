@@ -19,6 +19,8 @@ resolves ``data_cache_dir`` at call time).
 """
 
 import json
+import os
+import time
 from unittest import mock
 
 import pytest
@@ -162,6 +164,21 @@ def _quality_ledger():
     quality.reset_quality()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_square_cache(tmp_path):
+    """Per-test disk cache for EVERY test in this file.
+
+    conftest's ``_isolated_vendor_cache`` is opt-in (not autouse); without
+    this override the vendor cache resolves to the developer's REAL
+    ``~/.yialpha/cache`` — mocked responses would pollute it and later
+    tests (or real runs) would serve the fake bytes back. This file's
+    fetch-and-cache tests must never touch the real cache dir.
+    """
+    from yialpha.dataflows.config import set_config
+
+    set_config({"data_cache_dir": str(tmp_path / "square-cache")})
+
+
 def _patch_post(monkeypatch, fake):
     """Patch the vendor module's ``requests.post`` with a wraps-style Mock."""
     return mock.patch.object(bs.requests, "post", mock.Mock(wraps=fake))
@@ -298,7 +315,10 @@ def test_bad_ticker_fails_closed_before_any_request(_quality_ledger):
 # ---------------------------------------------------------------------------
 # Degradation paths (placeholder + data-quality sentinel, never raise)
 # ---------------------------------------------------------------------------
-def _degrades(monkeypatch, response, expect_placeholder):
+_ALL_FAILED = "<binance_square unavailable: all feed scenes failed ({detail})>"
+
+
+def _degrades(monkeypatch, response, exc_name, expect_placeholder):
     quality.ensure_run_context()
     fake = _FakePost(response)
     with _patch_post(monkeypatch, fake):
@@ -309,15 +329,21 @@ def _degrades(monkeypatch, response, expect_placeholder):
     assert len(events) == 1
     assert events[0]["method"] == "fetch_binance_square_block"
     assert events[0]["kind"] == quality.KIND_OPTIONAL_UNAVAILABLE
+    assert exc_name in events[0]["detail"]
     quality.reset_quality()
 
 
 @pytest.mark.unit
 def test_http_error_degrades_with_sentinel(monkeypatch):
+    # Per-scene isolation (PR4): both scenes fail -> one sentinel whose
+    # detail carries each scene's exception type.
     _degrades(
         monkeypatch,
         _FakeResponse({"success": False}, status=403, text="forbidden"),
-        "<binance_square unavailable: HTTPError>",
+        "HTTPError",
+        _ALL_FAILED.format(
+            detail="web-homepage: HTTPError; web-trending: HTTPError"
+        ),
     )
 
 
@@ -335,7 +361,9 @@ def test_transport_error_retries_then_degrades(monkeypatch):
     with mock.patch.object(bs.requests, "post", _conn_error):
         block = bs.fetch_binance_square_block("BTCUSDT")
 
-    assert block == "<binance_square unavailable: ConnectionError>"
+    assert block == _ALL_FAILED.format(
+        detail="web-homepage: ConnectionError; web-trending: ConnectionError"
+    )
     events = quality.snapshot_quality()
     assert len(events) == 1
     assert events[0]["kind"] == quality.KIND_OPTIONAL_UNAVAILABLE
@@ -347,7 +375,10 @@ def test_non_json_body_degrades_with_sentinel(monkeypatch):
     _degrades(
         monkeypatch,
         _FakeResponse(None, status=200, text="<html>blocked</html>"),
-        "<binance_square unavailable: JSONDecodeError>",
+        "JSONDecodeError",
+        _ALL_FAILED.format(
+            detail="web-homepage: JSONDecodeError; web-trending: JSONDecodeError"
+        ),
     )
 
 
@@ -356,7 +387,10 @@ def test_success_false_shape_degrades_with_sentinel(monkeypatch):
     _degrades(
         monkeypatch,
         _FakeResponse({"success": False, "code": "100001", "message": "rejected"}),
-        "<binance_square unavailable: ValueError>",
+        "ValueError",
+        _ALL_FAILED.format(
+            detail="web-homepage: ValueError; web-trending: ValueError"
+        ),
     )
 
 
@@ -386,3 +420,274 @@ def test_url_guard_rejects_unsafe_targets(url):
 @pytest.mark.unit
 def test_url_guard_accepts_the_real_endpoint():
     assert bs._validated_feed_url(bs._FEED_URL) == bs._FEED_URL
+
+
+# ---------------------------------------------------------------------------
+# PR4 freshness contract: true fetched_at, STALE marker, 15-minute stale cap
+# ---------------------------------------------------------------------------
+def _write_scene_cache(posts, fetched_ms, age_s, scene="web-homepage"):
+    """Seed a v2 wrapper cache file whose payload/mtime are ``age_s`` old."""
+    import pathlib
+
+    cache_dir = pathlib.Path(bs.vendor_cache_dir("binance_square"))
+    response = {"success": True, "data": {"vos": posts}}
+    wrapper = {
+        "fetched_at_ms": int(fetched_ms),
+        "post_count": len(posts),
+        "response": response,
+    }
+    path = cache_dir / f"feed_v2_{scene}.json"
+    path.write_bytes(json.dumps(wrapper).encode())
+    old = time.time() - age_s
+    os.utime(path, (old, old))
+    return path
+
+
+def _fresh_post(**overrides):
+    return _post(
+        id="fresh-1",
+        content="$BTC looking strong this week",
+        date=int(time.time()) - 3_600,
+        viewCount=5_000,
+        tradingPairsV2=[{"symbol": "BTCUSDT", "code": "BTC"}],
+        **overrides,
+    )
+
+
+@pytest.mark.unit
+def test_fresh_cache_served_without_network(monkeypatch, _quality_ledger):
+    _write_scene_cache([_fresh_post()], time.time() * 1000 - 60_000, age_s=60)
+    _write_scene_cache([], time.time() * 1000 - 60_000, age_s=60, scene="web-trending")
+    monkeypatch.setattr(
+        bs.requests, "post", mock.Mock(side_effect=AssertionError("network hit"))
+    )
+    block = bs.fetch_binance_square_block("BTCUSDT")
+    assert "Posts mentioning BTC: 1" in block
+    assert "(fresh)" in block
+    assert "STALE" not in block
+
+
+@pytest.mark.unit
+def test_stale_within_cap_renders_true_fetch_time_and_marker(monkeypatch, _quality_ledger):
+    # Cache 10 min old (> 5-min TTL, < 15-min cap): fetch fails -> stale
+    # serve, rendered with the TRUE stored fetch time and an explicit STALE
+    # marker — never today's clock on old bytes.
+    fetched_ms = time.time() * 1000 - 600_000
+    _write_scene_cache([_fresh_post()], fetched_ms, age_s=600)
+    # Same failing cache for the second scene (beyond-cap there is fine —
+    # per-scene isolation keeps the first scene's partial feed).
+    _write_scene_cache([], time.time() * 1000 - 600_000, age_s=600, scene="web-trending")
+
+    def _fail(url, json=None, headers=None, timeout=None, proxies=None):
+        raise requests.exceptions.ConnectionError("down")
+
+    with mock.patch.object(bs.requests, "post", _fail):
+        block = bs.fetch_binance_square_block("BTCUSDT")
+
+    assert "Posts mentioning BTC: 1" in block
+    assert "STALE — live fetch failed" in block
+    assert "min old" in block
+    # The rendered timestamp is the STORED fetch time, not the render clock.
+    from datetime import UTC, datetime
+
+    true_ts = datetime.fromtimestamp(fetched_ms / 1000, tz=UTC).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
+    assert f"fetched {true_ts}" in block
+    # Partial feed: the second scene's stale serve still renders (cap not
+    # exceeded), but both fetch failures are visible as stale-cache evidence.
+    events = quality.snapshot_quality()
+    assert all(e["kind"] == quality.KIND_STALE_CACHE for e in events)
+
+
+@pytest.mark.unit
+def test_stale_beyond_cap_degrades_instead_of_serving_old_bytes(monkeypatch, _quality_ledger):
+    quality.ensure_run_context()
+    # Cache 30 min old — past the 15-minute square cap even though the
+    # global data_cache_max_stale_days default is 30 days.
+    _write_scene_cache([_fresh_post()], time.time() * 1000 - 1_800_000, age_s=1_800)
+
+    def _fail(url, json=None, headers=None, timeout=None, proxies=None):
+        raise requests.exceptions.ConnectionError("down")
+
+    from yialpha.dataflows import netretry
+
+    monkeypatch.setattr(netretry.time, "sleep", lambda _s: None)
+    with mock.patch.object(bs.requests, "post", _fail):
+        block = bs.fetch_binance_square_block("BTCUSDT")
+
+    assert block.startswith("<binance_square unavailable: all feed scenes failed")
+    events = quality.snapshot_quality()
+    assert any(e["kind"] == quality.KIND_OPTIONAL_UNAVAILABLE for e in events)
+    quality.reset_quality()
+
+
+@pytest.mark.unit
+def test_one_scene_failing_renders_partial_feed(monkeypatch, _quality_ledger):
+    """Scene isolation: web-trending 500s, web-homepage serves -> partial."""
+    good = _FakeResponse(_feed_body(_FULL_FEED))
+
+    def _flaky(url, json=None, headers=None, timeout=None, proxies=None):
+        if json and json.get("scene") == "web-trending":
+            return _FakeResponse({"success": False}, status=500, text="boom")
+        return good
+
+    with mock.patch.object(bs.requests, "post", mock.Mock(wraps=_flaky)):
+        block = bs.fetch_binance_square_block("BTCUSDT")
+
+    assert "Posts mentioning BTC: 3" in block
+    assert "FAILED: web-trending — partial feed" in block
+    assert "scenes ok: web-homepage" in block
+    # A partial feed is a rendered answer, not a full degradation: no
+    # optional_unavailable sentinel fires.
+    assert quality.snapshot_quality() == []
+
+
+@pytest.mark.unit
+def test_future_posts_are_pit_dropped_and_recency_partitioned(monkeypatch, _quality_ledger):
+    now = time.time()
+    posts = [
+        # In-window (today) — matches BTC.
+        _post(
+            id="today",
+            content="$BTC today rally",
+            date=int(now) - 3_600,
+            viewCount=2_000,
+            tradingPairsV2=[{"symbol": "BTCUSDT", "code": "BTC"}],
+        ),
+        # Old (20 days) — still evidence, but partitioned behind recent.
+        _post(
+            id="old",
+            content="$BTC macro take",
+            date=int(now) - 20 * 86_400,
+            viewCount=900_000,
+            tradingPairsV2=[{"symbol": "BTCUSDT", "code": "BTC"}],
+        ),
+        # Future (tomorrow) — PIT-dropped for an as_of of today.
+        _post(
+            id="future",
+            content="$BTC tomorrow news",
+            date=int(now) + 86_400,
+            viewCount=999_999,
+            tradingPairsV2=[{"symbol": "BTCUSDT", "code": "BTC"}],
+        ),
+    ]
+    fake = _FakePost(_FakeResponse(_feed_body(posts)))
+    with _patch_post(monkeypatch, fake):
+        block = bs.fetch_binance_square_block("BTCUSDT")
+
+    # Future post dropped: 2 matching, only 1 within the recency window.
+    assert "Posts mentioning BTC: 2 (1 of 2 within the last 3 days" in block
+    assert "tomorrow news" not in block
+    # The in-window post outranks the 900k-view old one despite fewer views.
+    assert block.index("today rally") < block.index("macro take")
+    assert "older matching post" in block
+    # oldest/newest span disclosed.
+    assert "matching posts span" in block
+
+
+@pytest.mark.unit
+def test_future_post_excluded_from_hot_coins_and_scan_count(
+    monkeypatch, _quality_ledger
+):
+    """The PIT filter applies to the FEED-WIDE tallies too: a future-dated
+    post (clock skew / publisher error) must not enter the hot-coin table or
+    the scanned count — only the as-of-visible posts do."""
+    now = time.time()
+    posts = [
+        _post(
+            id="today-btc",
+            content="$BTC today rally",
+            date=int(now) - 3_600,
+            viewCount=2_000,
+            tradingPairsV2=[{"symbol": "BTCUSDT", "code": "BTC"}],
+        ),
+        # Future post shilling PEPE — would win the hot-coin table by views
+        # if the feed-wide tallies forgot the PIT filter.
+        _post(
+            id="future-pepe",
+            content="$PEPE tomorrow moon",
+            date=int(now) + 3 * 86_400,
+            viewCount=99_999_999,
+            tradingPairsV2=[{"symbol": "PEPEUSDT", "code": "PEPE"}],
+        ),
+    ]
+    fake = _FakePost(_FakeResponse(_feed_body(posts)))
+    with _patch_post(monkeypatch, fake):
+        block = bs.fetch_binance_square_block("BTCUSDT")
+
+    assert "PEPE" not in block
+    assert "Feed-wide hot coins" in block and "BTC (1 post" in block
+    # Scanned count sees only the as-of-visible post, not the future one.
+    assert "— 1 posts scanned" in block
+
+
+@pytest.mark.unit
+def test_mixed_scene_freshness_labelled_mixed(monkeypatch, _quality_ledger):
+    """One scene fresh (cache within TTL), the other stale-served (fetch
+    failed, within the 15-min cap): the block is labelled MIXED naming the
+    stale scene — never wholesale "(fresh)" off the fresh scene's clock."""
+    # web-homepage: cache 60s old — within the 5-min TTL, served fresh.
+    _write_scene_cache([_fresh_post()], time.time() * 1000 - 60_000, age_s=60)
+    # web-trending: fetched 10 min ago (> TTL, < cap) — network fails, the
+    # stale snapshot is served.
+    _write_scene_cache([], time.time() * 1000 - 600_000, age_s=600, scene="web-trending")
+
+    def _fail(url, json=None, headers=None, timeout=None, proxies=None):
+        raise requests.exceptions.ConnectionError("down")
+
+    with mock.patch.object(bs.requests, "post", _fail):
+        block = bs.fetch_binance_square_block("BTCUSDT")
+
+    assert "MIXED — live fetch failed for: web-trending" in block
+    assert "remaining scenes fresh" in block
+    assert "(fresh)." not in block  # the wholesale-fresh label is gone
+
+
+@pytest.mark.unit
+def test_singleflight_collapses_concurrent_burst_onto_one_round(
+    monkeypatch, tmp_path, _quality_ledger
+):
+    """Four threads racing a cold cache: ONE network round per scene.
+
+    The singleflight lock holds across the whole read-or-fetch critical
+    section, so the three losers block on the LOCK (never reaching the
+    network) and then serve the fresh cache the winner wrote.
+
+    The cache dir is patched at module scope (NOT via config): config rides
+    a ContextVar that raw worker threads do not inherit, so the config
+    route would resolve the developer's REAL cache dir inside the threads.
+    """
+    import threading
+
+    monkeypatch.setattr(
+        bs, "vendor_cache_dir", lambda name: str(tmp_path / name)
+    )
+    network_calls: list[str] = []
+    call_lock = threading.Lock()
+
+    def _slow_post(url, json=None, headers=None, timeout=None, proxies=None):
+        scene = (json or {}).get("scene", "?")
+        with call_lock:
+            network_calls.append(scene)
+        time.sleep(0.05)
+        return _FakeResponse(_feed_body(_FULL_FEED))
+
+    with mock.patch.object(bs.requests, "post", mock.Mock(wraps=_slow_post)):
+        blocks: list[str] = []
+        results_lock = threading.Lock()
+
+        def _run():
+            block = bs.fetch_binance_square_block("BTCUSDT")
+            with results_lock:
+                blocks.append(block)
+
+        threads = [threading.Thread(target=_run) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+    assert len(blocks) == 4
+    assert all(b.startswith("Binance Square recommended feed") for b in blocks)
+    assert sorted(network_calls) == sorted(bs._SCENES)

@@ -55,6 +55,7 @@ from .errors import (
     VendorRateLimitError,
 )
 from .fred import get_macro_data as get_fred_macro_data
+from .fundamentals_overview import get_fundamentals as get_aggregate_fundamentals
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .sec_edgar import (
     get_balance_sheet as get_sec_balance_sheet,
@@ -143,6 +144,7 @@ TOOLS_CATEGORIES = {
         "description": "Binance USDT-M perpetual (klines/funding/openInterest/long_short_ratio/taker_buy_sell/basis/premium_index/depth_snapshot + vision archive metrics/bookDepth)",
         "tools": [
             "get_binance_klines",
+            "get_binance_indicators",
             "get_binance_funding_rate",
             "get_binance_open_interest",
             "get_binance_long_short_ratio",
@@ -164,6 +166,7 @@ TOOLS_CATEGORIES = {
         "description": "Binance spot (klines/ticker24/spot-perp basis)",
         "tools": [
             "get_binance_spot_klines",
+            "get_binance_spot_indicators",
             "get_binance_spot_ticker24",
             "get_binance_spot_perp_basis",
         ],
@@ -227,6 +230,7 @@ VENDOR_LIST = [
     "alpha_vantage",
     "binance",
     "sec_edgar",
+    "fundamentals_overview",
     "eastmoney",
     "baostock",
     "akshare",
@@ -253,10 +257,18 @@ VENDOR_METHODS: dict[str, dict[str, Callable[..., Any] | list[Any]]] = {
         "yfinance": get_stock_stats_indicators_window,
     },
     # fundamental_data
+    # get_fundamentals gains the "fundamentals_overview" aggregate (SEC filing
+    # facts + Yahoo real-time valuation, live-only for the Yahoo half). The
+    # DEFAULT points get_fundamentals at it via tool_vendors (see
+    # default_config): the statements stay SEC-first on the category chain,
+    # while the overview MERGES sources instead of the chain short-circuiting
+    # on SEC's seven filing facts and never reading Yahoo's market cap/PE/
+    # beta. Users who prefer the plain chain override tool_vendors.
     "get_fundamentals": {
         "alpha_vantage": get_alpha_vantage_fundamentals,
         "yfinance": get_yfinance_fundamentals,
         "sec_edgar": get_sec_fundamentals,
+        "fundamentals_overview": get_aggregate_fundamentals,
     },
     "get_balance_sheet": {
         "alpha_vantage": get_alpha_vantage_balance_sheet,
@@ -466,8 +478,15 @@ def get_vendor(category: str, method: str | None = None) -> str:
     # Fall back to category-level configuration
     return config.get("data_vendors", {}).get(category, "default")
 
-def route_to_vendor(method: str, *args: Any, **kwargs: Any) -> str:
-    """Route method calls to appropriate vendor implementation with fallback support."""
+def route_to_vendor(method: str, *args: Any, _qualifier: str = "", **kwargs: Any) -> str:
+    """Route method calls to appropriate vendor implementation with fallback support.
+
+    ``_qualifier`` (never forwarded to the vendor) labels the sentinel the
+    router records on failure with the call's severity-bearing parameter —
+    today ``get_binance_klines`` passes ``price_type`` so an INDEX-kline miss
+    classifies as the auxiliary enrichment it is, while last/mark stays the
+    critical price book (see quality._is_critical_failure).
+    """
     category = get_category_for_method(method)
     vendor_config = get_vendor(category, method)
     primary_vendors = [v.strip() for v in vendor_config.split(',')]
@@ -565,10 +584,12 @@ def route_to_vendor(method: str, *args: Any, **kwargs: Any) -> str:
             quality.record_sentinel(
                 method, quality.KIND_OPTIONAL_UNAVAILABLE,
                 last_no_data.detail or "no usable data",
+                qualifier=_qualifier,
             )
         else:
             quality.record_sentinel(
-                method, quality.KIND_NO_DATA, last_no_data.detail or "no usable data"
+                method, quality.KIND_NO_DATA, last_no_data.detail or "no usable data",
+                qualifier=_qualifier,
             )
         return (
             f"NO_DATA_AVAILABLE: No usable market data for '{sym}'{resolved} from "
@@ -585,7 +606,8 @@ def route_to_vendor(method: str, *args: Any, **kwargs: Any) -> str:
         if category in OPTIONAL_CATEGORIES:
             logger.warning("Optional %s unavailable for %s: %s", category, method, first_error)
             quality.record_sentinel(
-                method, quality.KIND_OPTIONAL_UNAVAILABLE, str(first_error)
+                method, quality.KIND_OPTIONAL_UNAVAILABLE, str(first_error),
+                qualifier=_qualifier,
             )
             return (
                 f"DATA_UNAVAILABLE: optional {category} could not be retrieved "
@@ -595,7 +617,9 @@ def route_to_vendor(method: str, *args: Any, **kwargs: Any) -> str:
         # degraded report, the ledger still shows why every core call failed —
         # without it a vacuum run could crash the trader or surface as a
         # zero-evidence HOLD ("no data AND no proof there was no data").
-        quality.record_sentinel(method, quality.KIND_CORE_ERROR, str(first_error))
+        quality.record_sentinel(
+            method, quality.KIND_CORE_ERROR, str(first_error), qualifier=_qualifier,
+        )
         raise first_error
 
     raise RuntimeError(f"No available vendor for '{method}'")

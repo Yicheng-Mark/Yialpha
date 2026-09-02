@@ -86,12 +86,17 @@ def ensure_run_context() -> None:
     _success_var.set(set())
 
 
-def record_sentinel(method: str, kind: str, detail: str = "") -> None:
+def record_sentinel(
+    method: str, kind: str, detail: str = "", qualifier: str = "",
+) -> None:
     """Append one degradation event for the current run context.
 
     Never raises: quality evidence must not be able to fail the data call it
     is describing. ``method`` is the router method name (e.g.
-    ``get_stock_data``); ``detail`` carries the typed error's reason.
+    ``get_stock_data``); ``detail`` carries the typed error's reason;
+    ``qualifier`` labels the call's severity-bearing parameter (e.g. a
+    klines call's ``price_type``) so the classifier can grade enrichment
+    misses below core misses — see :func:`classify_quality`.
     """
     try:
         events = _events_var.get()
@@ -99,7 +104,12 @@ def record_sentinel(method: str, kind: str, detail: str = "") -> None:
             events = []
             _events_var.set(events)
         events.append(
-            {"method": str(method), "kind": str(kind), "detail": str(detail)[:500]}
+            {
+                "method": str(method),
+                "kind": str(kind),
+                "detail": str(detail)[:500],
+                "qualifier": str(qualifier or ""),
+            }
         )
     except Exception:  # noqa: BLE001 -- evidence must never break the run
         pass
@@ -284,6 +294,41 @@ CRITICAL_CATEGORIES = frozenset({
     "binance_spot",
 })
 
+#: The Binance price categories get METHOD+QUALIFIER severity, not bare
+#: category-level: only the klines/indicator engines (the price/ATR book
+#: every number in the decision rests on) are critical. The enrichment
+#: tools — funding, OI, LSR, taker, premium, basis, depth, vision — are
+#: auxiliary: their failure degrades and is disclosed but never vetoes. The
+#: klines tool itself is qualifier-graded: last/mark are the entry and
+#: liquidation price books (critical), while ``index`` is the settlement
+#: fair-value ANCHOR — an index-only miss must not veto a run whose traded
+#: and liquidation prices are intact. This fixes two inverse failures: a
+#: tokenized-stock perp structurally lacking a spot leg (basis tools error)
+#: was being NO_TRADE'd on an absent CAPABILITY, while the actual indicator
+#: engine failing (previously an unregistered method name, classified
+#: auxiliary) did not veto at all — and a third, an index-kline-only outage
+#: reading as a lost price book.
+_PERP_PRICE_CATEGORIES = frozenset({"binance_perp", "binance_spot"})
+_PERP_CORE_METHODS = frozenset({
+    "get_binance_klines",
+    "get_binance_indicators",
+    "get_binance_spot_klines",
+    "get_binance_spot_indicators",
+})
+#: Qualifiers that downgrade an otherwise-core klines miss to auxiliary.
+_KLINES_AUX_QUALIFIERS = frozenset({"index"})
+
+
+def _is_critical_failure(method: str, category: str, qualifier: str = "") -> bool:
+    """Per-method (+qualifier) severity: core-method failure in the Binance
+    price categories is critical; their enrichment tools — and klines
+    enrichment price bases — are auxiliary."""
+    if category in _PERP_PRICE_CATEGORIES:
+        if method not in _PERP_CORE_METHODS:
+            return False
+        return qualifier not in _KLINES_AUX_QUALIFIERS
+    return category in CRITICAL_CATEGORIES
+
 
 def classify_quality(
     events: list[dict[str, Any]] | None,
@@ -298,8 +343,10 @@ def classify_quality(
       vacuum gate refuses such runs under the default policy; this tier keeps
       the classification complete for ``warn``-policy runs and post-hoc reads.
     - ``DEGRADED_CRITICAL`` — at least one sentinel in a critical category
-      (price/indicators/fundamentals/perp-or-spot book). The tradeability
-      gate turns this into NO_TRADE.
+      (price/indicators/fundamentals; in the Binance price categories only
+      the klines/indicator core methods count — see
+      :data:`_PERP_CORE_METHODS`). The tradeability gate turns this into
+      NO_TRADE.
     - ``DEGRADED_AUXILIARY`` — only auxiliary degradation (news/macro/social
       absent or stale-cache serves). Confidence penalty + disclosure, never a
       veto.
@@ -323,6 +370,7 @@ def classify_quality(
     for e in events:
         method = str(e.get("method", ""))
         kind = str(e.get("kind", ""))
+        qualifier = str(e.get("qualifier", "") or "")
         try:
             from .interface import get_category_for_method  # local: avoid cycle
 
@@ -330,8 +378,10 @@ def classify_quality(
         except Exception:  # noqa: BLE001 -- unknown method: classify aux, keep name
             category = ""
         if kind in _CORE_SENTINEL_KINDS or kind == KIND_OPTIONAL_UNAVAILABLE:
-            label = f"{method}({kind})" if kind else method
-            if category in CRITICAL_CATEGORIES:
+            label = f"{method}[{qualifier}]({kind})" if qualifier else (
+                f"{method}({kind})" if kind else method
+            )
+            if _is_critical_failure(method, category, qualifier):
                 critical_missing.append(label)
             else:
                 auxiliary.append(label)

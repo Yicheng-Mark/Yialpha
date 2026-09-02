@@ -25,6 +25,7 @@ import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
+from typing import Any
 
 from .binance import _http_get
 from .errors import NoMarketDataError
@@ -83,28 +84,45 @@ def mmr_for_notional(brackets, notional: float) -> float:
     return mmr
 
 
-def _signed_leverage_brackets(symbol: str, canonical: str) -> list[Bracket]:
-    """Signed ``/fapi/v1/leverageBracket`` fetch (needs operator API keys)."""
+def signed_fapi_get(
+    path: str, params: dict[str, Any], symbol: str, canonical: str,
+) -> Any:
+    """Signed USER-DATA GET on the /fapi futures API (needs operator keys).
+
+    Adds ``timestamp``/``recvWindow``, HMAC-SHA256-signs the query and sends
+    the ``X-MBX-APIKEY`` header — the same minimal signing the execution
+    gateway contract uses. Raises :class:`NoMarketDataError` with the
+    actionable reason when ``BINANCE_API_KEY``/``BINANCE_API_SECRET`` are
+    not configured, so callers (leverage brackets, perp-bundle ADL) degrade
+    instead of firing a doomed unsigned request at a signed endpoint.
+    """
     api_key = os.environ.get("BINANCE_API_KEY", "")
     api_secret = os.environ.get("BINANCE_API_SECRET", "")
     if not (api_key and api_secret):
         raise NoMarketDataError(
             symbol, canonical,
-            "leverageBracket is a signed endpoint and no BINANCE_API_KEY/"
+            f"{path} is a signed endpoint and no BINANCE_API_KEY/"
             "BINANCE_API_SECRET is configured",
         )
-    params = {
-        "symbol": canonical,
+    full = {
+        **params,
         "timestamp": int(time.time() * 1000),
         "recvWindow": "5000",
     }
-    query = urllib.parse.urlencode(params)
+    query = urllib.parse.urlencode(full)
     signature = hmac.new(
         api_secret.encode(), query.encode(), hashlib.sha256
     ).hexdigest()
-    data = _http_get(
-        "/fapi/v1/leverageBracket", {**params, "signature": signature},
+    return _http_get(
+        path, {**full, "signature": signature},
         symbol, canonical, headers={"X-MBX-APIKEY": api_key},
+    )
+
+
+def _signed_leverage_brackets(symbol: str, canonical: str) -> list[Bracket]:
+    """Signed ``/fapi/v1/leverageBracket`` fetch (needs operator API keys)."""
+    data = signed_fapi_get(
+        "/fapi/v1/leverageBracket", {"symbol": canonical}, symbol, canonical,
     )
     # Response: [{"symbol": ..., "brackets": [{bracket, initialLeverage,
     # notionalFloor, maintMarginRatio, cum}, ...]}]

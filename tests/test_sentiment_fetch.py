@@ -1,18 +1,19 @@
-"""Byte-equivalence + gating guard for the sentiment source fetch.
+"""Policy + gating guard for the sentiment source fetch.
 
-``_fetch_sentiment_sources`` fans the independent fetches (Yahoo news /
-StockTwits / Reddit, plus the crypto-only Binance Square block) across a
-thread pool when ``YIALPHA_SENTIMENT_PARALLEL_FETCH`` is on, and runs them
+``_fetch_sentiment_sources`` fans the independent fetches across a thread
+pool when ``YIALPHA_SENTIMENT_PARALLEL_FETCH`` is on, and runs them
 sequentially when off. Each block lands in a fixed slot, so the two paths
 must produce identical results -- this test pins that.
 
-The fourth slot is the Binance Square crypto-sentiment block:
-* stock / unset asset_type -> ``None`` (prompt byte-identical to the
-  three-source version);
-* crypto asset types, live date, ``binance_square_enabled`` -> fetched;
-* crypto asset types, historical date -> explicit unavailable placeholder,
-  with the current-feed endpoint never called (PIT fail-closed);
-* crypto asset types, config disabled -> ``None``, endpoint never called.
+The source SET is the deterministic per-instrument policy (PR4, 2026-09):
+
+* plain stocks — news + StockTwits + Reddit (Square slot None);
+* pure crypto (crypto / crypto_spot / crypto_perp without an equity
+  underlying) — news + Binance Square; StockTwits/Reddit carry explicit
+  policy-off placeholders and their fetchers are never called;
+* crypto family, historical date — explicit unavailable placeholders, with
+  the current-feed endpoints never called (PIT fail-closed);
+* crypto family, config disabled — Square slot None, endpoint never called.
 """
 
 import pytest
@@ -38,7 +39,10 @@ def _stub_sources(monkeypatch, square="UNUSED"):
         sent, "fetch_stocktwits_messages", lambda ticker, limit=30: "STOCKTWITS"
     )
     monkeypatch.setattr(sent, "fetch_reddit_posts", lambda ticker: "REDDIT")
-    monkeypatch.setattr(sent, "fetch_binance_square_block", lambda ticker: square)
+    # as_of kwarg is part of the PR4 freshness contract.
+    monkeypatch.setattr(
+        sent, "fetch_binance_square_block", lambda ticker, as_of=None: square
+    )
 
 
 def _square_must_not_fetch(monkeypatch):
@@ -46,6 +50,13 @@ def _square_must_not_fetch(monkeypatch):
         raise AssertionError("Binance Square current feed called when gated off")
 
     monkeypatch.setattr(sent, "fetch_binance_square_block", _must_not_fetch)
+
+
+def _must_not_call(monkeypatch, name):
+    def _guard(*_args, **_kwargs):
+        raise AssertionError(f"{name} called under its source policy")
+
+    monkeypatch.setattr(sent, name, _guard)
 
 
 @pytest.mark.unit
@@ -97,14 +108,53 @@ def test_parallel_fetch_workers_inherit_dataflow_config(monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("asset_type", ["crypto", "crypto_spot", "crypto_perp"])
-def test_crypto_live_fetches_binance_square(monkeypatch, asset_type):
+def test_pure_crypto_live_is_square_only_policy(monkeypatch, asset_type):
+    # PR4: pure crypto keeps news + Square; StockTwits/Reddit fetchers are
+    # never called and their slots carry explicit policy placeholders.
     _stub_sources(monkeypatch, square="SQUARE")
+    _must_not_call(monkeypatch, "fetch_stocktwits_messages")
+    _must_not_call(monkeypatch, "fetch_reddit_posts")
     monkeypatch.setattr(sent, "is_historical_date", lambda _date: False)
     monkeypatch.setattr(sent, "_SENTIMENT_PARALLEL_FETCH", False)
     out = sent._fetch_sentiment_sources(
         "BTCUSDT", "2026-01-01", "2026-01-08", asset_type=asset_type
     )
-    assert out == ("NEWS", "STOCKTWITS", "REDDIT", "SQUARE")
+    assert out == (
+        "NEWS",
+        sent._CRYPTO_STOCKTWITS_OFF,
+        sent._CRYPTO_REDDIT_OFF,
+        "SQUARE",
+    )
+    assert "source policy" in out[1] and "source policy" in out[2]
+
+
+@pytest.mark.unit
+def test_stock_perp_hybrid_queries_underlying_stocktwits(monkeypatch):
+    # Tokenized-stock perp: Square on the contract side, StockTwits on the
+    # UNDERLYING equity ticker; Reddit off.
+    seen = {}
+
+    def fake_stocktwits(ticker, limit=30):
+        seen["stocktwits"] = ticker
+        return "STOCKTWITS"
+
+    def fake_square(ticker, as_of=None):
+        seen["square"] = (ticker, as_of)
+        return "SQUARE"
+
+    monkeypatch.setattr(sent, "get_news", _Stub("NEWS"))
+    monkeypatch.setattr(sent, "fetch_stocktwits_messages", fake_stocktwits)
+    monkeypatch.setattr(sent, "fetch_reddit_posts", lambda t: "REDDIT")
+    monkeypatch.setattr(sent, "fetch_binance_square_block", fake_square)
+    monkeypatch.setattr(sent, "is_historical_date", lambda _date: False)
+    monkeypatch.setattr(sent, "_SENTIMENT_PARALLEL_FETCH", False)
+
+    out = sent._fetch_sentiment_sources(
+        "MUUSDT", "2026-01-01", "2026-01-08", asset_type="crypto_perp"
+    )
+    assert out == ("NEWS", "STOCKTWITS", sent._CRYPTO_REDDIT_OFF, "SQUARE")
+    assert seen["stocktwits"] == "MU"
+    assert seen["square"] == ("MUUSDT", "2026-01-08")
 
 
 @pytest.mark.unit
@@ -119,7 +169,8 @@ def test_crypto_parallel_fetch_byte_equivalent_to_sequential(monkeypatch):
     parallel = sent._fetch_sentiment_sources(
         "BTCUSDT", "2026-01-01", "2026-01-08", asset_type="crypto"
     )
-    assert parallel == sequential == ("NEWS", "STOCKTWITS", "REDDIT", "SQUARE")
+    expected = ("NEWS", sent._CRYPTO_STOCKTWITS_OFF, sent._CRYPTO_REDDIT_OFF, "SQUARE")
+    assert parallel == sequential == expected
 
 
 @pytest.mark.unit
@@ -132,7 +183,7 @@ def test_crypto_disabled_config_gates_square_off(monkeypatch):
     out = sent._fetch_sentiment_sources(
         "BTCUSDT", "2026-01-01", "2026-01-08", asset_type="crypto_perp"
     )
-    assert out == ("NEWS", "STOCKTWITS", "REDDIT", None)
+    assert out == ("NEWS", sent._CRYPTO_STOCKTWITS_OFF, sent._CRYPTO_REDDIT_OFF, None)
 
 
 @pytest.mark.unit
@@ -200,59 +251,62 @@ def test_default_flag_is_off(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Prompt assembly: stock runs byte-identical, crypto runs gain the block
+# System message: instructions only — data blocks ride the evidence message
 # ---------------------------------------------------------------------------
-_PROMPT_KWARGS = {
+_SYS_KWARGS = {
     "ticker": "BTCUSDT",
     "start_date": "2026-01-01",
     "end_date": "2026-01-08",
-    "news_block": "NEWS",
-    "stocktwits_block": "STOCKTWITS",
-    "reddit_block": "REDDIT",
 }
 
 
 @pytest.mark.unit
-def test_system_message_without_square_matches_three_source_prompt():
-    msg = sent._build_system_message(**_PROMPT_KWARGS, binance_square_block=None)
-
+def test_system_message_carries_instructions_not_data():
+    msg = sent._build_system_message(**_SYS_KWARGS, has_square=False)
     assert "drawing on three complementary data sources" in msg
+    assert "EXTERNAL EVIDENCE" in msg  # describes where the blocks live
+    # Third-party content must never appear in the system role.
+    assert "<start_of_news>" not in msg
     assert "<start_of_binance_square>" not in msg
-    assert "Treat Binance Square as crypto-native retail chatter" not in msg
-    assert "<start_of_news>" in msg and "<start_of_reddit>" in msg
+    # No cap rule without a cap.
+    assert "Deterministic source policy" not in msg
 
 
 @pytest.mark.unit
-def test_system_message_with_square_adds_fourth_source():
+def test_system_message_with_square_and_cap_rule():
     msg = sent._build_system_message(
-        **_PROMPT_KWARGS, binance_square_block="SQUARE DATA"
+        **_SYS_KWARGS, has_square=True, confidence_cap="medium"
     )
-
     assert "drawing on four complementary data sources" in msg
-    assert "<start_of_binance_square>\nSQUARE DATA\n<end_of_binance_square>" in msg
     assert "Treat Binance Square as crypto-native retail chatter" in msg
-    # The crypto message is the stock message plus exactly three insertions.
-    stock = sent._build_system_message(**_PROMPT_KWARGS, binance_square_block=None)
-    stripped = (
-        msg.replace("four complementary", "three complementary")
-        .replace(
-            "\n### Binance Square posts — crypto-native social feed (current "
-            "snapshot)\nCrypto-native retail chatter from Binance Square, "
-            "filtered for the target asset and ranked by view/like counts, "
-            "plus feed-wide hot-coin mentions for overall market mood. Posts "
-            "are opinions (frequently shilling or sarcasm), not data.\n\n"
-            "<start_of_binance_square>\nSQUARE DATA\n<end_of_binance_square>\n",
-            "",
-        )
-        .replace(
-            "\n9. **Treat Binance Square as crypto-native retail chatter.** "
-            "Weight posts by their view/like counts (a 200k-view post reflects "
-            "real attention; a 300-view post is noise), stay alert to shilling "
-            "and sarcasm, and read it against the news framing — Square posts "
-            "are opinion, never price data. If the block reports zero posts "
-            "for the target asset, say so explicitly instead of generalizing "
-            "from the hot-coin list.\n",
-            "",
-        )
+    assert "Neutral / insufficient evidence" in msg
+    assert "at most 'medium' confidence" in msg
+
+
+@pytest.mark.unit
+def test_evidence_message_holds_all_blocks_in_user_role():
+    from langchain_core.messages import HumanMessage
+
+    evidence = sent._render_evidence_message(
+        news_block="NEWS DATA",
+        stocktwits_block="STOCKTWITS DATA",
+        reddit_block="REDDIT DATA",
+        binance_square_block="SQUARE DATA",
     )
-    assert stripped == stock
+    assert isinstance(evidence, HumanMessage)
+    content = evidence.content
+    assert content.startswith("[EXTERNAL EVIDENCE")
+    for tag, payload in (
+        ("news", "NEWS DATA"),
+        ("stocktwits", "STOCKTWITS DATA"),
+        ("reddit", "REDDIT DATA"),
+        ("binance_square", "SQUARE DATA"),
+    ):
+        assert f"<start_of_{tag}>" in content
+        assert payload in content
+    # Stock runs: the Square section is absent from the evidence message.
+    stock_evidence = sent._render_evidence_message(
+        news_block="N", stocktwits_block="S", reddit_block="R",
+        binance_square_block=None,
+    )
+    assert "<start_of_binance_square>" not in stock_evidence.content

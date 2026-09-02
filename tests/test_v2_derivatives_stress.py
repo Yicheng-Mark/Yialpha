@@ -185,8 +185,13 @@ def test_fetcher_builds_series_from_records(monkeypatch):
         n = 40
         base = 100.0 if price_type == "last" else 99.0
         idx = pd.date_range("2026-06-01", periods=n, freq="D")
+        # REAL vendor schema: binance_klines_frame returns the capitalised
+        # KLINE_CLOSE_COLUMN ("Close"). A lowercase mock matched the old
+        # perp["close"] KeyError bug and hid it for the component's whole
+        # life — the schema lock below is the regression pin.
         return pd.DataFrame(
-            {"close": [base + i * 0.1 for i in range(n)]}, index=idx
+            {bn.KLINE_CLOSE_COLUMN: [base + i * 0.1 for i in range(n)]},
+            index=idx,
         )
 
     monkeypatch.setattr(bn, "_http_get", _fake_http)

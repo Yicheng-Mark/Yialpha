@@ -130,6 +130,19 @@ def archive(monkeypatch, tmp_path):
     cache_dir.mkdir()
     monkeypatch.setattr(bnv, "_fetch", server)
     monkeypatch.setattr(bnv, "vendor_cache_dir", lambda name: str(cache_dir))
+    # PR6: the parsed store resolves its own root through ITS module binding
+    # of vendor_cache_dir — patch that seam too, or the store writes into the
+    # developer's real ~/.yialpha cache.
+    import yialpha.dataflows.binance_vision_store as bvs
+
+    monkeypatch.setattr(
+        bvs, "vendor_cache_dir", lambda name: str(tmp_path / name)
+    )
+    # Summary mode is DEFAULT-ON in production; existing tests pin the raw
+    # daily-CSV contract, so opt the fixture out (summary tests opt back in).
+    from yialpha.dataflows.config import set_config
+
+    set_config({"binance_vision_summary": False})
     return server
 
 
@@ -201,7 +214,11 @@ def test_missing_checksum_file_never_serves(archive):
     _add_metrics_day(archive, "BTCUSDT", day, [_metrics_row(day, "00:00", 1, 1, 1, 1)])
     url = _daily_url("metrics", "BTCUSDT", day)
     archive.drop_checksums.add(url + ".CHECKSUM")
-    with pytest.raises(NoMarketDataError, match="CHECKSUM"):
+    # A missing sidecar now classifies the day as MISSING (like a 404) with
+    # 24h retry backoff instead of aborting the sync — but the never-serve
+    # contract is unchanged: the unverified bytes never enter the store, so
+    # an all-unverifiable window raises the instructive no-data error.
+    with pytest.raises(NoMarketDataError, match="no metrics archive data"):
         bnv.get_binance_vision_metrics("BTCUSDT", day, day)
 
 
@@ -298,7 +315,7 @@ def test_verified_real_schema_maps_count_columns(archive):
 
 @pytest.mark.unit
 def test_all_missing_raises_instructive_no_data(archive):
-    with pytest.raises(NoMarketDataError, match="no metrics archive files"):
+    with pytest.raises(NoMarketDataError, match="no metrics archive data"):
         bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-02")
 
 
@@ -323,12 +340,31 @@ def test_row_caps_refuse_instead_of_truncating(archive, monkeypatch):
 
 
 @pytest.mark.unit
-def test_archive_file_count_cap(archive, monkeypatch):
-    monkeypatch.setattr(bnv, "_MAX_ARCHIVE_FILES", 1)
-    for day in ("2024-05-01", "2024-05-02"):
+def test_sync_budget_bounds_new_downloads_not_reads(archive, monkeypatch):
+    """PR6: the per-call budget is a RATE bound on NEW downloads, not a
+    coverage ceiling — a 3-day window under a 1-file budget syncs the most
+    recent day first, discloses the partial coverage, and a follow-up call
+    extends the store without re-downloading what is already synced."""
+    monkeypatch.setattr(bnv, "_SYNC_BUDGET_FILES", 1)
+    for day in ("2024-05-01", "2024-05-02", "2024-05-03"):
         _add_metrics_day(archive, "BTCUSDT", day, [_metrics_row(day, "00:00", 1, 1, 1, 1)])
-    with pytest.raises(NoMarketDataError, match="narrow the date range"):
-        bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-02")
+    out = bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-03")
+    # Partial coverage disclosed; most-recent-first sync.
+    assert "store covers 1 of 3 window days" in out
+    assert "sync budget 1 files" in out
+    zip_fetches = archive.zip_fetches()
+    assert len(zip_fetches) == 1 and "2024-05-03" in zip_fetches[0]
+    # Raw body carries only the synced day.
+    assert "2024-05-03" in out.split("\n\n", 1)[1]
+    assert "2024-05-01" not in out.split("\n\n", 1)[1]
+    # Budget lifted: coverage extends, the synced day is NOT re-fetched, and
+    # the disclosure note disappears when the window is complete.
+    monkeypatch.setattr(bnv, "_SYNC_BUDGET_FILES", 400)
+    out2 = bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-03")
+    assert "store covers" not in out2
+    assert len(archive.zip_fetches()) == 3  # +2024-05-01, +2024-05-02 only
+    df = pd.read_csv(io.StringIO(out2.split("\n\n", 1)[1]))
+    assert list(df["time"]) == ["2024-05-01", "2024-05-02", "2024-05-03"]
 
 
 @pytest.mark.unit
@@ -488,3 +524,204 @@ def test_router_degrades_vision_no_data_to_sentinel(archive, monkeypatch):
     out = route_to_vendor("get_binance_vision_metrics", "BTCUSDT", "2024-05-01", "2024-05-02")
     assert out.startswith("NO_DATA_AVAILABLE")
     assert quality_calls  # evidence recorded for the data_quality block
+
+
+# ---- PR6: parsed multi-year store + summary mode ------------------------------
+
+
+def _store_root(tmp_path):
+    return tmp_path / "binance_vision_store"
+
+
+@pytest.mark.unit
+def test_store_incremental_sync_second_call_no_fetch(archive):
+    for day in ("2024-05-01", "2024-05-02"):
+        _add_metrics_day(archive, "BTCUSDT", day, [_metrics_row(day, "00:00", 1, 1, 1, 1)])
+    bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-02")
+    n = len(archive.zip_fetches())
+    assert n > 0
+    bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-02")
+    assert len(archive.zip_fetches()) == n  # manifest knows the days: no refetch
+
+
+@pytest.mark.unit
+def test_missing_404_day_remembered_not_retried(archive):
+    """A 404 day is recorded with a timestamp and retried at most once per
+    day — a pre-listing hole must not burn the sync budget every query."""
+    for day in ("2024-05-01", "2024-05-03"):  # 05-02 deliberately absent
+        _add_metrics_day(archive, "BTCUSDT", day, [_metrics_row(day, "00:00", 1, 1, 1, 1)])
+    bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-03")
+    zips = archive.zip_fetches()
+    bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-03")
+    assert archive.zip_fetches() == zips  # the remembered 404 was not retried
+    # The interior hole is disclosed on every render.
+    assert "1 archive day(s) missing inside the window" in bnv.get_binance_vision_metrics(
+        "BTCUSDT", "2024-05-01", "2024-05-03"
+    )
+
+
+@pytest.mark.unit
+def test_sync_budget_counts_404_attempts(archive, monkeypatch):
+    """A 404 is a real network round trip: it consumes the sync budget like
+    a download. Without this, a symbol whose history is mostly holes would
+    make an unbounded number of "free" miss requests per call (most-recent
+    day missing → budget=1 must stop after THAT attempt, not march on)."""
+    monkeypatch.setattr(bnv, "_SYNC_BUDGET_FILES", 1)
+    # Only the OLDEST day exists; the two most-recent days 404.
+    _add_metrics_day(archive, "BTCUSDT", "2024-05-01", [_metrics_row("2024-05-01", "00:00", 1, 1, 1, 1)])
+    # The single budgeted attempt went to the most-recent day and 404'd;
+    # no further attempts were made (previously the miss was free and
+    # 05-02 would have been fetched too). Zero synced days → the
+    # instructive no-data error discloses the miss + budget stop.
+    with pytest.raises(NoMarketDataError, match="1 day\\(s\\) 404'd, 2 unsynced"):
+        bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-03")
+    zips = archive.zip_fetches()
+    assert len(zips) == 1 and "2024-05-03" in zips[0]
+
+
+@pytest.mark.unit
+def test_missing_checksum_sidecar_skips_day_without_aborting_sync(archive):
+    """A day whose CHECKSUM sidecar 404s is recorded as missing and the sync
+    CONTINUES (previously the _ChecksumError aborted the whole incremental
+    loop). A checksum MISMATCH still fails closed — only the missing-file
+    case reclassifies as a missing day; the day is never served either way."""
+    for day in ("2024-05-01", "2024-05-03"):
+        _add_metrics_day(archive, "BTCUSDT", day, [_metrics_row(day, "00:00", 1, 1, 1, 1)])
+    # 05-02: the archive zip EXISTS but its CHECKSUM sidecar is dropped.
+    archive.add(
+        _daily_url("metrics", "BTCUSDT", "2024-05-02"),
+        _zip_bytes(_metrics_csv([_metrics_row("2024-05-02", "00:00", 1, 1, 1, 1)])),
+    )
+    archive.drop_checksums.add(
+        _daily_url("metrics", "BTCUSDT", "2024-05-02") + ".CHECKSUM"
+    )
+    out = bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-03")
+    # The good days synced and are served; the unverifiable middle day is
+    # disclosed as an interior missing day (24h retry backoff) — the sync
+    # did NOT abort on it.
+    assert "1 archive day(s) missing inside the window" in out
+    assert "2024-05-01" in out and "2024-05-03" in out
+    assert "2024-05-02" not in out.split("\n\n", 1)[1]  # never served
+    # A genuinely CORRUPT checksum (mismatch) still fails closed.
+    archive.corrupt_checksums.add(
+        _daily_url("metrics", "BTCUSDT", "2024-05-02") + ".CHECKSUM"
+    )
+    archive.drop_checksums.discard(
+        _daily_url("metrics", "BTCUSDT", "2024-05-02") + ".CHECKSUM"
+    )
+    with pytest.raises(NoMarketDataError):
+        bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-02", "2024-05-02")
+
+
+@pytest.mark.unit
+def test_year_partitions_written(tmp_path, archive):
+    """Multi-year windows land in per-year CSV.gz partitions (one file per
+    year, not one per day)."""
+    for day in ("2024-12-31", "2025-01-01", "2025-01-02"):
+        _add_metrics_day(archive, "BTCUSDT", day, [_metrics_row(day, "00:00", 1, 1, 1, 1)])
+    bnv.get_binance_vision_metrics("BTCUSDT", "2024-12-31", "2025-01-02")
+    parts = sorted(
+        p.name for p in (_store_root(tmp_path) / "metrics" / "BTCUSDT").glob("data-*.csv.gz")
+    )
+    assert parts == ["data-2024.csv.gz", "data-2025.csv.gz"]
+
+
+@pytest.mark.unit
+def test_qa_flags_low_row_days(archive):
+    """A day with far fewer rows than the median synced day (a truncated or
+    partially published file) is disclosed — checksums prove bytes, not
+    completeness."""
+    for i in range(1, 9):
+        day = f"2024-05-{i:02d}"
+        rows = (
+            [_metrics_row(day, "00:00", 1, 1, 1, 1)]
+            if i == 4  # one truncated day among eight normal ones
+            else [
+                _metrics_row(day, hh, 1, 1, 1, 1)
+                for hh in ("00:00", "02:00", "04:00", "06:00", "08:00")
+            ]
+        )
+        _add_metrics_day(archive, "BTCUSDT", day, rows)
+    out = bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-08")
+    assert "1 synced day(s) carry far fewer rows" in out
+
+
+@pytest.mark.unit
+def test_metrics_summary_mode_distribution_and_tail(archive):
+    from yialpha.dataflows.config import set_config
+
+    set_config({"binance_vision_summary": True})
+    for day, oi_seq in (
+        ("2024-05-01", (100.0, 200.0, 400.0)),
+        ("2024-05-02", (500.0, 700.0, 900.0)),
+    ):
+        rows = [
+            _metrics_row(day, hhmm, oi, top, glob, taker)
+            for hhmm, oi, top, glob, taker in (
+                ("00:00", oi_seq[0], 1.1, 2.0, 0.9),
+                ("08:00", oi_seq[1], 1.3, 2.2, 1.1),
+                ("16:00", oi_seq[2], 1.5, 2.4, 1.3),
+            )
+        ]
+        _add_metrics_day(archive, "BTCUSDT", day, rows)
+    out = bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-02")
+    assert "## Distribution over the full window" in out
+    assert "summary mode: distribution over the full window" in out
+    # Day-close OI over the two days: first 400, last 900, mean 650.
+    for fragment in ("first", "last", "mean", "p10", "median", "p90"):
+        assert f"\n{fragment}," in out
+    stats = {}
+    for line in out.splitlines():
+        if line.startswith(("mean,", "first,", "last,")):
+            parts = line.split(",")
+            stats[parts[0]] = parts
+    oi_col = stats["mean"].index("open_interest") if "open_interest" in stats["mean"] else None
+    if oi_col is None:
+        # header order: stat,open_interest,open_interest_value,...
+        header = next(
+            ln for ln in out.splitlines() if ln.startswith("stat,")
+        )
+        oi_col = header.split(",").index("open_interest")
+    assert float(stats["first"][oi_col]) == pytest.approx(400.0)
+    assert float(stats["last"][oi_col]) == pytest.approx(900.0)
+    assert float(stats["mean"][oi_col]) == pytest.approx(650.0)
+    assert "## Recent tail (last 2 day(s))" in out
+
+
+@pytest.mark.unit
+def test_depth_summary_bands_and_liquidity_streak(archive):
+    from yialpha.dataflows.config import set_config
+
+    set_config({"binance_vision_summary": True})
+    # 8 days x 4 signed bands; the last 2 days carry collapsed tight-band
+    # notional (5 vs 1000) -> the liquidity-thin streak must surface.
+    for i in range(1, 9):
+        day = f"2024-05-{i:02d}"
+        notional = 5.0 if i >= 7 else 1000.0
+        rows = []
+        for pct in (-5.0, -1.0, 1.0, 5.0):
+            rows.append({
+                "timestamp": f"{day} 00:00:00",
+                "percentage": pct,
+                "depth": 10.0,
+                "notional": notional,
+            })
+        _add_depth_day(archive, "BTCUSDT", day, rows)
+    out = bnv.get_binance_vision_book_depth("BTCUSDT", "2024-05-01", "2024-05-08")
+    assert "## Per-band distribution over the full window" in out
+    assert "## Liquidity-thin streak" in out
+    assert "2 day(s) (window p25" in out
+    assert "±1% band" in out
+    assert "## Recent tail (last 14 day(s))" in out
+
+
+@pytest.mark.unit
+def test_summary_explicit_false_restores_raw_csv(archive):
+    for day in ("2024-05-01", "2024-05-02"):
+        _add_metrics_day(archive, "BTCUSDT", day, [_metrics_row(day, "00:00", 1, 1, 1, 1)])
+    out = bnv.get_binance_vision_metrics(
+        "BTCUSDT", "2024-05-01", "2024-05-02", summary=False
+    )
+    df = pd.read_csv(io.StringIO(out.split("\n\n", 1)[1]))
+    assert list(df["time"]) == ["2024-05-01", "2024-05-02"]
+    assert "Distribution over the full window" not in out

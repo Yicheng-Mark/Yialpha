@@ -19,9 +19,15 @@ _THREE = ("market", "social", "news")
 
 @pytest.fixture()
 def _no_network(monkeypatch):
-    """Keep the helper hermetic and record warm/filter ordering."""
-    import yialpha.cli.utils as cli_utils
+    """Keep the helper hermetic and record warm/filter ordering.
+
+    The per-ticker applicability predicate lives in yialpha.graph.routing
+    (shared with the fundamentals node's runtime skip) and holds its OWN
+    binding of ``stock_perp_underlying`` — patch it there, not on the CLI
+    utils module that now merely delegates.
+    """
     import yialpha.dataflows.binance as bn
+    import yialpha.graph.routing as routing
 
     order: list[str] = []
     monkeypatch.setattr(
@@ -29,7 +35,7 @@ def _no_network(monkeypatch):
         lambda: order.append("warm") or frozenset(),
     )
     monkeypatch.setattr(
-        cli_utils, "stock_perp_underlying",
+        routing, "stock_perp_underlying",
         lambda t: order.append("filter") or None,
     )
     return order
@@ -56,12 +62,12 @@ def test_pure_crypto_batch_drops_fundamentals(_no_network, asset_type):
 
 @pytest.mark.unit
 def test_tokenized_stock_perp_keeps_fundamentals(monkeypatch):
-    import yialpha.cli.utils as cli_utils
     import yialpha.dataflows.binance as bn
+    import yialpha.graph.routing as routing
 
     monkeypatch.setattr(bn, "warm_equity_perp_bases", lambda: frozenset())
     monkeypatch.setattr(
-        cli_utils, "stock_perp_underlying",
+        routing, "stock_perp_underlying",
         lambda t: "MU" if t == "MUUSDT" else None,
     )
     # Mixed batch: union keeps Fundamentals for the whole batch (a shared

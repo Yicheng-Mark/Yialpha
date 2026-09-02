@@ -394,7 +394,9 @@ class SentimentReport(BaseModel):
             "Confidence in the assessment based on data quality and sample size. "
             "Use 'low' when one or more sources returned a placeholder or fewer "
             "than 5 data points; 'medium' when data is present but sparse; "
-            "'high' when all three sources returned substantive data."
+            "'high' only when multiple independent sources returned substantive "
+            "data — never when the prompt states a deterministic source-policy "
+            "cap (that ceiling is enforced on the report mechanically)."
         ),
     )
     narrative: str = Field(

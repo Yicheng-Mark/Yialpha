@@ -41,10 +41,18 @@ def latest_atr(symbol: str, curr_date: str) -> tuple[float, float]:
 def latest_atr_from_frame(ohlcv: pd.DataFrame) -> tuple[float, float]:
     """Return ``(last_close, last_atr)`` from a precomputed OHLCV DataFrame.
 
-    The project's ``load_ohlcv`` returns a frame with capitalised columns
-    ``Date`` / ``Open`` / ``High`` / ``Low`` / ``Close`` / ``Volume``. This
-    helper wraps it with ``stockstats`` to compute the 14-period ``atr``
-    and reads the last row.
+    The project's ``load_ohlcv`` / ``binance_klines_frame`` return a frame
+    with capitalised columns ``Date`` / ``Open`` / ``High`` / ``Low`` /
+    ``Close`` / ``Volume``. This helper wraps it with ``stockstats`` to
+    compute the 14-period ``atr`` and reads the tail.
+
+    ATR is computed on COMPLETED bars only: a daily candle dated today (UTC)
+    is still forming — its high/low expand with the session and would distort
+    the volatility reading — so the forming row is excluded from the ATR
+    window. The returned close still comes from the frame's LAST row (a
+    forming candle's close is the live price; excluding it would report
+    yesterday's close as "current"). Historical frames (nothing dated today)
+    are unaffected.
 
     Raises :class:`ValueError` on empty/NaN input.
     """
@@ -60,23 +68,44 @@ def latest_atr_from_frame(ohlcv: pd.DataFrame) -> tuple[float, float]:
     if "Close" not in ohlcv.columns:
         raise ValueError("atr_stop: OHLCV frame missing a 'Close' column")
 
+    # Split off a trailing forming candle (dated today UTC) for the ATR
+    # window; the close is still read from the full frame's tail below.
+    work = ohlcv
+    if rows > 1:
+        try:
+            last_day = pd.Timestamp(ohlcv.index[-1]).normalize()
+            today_utc = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+            if last_day >= today_utc:
+                work = ohlcv.iloc[:-1]
+        except (TypeError, ValueError):
+            work = ohlcv  # non-datetime index: keep the historical behaviour
+
     # Work on a copy so stockstats' column additions never leak back.
-    df = wrap(ohlcv.copy())
-    close_series = df["close"]
+    df = wrap(work.copy())
     atr_series = df["atr"]  # access triggers stockstats computation
 
-    # Walk back from the tail to the last finite (close, atr) pair.
-    close_arr = np.asarray(close_series, dtype=float)
+    # Walk back from the tail to the last finite ATR on completed bars.
     atr_arr = np.asarray(atr_series, dtype=float)
-    for i in range(len(close_arr) - 1, -1, -1):
-        c = close_arr[i]
+    last_atr: float | None = None
+    for i in range(len(atr_arr) - 1, -1, -1):
         a = atr_arr[i]
-        if np.isfinite(c) and np.isfinite(a):
+        if np.isfinite(a):
             if a <= 0.0:
                 raise ValueError("atr_stop: computed ATR is non-positive")
-            return float(c), float(a)
+            last_atr = float(a)
+            break
+    if last_atr is None:
+        raise ValueError("atr_stop: no finite ATR row in the OHLCV frame")
 
-    raise ValueError("atr_stop: no finite (close, atr) row in the OHLCV frame")
+    # Close: last finite close of the FULL frame (forming row included — its
+    # close is the live price, not a completed-bar statistic).
+    close_arr = np.asarray(ohlcv["Close"], dtype=float)
+    for i in range(len(close_arr) - 1, -1, -1):
+        c = close_arr[i]
+        if np.isfinite(c):
+            return float(c), last_atr
+
+    raise ValueError("atr_stop: no finite close row in the OHLCV frame")
 
 
 def atr_stop(

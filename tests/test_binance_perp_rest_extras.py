@@ -223,6 +223,47 @@ def test_index_price_routes_to_index_endpoint(monkeypatch):
 
 
 @pytest.mark.unit
+def test_index_klines_identifier_is_pair_not_symbol(monkeypatch):
+    # The current API requires `pair` (not `symbol`) on indexPriceKlines and
+    # caps the page at 1000 rows; sending symbol= returns an error body that
+    # the fail-open consumers silently degraded to basis=None. Params-level
+    # contract — the old test only pinned the path and could not catch this.
+    bn.reset_history_memo_for_test()
+    cap = _Capture({"/fapi/v1/indexPriceKlines": []})
+    monkeypatch.setattr(bn, "_http_get", cap)
+    with pytest.raises(NoMarketDataError):
+        bn.binance_klines_frame(
+            "BTCUSDT", _days_ago(6), _days_ago(1), price_type="index",
+        )
+    assert cap.calls, "identifier contract must be asserted on the request"
+    path, params = cap.calls[0]
+    assert path == "/fapi/v1/indexPriceKlines"
+    assert params["pair"] == "BTCUSDT"
+    assert "symbol" not in params
+    assert params["limit"] == bn._FAPI_INDEX_KLINES_LIMIT == 1000
+
+
+@pytest.mark.unit
+def test_last_and_mark_klines_keep_symbol_and_1500_limit(monkeypatch):
+    bn.reset_history_memo_for_test()
+    for price_type, expected_path in (
+        ("last", "/fapi/v1/klines"),
+        ("mark", "/fapi/v1/markPriceKlines"),
+    ):
+        cap = _Capture({expected_path: []})
+        monkeypatch.setattr(bn, "_http_get", cap)
+        with pytest.raises(NoMarketDataError):
+            bn.binance_klines_frame(
+                "BTCUSDT", _days_ago(6), _days_ago(1), price_type=price_type,
+            )
+        path, params = cap.calls[0]
+        assert path == expected_path
+        assert params["symbol"] == "BTCUSDT"
+        assert "pair" not in params
+        assert params["limit"] == 1500
+
+
+@pytest.mark.unit
 def test_spot_index_combination_rejected(monkeypatch):
     rec = _PathRecorder([])
     monkeypatch.setattr(bn, "_http_get", rec)

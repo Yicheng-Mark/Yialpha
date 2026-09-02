@@ -62,8 +62,10 @@ _TIMEOUT = (5, 30)
 
 # fapi per-request caps. klines tops out at 1500, fundingRate at 1000; without
 # paging, a long range returns only the OLDEST page and silently drops the
-# recent, decision-critical rows.
+# recent, decision-critical rows. indexPriceKlines is the exception in the
+# kline family: its documented ceiling is 1000 rows (mark/last stay 1500).
 _FAPI_KLINES_LIMIT = 1500
+_FAPI_INDEX_KLINES_LIMIT = 1000
 _FAPI_FUNDING_LIMIT = 1000
 # Runaway guard: ~50000 daily bars ≈ 137 years. Purely a safety ceiling so a
 # mis-sized range can never spin the paginator unboundedly.
@@ -493,6 +495,13 @@ def _http_get(
     return parsed
 
 
+#: Close-column name of the klines frame schema. Single source for producers
+#: AND consumers: a consumer keying on lowercase ``"close"`` raises KeyError,
+#: which the fail-open stress path swallowed into basis=None for the entire
+#: life of that component (caught only once the mock matched the real schema).
+KLINE_CLOSE_COLUMN = "Close"
+
+
 def binance_klines_frame(
     symbol: str,
     start_date: str,
@@ -518,7 +527,9 @@ def binance_klines_frame(
     serves ``/fapi/v1/indexPriceKlines`` — the settlement/index-price series
     (volume is 0 on index klines) — so mark-vs-index displacement can be
     studied as two aligned series rather than one premium snapshot. The
-    default ``"last"`` is the ordinary last-traded-price kline.
+    default ``"last"`` is the ordinary last-traded-price kline. Note the
+    index endpoint's identifier parameter is ``pair=`` (the last/mark
+    endpoints use ``symbol=``) and it pages at 1000 rows.
     """
     if price_type not in ("last", "mark", "index"):
         raise ValueError(
@@ -535,9 +546,15 @@ def binance_klines_frame(
             "mark": "/fapi/v1/markPriceKlines",
             "index": "/fapi/v1/indexPriceKlines",
         }.get(price_type, "/fapi/v1/klines")
-        path, limit, base, weight_key = (
-            path, _FAPI_KLINES_LIMIT, None, None,
+        # indexPriceKlines deviates from its last/mark siblings twice: its
+        # required identifier parameter is ``pair`` (NOT ``symbol``) and its
+        # per-request ceiling is 1000 rows (not 1500). Sending symbol= to the
+        # current API returns an error body, which the fail-open consumers
+        # (derivatives stress) silently degraded to basis=None.
+        limit = (
+            _FAPI_INDEX_KLINES_LIMIT if price_type == "index" else _FAPI_KLINES_LIMIT
         )
+        path, base, weight_key = path, None, None
     canonical = normalize_symbol_for_venue(symbol, venue)
 
     start_ms = int(
@@ -553,9 +570,11 @@ def binance_klines_frame(
     kwargs: dict = {"base": base, "weight_key": weight_key}
     if base is None:
         kwargs = {}
+    # indexPriceKlines identifies the contract with ``pair`` (see docstring).
+    identifier_key = "pair" if price_type == "index" and venue != "binance_spot" else "symbol"
     rows = _paginate_history(
         path,
-        {"symbol": canonical, "interval": interval},
+        {identifier_key: canonical, "interval": interval},
         limit,
         lambda k: k[0],  # kline open_time (ms) is element 0
         start_ms,
@@ -571,6 +590,7 @@ def binance_klines_frame(
         )
 
     # Binance kline array indices: [1]Open [2]High [3]Low [4]Close [5]Volume.
+    close_col = KLINE_CLOSE_COLUMN
     records = []
     for k in rows:
         if not isinstance(k, list) or len(k) < 6:
@@ -583,7 +603,7 @@ def binance_klines_frame(
                 "Open": float(k[1]),
                 "High": float(k[2]),
                 "Low": float(k[3]),
-                "Close": float(k[4]),
+                close_col: float(k[4]),
                 "Adj Close": float(k[4]),
                 "Volume": float(k[5]),
             }
@@ -610,6 +630,17 @@ def binance_klines_frame(
     if (datetime.now(UTC) - end_dt).days <= MAX_OHLCV_STALE_DAYS:
         _assert_ohlcv_not_stale(df, end_date, symbol, canonical)
     return df
+
+
+#: Human disclosure rendered into the klines CSV header per price basis, so
+#: a row's basis is visible in the artifact itself (not only the tool's
+#: docstring): every downstream "price is X" claim can be checked against the
+#: basis it was actually served on.
+_PRICE_BASIS_NOTES = {
+    "last": "last traded price; the default trend/entry series",
+    "mark": "mark price — the price Binance liquidates against",
+    "index": "index price — settlement fair-value anchor; volume is 0",
+}
 
 
 def get_binance_klines(
@@ -639,6 +670,7 @@ def get_binance_klines(
     end_date = current_pit_end(end_date) or end_date
     label = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
     header = f"# Perp USDT-M klines for {label} from {start_date} to {end_date}\n"
+    header += f"# Price basis: {price_type} ({_PRICE_BASIS_NOTES[price_type]})\n"
     header += f"# Total records: {len(df)}\n"
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     return header + df.to_csv()
@@ -1737,13 +1769,27 @@ def get_binance_spot_perp_basis(
 
 _EQUITY_PERP_BASES_LOCK = threading.Lock()
 _EQUITY_PERP_BASES_CACHE: frozenset[str] | None = None
+#: Per-base listing facts from the LAST SUCCESSFUL exchangeInfo warm:
+#: ``{base: {"onboard_date": iso|None, "status": "TRADING"}}``. Cache-only like
+#: the base set — never fetched on read. Empty when the process only ever saw
+#: the static seed (the seed carries no onboard dates).
+_EQUITY_PERP_LISTING_CACHE: dict[str, dict] | None = None
+#: When the last successful warm happened (``time.monotonic()`` seconds).
+#: A SUCCESSFUL warm used to be cached for the whole process lifetime, so a
+#: long-lived web subprocess never noticed newly listed/delisted equity perps
+#: after its first warm — the TTL re-fetches at perp-run start when stale.
+_EQUITY_PERP_WARMED_AT_MONO: float | None = None
+_EQUITY_PERP_WARM_TTL_S = 6 * 3600.0
 
 
 def refresh_equity_perp_bases() -> None:
-    """Drop the equity-perp base cache (tests / forced re-warm): back to seed."""
-    global _EQUITY_PERP_BASES_CACHE
+    """Drop the equity-perp base/listing caches (tests / forced re-warm): back to seed."""
+    global _EQUITY_PERP_BASES_CACHE, _EQUITY_PERP_LISTING_CACHE
+    global _EQUITY_PERP_WARMED_AT_MONO
     with _EQUITY_PERP_BASES_LOCK:
         _EQUITY_PERP_BASES_CACHE = None
+        _EQUITY_PERP_LISTING_CACHE = None
+        _EQUITY_PERP_WARMED_AT_MONO = None
 
 
 def equity_perp_bases() -> frozenset[str]:
@@ -1761,8 +1807,23 @@ def equity_perp_bases() -> frozenset[str]:
     return _EQUITY_PERP_SEED_BASES
 
 
+def equity_perp_listing_info() -> dict[str, dict]:
+    """Per-base listing facts from the last successful warm (cache-only).
+
+    ``{base: {"onboard_date": "YYYY-MM-DD"|None, "status": "TRADING"}}``.
+    Empty when no exchangeInfo snapshot has been warmed yet (seed mode) —
+    callers must treat an absent entry as "classification evidence missing",
+    never as "not listed". Fetch-free by the same contract as
+    :func:`equity_perp_bases`.
+    """
+    with _EQUITY_PERP_BASES_LOCK:
+        if _EQUITY_PERP_LISTING_CACHE is None:
+            return {}
+        return dict(_EQUITY_PERP_LISTING_CACHE)
+
+
 def warm_equity_perp_bases() -> frozenset[str]:
-    """Fetch the live EQUITY perp listing once (perp-run start only).
+    """Fetch the live EQUITY perp listing once per TTL window (perp-run start).
 
     exchangeInfo -> underlyingType == EQUITY, status TRADING. On ANY failure
     (network, rate limit, parse, empty universe) falls back to the static seed
@@ -1771,10 +1832,23 @@ def warm_equity_perp_bases() -> frozenset[str]:
     listing snapshot is current-state (no as-of date): it gates analyst
     ELIGIBILITY only, never data content — the fundamentals vendors
     themselves remain PIT-correct by date.
+
+    A failed fetch is NOT cached: the seed is returned for THIS call only, so
+    the next perp-run start re-attempts the live listing instead of serving a
+    transient outage's seed for the whole process lifetime. A SUCCESSFUL warm
+    is honoured for ``_EQUITY_PERP_WARM_TTL_S`` (6h) and then re-fetched at
+    the next perp-run start — a long-lived web subprocess must pick up newly
+    listed equity perps without a restart.
     """
-    global _EQUITY_PERP_BASES_CACHE
+    global _EQUITY_PERP_BASES_CACHE, _EQUITY_PERP_LISTING_CACHE
+    global _EQUITY_PERP_WARMED_AT_MONO
     with _EQUITY_PERP_BASES_LOCK:
-        if _EQUITY_PERP_BASES_CACHE is not None:
+        if (
+            _EQUITY_PERP_BASES_CACHE is not None
+            and _EQUITY_PERP_WARMED_AT_MONO is not None
+            and (time.monotonic() - _EQUITY_PERP_WARMED_AT_MONO)
+            < _EQUITY_PERP_WARM_TTL_S
+        ):
             return _EQUITY_PERP_BASES_CACHE
         try:
             payload = _http_get(
@@ -1786,13 +1860,15 @@ def warm_equity_perp_bases() -> frozenset[str]:
             symbols = (
                 payload.get("symbols", []) if isinstance(payload, dict) else []
             )
-            bases = frozenset(
-                s["symbol"][: -len(s["quoteAsset"])]
-                for s in symbols
+            equity_rows = [
+                s for s in symbols
                 if isinstance(s, dict)
                 and s.get("underlyingType") == "EQUITY"
                 and s.get("status") == "TRADING"
                 and s.get("quoteAsset") in ("USDT", "USDC")
+            ]
+            bases = frozenset(
+                s["symbol"][: -len(s["quoteAsset"])] for s in equity_rows
             )
             if not bases:
                 # A 200 with zero EQUITY rows would silently disable the
@@ -1803,13 +1879,47 @@ def warm_equity_perp_bases() -> frozenset[str]:
                     "exchangeInfo returned no TRADING EQUITY symbols",
                 )
         except Exception as exc:  # noqa: BLE001 — fail-open floor, any failure
+            if _EQUITY_PERP_BASES_CACHE is not None:
+                # A previous successful warm exists but aged past the TTL: a
+                # stale-but-real exchangeInfo snapshot beats the static seed —
+                # serve it for this call and re-attempt at the next perp-run
+                # start.
+                logger.warning(
+                    "warm_equity_perp_bases: exchangeInfo re-fetch failed "
+                    "(%s); serving the previous warmed snapshot (%d bases) "
+                    "for this call only",
+                    exc, len(_EQUITY_PERP_BASES_CACHE),
+                )
+                return _EQUITY_PERP_BASES_CACHE
             logger.warning(
                 "warm_equity_perp_bases: exchangeInfo fetch failed (%s); "
-                "falling back to the static seed snapshot (%d bases)",
+                "serving the static seed snapshot for this call only "
+                "(%d bases; not cached — next perp-run start retries)",
                 exc, len(_EQUITY_PERP_SEED_BASES),
             )
-            bases = _EQUITY_PERP_SEED_BASES
+            return _EQUITY_PERP_SEED_BASES
+        listing: dict[str, dict] = {}
+        for row in equity_rows:
+            base = row["symbol"][: -len(row["quoteAsset"])]
+            if base in listing:
+                continue  # first listing row per base wins (USDT vs USDC twin)
+            onboard_ms = row.get("onboardDate")
+            try:
+                onboard_date = (
+                    datetime.fromtimestamp(int(onboard_ms) / 1000, tz=UTC)
+                    .strftime("%Y-%m-%d")
+                    if isinstance(onboard_ms, (int, float)) and onboard_ms > 0
+                    else None
+                )
+            except (OverflowError, OSError, ValueError):
+                onboard_date = None
+            listing[base] = {
+                "onboard_date": onboard_date,
+                "status": str(row.get("status") or "TRADING"),
+            }
         _EQUITY_PERP_BASES_CACHE = bases
+        _EQUITY_PERP_LISTING_CACHE = listing
+        _EQUITY_PERP_WARMED_AT_MONO = time.monotonic()
         return _EQUITY_PERP_BASES_CACHE
 
 
@@ -1939,7 +2049,12 @@ def derivatives_stress_series(
             symbol, start_dt.strftime("%Y-%m-%d"), end_clamped, "1d", "binance_perp",
             "index",
         )
-        joined = pd.DataFrame({"perp": perp["close"], "index": index["close"]}).dropna()
+        joined = pd.DataFrame(
+            {
+                "perp": perp[KLINE_CLOSE_COLUMN],
+                "index": index[KLINE_CLOSE_COLUMN],
+            }
+        ).dropna()
         out["basis"] = (
             (joined["perp"] / joined["index"] - 1.0).dropna()
             if not joined.empty

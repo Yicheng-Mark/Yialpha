@@ -112,8 +112,13 @@ def test_global_news_future_flat_article_excluded(monkeypatch):
 
 
 @pytest.mark.unit
-def test_global_news_empty_after_filter_is_informative(monkeypatch):
-    # #993: everything filtered out -> a clear message, not a blank-bodied report.
+def test_global_news_empty_after_filter_is_typed_soft_miss(monkeypatch):
+    # #993 + PR5: everything filtered out -> a typed soft-miss (the router
+    # may fall through to the next vendor) instead of a blank-bodied report
+    # or a success-shaped "No global news found" string that masked the
+    # fallback chain.
+    from yialpha.dataflows.errors import NoMarketDataError
+
     only_future = {"title": "FUTURE", "publisher": "P", "link": "l",
                    "providerPublishTime": _epoch("2025-06-01")}
 
@@ -122,9 +127,8 @@ def test_global_news_empty_after_filter_is_informative(monkeypatch):
             self.news = [only_future]
 
     monkeypatch.setattr(ynews.yf, "Search", FakeSearch)
-    out = ynews.get_global_news_yfinance("2025-05-09", look_back_days=7, limit=10)
-    assert "No global news found" in out
-    assert "###" not in out  # no empty article body
+    with pytest.raises(NoMarketDataError):
+        ynews.get_global_news_yfinance("2025-05-09", look_back_days=7, limit=10)
 
 
 # --------------------------------------------------------------------------- #
