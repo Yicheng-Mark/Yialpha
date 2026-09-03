@@ -69,6 +69,7 @@ from yialpha.agents.utils.agent_utils import (
 )
 from yialpha.agents.utils.memory import TradingMemoryLog
 from yialpha.agents.utils.pot_tool import make_pot_compute_tool
+from yialpha.agents.utils.prediction_tools import submit_prediction
 from yialpha.agents.utils.valuation_tools import get_valuation_metrics
 from yialpha.dataflows.binance import stock_perp_underlying, warm_equity_perp_bases
 from yialpha.dataflows.config import set_config
@@ -446,6 +447,15 @@ class YiAlphaGraph:
                     get_news,
                 ]
             ),
+            # V2.3 positioning split. The positioning analyst is
+            # structured-output (no tool loop): its report call binds NO
+            # tools and its blind-prediction round is dispatched by the node
+            # itself, so this ToolNode exists purely to satisfy the serial
+            # plan's (agent <-> tool <-> clear) wiring contract. The generic
+            # submit_prediction registration makes the (never-expected) case
+            # of a stray submit_prediction tool call resolvable instead of a
+            # hard "not a valid tool" failure. Dormant by construction.
+            "positioning": ToolNode([submit_prediction]),
             "news": ToolNode(
                 [
                     # News and insider information

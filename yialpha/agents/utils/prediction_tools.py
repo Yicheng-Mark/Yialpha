@@ -200,7 +200,9 @@ def _record_submitted_entries(
     return f"submit_prediction: {head}"
 
 
-def make_submit_prediction_tool(instrument_id: str = "") -> BaseTool:
+def make_submit_prediction_tool(
+    instrument_id: str = "", *, direction_note: str = ""
+) -> BaseTool:
     """Build the ``submit_prediction`` tool with the instrument named.
 
     The description is the ONLY prompt surface the record stage gets, so
@@ -211,6 +213,12 @@ def make_submit_prediction_tool(instrument_id: str = "") -> BaseTool:
     hold one generic registration while analyst nodes bind per-run
     instances — dispatch is by name, and the buffer's instrument identity
     comes from :func:`begin_prediction_capture`, not from the description.
+
+    ``direction_note`` (V2.3, additive): an optional sentence appended to
+    the description REDEFINING what ``direction`` means for this capture —
+    the POSITIONING analyst forecasts the SIGN of the cumulative funding
+    rate, not a price move. Empty (every existing caller) keeps the
+    description byte-identical to the price-direction wording.
     """
 
     def submit_prediction(
@@ -221,9 +229,16 @@ def make_submit_prediction_tool(instrument_id: str = "") -> BaseTool:
     ) -> str:
         return _record_submitted_entries(predictions)
 
-    submit_prediction.__doc__ = _DESCRIPTION_TEMPLATE.format(
+    description = _DESCRIPTION_TEMPLATE.format(
         instrument_phrase=_instrument_phrase(instrument_id)
     )
+    if direction_note:
+        # Slot the note just before the Args block so it reads as part of
+        # the semantics paragraph, not a trailing footer.
+        description = description.replace(
+            "\nArgs:", f"{direction_note}\n\nArgs:", 1
+        )
+    submit_prediction.__doc__ = description
     return tool(submit_prediction)
 
 

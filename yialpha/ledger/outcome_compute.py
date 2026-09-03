@@ -91,6 +91,7 @@ from yialpha.dataflows.y_finance import get_YFin_history_cached
 from yialpha.ledger.models import (
     SCOPE_CONTRACT,
     SCOPE_MACRO,
+    SCOPE_POSITIONING,
     SCOPE_UNDERLYING,
     timestamp_as_utc,
 )
@@ -121,6 +122,9 @@ LEG_CONTRACT_PRICE = "contract_price"
 LEG_FUNDING = "funding"
 LEG_TICKET_COST = "ticket_cost"
 LEG_UNDERLYING = "underlying"
+#: V2.3 POSITIONING scope: the funding settlement window itself could not be
+#: proven complete (no settlements / cadence uninferrable / slot gap).
+LEG_FUNDING_WINDOW = "funding_window"
 
 
 # --------------------------------------------------------------------------- #
@@ -271,6 +275,50 @@ def _modal_cadence_hours(times: list[datetime]) -> int | None:
     return mode if mode > 0 else None
 
 
+def _funding_window_sum(
+    symbol: str,
+    analysis_dt: datetime,
+    horizon_end_dt: datetime,
+) -> tuple[float | None, str | None]:
+    """Raw cumulative funding over ``(analysis_dt, horizon_end_dt]``.
+
+    Returns ``(sum, last_settlement_iso_date)``; the sum is None when the
+    settlement grid inside the window cannot be proven complete (no
+    settlements, cadence uninferrable, or an expected slot absent) — fail
+    closed per leg. The sum is UNSIGNED by position: it is the realized
+    quantity the POSITIONING analyst's direction call is about (positive =
+    longs paid net), independent of any trade direction.
+    """
+    csv_text = get_binance_funding_rate(
+        symbol,
+        analysis_dt.date().isoformat(),
+        horizon_end_dt.date().isoformat(),
+    )
+    settlements = _parse_funding_csv(csv_text)
+    if not settlements:
+        return None, None
+    in_window = [
+        (moment, rate) for moment, rate in settlements if analysis_dt < moment <= horizon_end_dt
+    ]
+    if not in_window:
+        return None, None
+    cadence = _modal_cadence_hours([moment for moment, _ in settlements])
+    if cadence is None:
+        return None, None
+    # Verify every expected settlement slot from the first fetched one up to
+    # the horizon end is present; an absent slot is a history gap.
+    present = {moment for moment, _ in settlements}
+    step = timedelta(hours=cadence)
+    expected = settlements[0][0]
+    while expected <= horizon_end_dt:
+        if expected > analysis_dt and expected not in present:
+            return None, None
+        expected += step
+    total = sum(rate for _, rate in in_window)
+    last_iso = max(moment for moment, _ in in_window).date().isoformat()
+    return total, last_iso
+
+
 def _funding_pnl_leg(
     symbol: str,
     analysis_dt: datetime,
@@ -280,37 +328,14 @@ def _funding_pnl_leg(
     """Signed funding pnl over ``(analysis_dt, horizon_end_dt]`` or a miss.
 
     Returns ``(pnl, missing)``: ``missing`` is True when the settlement grid
-    inside the window cannot be proven complete (no settlements, cadence
-    uninferrable, or an expected slot absent) — fail closed per leg. The pnl
-    itself is ``-sign(direction) * sum(rate)``: a long pays positive funding.
+    inside the window cannot be proven complete — fail closed per leg. The
+    pnl itself is ``-sign(direction) * sum(rate)``: a long pays positive
+    funding.
     """
-    csv_text = get_binance_funding_rate(
-        symbol,
-        analysis_dt.date().isoformat(),
-        horizon_end_dt.date().isoformat(),
-    )
-    settlements = _parse_funding_csv(csv_text)
-    if not settlements:
+    total, _last = _funding_window_sum(symbol, analysis_dt, horizon_end_dt)
+    if total is None:
         return None, True
-    in_window = [
-        (moment, rate) for moment, rate in settlements if analysis_dt < moment <= horizon_end_dt
-    ]
-    if not in_window:
-        return None, True
-    cadence = _modal_cadence_hours([moment for moment, _ in settlements])
-    if cadence is None:
-        return None, True
-    # Verify every expected settlement slot from the first fetched one up to
-    # the horizon end is present; an absent slot is a history gap.
-    present = {moment for moment, _ in settlements}
-    step = timedelta(hours=cadence)
-    expected = settlements[0][0]
-    while expected <= horizon_end_dt:
-        if expected > analysis_dt and expected not in present:
-            return None, True
-        expected += step
     sign = {"up": 1.0, "down": -1.0}.get(direction, 0.0)
-    total = sum(rate for _, rate in in_window)
     return -sign * total, False
 
 
@@ -407,6 +432,45 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
         # A macro call is not a claim about this instrument's return; scoring
         # it as one would fabricate precision. No row is ever written.
         return detail("skipped")
+
+    if scope == SCOPE_POSITIONING:
+        # The POSITIONING call (V2.3) is about the SIGN of the cumulative
+        # funding rate itself, not a price return: net_return IS the realized
+        # funding sum (signed fraction of notional, positive = longs paid
+        # net), the scoreboard's direction hit rule is sign-based (up hit
+        # iff sum > 0), and no price/cost legs apply — there is no tradable
+        # return claim to charge fees against.
+        position_analysis_dt = timestamp_as_utc(analysis_as_of)
+        position_horizon_end_dt = min(
+            position_analysis_dt + timedelta(days=horizon),
+            timestamp_as_utc(now_as_of),
+        )
+        total, last_iso = _funding_window_sum(
+            instrument_id, position_analysis_dt, position_horizon_end_dt
+        )
+        if total is None:
+            outcome_id = write_outcome(
+                prediction_id,
+                run_id,
+                horizon,
+                status="incomplete",
+                legs_missing=[LEG_FUNDING_WINDOW],
+                regime_id=item.get("regime_id"),
+            )
+            return detail(
+                "incomplete", legs_missing=(LEG_FUNDING_WINDOW,), outcome_id=outcome_id
+            )
+        outcome_id = write_outcome(
+            prediction_id,
+            run_id,
+            horizon,
+            status="complete",
+            funding_pnl=total,
+            net_return=total,
+            outcome_available_at=last_iso,
+            regime_id=item.get("regime_id"),
+        )
+        return detail("complete", net_return=total, outcome_id=outcome_id)
 
     is_perp = (
         instrument_class in _PERP_INSTRUMENT_CLASSES or asset_type == "crypto_perp"

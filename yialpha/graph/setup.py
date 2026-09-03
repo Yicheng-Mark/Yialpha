@@ -16,6 +16,7 @@ from yialpha.agents import (
     create_neutral_debator,
     create_news_analyst,
     create_portfolio_manager,
+    create_positioning_analyst,
     create_research_manager,
     create_sentiment_analyst,
     create_trader,
@@ -105,6 +106,13 @@ class GraphSetup:
 
         analyst_factories = {
             "market": lambda: create_market_analyst(self.quick_thinking_llm),
+            # V2.3 positioning split: present in the factory map whenever a
+            # caller selects "positioning" (the CLI/batch filters do so only
+            # when the positioning_split flag is on AND the asset is
+            # crypto_perp). The node itself re-checks the gates at runtime.
+            "positioning": lambda: create_positioning_analyst(
+                self.quick_thinking_llm
+            ),
             "social": lambda: create_sentiment_analyst(self.quick_thinking_llm),
             "news": lambda: create_news_analyst(self.quick_thinking_llm),
             "fundamentals": lambda: create_fundamentals_analyst(self.quick_thinking_llm),

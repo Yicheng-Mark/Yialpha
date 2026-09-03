@@ -92,6 +92,10 @@ class AgentState(MessagesState):
 
     # research step
     market_report: Annotated[str, "Report from the Market Analyst"]
+    # V2.3 positioning split (flag-gated; key exists only on runs whose graph
+    # carried the positioning analyst). Not read downstream yet — V2.4's
+    # portfolio control consumes it.
+    positioning_report: Annotated[str, "Report from the Positioning Analyst"]
     sentiment_report: Annotated[str, "Report from the Sentiment Analyst"]
     news_report: Annotated[
         str, "Report from the News Researcher of current world affairs"

@@ -650,11 +650,20 @@ def _last_close_hint(symbol: str, end_date: str) -> float | None:
         return None
 
 
-def _component_footer(bundle: dict[str, Any]) -> list[str]:
+def _component_footer(
+    bundle: dict[str, Any], keys: tuple[str, ...] | None = None
+) -> list[str]:
     """One line per non-ok component — a missing enrichment never reads as
-    a calm market."""
+    a calm market.
+
+    ``keys`` restricts the footer to the named top-level components (the
+    V2.3 positioning split renders only its own components' statuses in each
+    half); ``None`` covers every component (the unsplit block's footer).
+    """
     notes: list[str] = []
     for key, comp in bundle.items():
+        if keys is not None and key not in keys:
+            continue
         if not isinstance(comp, dict) or comp.get("status") == STATUS_OK:
             continue
         status = comp.get("status", STATUS_UNAVAILABLE)
@@ -670,20 +679,37 @@ def _component_footer(bundle: dict[str, Any]) -> list[str]:
     return notes
 
 
-def render_perp_bundle_block(bundle: dict[str, Any]) -> str:
-    """Render the bundle as a compact advisory markdown block.
+#: Top-level bundle components rendered by the PRICE half of the split (the
+#: market analyst's block under positioning_split): the three kline price
+#: bases and their derived change/ATR/coverage lines.
+_PRICE_SECTION_KEYS = ("prices",)
 
-    Deterministic numbers only — no model prose. Prices always carry their
-    basis (last/mark/index) and the block footer discloses every component
-    that is not ok."""
-    symbol = bundle.get("symbol", "?")
-    as_of = bundle.get("as_of", "?")
+#: Top-level bundle components rendered by the POSITIONING half of the split
+#: (the positioning analyst's block): carry, positioning, flow, book and
+#: basis — everything that describes WHO is in the trade, not WHERE the
+#: price is.
+_POSITIONING_SECTION_KEYS = (
+    "funding",
+    "open_interest",
+    "long_short",
+    "taker",
+    "spot_basis",
+    "depth_bands",
+    "adl",
+    "premium_snapshot",
+)
+
+#: Both halves together — the unsplit market bundle's full component set.
+_ALL_SECTION_KEYS = _PRICE_SECTION_KEYS + _POSITIONING_SECTION_KEYS
+
+
+def _price_lines(bundle: dict[str, Any]) -> list[str]:
+    """Price-basis section lines (last/mark/index + bases + ATR + coverage)."""
     prices = bundle.get("prices") or {}
     last = prices.get("last") or {}
     mark = prices.get("mark") or {}
     index = prices.get("index") or {}
     lines: list[str] = [
-        f"### Perp Market Bundle — {symbol} (deterministic prefetch, as of {as_of})",
         "- **Price bases**: last "
         f"{_fmt(last.get('close'))}"
         + (f" (1d {_pct(last.get('chg_1d'))}, 7d {_pct(last.get('chg_7d'))})" if last else " (unavailable)")
@@ -711,7 +737,12 @@ def render_perp_bundle_block(bundle: dict[str, Any]) -> str:
             f"- **Kline coverage**: {cov['rows']} daily rows "
             f"{cov['start']} → {cov['end']}"
         )
+    return lines
 
+
+def _positioning_lines(bundle: dict[str, Any]) -> list[str]:
+    """Positioning section lines (funding/OI/LSR/taker/basis/depth/ADL)."""
+    lines: list[str] = []
     funding = bundle.get("funding") or {}
     if funding.get("status") == STATUS_OK:
         lines.append(
@@ -806,8 +837,15 @@ def render_perp_bundle_block(bundle: dict[str, Any]) -> str:
         lines.append(
             f"- **Spot-perp basis**: capability absent — {basis.get('reason')}"
         )
+    return lines
 
-    footer = _component_footer(bundle)
+
+def _footer_lines(
+    bundle: dict[str, Any], keys: tuple[str, ...] | None
+) -> list[str]:
+    """Component-availability + historical-policy footer lines for one half."""
+    lines: list[str] = []
+    footer = _component_footer(bundle, keys)
     if footer:
         lines.append(
             "- **Component availability**: " + "; ".join(footer)
@@ -818,4 +856,59 @@ def render_perp_bundle_block(bundle: dict[str, Any]) -> str:
             "depth/ADL — are skipped by PIT policy; REST positioning "
             "retains 30 days.)"
         )
-    return "\n".join(lines)
+    return lines
+
+
+def render_perp_bundle_block(
+    bundle: dict[str, Any], *, positioning_split: bool = False
+) -> str:
+    """Render the bundle as a compact advisory markdown block.
+
+    Deterministic numbers only — no model prose. Prices always carry their
+    basis (last/mark/index) and the block footer discloses every component
+    that is not ok.
+
+    ``positioning_split=True`` (V2.3, flag-gated at the call site) renders
+    ONLY the price half: the positioning sections (funding / OI / LSR /
+    taker / depth / ADL / spot-perp basis) are carried by the Positioning
+    analyst's own block (:func:`render_positioning_block`) so no data is
+    silently lost by the split — the union of the two halves is exactly the
+    unsplit section set (pinned by tests). Default False renders the full
+    block byte-identically to the pre-split renderer.
+    """
+    symbol = bundle.get("symbol", "?")
+    as_of = bundle.get("as_of", "?")
+    lines: list[str] = [
+        f"### Perp Market Bundle — {symbol} (deterministic prefetch, as of {as_of})",
+    ]
+    lines += _price_lines(bundle)
+    if positioning_split:
+        lines.append(
+            "- (Positioning split: funding / open interest / long-short / "
+            "taker / depth / ADL / spot-perp basis are rendered by the "
+            "Positioning analyst's block, not here.)"
+        )
+        return "\n".join(
+            lines + _footer_lines(bundle, _PRICE_SECTION_KEYS)
+        )
+    lines += _positioning_lines(bundle)
+    return "\n".join(lines + _footer_lines(bundle, None))
+
+
+def render_positioning_block(bundle: dict[str, Any]) -> str:
+    """Render the POSITIONING half of the perp market bundle (V2.3).
+
+    Funding carry, open interest, the three-vantage long/short ratios, taker
+    flow, spot-perp basis, depth bands and ADL — the fabric of WHO is in the
+    trade. No price-trend/kline sections (those stay with the market
+    analyst). The footer discloses the positioning components' own
+    availability statuses only.
+    """
+    symbol = bundle.get("symbol", "?")
+    as_of = bundle.get("as_of", "?")
+    lines: list[str] = [
+        f"### Perp Positioning Bundle — {symbol} "
+        f"(deterministic prefetch, as of {as_of})",
+    ]
+    lines += _positioning_lines(bundle)
+    return "\n".join(lines + _footer_lines(bundle, _POSITIONING_SECTION_KEYS))
