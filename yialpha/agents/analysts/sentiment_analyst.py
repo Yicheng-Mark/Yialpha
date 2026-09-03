@@ -18,7 +18,7 @@ is invoked. Source POLICY is deterministic per instrument class (PR4,
     crypto-native coverage, so both are policy-off with explicit
     not-fetched placeholders (adapters remain installed for stocks);
   * tokenized-stock perps (e.g. MUUSDT) — Square on the CONTRACT side plus
-    StockTwits on the UNDERLYING equity ticker; Reddit off.
+    StockTwits and the news leg on the UNDERLYING equity ticker; Reddit off.
 
 Historical replays never see ANY social feed (they are current-snapshot
 APIs with no as-of boundary) — fail-closed placeholders instead.
@@ -204,9 +204,27 @@ def _fetch_sentiment_sources(
     """
     square_enabled = _binance_square_enabled(asset_type)
 
+    # D8: a tokenized-stock perp run must query the news leg with the
+    # UNDERLYING equity ticker — the vendor chain cannot answer the contract
+    # symbol ("MUUSDT" fails symbol normalization, yfinance returns nothing
+    # and Alpha Vantage 404s). ``stock_perp_underlying`` resolves the
+    # Yahoo-ready stock ticker (base-set validated, Yahoo aliases applied,
+    # e.g. BRKBUSDT -> BRK-B) once here, ABOVE the historical early-return
+    # so the date-bounded historical news call gets it too; pure-crypto
+    # perps resolve to None and keep the contract ticker. Social legs keep
+    # their existing ticker flow (StockTwits already resolves the underlying
+    # via _source_profile; Square and Reddit stay on the contract ticker).
+    # Same deferred-import idiom as _source_profile.
+    if asset_type == "crypto_perp":
+        from yialpha.dataflows.binance import stock_perp_underlying
+
+        news_ticker = stock_perp_underlying(ticker) or ticker
+    else:
+        news_ticker = ticker
+
     if is_historical_date(end_date):
         return (
-            _get_news_impl(ticker, start_date, end_date),
+            _get_news_impl(news_ticker, start_date, end_date),
             _HISTORICAL_STOCKTWITS_UNAVAILABLE,
             _HISTORICAL_REDDIT_UNAVAILABLE,
             _HISTORICAL_BINANCE_SQUARE_UNAVAILABLE if square_enabled else None,
@@ -221,7 +239,7 @@ def _fetch_sentiment_sources(
         # identical to the sequential path; only fetch order differs.
         with ThreadPoolExecutor(max_workers=4) as pool:
             fut_news = submit_with_context(
-                pool, _get_news_impl, ticker, start_date, end_date
+                pool, _get_news_impl, news_ticker, start_date, end_date
             )
             fut_stocktwits = (
                 submit_with_context(
@@ -251,7 +269,7 @@ def _fetch_sentiment_sources(
                 fut_square.result() if fut_square is not None else None,
             )
     return (
-        _get_news_impl(ticker, start_date, end_date),
+        _get_news_impl(news_ticker, start_date, end_date),
         fetch_stocktwits_messages(stocktwits_ticker, limit=30)
         if fetch_stocktwits
         else _CRYPTO_STOCKTWITS_OFF,
@@ -432,11 +450,26 @@ def create_sentiment_analyst(llm):
             if state.get("asset_type") == "crypto_perp"
             else SCOPE_UNDERLYING
         )
+        # D8 evidence identity: the news leg is queried with the UNDERLYING
+        # equity ticker on tokenized-stock perp runs (see
+        # _fetch_sentiment_sources), so the sentiment_news row must carry
+        # that SAME identity — symbol=MU / scope=UNDERLYING, not the
+        # contract symbol. _source_profile resolves the identical underlying
+        # expression (stock_perp_underlying(ticker) or ticker) for the
+        # square_plus_underlying profile, making stocktwits_ticker the news
+        # query target; pure-crypto perps resolve no underlying and keep the
+        # contract identity. Only the symbol/scope labels change here — the
+        # row's availability contract is owned elsewhere.
+        _news_symbol, _news_scope = (
+            (stocktwits_ticker, SCOPE_UNDERLYING)
+            if profile == "square_plus_underlying"
+            else (ticker, _evidence_scope)
+        )
         record_evidence_block(
             "sentiment_news",
             "news_data",
-            ticker,
-            _evidence_scope,
+            _news_symbol,
+            _news_scope,
             news_block,
             replayability=REPLAYABILITY_LIVE_ONLY,
         )

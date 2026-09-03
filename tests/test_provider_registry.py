@@ -55,8 +55,11 @@ def test_key_optionality():
     assert OPENAI_COMPATIBLE_PROVIDERS["openai_compatible"].key_optional is True
     assert OPENAI_COMPATIBLE_PROVIDERS["openai_compatible"].require_base_url is True
     assert OPENAI_COMPATIBLE_PROVIDERS["xai"].key_optional is False
-    # OLLAMA_BASE_URL is the only base-URL env override.
+    # Base-URL env overrides: ollama (remote server) and the GLM dual-region
+    # providers (Coding Plan keys live on a dedicated endpoint).
     assert OPENAI_COMPATIBLE_PROVIDERS["ollama"].base_url_env == "OLLAMA_BASE_URL"
+    assert OPENAI_COMPATIBLE_PROVIDERS["glm"].base_url_env == "ZHIPU_BASE_URL"
+    assert OPENAI_COMPATIBLE_PROVIDERS["glm-cn"].base_url_env == "ZHIPU_CN_BASE_URL"
 
 
 @pytest.mark.unit

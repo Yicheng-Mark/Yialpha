@@ -17,12 +17,23 @@ Shared semantics (every constraint function):
   computed on the post-candidate book.
 * ``weight`` is a SIGNED fraction of equity; exposure metrics (gross, asset
   class, single, cluster) use ``abs(weight)``.
-* Over the limit -> RESIZE with ``multiplier = limit / current`` clipped to
-  [0, 1]; at or under -> PASS with multiplier 1.0. A lone position over
-  ``max_single`` is still a RESIZE (``limit/current`` is a valid clip), NOT
+* Over the limit -> RESIZE into the UNUSED headroom, never onto the old
+  book: with ``others`` the post-replacement book's metric minus the
+  candidate's own contribution and ``contribution`` what the candidate
+  adds at the proposed weight, ``multiplier = clip((limit - others) /
+  contribution, 0, 1)`` — the resized candidate lands the book exactly on
+  the limit. At or under -> PASS with multiplier 1.0. An old book already
+  at/over the limit leaves zero headroom -> RESIZE with multiplier 0.0 and
+  reason ``book_already_over_limit`` (the risk layer shrinks the CANDIDATE,
+  never the existing book). A lone position over ``max_single`` is still a
+  RESIZE (the headroom form degenerates to ``limit / |proposed|``), NOT
   a VETO — VETO is reserved for hard refusals: non-finite inputs,
-  non-positive equity, a degenerate candidate (weight NaN/inf). The risk
-  layer never refuses a trade it can simply shrink.
+  non-positive equity, a degenerate candidate (weight NaN/inf), and a
+  candidate NO admissible size can make compliant
+  (``opposite_direction_exceeds_limit`` in :func:`directional_concentration`:
+  shrinking a weakened offsetting position only deepens the net exposure it
+  used to offset, so the trade is refused and the pre-trade book stands).
+  The risk layer never refuses a trade it can simply shrink.
 * Fail-closed: :func:`evaluate_constraints` never raises — a crashing
   constraint yields a VETO with reason ``constraint_error``.
 
@@ -64,9 +75,10 @@ class RiskDecision:
 
     ``multiplier`` is ALWAYS a finite float in [0.0, 1.0] (validated); VETO
     additionally requires exactly 0.0. ``reasons`` are stable
-    machine-readable strings (``within_limit`` / ``exceeds_limit`` / veto
-    causes / ``constraint_error``); ``metrics`` carries the post-candidate
-    metric and the limit it was judged against, under rule-specific keys.
+    machine-readable strings (``within_limit`` / ``exceeds_limit`` /
+    ``book_already_over_limit`` / veto causes / ``constraint_error``);
+    ``metrics`` carries the post-candidate metric and the limit it was
+    judged against, under rule-specific keys.
     """
 
     rule: str
@@ -177,18 +189,56 @@ def _degenerate_veto(
 
 
 def _limit_decision(
-    rule: str, metric_key: str, limit_key: str, current: float, limit: float
+    rule: str,
+    metric_key: str,
+    limit_key: str,
+    others: float,
+    contribution: float,
+    limit: float,
+    *,
+    post_metric: float | None = None,
 ) -> RiskDecision:
-    """PASS at/below the limit; RESIZE at ``limit/current`` clipped to [0,1]."""
-    metrics = {metric_key: current, limit_key: limit}
+    """Size the candidate into the UNUSED headroom, never onto the old book.
+
+    ``others`` is the post-replacement book's metric MINUS the candidate's
+    own contribution; ``contribution`` is what the candidate adds to the
+    metric at the proposed weight. A non-positive contribution adds nothing
+    and cannot be shrunk any further (the candidate is already zero), so it
+    PASSes UNCONDITIONALLY — this check must precede the at/over-limit branch
+    below, otherwise a risk-reducing CLOSE whose remaining book sits at the
+    cap is stranded as a zero-multiplier RESIZE the upstream graph will never
+    execute, even though the candidate contributes nothing the limit math
+    could clip. Otherwise, an old book already at/over the limit (tolerance
+    1e-12) pins the multiplier at 0.0 with reason ``book_already_over_limit``
+    — the risk layer shrinks the candidate, never the existing book. The
+    candidate fits whenever ``limit - others >= contribution`` (PASS, 1.0)
+    and is otherwise clipped to the headroom ratio
+    ``clip((limit - others) / contribution, 0, 1)`` — the resized candidate
+    lands the book exactly on the limit. ``post_metric`` overrides the
+    reported metric (default ``others + contribution``) for rules whose post
+    book nets below the simple sum (directional hedges).
+    """
+    if post_metric is None:
+        post_metric = others + contribution
+    metrics = {metric_key: post_metric, limit_key: limit}
     if not math.isfinite(limit):
         return _veto(rule, "non_finite_limit")
-    if current <= limit:
+    if contribution <= 0.0:
         return RiskDecision(
             rule=rule, action="PASS", multiplier=1.0, reasons=["within_limit"],
             metrics=metrics,
         )
-    multiplier = min(max(limit / current, 0.0), 1.0)
+    if others >= limit - 1e-12:
+        return RiskDecision(
+            rule=rule, action="RESIZE", multiplier=0.0,
+            reasons=["book_already_over_limit"], metrics=metrics,
+        )
+    if limit - others >= contribution:
+        return RiskDecision(
+            rule=rule, action="PASS", multiplier=1.0, reasons=["within_limit"],
+            metrics=metrics,
+        )
+    multiplier = min(max((limit - others) / contribution, 0.0), 1.0)
     return RiskDecision(
         rule=rule, action="RESIZE", multiplier=multiplier, reasons=["exceeds_limit"],
         metrics=metrics,
@@ -212,14 +262,19 @@ def global_gross(
 
     The whole-portfolio leverage cap. The candidate replaces a same-symbol
     position; gross = ``sum(abs(w))`` so a long and a short BOTH consume
-    gross (offsetting is directional exposure's job, not gross's).
+    gross (offsetting is directional exposure's job, not gross's). The
+    candidate's contribution is ``abs(proposed)``; ``others`` is the rest
+    of the book's gross — only the unused global headroom is on offer.
     """
     veto = _degenerate_veto("global_gross", candidate, snapshot)
     if veto is not None:
         return veto
     positions = _post_positions(candidate, snapshot)
-    current = sum(abs(p.weight) for p in positions)
-    return _limit_decision("global_gross", "post_gross", "max_gross", current, limits.max_gross)
+    others = sum(abs(p.weight) for p in positions if p.symbol != candidate.symbol)
+    return _limit_decision(
+        "global_gross", "post_gross", "max_gross",
+        others, abs(candidate.weight), limits.max_gross,
+    )
 
 
 def asset_class(
@@ -230,17 +285,22 @@ def asset_class(
     Groups the post-candidate book by ``instrument_class``
     (``stock_perp`` / ``pure_crypto_perp`` / ``unknown_perp``) and caps the
     candidate's own class — the stock-perp sleeve cannot quietly swallow the
-    pure-crypto sleeve's budget.
+    pure-crypto sleeve's budget. ``others`` is the same-class gross of the
+    rest of the book; the candidate only gets that class's unused headroom.
     """
     veto = _degenerate_veto("asset_class", candidate, snapshot)
     if veto is not None:
         return veto
     positions = _post_positions(candidate, snapshot)
-    current = sum(
-        abs(p.weight) for p in positions if p.instrument_class == candidate.instrument_class
+    others = sum(
+        abs(p.weight)
+        for p in positions
+        if p.symbol != candidate.symbol
+        and p.instrument_class == candidate.instrument_class
     )
     return _limit_decision(
-        "asset_class", "post_class_gross", "max_asset_class", current, limits.max_asset_class
+        "asset_class", "post_class_gross", "max_asset_class",
+        others, abs(candidate.weight), limits.max_asset_class,
     )
 
 
@@ -249,18 +309,19 @@ def single_concentration(
 ) -> RiskDecision:
     """Rule ``single_concentration``: |weight| of the candidate alone.
 
-    Post-replacement the candidate IS the symbol's position, so the metric
-    is simply ``abs(candidate.weight)``. A lone position over ``max_single``
-    is a RESIZE (``limit/current`` remains a valid clip — e.g. 0.25 over a
-    0.20 cap resizes x0.8), NEVER a VETO: shrinking is always available,
-    and VETO is reserved for degenerate inputs.
+    Post-replacement the candidate IS the symbol's position, so the rest
+    of the book contributes nothing (``others`` = 0) and the headroom form
+    degenerates to ``limit / |proposed|`` — numerically identical to the
+    old whole-book ratio. A lone position over ``max_single`` is a RESIZE
+    (e.g. 0.25 over a 0.20 cap resizes x0.8), NEVER a VETO: shrinking is
+    always available, and VETO is reserved for degenerate inputs.
     """
     veto = _degenerate_veto("single_concentration", candidate, snapshot)
     if veto is not None:
         return veto
     return _limit_decision(
-        "single_concentration", "post_single", "max_single", abs(candidate.weight),
-        limits.max_single,
+        "single_concentration", "post_single", "max_single",
+        0.0, abs(candidate.weight), limits.max_single,
     )
 
 
@@ -275,6 +336,31 @@ def directional_concentration(
     0.7 short book has only 0.0 net long at risk in this direction), and a
     book that nets the OTHER way exposes 0.0 in the candidate's direction.
     A FLAT candidate adds no direction -> metric 0.0 -> PASS.
+
+    Headroom form: ``others`` is the old book's net exposure IN the
+    candidate's direction (0.0 when the book nets the other way — a hedge
+    gets no budget credit from the exposure it offsets) and the
+    contribution is ``abs(proposed)``; the reported metric stays the true
+    post-candidate net, which nets below ``others + contribution`` when
+    the candidate is itself partially hedged.
+
+    Opposite-direction feasibility (the ACTUAL final book): the cap bounds
+    the post-candidate book's net exposure in BOTH directions, but the
+    headroom form above judges only the candidate's OWN direction. A
+    same-symbol replacement that weakens an offsetting position — a -0.10
+    short hedge re-proposed at -0.01 on a book that nets long — passes its
+    own direction at 0.0 while the final book's net LONG breaches the cap.
+    So after the own-side form, the final book's opposite-direction net
+    exposure (``max(-sign * net, 0)``) is validated too. When NO admissible
+    size can restore compliance — the candidate's weight points along its
+    own side, so every shrink moves net FURTHER toward the opposite
+    direction and even the full proposed size violates — the rule VETOs
+    with reason ``opposite_direction_exceeds_limit``: the trade is refused
+    outright (the pre-trade book, offsetting position intact, stands) and
+    the candidate is never enlarged to manufacture the hedge back. A weight
+    pointing AGAINST its declared side (side/weight disagreement — produced
+    nowhere upstream) instead GROWS the opposite exposure with size, so it
+    is resized into the opposite headroom like any other contribution.
     """
     veto = _degenerate_veto("directional_concentration", candidate, snapshot)
     if veto is not None:
@@ -286,12 +372,42 @@ def directional_concentration(
             reasons=["within_limit"],
             metrics={"post_directional": 0.0, "max_directional": limits.max_directional},
         )
-    net = sum(p.weight for p in _post_positions(candidate, snapshot))
-    current = max(sign * net, 0.0)
-    return _limit_decision(
+    positions = _post_positions(candidate, snapshot)
+    others_net = sum(p.weight for p in positions if p.symbol != candidate.symbol)
+    net = others_net + candidate.weight
+    others = max(sign * others_net, 0.0)
+    decision = _limit_decision(
         "directional_concentration", "post_directional", "max_directional",
-        current, limits.max_directional,
+        others, abs(candidate.weight), limits.max_directional,
+        post_metric=max(sign * net, 0.0),
     )
+    if decision.action == "VETO":
+        return decision
+    opp_exposure = max(-sign * net, 0.0)
+    if opp_exposure <= limits.max_directional + 1e-12:
+        return decision
+    if sign * candidate.weight > 0.0:
+        # Shrinking only deepens the opposite net; the full proposed size is
+        # the most compliant size available and it still violates -> refuse.
+        return RiskDecision(
+            rule="directional_concentration", action="VETO", multiplier=0.0,
+            reasons=["opposite_direction_exceeds_limit"],
+            metrics={
+                "post_directional": max(sign * net, 0.0),
+                "opposite_directional": opp_exposure,
+                "max_directional": limits.max_directional,
+            },
+        )
+    # Defensive: side/weight disagree, so the opposite exposure GROWS with
+    # size — shrink into the opposite headroom, keeping the tighter of the
+    # two directional multipliers.
+    opp_decision = _limit_decision(
+        "directional_concentration", "post_directional", "max_directional",
+        max(-sign * others_net, 0.0), abs(candidate.weight),
+        limits.max_directional,
+        post_metric=opp_exposure,
+    )
+    return opp_decision if opp_decision.multiplier < decision.multiplier else decision
 
 
 def correlation_cluster(
@@ -304,19 +420,23 @@ def correlation_cluster(
     is its own cluster, so this degenerates to a per-symbol SECOND cap on
     ``abs(candidate.weight)`` next to ``max_single`` (documented default —
     the tighter cap binds; real correlation grouping arrives with data).
+    ``others`` is the rest of the cluster's gross; only the cluster's
+    unused headroom is on offer.
     """
     veto = _degenerate_veto("correlation_cluster", candidate, snapshot)
     if veto is not None:
         return veto
     positions = _post_positions(candidate, snapshot)
     cluster = _cluster_id(candidate.symbol, limits.cluster_of)
-    current = sum(
+    others = sum(
         abs(p.weight)
         for p in positions
-        if _cluster_id(p.symbol, limits.cluster_of) == cluster
+        if p.symbol != candidate.symbol
+        and _cluster_id(p.symbol, limits.cluster_of) == cluster
     )
     return _limit_decision(
-        "correlation_cluster", "post_cluster", "max_cluster", current, limits.max_cluster
+        "correlation_cluster", "post_cluster", "max_cluster",
+        others, abs(candidate.weight), limits.max_cluster,
     )
 
 

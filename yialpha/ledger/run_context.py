@@ -12,10 +12,12 @@ Record-stage invariant: everything keyed off this module is fail-soft. With
 no context bound (unit tests, direct node calls) — or with the
 ``prediction_ledger`` config flag off — :func:`record_evidence_block`
 degrades to a no-op: no ledger write, no exception, and never a change to
-report/decision bytes. A ledger-side rejection (e.g. the point-in-time
-guard refusing an injection whose ``available_at`` postdates the run's
-``analysis_as_of``) is logged as a WARNING and swallowed for the same
-reason: evidence recording must never abort the run it is describing.
+report/decision bytes. A ledger-side rejection is disclosed, never silent:
+a point-in-time guard refusal (an injection whose ``available_at``
+postdates the run's ``analysis_as_of``) logs its own explicit WARNING
+naming the two timestamps, and any other ledger failure is logged with the
+traceback — for the same reason: evidence recording must never abort the
+run it is describing, but a refused injection must be visible.
 
 Evidence mapping table — every ``[EXTERNAL EVIDENCE]`` injection site this
 module serves, as (source / category / symbol / scope / replayability).
@@ -49,8 +51,9 @@ reconstructed later — one non-replayable leg is enough to break that:
   ``news_contract_digest`` / ``news_data`` / contract symbol /
   ``CONTRACT`` — ``LIVE_ONLY`` (Tavily web digest, no as-of boundary).
 * sentiment_analyst news block → ``sentiment_news`` / ``news_data`` /
-  the queried symbol / ``CONTRACT`` on perp runs else ``UNDERLYING`` —
-  ``LIVE_ONLY``.
+  underlying equity symbol / ``UNDERLYING`` on stock-perp runs
+  (company-news tier keeps its UNDERLYING identity) else the contract
+  symbol / ``CONTRACT`` — ``LIVE_ONLY``.
 * sentiment_analyst StockTwits block → ``sentiment_stocktwits`` /
   ``social`` / the cashtag symbol (the underlying equity) /
   ``UNDERLYING`` — ``LIVE_ONLY``.
@@ -197,16 +200,27 @@ def record_evidence_block(
     to one row. ``analysis_as_of`` comes from the bound context — the PIT
     guard lives in :func:`yialpha.ledger.evidence.record_evidence` and a
     violation (injection available after the run's as-of instant) is
-    logged and swallowed here, never raised into the data path.
-    ``available_at`` (V2.3, additive; ``None`` = now, the previous
-    behavior) lets a historical-capable vendor anchor its row to the
-    latest data-point timestamp instead of wall-clock fetch time. See the
-    module docstring for the site → source/replayability/scope mapping.
+    explicitly disclosed as a WARNING here — never raised into the data
+    path, and never silently swallowed.
+
+    ``available_at``: an explicit value is the caller's real data timestamp
+    (external fetched market data keeps its true availability — it is never
+    backfilled to the past to slip past the guard; a future-dated external
+    row is PIT-rejected and disclosed). ``None`` means the block is
+    RUN-DERIVED (sentiment/news digests, analysis output): it became
+    available when the run analyzed, so it defaults to the run's anchored
+    ``analysis_as_of`` — NOT wall-clock record time, which one instant after
+    the anchor on a live run would PIT-reject against the run's own clock
+    drift. See the module docstring for the site → source/replayability/
+    scope mapping.
     """
     context = current_ledger_run_context()
     if context is None:
         return
     run_id = context.run_id
+    # R4 time contract: run-derived evidence anchors to the run's as-of;
+    # explicit values pass through untouched.
+    available = available_at if available_at is not None else context.analysis_as_of
     try:
         from yialpha.dataflows.config import get_config  # local: avoid import cycle
 
@@ -226,9 +240,26 @@ def record_evidence_block(
             replayability=replayability,
             quality_status=quality_status,
             analysis_as_of=context.analysis_as_of,
-            available_at=available_at,
+            available_at=available,
         )
-    except Exception:  # noqa: BLE001 -- record stage must never abort a run
+    except Exception as exc:  # noqa: BLE001 -- record stage must never abort a run
+        from yialpha.ledger.evidence import PITEvidenceViolation
+
+        if isinstance(exc, PITEvidenceViolation):
+            # Explicit disclosure, never a silent swallow: the point-in-time
+            # guard REFUSED this block because its available_at postdates the
+            # run's anchored as-of. Evidence recording stays fail-soft (the
+            # run it describes must not abort), but the refusal is surfaced.
+            logger.warning(
+                "record_evidence_block(%s) for run %s: point-in-time guard "
+                "rejected the block (available_at %s postdates the run's "
+                "analysis_as_of %s); block not recorded",
+                source,
+                run_id,
+                available,
+                context.analysis_as_of,
+            )
+            return
         logger.warning(
             "record_evidence_block(%s) failed for run %s; block not recorded",
             source,

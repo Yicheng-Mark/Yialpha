@@ -815,6 +815,8 @@ class YiAlphaGraph:
                 or float(state.equity or 0.0)
                 or 1.0,
                 reference_price=close,
+                atr=atr,
+                funding_annualized=funding_annualized,
             )
             final_state["execution_ticket"] = ticket.model_dump()
             overlay += render_ticket_lines(ticket)
@@ -876,6 +878,89 @@ class YiAlphaGraph:
         from yialpha.ledger.run_context import current_ledger_run_context
 
         context = current_ledger_run_context()
+
+        # Fair-value bridge runs FIRST so the CANDIDATE mirror below
+        # serializes the COMPLETE ticket: the round-3e live reconciliation
+        # caught the original attach-before-bridge order writing None for
+        # underlying_target/contract_target/quote_fx/basis_snapshot/
+        # price_target_basis into the DB while the logged ticket (read back
+        # after the bridge) carried the real conversion values.
+        bridge_block = ""
+        if asset_type == "crypto_perp" and self.config.get("stock_perp_fair_value"):
+            try:
+                from yialpha.graph import routing as routing_module
+                from yialpha.perp import quote_fx as quote_fx_module
+                from yialpha.perp.fair_value import fair_value_bridge, render_bridge_block
+
+                instrument_class = (
+                    context.instrument_class if context is not None else None
+                ) or routing_module.instrument_class(asset_type, ticker)
+                if instrument_class == "stock_perp":
+                    pm_fields = final_state.get("pm_decision_fields") or {}
+
+                    def _as_float(value) -> float | None:
+                        try:
+                            return float(value) if value is not None else None
+                        except (TypeError, ValueError):
+                            return None
+
+                    underlying_target = _as_float(pm_fields.get("underlying_price_target"))
+                    if (
+                        underlying_target is None
+                        and str(pm_fields.get("price_target_currency") or "").upper() == "USD"
+                    ):
+                        # PM quoted the target on the underlying in USD directly.
+                        underlying_target = _as_float(pm_fields.get("price_target"))
+                    if underlying_target is not None:
+                        fx = quote_fx_module.usdt_usd_as_of(trade_date)
+                        mark_close = self._latest_mark_close(ticker, trade_date)
+                        current_basis = (
+                            (close - mark_close) / mark_close
+                            if close is not None and mark_close
+                            else None
+                        )
+                        result = fair_value_bridge(
+                            underlying_target,
+                            fx.rate if fx is not None else None,
+                            current_basis,
+                        )
+                        ticket.underlying_target = underlying_target
+                        ticket.price_target_basis = "last"
+                        if result.contract_target_usdt is not None:
+                            ticket.contract_target = result.contract_target_usdt
+                        if fx is not None:
+                            ticket.quote_fx = {
+                                "rate": fx.rate,
+                                "source": fx.source,
+                                "available_at": fx.available_at,
+                                "replayability": fx.replayability,
+                            }
+                        if close is not None or mark_close is not None:
+                            ticket.basis_snapshot = {
+                                "last_close": close,
+                                "mark_close": mark_close,
+                                "last_vs_mark": current_basis,
+                            }
+                        block = (
+                            "\n"
+                            + quote_fx_module.render_fx_line(fx)
+                            + "\n\n"
+                            + render_bridge_block(result)
+                            + "\n"
+                        )
+                        if fx is None:
+                            block += (
+                                "- ⚠ shadow verdict: DEGRADED_CRITICAL / NO_TRADE recorded "
+                                "(enforcement arrives with the V2.4 enforced mode)\n"
+                            )
+                        bridge_block = block
+            except Exception:  # noqa: BLE001 -- record stage must never break a run
+                logger.warning(
+                    "fair-value bridge wiring failed for %s on %s",
+                    ticker,
+                    trade_date,
+                    exc_info=True,
+                )
         if context is not None and context.run_id:
             try:
                 from yialpha.ledger.evidence import evidence_ids_for_run
@@ -915,85 +1000,117 @@ class YiAlphaGraph:
                     trade_date,
                     exc_info=True,
                 )
-        if asset_type != "crypto_perp" or not self.config.get("stock_perp_fair_value"):
-            return ""
-        try:
-            from yialpha.graph import routing as routing_module
-            from yialpha.perp import quote_fx as quote_fx_module
-            from yialpha.perp.fair_value import fair_value_bridge, render_bridge_block
+        return bridge_block
 
-            instrument_class = (
-                context.instrument_class if context is not None else None
-            ) or routing_module.instrument_class(asset_type, ticker)
-            if instrument_class != "stock_perp":
-                return ""
-            pm_fields = final_state.get("pm_decision_fields") or {}
+    def _sync_candidate_ticket(
+        self,
+        ticket,
+        decision,
+        asset_type: str,
+        side: str,
+        proposed: float,
+        *,
+        reference_price: float | None,
+        atr: float | None,
+        funding_annualized: float | None,
+    ) -> None:
+        """R1: project the authoritative candidate onto the Candidate ticket.
 
-            def _as_float(value) -> float | None:
-                try:
-                    return float(value) if value is not None else None
-                except (TypeError, ValueError):
-                    return None
+        The Candidate ticket is built from the legacy rating/target_weight
+        pair (long-only sizing), while the portfolio-control stage resolves
+        the AUTHORITATIVE side (explicit ``desired_side`` wins) and size
+        (strategy sizing, with the transitional short heuristic). This
+        rewrites the ticket's direction, proposed size, directional
+        tradeability verdict, directional ATR stop and perp leverage advisory
+        to THAT candidate, so every downstream reader — the eligibility gate,
+        the resolver write-back, the ledger mirror, replays — sees ONE
+        consistent trade object. No sizing math is re-run here: this is a
+        projection of the already-decided candidate, not a second sizing
+        layer (and never signed-Kelly).
 
-            underlying_target = _as_float(pm_fields.get("underlying_price_target"))
-            if (
-                underlying_target is None
-                and str(pm_fields.get("price_target_currency") or "").upper() == "USD"
-            ):
-                # PM quoted the target on the underlying in USD directly.
-                underlying_target = _as_float(pm_fields.get("price_target"))
-            if underlying_target is None:
-                return ""
-            fx = quote_fx_module.usdt_usd_as_of(trade_date)
-            mark_close = self._latest_mark_close(ticker, trade_date)
-            current_basis = (
-                (close - mark_close) / mark_close
-                if close is not None and mark_close
-                else None
-            )
-            result = fair_value_bridge(
-                underlying_target,
-                fx.rate if fx is not None else None,
-                current_basis,
-            )
-            ticket.underlying_target = underlying_target
-            ticket.price_target_basis = "last"
-            if result.contract_target_usdt is not None:
-                ticket.contract_target = result.contract_target_usdt
-            if fx is not None:
-                ticket.quote_fx = {
-                    "rate": fx.rate,
-                    "source": fx.source,
-                    "available_at": fx.available_at,
-                    "replayability": fx.replayability,
-                }
-            if close is not None or mark_close is not None:
-                ticket.basis_snapshot = {
-                    "last_close": close,
-                    "mark_close": mark_close,
-                    "last_vs_mark": current_basis,
-                }
-            block = (
-                "\n"
-                + quote_fx_module.render_fx_line(fx)
-                + "\n\n"
-                + render_bridge_block(result)
-                + "\n"
-            )
-            if fx is None:
-                block += (
-                    "- ⚠ shadow verdict: DEGRADED_CRITICAL / NO_TRADE recorded "
-                    "(enforcement arrives with the V2.4 enforced mode)\n"
+        The tradeability verdict is re-derived by the SAME
+        :func:`yialpha.risk.tradeability.evaluate_tradeability` gate — it
+        keys the side off the rating, so the authoritative side passes its
+        proxy rating rather than the gate being duplicated. The stop is the
+        signed ATR stop on the authoritative side; a LONG result is
+        identical to the legacy long-only stop by construction, while an
+        explicit SHORT finally carries its mirrored protection instead of
+        inheriting a long stop (or none at all).
+        """
+        from typing import Literal, cast
+
+        from yialpha.dataflows import quality as quality_module
+        from yialpha.risk.cost_model import estimate_round_trip_cost
+        from yialpha.risk.signed_math import atr_stop, signed_position
+        from yialpha.risk.tradeability import evaluate_tradeability
+        from yialpha.tickets import (
+            DEFAULT_HORIZON_DAYS,
+            TicketSide,
+            perp_ticket_numbers,
+        )
+
+        ticket.side = TicketSide(side)
+        ticket.proposed_size = float(proposed)
+        side_literal = cast(Literal["LONG", "SHORT", "FLAT"], side)
+        proxy_rating = {"LONG": "buy", "SHORT": "sell", "FLAT": "hold"}[side]
+        classification = quality_module.classify_quality(
+            quality_module.snapshot_quality(),
+            quality_module.snapshot_core_successes(),
+        )
+        cost = estimate_round_trip_cost(
+            asset_type, ticket.side.value.lower(), DEFAULT_HORIZON_DAYS,
+            funding_annualized,
+        )
+        verdict = evaluate_tradeability(
+            rating=proxy_rating,
+            target_price=ticket.target_price,
+            reference_price=reference_price,
+            cost=cost,
+            quality_tier=classification["tier"],
+        )
+        ticket.tradeability = verdict.tradeability
+        ticket.tradeability_reason = verdict.tradeability_reason
+        ticket.gross_edge = (
+            verdict.gross_edge_bps / 1e4
+            if verdict.gross_edge_bps is not None
+            else None
+        )
+        ticket.estimated_cost = cost.total_bps / 1e4
+        ticket.net_edge = (
+            verdict.net_edge_bps / 1e4
+            if verdict.net_edge_bps is not None
+            else None
+        )
+        # The legacy stop is computed only when the long-only sizing produced
+        # a weight (RiskManager.decide), so a SHORT candidate carried none.
+        # Re-arm it from the shared directional formula whenever the
+        # candidate actually enters with size.
+        # _apply_portfolio_control is callable on a bare graph (unit seams
+        # construct YiAlphaGraph.__new__) — degrade to config defaults there
+        # instead of aborting portfolio control entirely.
+        risk_manager = getattr(self, "risk_manager", None)
+        if side != "FLAT" and proposed > 0.0 and (
+            risk_manager is None
+            or getattr(risk_manager, "use_atr_stop", True)
+        ):
+            entry_for_stop = getattr(decision, "entry_price", None) or reference_price
+            atr_mult = getattr(risk_manager, "atr_mult", None)
+            if atr_mult is None:
+                atr_mult = float(self.config.get("atr_stop_mult", 2.0) or 2.0)
+            if entry_for_stop and atr and atr > 0.0:
+                ticket.stop_price = atr_stop(
+                    side_literal, float(entry_for_stop), float(atr), float(atr_mult)
                 )
-            return block
-        except Exception:  # noqa: BLE001 -- record stage must never break a run
-            logger.warning(
-                "fair-value bridge wiring failed for %s on %s",
-                ticker,
-                trade_date,
-                exc_info=True,
+        # Perp leverage/liquidation advisory follows the synced direction and
+        # size (the sign of the weight selects long/short, mirroring the
+        # overlay renderer).
+        if asset_type == "crypto_perp" and reference_price is not None:
+            entry_for_lev = getattr(decision, "entry_price", None) or reference_price
+            numbers = perp_ticket_numbers(
+                entry_for_lev, atr, proxy_rating, ticket.stop_price,
+                signed_position(side_literal, proposed),
             )
-            return ""
+            ticket.leverage = numbers[0] if numbers is not None else None
 
     def _apply_portfolio_control(
         self,
@@ -1005,6 +1122,8 @@ class YiAlphaGraph:
         asset_type: str,
         equity: float = 1.0,
         reference_price: float | None = None,
+        atr: float | None = None,
+        funding_annualized: float | None = None,
     ) -> str:
         """V2.4 Portfolio Control: candidate → snapshot → constraints → resolver.
 
@@ -1111,6 +1230,21 @@ class YiAlphaGraph:
                     self.config.get("max_single_position", 0.2) or 0.2
                 )
                 short_sizing_heuristic = True
+            # R1 — the Candidate ticket is AUTHORITATIVE: sync it to the
+            # side/size this stage actually evaluates BEFORE the constraints
+            # run. The ticket was built from the legacy rating/target_weight
+            # pair (long-only sizing), so an explicit SHORT kept
+            # proposed_size=0, no stop and a rating-derived direction that
+            # can diverge from the resolver's input. From here on the Final
+            # stage may only shrink or refuse this candidate — never
+            # introduce a direction of its own. Shadow keeps the legacy
+            # ticket untouched (diffing is the point; pinned by acceptance).
+            if mode == "enforced":
+                self._sync_candidate_ticket(
+                    ticket, decision, asset_type, side, proposed,
+                    reference_price=reference_price, atr=atr,
+                    funding_annualized=funding_annualized,
+                )
             instrument_class = routing_module.instrument_class(asset_type, ticker)
             candidate = PositionView(
                 symbol=ticker,
@@ -1214,6 +1348,12 @@ class YiAlphaGraph:
                     "snapshot_positions": [asdict(p) for p in positions],
                     "snapshot_source": snapshot_source,
                     "limits": asdict(limits),
+                    # P2 completeness: the equity the snapshot was built on
+                    # and the advisory metrics the render line claims are
+                    # "computed and recorded" — without these keys the record
+                    # alone cannot recompute the shadow decision.
+                    "equity": equity,
+                    "advisory": advisory,
                     "config": {
                         "kelly_fraction": self.config.get("kelly_fraction"),
                         "max_single_position": self.config.get(
@@ -1308,6 +1448,7 @@ class YiAlphaGraph:
                 ),
                 open_position=open_position,
                 close_existing=close_existing,
+                instrument_class=instrument_class,
             )
             final_state["portfolio_control"] = {
                 "mode": "enforced",
@@ -1860,6 +2001,10 @@ class YiAlphaGraph:
         # the quality ledger and the Tavily budget).
         from yialpha.dataflows import run_scope
 
+        # Start COLD: a prior run that ended abnormally (or whose _log_state
+        # was replaced by a stub) could leave a scope bound; ensure alone
+        # would keep serving that stale snapshot.
+        run_scope.reset_run_scope()
         run_scope.ensure_run_scope()
 
         # V2.1 record stage: bind the ledger run context (one run_id for the
@@ -1869,7 +2014,32 @@ class YiAlphaGraph:
         # state/log bytes stay identical to the pre-V2.1 behavior.
         ledger_run_id: str | None = None
         regime_run_id: str | None = None
+        # R4 time-chain unification: ONE analysis_as_of for the whole run.
+        # A historical replay keeps the date-only analysis date; a live run
+        # analyzes as-of NOW (precise UTC instant, not the bare date). Every
+        # ledger binding below — the initial run-context bind, register_run,
+        # the regime compute and the regime re-bind — reads THIS value, so
+        # the registered run row, the bound context and the regime stage can
+        # never disagree about when the run is anchored (previously the
+        # regime-success path re-derived its own precise instant while the
+        # initial bind stayed date-only, and run-derived evidence defaulted
+        # its available_at to wall clock — postdating the anchor).
+        _run_as_of = str(trade_date) if trade_date else ""
         if self.config.get("prediction_ledger"):
+            try:
+                from yialpha.dataflows.utils import is_historical_date
+                from yialpha.ledger.sqlite import utc_now_iso
+
+                if not _run_as_of or not is_historical_date(_run_as_of):
+                    _run_as_of = utc_now_iso()
+            except Exception:  # noqa: BLE001 -- record stage must never break a run
+                _run_as_of = str(trade_date) if trade_date else ""
+                logger.warning(
+                    "precise run as-of resolution failed for %s; anchoring the "
+                    "run to the date-only analysis date",
+                    company_name,
+                    exc_info=True,
+                )
             try:
                 from yialpha.agents.utils import prediction_tools as _prediction_tools
                 from yialpha.graph import routing as _routing
@@ -1884,14 +2054,14 @@ class YiAlphaGraph:
                     company_name,
                     asset_type,
                     instrument_class=_instrument_class,
-                    analysis_as_of=str(trade_date),
+                    analysis_as_of=_run_as_of,
                 )
                 register_run(
                     run_id=ledger_run_id,
                     ticker=company_name,
                     asset_type=asset_type,
                     instrument_class=_instrument_class,
-                    analysis_as_of=str(trade_date),
+                    analysis_as_of=_run_as_of,
                 )
                 # Bind the prediction capture registry in this parent context
                 # so ToolNode tasks share one buffer per run (same ContextVar
@@ -1923,11 +2093,18 @@ class YiAlphaGraph:
                     from yialpha.ledger.run_context import set_ledger_run_context
                     from yialpha.regime.compute import compute_regime_state
 
+                    # R4: the regime stage anchors to the SAME run-wide
+                    # as-of as the initial bind (precise on live runs,
+                    # date-only on historical replays) — re-deriving it here
+                    # is what let the regime-success context drift from the
+                    # registered run row. end_date stays date-only either
+                    # way (compute.py parses "%Y-%m-%d").
+                    _regime_as_of = _run_as_of
                     _regime = compute_regime_state(
                         company_name,
                         asset_type,
                         _instrument_class,
-                        str(trade_date),
+                        _regime_as_of,
                         end_date=str(trade_date),
                     )
                     if _regime is not None and _regime.regime_id:
@@ -1941,7 +2118,7 @@ class YiAlphaGraph:
                             company_name,
                             asset_type,
                             instrument_class=_instrument_class,
-                            analysis_as_of=str(trade_date),
+                            analysis_as_of=_regime_as_of,
                             regime_id=_regime.regime_id,
                         )
                         regime_run_id = _regime.regime_id
@@ -2074,6 +2251,14 @@ class YiAlphaGraph:
             from yialpha.ledger import run_context as _ledger_run_context_final
 
             _ledger_run_context_final.reset_ledger_run_context()
+            # Drop the per-run prefetch scope on EVERY exit path, not only
+            # inside _log_state: that reset is bypassed when _log_state is
+            # replaced by a stub (tests) or the run fails before logging, and
+            # a surviving scope would serve one run's live prefetch snapshot
+            # to the next run in the same context.
+            from yialpha.dataflows import run_scope as _run_scope_final
+
+            _run_scope_final.reset_run_scope()
 
     def _log_state(self, trade_date, final_state):
         """Log the final state to a JSON file.

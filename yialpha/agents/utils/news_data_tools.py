@@ -5,6 +5,24 @@ from langchain_core.tools import tool
 from yialpha.dataflows.interface import route_to_vendor
 
 
+def _vendor_ticker(ticker: str) -> str:
+    """Stock-vendor-ready ticker: a tokenized-stock perp's underlying.
+
+    The LLM-facing tools receive the contract ticker ("MUUSDT") per the
+    shared instrument-context contract, but these routes end at equity-only
+    vendors (Yahoo / Alpha Vantage) that cannot answer the contract symbol.
+    Resolve the Yahoo-ready underlying here — the same deterministic mapping
+    the sentiment/news prefetch legs apply above the tool layer — so a tool
+    call that follows the prompt still reaches real company data.
+    Pure-crypto perps and plain equities resolve to None and pass through
+    unchanged. Deferred import idiom as in sentiment_analyst (binance pulls
+    a heavy module graph).
+    """
+    from yialpha.dataflows.binance import stock_perp_underlying
+
+    return stock_perp_underlying(ticker) or ticker
+
+
 @tool
 def get_news(
     ticker: Annotated[str, "Ticker symbol"],
@@ -21,7 +39,7 @@ def get_news(
     Returns:
         str: A formatted string containing news data
     """
-    return route_to_vendor("get_news", ticker, start_date, end_date)
+    return route_to_vendor("get_news", _vendor_ticker(ticker), start_date, end_date)
 
 @tool
 def get_global_news(
@@ -57,4 +75,4 @@ def get_insider_transactions(
     Returns:
         str: A report of insider transaction data
     """
-    return route_to_vendor("get_insider_transactions", ticker)
+    return route_to_vendor("get_insider_transactions", _vendor_ticker(ticker))

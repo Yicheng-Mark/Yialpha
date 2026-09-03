@@ -6,15 +6,23 @@ These verify:
 - YIALPHA_LOG_LEVEL env var is respected
 - Third-party loggers are silenced to WARNING
 - Invalid level names raise ValueError
+- Credential redaction (R6): every record is scrubbed by a handler-level
+  fallback filter so a key concatenated anywhere upstream never reaches a sink
 """
 
 from __future__ import annotations
 
+import io
 import logging
 
 import pytest
+from rich.console import Console
 
-from yialpha.logging_config import setup_logging
+from yialpha.logging_config import (
+    CredentialRedactionFilter,
+    redact_secrets,
+    setup_logging,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -122,3 +130,118 @@ def test_explicit_overrides_env(monkeypatch):
     monkeypatch.setenv("YIALPHA_LOG_LEVEL", "WARNING")
     setup_logging("ERROR")
     assert logging.getLogger().level == logging.ERROR
+
+
+# ---------------------------------------------------------------------------
+# Credential redaction (R6): the handler-level fallback scrubber. All keys
+# below are synthetic; nothing here touches the network or a real credential.
+# ---------------------------------------------------------------------------
+
+_FAKE_KEY = "SYNTHETIC_CONFIG_KEY99"
+
+
+def _capture_output() -> io.StringIO:
+    """Route every installed RichHandler's console into a StringIO sink."""
+    stream = io.StringIO()
+    for handler in logging.getLogger().handlers:
+        if hasattr(handler, "console"):
+            handler.console = Console(file=stream, width=300, no_color=True)
+    return stream
+
+
+def test_redaction_filter_attached_to_handler():
+    """setup_logging() must attach exactly one CredentialRedactionFilter."""
+    setup_logging()
+    assert sum(
+        1
+        for h in logging.getLogger().handlers
+        for f in h.filters
+        if isinstance(f, CredentialRedactionFilter)
+    ) == 1
+
+
+def test_redaction_filter_not_duplicated_when_idempotent():
+    setup_logging()
+    setup_logging()
+    assert sum(
+        1
+        for h in logging.getLogger().handlers
+        for f in h.filters
+        if isinstance(f, CredentialRedactionFilter)
+    ) == 1
+
+
+def test_filter_redacts_configured_api_key(monkeypatch):
+    """A key pasted verbatim into a future log call is scrubbed before it
+    reaches the sink — the belt-and-braces behind the exception-side fix."""
+    monkeypatch.setenv("ALPHA_VANTAGE_API_KEY", _FAKE_KEY)
+    setup_logging("INFO")
+    stream = _capture_output()
+    logging.getLogger("yialpha.test").warning(
+        "vendor notice: your key %s is throttled", _FAKE_KEY
+    )
+    output = stream.getvalue()
+    assert _FAKE_KEY not in output
+    assert "[REDACTED]" in output
+    assert "vendor notice" in output and "throttled" in output  # semantics kept
+
+
+def test_filter_redacts_apikey_query_parameter(monkeypatch):
+    monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
+    setup_logging("INFO")
+    stream = _capture_output()
+    logging.getLogger("yialpha.test").warning(
+        "request failed: https://example.com/query?function=X&apikey=secret123&limit=5"
+    )
+    output = stream.getvalue()
+    assert "secret123" not in output
+    assert "apikey=[REDACTED]" in output
+    assert "function=X" in output  # unrelated query parts preserved
+
+
+def test_filter_redacts_key_shaped_token_but_not_benign_text(monkeypatch):
+    """A standalone 16-char letter+digit token (AV key shape) is scrubbed;
+    words, 12-char digests, and pure numbers must survive untouched."""
+    monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
+    setup_logging("INFO")
+    stream = _capture_output()
+    logging.getLogger("yialpha.test").warning(
+        "shape probe key=AB12CD34EF56GH78 digest=a1b2c3d4e5f6 "
+        "word=SECTION508ONLY count=2026090314320000"
+    )
+    output = stream.getvalue()
+    assert "AB12CD34EF56GH78" not in output
+    assert "a1b2c3d4e5f6" in output
+    assert "SECTION508ONLY" in output
+    assert "2026090314320000" in output
+
+
+def test_filter_preserves_error_semantics(monkeypatch):
+    monkeypatch.setenv("ALPHA_VANTAGE_API_KEY", _FAKE_KEY)
+    setup_logging("INFO")
+    stream = _capture_output()
+    logging.getLogger("yialpha.test").warning(
+        "Alpha Vantage rate limit exceeded: your API key %s is limited to "
+        "25 requests per day.",
+        _FAKE_KEY,
+    )
+    output = stream.getvalue()
+    assert _FAKE_KEY not in output
+    assert "rate limit exceeded" in output
+    assert "limited to 25 requests per day" in output
+    assert "[REDACTED]" in output
+
+
+def test_redact_secrets_is_idempotent():
+    once = redact_secrets(f"boom {_FAKE_KEY}", extra_secrets=(_FAKE_KEY,))
+    twice = redact_secrets(once)
+    assert _FAKE_KEY not in once
+    assert once == twice
+
+
+def test_redact_secrets_shape_layer_works_without_env(monkeypatch):
+    """Even with no key configured, a key-shaped 16-char token is caught."""
+    monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
+    out = redact_secrets("key DEADBEEF1234CAFE used")
+    assert "DEADBEEF1234CAFE" not in out
+    assert "[REDACTED]" in out

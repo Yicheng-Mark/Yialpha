@@ -509,6 +509,8 @@ def binance_klines_frame(
     interval: str = "1d",
     venue: str = "binance_perp",
     price_type: str = "last",
+    *,
+    closed_as_of: int | None = None,
 ) -> pd.DataFrame:
     """OHLCV DataFrame for a Binance pair (perp or spot), PIT-clamped.
 
@@ -520,6 +522,15 @@ def binance_klines_frame(
     round destroys them). Raises NoMarketDataError on empty windows, and
     ``current_pit_end`` clamps the end so a backtest never sees klines after
     its analysis date.
+
+    ``closed_as_of`` (epoch ms, keyword-only) additionally drops rows whose
+    closeTime (kline element 6) is strictly later, so a caller pinned to a
+    wall-clock instant never reads a candle that had not closed by then —
+    e.g. the current day's still-forming bar, which the window clamp above
+    cannot remove. The filter deliberately runs after ``_paginate_history``:
+    the closed-window memo caches raw rows, and every call filters by its
+    own ``closed_as_of``. ``None`` (the default) keeps every row, forming
+    bar included — the behavior existing callers are built on.
 
     ``price_type="mark"`` (perp only) switches the endpoint to
     ``/fapi/v1/markPriceKlines`` — the mark price Binance liquidates against —
@@ -594,6 +605,16 @@ def binance_klines_frame(
     records = []
     for k in rows:
         if not isinstance(k, list) or len(k) < 6:
+            continue
+        # D5a: k[6] is the bar's closeTime — drop candles that had not yet
+        # closed by closed_as_of (e.g. the run's pinned wall-clock), such as
+        # the current day's still-forming bar. Arrays with no element 6 pass
+        # through unfiltered, exactly as the len>=6 guard above allows.
+        if (
+            closed_as_of is not None
+            and len(k) >= 7
+            and int(k[6]) > closed_as_of
+        ):
             continue
         open_ms = int(k[0])
         records.append(

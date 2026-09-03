@@ -11,6 +11,7 @@ from langchain_openai import ChatOpenAI
 from ._timeout import resolve_timeout
 from .api_key_env import get_api_key_env
 from .base_client import BaseLLMClient, normalize_content
+from .key_pool import api_key_pool, get_pool_http_client
 from .capabilities import get_capabilities
 from .validators import validate_model
 
@@ -226,14 +227,22 @@ class ProviderSpec:
 # Single source of truth for the OpenAI-compatible provider family. Dual-region
 # providers (qwen/glm/minimax) keep separate endpoints because international and
 # China accounts cannot share credentials (#758).
+#
+# The GLM providers carry a base_url_env because Coding Plan subscriptions
+# (per-key quota, the typical multi-key pool setup) live on a DEDICATED
+# endpoint that rejects pay-as-you-go traffic and vice versa:
+#   Z.AI:       https://api.z.ai/api/coding/paas/v4/
+#   BigModel:   https://open.bigmodel.cn/api/coding/paas/v4/
+# so the spec keeps the pay-as-you-go default and Coding Plan users point
+# ZHIPU_BASE_URL / ZHIPU_CN_BASE_URL at the coding endpoint in .env.
 OPENAI_COMPATIBLE_PROVIDERS: dict[str, ProviderSpec] = {
     "openai":     ProviderSpec(use_responses_api=True),
     "xai":        ProviderSpec(base_url="https://api.x.ai/v1"),
     "deepseek":   ProviderSpec(base_url="https://api.deepseek.com", chat_class=DeepSeekChatOpenAI),
     "qwen":       ProviderSpec(base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
     "qwen-cn":    ProviderSpec(base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"),
-    "glm":        ProviderSpec(base_url="https://api.z.ai/api/paas/v4/"),
-    "glm-cn":     ProviderSpec(base_url="https://open.bigmodel.cn/api/paas/v4/"),
+    "glm":        ProviderSpec(base_url="https://api.z.ai/api/paas/v4/", base_url_env="ZHIPU_BASE_URL"),
+    "glm-cn":     ProviderSpec(base_url="https://open.bigmodel.cn/api/paas/v4/", base_url_env="ZHIPU_CN_BASE_URL"),
     "minimax":    ProviderSpec(base_url="https://api.minimax.io/v1", chat_class=MinimaxChatOpenAI),
     "minimax-cn": ProviderSpec(base_url="https://api.minimaxi.com/v1", chat_class=MinimaxChatOpenAI),
     "openrouter": ProviderSpec(base_url="https://openrouter.ai/api/v1"),
@@ -271,6 +280,18 @@ def _is_native_openai_base_url(base_url: str | None) -> bool:
     return host == "api.openai.com" or host.endswith(".openai.com")
 
 
+def _pool_streaming_enabled() -> bool:
+    """Whether pooled providers issue their LLM calls over a wire-level stream.
+
+    Default ON: see get_llm's key-pool branch for the read-timeout semantics
+    that make slow reasoning endpoints workable. YIALPHA_LLM_POOL_STREAMING=false
+    restores the non-streaming request path exactly.
+    """
+    return os.getenv("YIALPHA_LLM_POOL_STREAMING", "true").strip().lower() not in (
+        "false", "0", "no",
+    )
+
+
 class OpenAIClient(BaseLLMClient):
     """Client for OpenAI, Ollama, OpenRouter, and xAI providers.
 
@@ -296,6 +317,7 @@ class OpenAIClient(BaseLLMClient):
         llm_kwargs: dict[str, Any] = {"model": self.model}
         spec = OPENAI_COMPATIBLE_PROVIDERS.get(self.provider)
         chat_cls: type = NormalizedChatOpenAI
+        pool_client = None  # set when a key-pool provider (key_pool.py) engages
 
         if spec is not None:
             chat_cls = spec.chat_class
@@ -317,9 +339,33 @@ class OpenAIClient(BaseLLMClient):
 
             # API key: required unless key_optional; keyless local servers get a
             # placeholder. The env-var name is the single source in api_key_env.
+            # Key-pool providers (GLM Coding Plan, see key_pool.py) instead get
+            # a rotating transport: ChatOpenAI still needs one key for its own
+            # validation, but the Authorization header is decided per request.
             api_key_env = get_api_key_env(self.provider)
             api_key = os.environ.get(api_key_env) if api_key_env else None
-            if api_key:
+            pool_client = get_pool_http_client(self.provider)
+            if pool_client is not None:
+                pool = api_key_pool(self.provider)
+                llm_kwargs["api_key"] = pool[0]
+                llm_kwargs["http_client"] = pool_client
+                # Wire-level streaming for pooled providers: reasoning models
+                # behind slow endpoints (GLM Coding Plan measured ~40 tok/s
+                # with minutes-long analyst-scale generations) exceed any
+                # sane read timeout in NON-streaming mode, where the read
+                # timeout bounds the TOTAL response time. Streaming keeps
+                # invoke()'s aggregated-message semantics but applies the
+                # read timeout per chunk, so a continuously-generating call
+                # never trips it. Opt out with YIALPHA_LLM_POOL_STREAMING=false.
+                if _pool_streaming_enabled():
+                    llm_kwargs["streaming"] = True
+                logger.info(
+                    "key_pool: %s active with %d key(s) — round-robin per "
+                    "request (401/403 drops a key for the process, 429 cools "
+                    "it down); streaming=%s",
+                    self.provider, len(pool), llm_kwargs.get("streaming", False),
+                )
+            elif api_key:
                 llm_kwargs["api_key"] = api_key
             elif spec.key_optional:
                 llm_kwargs["api_key"] = spec.placeholder_key
@@ -345,6 +391,17 @@ class OpenAIClient(BaseLLMClient):
             if key == "reasoning_effort" and not _supports_reasoning_effort(self.model):
                 continue
             llm_kwargs[key] = self.kwargs[key]
+
+        # A key-pool transport beats the generic keepalive http_client that
+        # _get_provider_kwargs may have forwarded: the pool client is itself a
+        # shared keepalive client (one per provider), and without it the
+        # rotating auth — the whole point of the pool — would be dropped.
+        if pool_client is not None and llm_kwargs.get("http_client") is not pool_client:
+            logger.debug(
+                "key_pool: replacing forwarded http_client with the rotating "
+                "pool client for provider %s", self.provider,
+            )
+            llm_kwargs["http_client"] = pool_client
 
         # Read-timeout safety net (shared with all LLM clients). ChatOpenAI has
         # no default read timeout, so a half-open socket blocks forever; setting

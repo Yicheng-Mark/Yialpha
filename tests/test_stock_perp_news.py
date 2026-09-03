@@ -19,22 +19,34 @@ tests pin:
     message, never the system prompt),
   * the sentiment-side requirement shipped with this change: an equity perp
     run queries Binance Square with the PERP symbol (the existing crypto
-    parametrize in test_sentiment_fetch.py covers pure-crypto perps).
+    parametrize in test_sentiment_fetch.py covers pure-crypto perps),
+  * the sentiment-side news-leg fix (D8): an equity perp run hands the news
+    vendor chain the UNDERLYING equity ticker — the vendor chain cannot
+    answer the contract symbol — on both the sequential and parallel paths,
+  * the sentiment-side evidence-identity fix (D8 follow-up): the
+    ``sentiment_news`` evidence row carries that same UNDERLYING identity
+    (symbol=MU / scope=UNDERLYING), not the contract symbol — while the
+    contract-side legs (Reddit, Binance Square) and a pure-crypto perp's
+    news row keep the contract identity.
 
 Everything runs with ZERO network: the symbol resolver is cache-or-seed by
 design, and every fetch seam is mocked.
 """
 
+import contextlib
 import unittest
 from unittest import mock
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
 import yialpha.agents.analysts.news_analyst as news
 import yialpha.agents.analysts.sentiment_analyst as sent
+import yialpha.agents.utils.news_data_tools as news_tools
 from yialpha.agents.analysts.news_analyst import create_news_analyst
 from yialpha.dataflows import config as cfgmod
+from yialpha.ledger.models import SCOPE_CONTRACT, SCOPE_UNDERLYING
 
 
 class _PromptCaptureLLM(Runnable):
@@ -297,6 +309,232 @@ class EquityPerpSquareGuardTests(unittest.TestCase):
         # Square is queried with the perp symbol; as_of anchors the recency
         # window to the run's trade date.
         self.assertEqual(square_calls, [("MUUSDT", "2026-01-08")])
+
+
+class StockPerpNewsUnderlyingTickerTests(unittest.TestCase):
+    """The news vendor chain receives the UNDERLYING equity ticker.
+
+    D8: the sentiment news leg used to receive the CONTRACT symbol
+    ("MUUSDT"), which the vendor chain cannot answer — route_to_vendor's
+    symbol normalization rejects it, yfinance returns nothing and Alpha
+    Vantage 404s. Both fetch paths (sequential and the opt-in parallel
+    pool) must hand the vendor the underlying equity ticker instead. The
+    gate keys on ``asset_type == "crypto_perp"`` — the CLI AssetType value
+    equity-perp runs actually carry ("stock_perp" is the derived
+    instrument_class label, which never rides state["asset_type"]).
+    """
+
+    # ``-m unit`` selects only marked tests, and this file's legacy cases
+    # carry no marker -- the new test opts in explicitly so the mandated
+    # unit-filtered run exercises it.
+    @pytest.mark.unit
+    def test_stock_perp_news_vendor_receives_underlying_ticker(self):
+        news_calls = []
+
+        def fake_impl(ticker, start_date, end_date):
+            news_calls.append((ticker, start_date, end_date))
+            return "NEWS"
+
+        def run_fetch(parallel):
+            with (
+                mock.patch.object(sent, "_get_news_impl", side_effect=fake_impl),
+                mock.patch.object(
+                    sent, "fetch_stocktwits_messages", lambda *a, **k: "STOCKTWITS"
+                ),
+                mock.patch.object(sent, "fetch_reddit_posts", lambda *a: "REDDIT"),
+                mock.patch.object(
+                    sent, "fetch_binance_square_block", lambda *a, **k: "SQUARE"
+                ),
+                mock.patch.object(sent, "is_historical_date", lambda _d: False),
+                mock.patch.object(sent, "_SENTIMENT_PARALLEL_FETCH", parallel),
+            ):
+                return sent._fetch_sentiment_sources(
+                    "MUUSDT", "2026-01-01", "2026-01-08", asset_type="crypto_perp"
+                )
+
+        sequential = run_fetch(parallel=False)
+        parallel = run_fetch(parallel=True)
+        self.assertEqual(sequential[0], "NEWS")
+        self.assertEqual(parallel[0], "NEWS")
+        # Both paths query the vendor chain with the UNDERLYING equity
+        # ticker (not the contract symbol), date bounds passed through.
+        self.assertEqual(
+            news_calls, [("MU", "2026-01-01", "2026-01-08")] * 2
+        )
+
+
+class SentimentNewsEvidenceIdentityTests(unittest.TestCase):
+    """The sentiment_news evidence row carries the news query's identity.
+
+    D8 follow-up: the vendor chain is queried with the UNDERLYING equity
+    ticker on tokenized-stock perp runs, so the ``sentiment_news`` evidence
+    row must record that SAME identity — symbol=MU / scope=UNDERLYING, not
+    the contract symbol/scope (an evidence row is the ledger's record of
+    WHAT the analyst saw; a "MUUSDT"-labeled company-news row misattributes
+    the underlying's news flow to the contract). The patch shape mirrors the
+    offline review probe (``_source_profile`` stubbed to the
+    square_plus_underlying profile, the resolver stubbed at its source
+    module for the fetch leg). Contract-side legs keep the contract
+    identity, and a pure-crypto perp (no resolvable underlying) keeps it
+    for news too.
+    """
+
+    def _capture(self, state, *, source_profile=None):
+        """Run the full sentiment node with every seam mocked.
+
+        Returns the recorded ``record_evidence_block`` rows as dicts. When
+        ``source_profile`` is given, ``sent._source_profile`` is stubbed to
+        it (probe-mirror); otherwise the real policy runs.
+        """
+        rows = []
+
+        def fake_record(source, category, symbol, scope, *args, **kwargs):
+            rows.append(
+                {"source": source, "category": category,
+                 "symbol": symbol, "scope": scope}
+            )
+
+        patches = [
+            mock.patch.object(sent, "bind_structured", return_value=None),
+            mock.patch.object(
+                sent, "invoke_structured_or_freetext", return_value="MOCK REPORT"
+            ),
+            mock.patch.object(sent, "_get_news_impl", lambda *a: "NEWS"),
+            mock.patch.object(
+                sent, "fetch_stocktwits_messages", lambda *a, **k: "STOCKTWITS"
+            ),
+            mock.patch.object(sent, "fetch_reddit_posts", lambda *a: "REDDIT"),
+            mock.patch.object(
+                sent, "fetch_binance_square_block", lambda *a, **k: "SQUARE"
+            ),
+            mock.patch.object(sent, "is_historical_date", lambda _d: False),
+            mock.patch.object(sent, "_SENTIMENT_PARALLEL_FETCH", False),
+            mock.patch.object(
+                sent, "record_evidence_block", side_effect=fake_record
+            ),
+            mock.patch(
+                "yialpha.dataflows.binance.stock_perp_underlying",
+                return_value="MU",
+            ),
+        ]
+        if source_profile is not None:
+            patches.append(
+                mock.patch.object(
+                    sent, "_source_profile", return_value=source_profile
+                )
+            )
+        with contextlib.ExitStack() as stack:
+            for patcher in patches:
+                stack.enter_context(patcher)
+            sent.create_sentiment_analyst(_PromptCaptureLLM())(state)
+        return {row["source"]: row for row in rows}
+
+    def test_stock_perp_news_evidence_carries_underlying_identity(self):
+        evidence = self._capture(
+            _state("MUUSDT"), source_profile=("square_plus_underlying", "MU"),
+        )
+        news_row = evidence["sentiment_news"]
+        self.assertEqual(news_row["symbol"], "MU")
+        self.assertEqual(news_row["scope"], SCOPE_UNDERLYING)
+        # The StockTwits row was already underlying-identified; the
+        # contract-side legs keep the contract identity.
+        self.assertEqual(evidence["sentiment_stocktwits"]["symbol"], "MU")
+        self.assertEqual(
+            evidence["sentiment_stocktwits"]["scope"], SCOPE_UNDERLYING
+        )
+        self.assertEqual(evidence["sentiment_reddit"]["symbol"], "MUUSDT")
+        self.assertEqual(evidence["sentiment_reddit"]["scope"], SCOPE_CONTRACT)
+        self.assertEqual(evidence["binance_square"]["symbol"], "MUUSDT")
+        self.assertEqual(evidence["binance_square"]["scope"], SCOPE_CONTRACT)
+
+    def test_pure_crypto_perp_news_evidence_keeps_contract_identity(self):
+        # No resolvable underlying: the news row stays contract-scoped
+        # (real source policy runs — BTCUSDT resolves no equity underlying).
+        evidence = self._capture(_state("BTCUSDT"))
+        news_row = evidence["sentiment_news"]
+        self.assertEqual(news_row["symbol"], "BTCUSDT")
+        self.assertEqual(news_row["scope"], SCOPE_CONTRACT)
+
+
+class GenericNewsToolRoutingTests(unittest.TestCase):
+    """The LLM-facing generic tools map stock-perp tickers before vendors.
+
+    Shadow round 2 finding: the deterministic prefetch legs already query
+    the UNDERLYING, but the LLM can still call the generic ``get_news`` /
+    ``get_insider_transactions`` tools with the contract ticker (the shared
+    instrument context demands the exact contract symbol), and those routes
+    end at equity-only vendors (Yahoo / Alpha Vantage) that cannot answer
+    "MUUSDT". The fix resolves the Yahoo-ready underlying INSIDE the tool
+    entry, so a prompt-compliant tool call still reaches real company data.
+    These tests pin the routing matrix: stock-perp -> underlying, pure-crypto
+    perp and plain equity -> unchanged. Zero network: the resolver is stubbed
+    at its source module and the vendor router is an in-memory spy (probe
+    mirrors the review's offline reproduction).
+    """
+
+    def _vendor_calls(self, tool_fn, kwargs, underlying):
+        calls = []
+
+        def spy(*args):
+            calls.append(args)
+            return "MOCK"
+
+        with (
+            mock.patch.object(news_tools, "route_to_vendor", side_effect=spy),
+            mock.patch(
+                "yialpha.dataflows.binance.stock_perp_underlying",
+                return_value=underlying,
+            ),
+        ):
+            tool_fn.invoke(kwargs)
+        return calls
+
+    def test_get_news_maps_stock_perp_to_underlying(self):
+        calls = self._vendor_calls(
+            news_tools.get_news,
+            {"ticker": "MUUSDT", "start_date": "2026-08-27",
+             "end_date": "2026-09-03"},
+            underlying="MU",
+        )
+        self.assertEqual(
+            calls, [("get_news", "MU", "2026-08-27", "2026-09-03")]
+        )
+
+    def test_get_news_keeps_pure_crypto_contract_ticker(self):
+        calls = self._vendor_calls(
+            news_tools.get_news,
+            {"ticker": "BTCUSDT", "start_date": "2026-08-27",
+             "end_date": "2026-09-03"},
+            underlying=None,
+        )
+        self.assertEqual(
+            calls, [("get_news", "BTCUSDT", "2026-08-27", "2026-09-03")]
+        )
+
+    def test_get_news_keeps_plain_equity_ticker(self):
+        calls = self._vendor_calls(
+            news_tools.get_news,
+            {"ticker": "MU", "start_date": "2026-08-27",
+             "end_date": "2026-09-03"},
+            underlying=None,
+        )
+        self.assertEqual(calls, [("get_news", "MU", "2026-08-27", "2026-09-03")])
+
+    def test_get_insider_transactions_maps_stock_perp_to_underlying(self):
+        calls = self._vendor_calls(
+            news_tools.get_insider_transactions,
+            {"ticker": "MUUSDT"},
+            underlying="MU",
+        )
+        self.assertEqual(calls, [("get_insider_transactions", "MU")])
+
+    def test_get_insider_transactions_keeps_plain_equity_ticker(self):
+        calls = self._vendor_calls(
+            news_tools.get_insider_transactions,
+            {"ticker": "MU"},
+            underlying=None,
+        )
+        self.assertEqual(calls, [("get_insider_transactions", "MU")])
 
 
 if __name__ == "__main__":

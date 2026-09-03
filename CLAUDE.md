@@ -3,7 +3,7 @@
 AI 多智能体量化投资框架（前身 TradingAgents v0.3.0 fork，已于 2026-06-27 彻底重命名为 YiAlpha）。
 
 - **GitHub**：https://github.com/Yicheng-Mark/Yialpha
-- **环境**：Windows 11 + git-bash，DeepSeek API
+- **环境**：Windows 11 + git-bash，GLM Coding Plan API（BigModel 国内端点）
 
 ## 命名约定（已统一）
 
@@ -27,12 +27,14 @@ AI 多智能体量化投资框架（前身 TradingAgents v0.3.0 fork，已于 20
 
 ## 模型偏好
 
-DeepSeek 两档分工（2026-07-05 起，原「一律 v4-pro」已废弃——单 ticker 墙钟 ~20min 太慢）：
+GLM 两档分工（2026-09-03 从 DeepSeek 切到 GLM Coding Plan，BigModel 国内 coding 端点 + 三 key 池轮换；两档哲学不变）：
 
-- **deep 通道（Research Manager / Portfolio Manager）用 `deepseek-v4-pro`** —— 重裁决，推理深度决定质量。
-- **quick 通道（4 分析师 / Bull-Bear 辩论 / 风控三方辩论 / Trader / 反思 / 信号提取）用 `deepseek-v4-flash`** —— 轻量多轮，速度优先；墙钟降到 ~8-10min。
+- **deep 通道（Research Manager / Portfolio Manager）用 `glm-5.3`** —— 重裁决，推理深度决定质量。
+- **quick 通道（4 分析师 / Trader / 反思 / 信号提取）+ 辩论层（Bull-Bear / 风控三方辩论，`YIALPHA_DEBATE_LLM`）用 `glm-5.3-flash`** —— 轻量多轮，速度优先；coding plan 按套餐限额（并发/每 5h 提示数），flash 层不占旗舰并发额度。
 
-切换只改 `.env` 的 `YIALPHA_QUICK_THINK_LLM`（第 8 行）。`capabilities.py` 仍登记 pro/flash 两模型，不要误删。
+**Key 池**（`yialpha/llm_clients/key_pool.py`）：`ZHIPU_CN_API_KEYS` 三把 key，**每个请求轮流取下一把活 key**（401/403 该 key 本进程内踢出；429 冷却 `YIALPHA_LLM_KEY_COOLDOWN_S` 秒默认 120 后回归）。coding plan 端点 `ZHIPU_CN_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4/` 与按量端点不通用。单 key（仅 `ZHIPU_CN_API_KEY`）时池不启用，行为与旧版字节等价。
+
+切回 DeepSeek 需在 `.env` 重配 provider/模型并重新填 key（旧 key 已于 2026-09-03 删除）。`capabilities.py` 仍登记 deepseek pro/flash 两模型，不要误删。
 
 ## 铁律
 
@@ -45,7 +47,7 @@ DeepSeek 两档分工（2026-07-05 起，原「一律 v4-pro」已废弃——�
 | 开关（env） | 默认 | 作用 | 备注 / 产物 |
 |---|---|---|---|
 | `YIALPHA_LLM_TIMEOUT_S` | off（未设；生产建议 120） | 单次 LLM 读超时；半开连接 → `APITimeoutError` → SDK 内置重试恢复 | `openai_client.py` 在线读；消除偶发 30min 卡死。默认 OFF 会在首次调用时发出一次性警告 |
-| `YIALPHA_HTTP_KEEPALIVE` | true（已设） | 进程级共享 `httpx.Client`，复用 TLS/SOCKS5 连接 | 仅 OpenAI 兼容 provider；DeepSeek 直连适用 |
+| `YIALPHA_HTTP_KEEPALIVE` | true（已设） | 进程级共享 `httpx.Client`，复用 TLS/SOCKS5 连接 | 仅 OpenAI 兼容 provider；key 池生效时由池的轮换 client 接管（同样是共享 keepalive，见「模型偏好」） |
 | `YIALPHA_LLM_MAX_RETRIES` | 2（= langchain 默认，等价） | 单调用重试次数；抖动期可调低 | 默认值与历史字节一致；外层靠 `run_robust` 看门狗兜底 |
 | `YIALPHA_LLM_CACHE` | false | per-call LLM 响应磁盘缓存（langchain 全局 `set_llm_cache` + `llm_clients/response_cache.py` `DiskLLMCache`）：相同 (model+prompt+temperature+绑定 tools/结构化 schema) 回放缓存的 `ChatGeneration` 而非重调模型 | 默认关=无缓存无 I/O（字节等价）；迭代重跑同一 smoke/单次分析省中间 ~11 个 agent 调用计费；产物 `~/.yialpha/cache/llm_responses/`。**勿与 `run_analyst_parallel_ab.py` / `run_baseline --full` DSR 同用**——会压扁温度>0 多 run 分布；回测整图重跑已由 `backtest/cache.py` DecisionCache 覆盖。**`run_robust.py` 默认为自己的运行开**（`setdefault` 尊重 env 显式值）：重跑回放已完成节点的 LLM 生成、卡死节点重跑 = hang 恢复语义，省整图重计费；run_robust 是 live 单配置分析、不触达上述分布 caveat；`--no-llm-cache` 关 |
 | `YIALPHA_NODE_PERF_TELEMETRY` | false | 节点级墙钟 + token 遥测（包装每个节点 handler） | 产物 `node_perf_<date>.json`（紧邻 `full_states_log`）；`run_baseline --profile` 一键开。注：`ToolNode` 不包装（Runnable 非 plain callable） |
@@ -146,19 +148,19 @@ IC 剪枝结论的**真实落地路径**（此前 `prune_indicators_cli.py --sug
 
 ## 运行规范
 
-- **必须先 `cd` 到项目根再跑**：`yialpha/__init__.py` 用 `load_dotenv(usecwd=True)` 注入 `HTTP_PROXY`/`NO_PROXY`/`DEEPSEEK_API_KEY`；在别处裸跑会 DNS 解析失败 / 缺 key。
-- **跑 ≥1 个 ticker 一律优先 `scripts/run_robust.py`**（per-ticker 独立子进程 + 看门狗 + OS 级强杀重跑），别裸跑 in-process batch——VPN / DeepSeek mid-response 卡死在进程内不可恢复。
+- **必须先 `cd` 到项目根再跑**：`yialpha/__init__.py` 用 `load_dotenv(usecwd=True)` 注入 `HTTP_PROXY`/`NO_PROXY`/`ZHIPU_CN_API_KEYS`；在别处裸跑会 DNS 解析失败 / 缺 key。
+- **跑 ≥1 个 ticker 一律优先 `scripts/run_robust.py`**（per-ticker 独立子进程 + 看门狗 + OS 级强杀重跑），别裸跑 in-process batch——VPN / LLM mid-response 卡死在进程内不可恢复。
   ```bash
   python scripts/run_robust.py --tickers SNDK INTC --date 2026-07-01 \
     --workers 2 --per-ticker-timeout 1800 --max-attempts 3
   ```
-- **单 ticker 墙钟 ~8-10 分钟**（quick=`deepseek-v4-flash` / deep=`deepseek-v4-pro` 分工后；原「一律 pro」时为 ~20min）。规划按 ≥10 min/ticker 估。
-- **DeepSeek 直连偶发 APIConnectionError / DNS 瞬时失败**属正常抖动：对失败 ticker 单独 `python scripts/run_batch.py --tickers <T> --date <D>` 重跑即可恢复。
+- **单 ticker 墙钟 ~8-10 分钟**（flash/旗舰两档分工；DeepSeek 时代实测值，GLM 量级相近）。规划按 ≥10 min/ticker 估。
+- **LLM 直连偶发 APIConnectionError / DNS 瞬时失败**属正常抖动：对失败 ticker 单独 `python scripts/run_batch.py --tickers <T> --date <D>` 重跑即可恢复。
 - 报告产物：`~/.yialpha/logs/reports/<TICKER>_<ts>/`；逐 ticker 完成态看 `~/.yialpha/logs/<TICKER>/YiAlphaStrategy_logs/full_states_log_<date>.json`（完成才落盘，可作进度信号）。
 
 ## 环境（已验证可用，别再重复诊断）
 
-- DeepSeek key 有效，**走直连**：`.env` 里 `NO_PROXY=api.deepseek.com`。可用模型 `deepseek-v4-pro` / `deepseek-v4-flash`。
+- GLM Coding Plan 三把 key 有效（2026-09-03 实测），**走直连**：`.env` 里 `NO_PROXY=open.bigmodel.cn`。端点 `ZHIPU_CN_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4/`（coding plan 专用）。可用模型 `glm-5.3` / `glm-5.3-flash`。
 - yfinance / 行情 / 财报必须经 `socks5h://127.0.0.1:1080`（SOCKS5 代理，FLASH-CAT VPN）。代理一断 → 数据抓取永久挂起。
 - **Windows 控制台是 GBK(cp936)**，打印 ✅/❌ 会 `UnicodeEncodeError`；入口脚本顶部须 `sys.stdout.reconfigure(utf-8)`，兜底用 `PYTHONUTF8=1`。
 - Reddit RSS 429、`FRED_API_KEY not set` 是**非致命降级**，不影响评级输出，不用装 FRED key。

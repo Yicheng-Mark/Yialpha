@@ -16,6 +16,7 @@ off; tests below opt in per case.
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -38,7 +39,12 @@ from yialpha.ledger.sqlite import get_connection, ledger_exists
 from yialpha.ledger.tickets_mirror import ticket_for_run
 from yialpha.perp.quote_fx import QuoteFxResult
 
-_TRADE_DATE = "2026-09-03"
+# Live-run anchoring (precise UTC instant) applies only when the trade date
+# is NOT historical — and is_historical_date compares against the LOCAL
+# today, so this test must use the same local "today". A hardcoded date
+# rots: on 2026-09-04 the original "2026-09-03" turned historical and the
+# run registered a date-only anchor, failing the "T"-in-anchor asserts.
+_TRADE_DATE = date.today().isoformat()
 
 
 def _make_graph(tmp_path, **config_over) -> YiAlphaGraph:
@@ -112,7 +118,13 @@ def test_run_graph_binds_run_id_and_registers_run(tmp_path):
     assert row is not None
     assert row["ticker"] == "MUUSDT"
     assert row["asset_type"] == "crypto_perp"
-    assert row["analysis_as_of"] == _TRADE_DATE
+    # Live runs bind the precise UTC as-of (R4 time contract); only
+    # historical replays keep the date-only form. The instant's calendar
+    # date may differ from the local trade date around midnight (UTC+8),
+    # so assert the precise-UTC form itself, not a date-prefix match.
+    anchor = row["analysis_as_of"]
+    assert "T" in anchor and anchor.endswith("+00:00")
+    assert datetime.fromisoformat(anchor).tzinfo is not None
     assert row["instrument_class"] is not None
     # The finally-block drops the context — a later run in this context
     # cannot attribute anything to the finished run.
@@ -275,6 +287,57 @@ def test_bridge_populates_stock_perp_ticket(tmp_path, monkeypatch):
     assert "Fair Value Bridge (USD → USDT contract target)" in md
     assert "USDT/USD fx: 0.999300" in md
     assert "shadow verdict" not in md
+
+
+@pytest.mark.unit
+def test_bridge_fields_land_in_db_mirror(tmp_path, monkeypatch):
+    """Round-3e live regression: the CANDIDATE mirror must serialize the
+    ticket AFTER the fair-value bridge fills its conversion fields. The
+    original attach-before-bridge order wrote None for
+    underlying_target / contract_target / quote_fx / basis_snapshot into
+    the tickets table while the logged ticket carried the real values, so
+    the live reconciliation's logged_ticket_equals_db_mirror check failed
+    for the stock-perp sample."""
+    monkeypatch.setattr(
+        "yialpha.graph.routing.instrument_class", lambda a, t: "stock_perp"
+    )
+    monkeypatch.setattr("yialpha.perp.quote_fx.usdt_usd_as_of", _fx_ok)
+    g = _make_graph(tmp_path, stock_perp_fair_value=True)
+    monkeypatch.setattr(
+        g, "_latest_close_and_atr", lambda t, d, at="stock": (0.5000, 0.01)
+    )
+    monkeypatch.setattr(g, "_trailing_funding_total", lambda t, d: None)
+    monkeypatch.setattr(g, "_latest_mark_close", lambda t, d: 0.4999)
+
+    run_id = "RBRIDGEMIRROR1"
+    register_run(run_id, "MUUSDT", "crypto_perp", "stock_perp", _TRADE_DATE)
+    set_ledger_run_context(
+        run_id, "MUUSDT", "crypto_perp", "stock_perp", _TRADE_DATE
+    )
+    try:
+        g._apply_risk_overlay(
+            "MUUSDT", _TRADE_DATE,
+            _perp_state(
+                pm_decision_fields={
+                    "underlying_price_target": 100.0,
+                    "confidence": 0.7,
+                }
+            ),
+            {"equity": 100_000},
+            asset_type="crypto_perp",
+        )
+    finally:
+        reset_ledger_run_context()
+
+    mirrored = ticket_for_run(run_id)
+    assert mirrored is not None
+    assert mirrored["underlying_target"] == 100.0
+    assert mirrored["contract_target"] == pytest.approx(100.0 / 0.9993)
+    assert mirrored["price_target_basis"] == "last"
+    assert mirrored["quote_fx"]["rate"] == pytest.approx(0.9993)
+    assert mirrored["basis_snapshot"]["last_vs_mark"] == pytest.approx(
+        (0.5 - 0.4999) / 0.4999
+    )
 
 
 @pytest.mark.unit
