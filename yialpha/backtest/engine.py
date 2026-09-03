@@ -1471,6 +1471,23 @@ def run_backtest(
             "execution_lag_bars": execution_lag_bars,
             "execution_price": "next available close",
             "periods_per_year": periods_per_year,
+            # Calendar honesty: a stock perp's sessions/year is a WEEKDAY
+            # assumption, not a verified Binance TradFi session calendar —
+            # market holidays, DST-shifted sessions and closure handling are
+            # UNVERIFIED (open item). Downstream consumers must treat every
+            # annualized stock-perp figure as assumption-based until the
+            # calendar is machine-verified.
+            **(
+                {
+                    "session_calendar_assumption": (
+                        f"{periods_per_year} weekday sessions/year — Binance "
+                        "TradFi calendar NOT verified (holidays/DST/closures "
+                        "unconfirmed); annualized figures are assumption-based"
+                    )
+                }
+                if instrument_klass == "stock_perp"
+                else {}
+            ),
             "rating_to_weight": dict(rating_to_weight or DEFAULT_RATING_TO_WEIGHT),
             "index_benchmark": index_name,
             "risk_warnings": sorted({

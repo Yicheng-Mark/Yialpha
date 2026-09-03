@@ -128,6 +128,8 @@ def test_pure_crypto_perp_run_class_and_annualization():
     )
     assert res.config_summary["instrument_class"] == "pure_crypto_perp"
     assert res.config_summary["periods_per_year"] == 365
+    # Pure-crypto sessions are genuinely 24/7 — NO calendar assumption key.
+    assert "session_calendar_assumption" not in res.config_summary
 
 
 @pytest.mark.unit
@@ -141,6 +143,12 @@ def test_stock_perp_run_class_and_annualization_261():
     )
     assert res.config_summary["instrument_class"] == "stock_perp"
     assert res.config_summary["periods_per_year"] == 261
+    # Acceptance item 4: 261 is an ASSUMPTION (weekday count), not a
+    # verified Binance TradFi calendar — the limitation must ride the
+    # config summary of every stock-perp backtest.
+    caveat = res.config_summary["session_calendar_assumption"]
+    assert "weekday" in caveat
+    assert "NOT verified" in caveat
     assert res.metrics is not None  # 261 flowed through the metric suite
 
 

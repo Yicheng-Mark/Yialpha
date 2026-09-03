@@ -1025,6 +1025,28 @@ class YiAlphaGraph:
         REDUCE/CLOSE intents map to FLAT here: V2.4 enforces ENTRY-side
         control; shrinking/closing an EXISTING position rides the position
         lifecycle (close path), not a new entry candidate.
+
+        ACCEPTANCE-VERIFIED ORDER (ticket-first, pinned by
+        tests/test_v24_acceptance.py): the enforced pipeline executes
+
+            PM decision
+            → strategy initial sizing (RiskManager.decide: Kelly × breaker ×
+              CVaR × funding gate × ATR stop — SINGLE-INSTRUMENT sizing that
+              becomes the candidate's ``proposed_size``; it is NOT portfolio
+              risk control)
+            → Candidate ticket built (status CANDIDATE, proposed_size set)
+            → Portfolio snapshot (open ledger positions)
+            → RiskDecision[] (eligibility gates, then the five frozen hard
+              constraints)
+            → Resolver (min multiplier; never changes side)
+            → Final Ticket (APPROVED/RESIZED/VETOED) + snapshot + position,
+              one atomic ledger transaction
+
+        The two sizing layers are deliberately distinct: 策略初始定尺 (the
+        pre-candidate Kelly layer, per-instrument) proposes; 组合风险约束
+        (the five constraints, portfolio-level, strictly AFTER the candidate
+        exists) can only shrink or refuse — never re-order risk ahead of the
+        candidate.
         """
         mode = str(self.config.get("portfolio_control_mode") or "legacy")
         if mode not in ("shadow", "enforced") or asset_type != "crypto_perp":
@@ -1044,6 +1066,7 @@ class YiAlphaGraph:
                 PortfolioLimits,
                 PortfolioSnapshot,
                 PositionView,
+                RiskDecision,
                 advisory_metrics,
                 evaluate_constraints,
             )
@@ -1072,15 +1095,20 @@ class YiAlphaGraph:
                 if side in ("LONG", "SHORT")
                 else 0.0
             )
+            short_sizing_heuristic = False
             if proposed <= 0.0 and explicit_side == "SHORT":
                 # Legacy sizing is rating-tied — a bearish rating sizes to
                 # zero, which would make an EXPLICIT short dead on arrival.
-                # Interim V2.4 rule (disclosed): an explicit short enters at
-                # kelly_fraction x max_single_position (conservative default
-                # entry), replaced by signed-Kelly sizing when it lands.
+                # ACCEPTANCE DISCLOSURE: this is a TRANSITIONAL HEURISTIC
+                # (kelly_fraction x max_single_position), NOT signed-Kelly
+                # sizing. It stays a deliberately conservative cap until
+                # long/short funding, stops, liquidations and portfolio
+                # resizes are verified on shadow samples; no richer sizing
+                # model is added before that verification.
                 proposed = float(self.config.get("kelly_fraction", 0.25) or 0.25) * float(
                     self.config.get("max_single_position", 0.2) or 0.2
                 )
+                short_sizing_heuristic = True
             instrument_class = routing_module.instrument_class(asset_type, ticker)
             candidate = PositionView(
                 symbol=ticker,
@@ -1108,7 +1136,46 @@ class YiAlphaGraph:
             limits = PortfolioLimits(
                 max_single=float(self.config.get("max_single_position", 0.2) or 0.2)
             )
+            # ACCEPTANCE ITEM — eligibility hard-vetoes. These are NOT a
+            # sixth portfolio constraint (the five-constraint freeze stands):
+            # they are instrument/tradeability gates that must BLOCK a Final
+            # Ticket outright. Record-stage disclosure (shadow verdicts,
+            # NO_TRADE verdicts, unknown classification) becomes BINDING in
+            # the enforced mode; the shadow mode shows them as would-veto.
+            eligibility_reasons: list[str] = []
+            if instrument_class == "unknown_perp":
+                eligibility_reasons.append(
+                    "unknown_instrument_class: identity unproven or "
+                    "unsupported contract type — research allowed, trading "
+                    "refused"
+                )
+            if str(getattr(ticket, "tradeability", "") or "") == "NO_TRADE":
+                reason = str(getattr(ticket, "tradeability_reason", "") or "").strip()
+                eligibility_reasons.append(
+                    f"tradeability_no_trade{': ' + reason if reason else ''}"
+                )
+            if (
+                instrument_class == "stock_perp"
+                and ticket.underlying_target is not None
+                and ticket.contract_target is None
+            ):
+                eligibility_reasons.append(
+                    "fair_value_bridge_incomplete: USD underlying target "
+                    "present but no USDT conversion (fx unavailable or out "
+                    "of band — never defaulted to 1.0)"
+                )
             decisions = evaluate_constraints(candidate, snapshot, limits)
+            if eligibility_reasons:
+                decisions = [
+                    RiskDecision(
+                        rule="eligibility",
+                        action="VETO",
+                        multiplier=0.0,
+                        reasons=list(eligibility_reasons),
+                        metrics={},
+                    ),
+                    *decisions,
+                ]
             result = resolve_constraints(decisions, proposed, side)
             advisory = advisory_metrics(candidate, snapshot, limits)
             context = current_ledger_run_context()
@@ -1126,15 +1193,36 @@ class YiAlphaGraph:
                     "proposed_size": proposed,
                     "resolver": asdict(result),
                     "decisions": [asdict(d) for d in decisions],
+                    "eligibility_reasons": list(eligibility_reasons),
+                    "short_sizing": (
+                        "heuristic" if short_sizing_heuristic else "legacy_weight"
+                    )
+                    if side == "SHORT"
+                    else "n/a",
                     "snapshot_id": snapshot_id,
                 }
+                eligibility_lines = (
+                    "\n".join(f"- ⚠ WOULD VETO (eligibility): {r}" for r in eligibility_reasons)
+                    + "\n"
+                    if eligibility_reasons
+                    else ""
+                )
+                short_line = (
+                    "- **Short sizing**: TRANSITIONAL HEURISTIC "
+                    "(kelly_fraction × max_single_position), not signed-Kelly\n"
+                    if short_sizing_heuristic
+                    else ""
+                )
                 return (
                     f"\n\n---\n\n[PORTFOLIO CONTROL — SHADOW, not enforced]\n\n"
                     f"- **Side**: {side} · **Proposed**: {proposed:.1%}\n"
                     + render_resolver_lines(result)
                     + "\n"
                     + rule_lines
-                    + "\n- Advisory metrics computed and recorded only "
+                    + "\n"
+                    + eligibility_lines
+                    + short_line
+                    + "- Advisory metrics computed and recorded only "
                     "(never resize): see portfolio_control_shadow.\n"
                 )
 
@@ -1148,6 +1236,10 @@ class YiAlphaGraph:
             ticket.margin_mode = "ISOLATED"
             ticket.portfolio_snapshot_id = snapshot_id
             ticket.risk_decision_ids = [d.rule for d in decisions]
+            if eligibility_reasons and result.action == "VETOED":
+                ticket.veto_reasons = list(ticket.veto_reasons or []) + list(
+                    eligibility_reasons
+                )
             snapshot_payload = {
                 "snapshot_id": snapshot_id,
                 "run_id": run_id,
@@ -1157,6 +1249,7 @@ class YiAlphaGraph:
                 "candidate": asdict(candidate),
                 "decisions": [asdict(d) for d in decisions],
                 "resolver": asdict(result),
+                "eligibility_reasons": list(eligibility_reasons),
                 "advisory": advisory,
             }
             open_position = (
@@ -1184,7 +1277,25 @@ class YiAlphaGraph:
                 "final_size": result.final_size,
                 "action": result.action,
                 "snapshot_id": snapshot_id,
+                "eligibility_reasons": list(eligibility_reasons),
+                "short_sizing": (
+                    "heuristic" if short_sizing_heuristic else "legacy_weight"
+                )
+                if side == "SHORT"
+                else "n/a",
             }
+            eligibility_lines = (
+                "\n".join(f"- ⚠ VETOED (eligibility): {r}" for r in eligibility_reasons)
+                + "\n"
+                if eligibility_reasons and result.action == "VETOED"
+                else ""
+            )
+            short_line = (
+                "- **Short sizing**: TRANSITIONAL HEURISTIC "
+                "(kelly_fraction × max_single_position), not signed-Kelly\n"
+                if short_sizing_heuristic and open_position
+                else ""
+            )
             return (
                 f"\n\n---\n\n[PORTFOLIO CONTROL — ENFORCED]\n\n"
                 f"- **Side**: {side} · **Proposed**: {proposed:.1%} · "
@@ -1194,6 +1305,8 @@ class YiAlphaGraph:
                 + "\n"
                 + rule_lines
                 + "\n"
+                + eligibility_lines
+                + short_line
             )
         except Exception:  # noqa: BLE001 -- portfolio control must never break a run
             logger.warning(

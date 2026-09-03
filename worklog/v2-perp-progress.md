@@ -65,6 +65,16 @@
 - **N**：web /api/tickets/{id}、/api/portfolio/snapshots/{id}、/api/positions（store 只读加载器+404 语义）；RFC17 矩阵审计=性质 8 条+集成 13 场景全部由各版本测试覆盖（K51+L9+M19+既有钉值）。
 - **坑**：pm_decision_fields 不总带 rating（测试壳）→ overlay 权威源 pm_rating 回退必加；mypy Side literal 需 cast 收窄；test_frozen_field_set pin 每版加字段都要补（V2.1 先例）。
 
+## 验收收敛批（2026-09-03，用户指令：停止扩功能，进入独立验收+shadow 样本积累）— ✅ 完成（2948 passed / ruff / mypy 169 文件；commit 不加版本 tag）
+
+21. **验收批落点**：状态定义=「代码交付完成，启用验收待完成」。五项收敛：
+    1. **Ticket-first 顺序核实**：enforced 实际执行序 PM→策略初始定尺（RiskManager 单票据 Kelly/breaker/CVaR/ATR，成为 candidate 的 proposed_size，非组合风控）→Candidate→Snapshot→RiskDecision[]→Resolver→Final——`test_v24_acceptance.py` 用 6 点执行 trace 钉死；docstring 明确「策略初始定尺 proposes / 组合风险约束（严格在 candidate 之后）只能缩或拒」两层区分。
+    2. **enforced 硬拒绝**：新增 eligibility 资格门（**非第六组合约束**，五约束冻结不动）：unknown_perp / tradeability NO_TRADE / stock_perp FX 桥不完整（underlying 有 USD 目标但无换算）→ 作为 rule="eligibility" 的 VETO RiskDecision 进 resolver → Final Ticket 真正 VETOED+零仓位+veto_reasons；shadow 档显示 WOULD VETO 不阻断；五约束照跑留审计。
+    3. **空头定尺如实标注**：kelly×max_single=5% 明确标 TRANSITIONAL HEURISTIC not signed-Kelly（overlay 行+final_state.short_sizing="heuristic"）；空头缩仓测试证明 resize 只缩不翻符号（gross 超限→5%缩至更小负值）；不加更复杂定尺模型。
+    4. **261=日历假设**：`SESSION_CALENDAR_CAVEAT` 常量；engine stock_perp backtest 的 config_summary 强制携带 session_calendar_assumption（weekday-count / NOT verified / 假日/DST/闭市未核实）；report.md 渲染 ⚠️ 行；纯币无该键（真 24/7）。
+    5. **Mimosa 完整审计完成**：scanId `scan-2026-09-03T02-29-00.403Z-630d1fa5af3c`，seal `sha256:f2ea8697…05dc`，**30 findings（21 high/9 medium）全部位于 V2 之前的旧代码，V2 新面（账本事务/幂等/约束/resolver/新 web 端点）零 finding**。分布：pot_executor 代码注入×3（默认关 flag 已知风险）、app.js 前端污点启发×13、内部路径拼接污点×4（用户输入边界已有 safe_ticker_component/_validate_path_ticker/sanitize_cache_filename）、固定 vendor 主机 SSRF×7、reddit/sec_ownership XML 实体扩展×2（可后续 defusedxml 加固，分析只读路径非验收阻塞）。**审计结论按 Mimosa 纪律：不宣称项目完全安全**。
+    - 用户路线指令：positioning_split 保持关闭（A/B 不作为加功能理由）；legacy 默认，新流程先 shadow（收集旧新差异/否决原因/空头票据/净收益归因），验收通过后才 enforced；enforced 仍是分析与账本约束非实盘授权。下一阶段目标：每张永续票据可解释、可重放、被后续结果检验。
+
 ## 已冻结的契约决定
 
 1. **中央账本**：单文件 SQLite，config `ledger_db_path`（默认 `~/.yialpha/ledger/portfolio.db`，env `YIALPHA_LEDGER_DB`）。WAL + busy_timeout=5000 + BEGIN IMMEDIATE 原子提交；版本管理用 **schema_meta 表**（`schema_version` 行，非 PRAGMA user_version——Mimosa 钩子拦 f-string PRAGMA）；append-only（无 UPDATE 路径）。迁移 v1 = runs / instrument_snapshots / evidence / predictions / outcomes / tickets 六表（DDL 见 `yialpha/ledger/sqlite.py::_migrate`）。**所有 SQL 必须字面量+参数绑定**（Mimosa 钩子拦截变量 SQL，已两次拦截验证）。

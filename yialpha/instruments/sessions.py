@@ -26,6 +26,21 @@ SESSION_BINANCE_TRADFI = "binance_published_tradfi_sessions"
 #: Plain equities follow their listing exchange's session calendar.
 SESSION_EXCHANGE = "listing_exchange_sessions"
 
+#: ACCEPTANCE-PHASE DISCLOSURE (2026-09-03): every sessions-per-year figure
+#: derived for a TradFi-like calendar below is a WEEKDAY-COUNT ASSUMPTION,
+#: not a verified trading calendar. Binance's TradFi perp session hours,
+#: market-holiday closures, DST-shifted sessions and next-tradable-bar
+#: behavior during US market close are UNVERIFIED (open item — needs one
+#: real exchangeInfo/kline probe). Until then, any annualization built on
+#: these counts must carry this caveat (the backtest engine records it in
+#: ``config_summary["session_calendar_assumption"]`` and renders it in the
+#: report). Verification of this calendar does NOT change the API — only
+#: the counts and this constant's wording.
+SESSION_CALENDAR_CAVEAT = (
+    "weekday-count assumption; Binance TradFi calendar "
+    "(holidays/DST/closures) not machine-verified"
+)
+
 #: Calendars whose sessions are approximated by NYSE-style weekdays.
 _TRADFI_LIKE_CALENDARS = frozenset({SESSION_BINANCE_TRADFI, SESSION_EXCHANGE})
 
