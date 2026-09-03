@@ -183,6 +183,9 @@ def render_backtest_report(result: BacktestResult) -> str:
                  f"Initial capital: {result.initial_capital:,.0f}  |  "
                  f"Transaction cost: {_cost_summary(result)}  |  "
                  f"Annualization: {result.config_summary.get('periods_per_year', 'n/a')}/yr")
+    calendar_assumption = result.config_summary.get("session_calendar_assumption")
+    if calendar_assumption:
+        lines.append(f"- ⚠️ Session calendar: {calendar_assumption}")
     lines.append(f"- Cache: {result.cached_hits} hits / {result.cached_misses} misses")
     if result.degraded_decision_count:
         lines.append(
