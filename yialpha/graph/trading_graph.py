@@ -814,6 +814,7 @@ class YiAlphaGraph:
                 equity=float(getattr(decision, "position_value", 0.0) or 0.0)
                 or float(state.equity or 0.0)
                 or 1.0,
+                reference_price=close,
             )
             final_state["execution_ticket"] = ticket.model_dump()
             overlay += render_ticket_lines(ticket)
@@ -1003,6 +1004,7 @@ class YiAlphaGraph:
         trade_date: str,
         asset_type: str,
         equity: float = 1.0,
+        reference_price: float | None = None,
     ) -> str:
         """V2.4 Portfolio Control: candidate → snapshot → constraints → resolver.
 
@@ -1058,8 +1060,8 @@ class YiAlphaGraph:
             from yialpha.graph import routing as routing_module
             from yialpha.ledger.portfolio import (
                 commit_final_ticket,
+                load_positions_input,
                 new_snapshot_id,
-                open_positions,
             )
             from yialpha.ledger.run_context import current_ledger_run_context
             from yialpha.risk.constraints import (
@@ -1116,7 +1118,11 @@ class YiAlphaGraph:
                 side=side,
                 weight=signed_position(side, proposed),
             )
-            open_rows = open_positions()
+            # Shadow acceptance item 1: the input book is the ledger's open
+            # positions OVERLAID with the operator's read-only positions
+            # file — never a silently-empty preview. The source label rides
+            # every snapshot/record so each preview is auditable.
+            open_rows, snapshot_source = load_positions_input()
             positions = tuple(
                 PositionView(
                     symbol=row["symbol"],
@@ -1188,12 +1194,33 @@ class YiAlphaGraph:
                 for d in decisions
             )
             if mode == "shadow":
+                # Shadow acceptance item 3 — the COMPLETE reconciliation
+                # record: config, price basis, INPUT snapshot, candidate,
+                # every rule's multiplier, the shadow Final, and the veto
+                # reasons. One self-contained dict, persisted into the run
+                # log via _log_state (presence-gated key), so every shadow
+                # decision is recomputable from the record alone.
                 final_state["portfolio_control_shadow"] = {
+                    "mode": "shadow",
+                    "ticket_id": ticket.ticket_id,
+                    "tradeability": str(getattr(ticket, "tradeability", "") or ""),
+                    "reference_price": reference_price,
                     "side": side,
                     "proposed_size": proposed,
                     "resolver": asdict(result),
                     "decisions": [asdict(d) for d in decisions],
                     "eligibility_reasons": list(eligibility_reasons),
+                    "candidate": asdict(candidate),
+                    "snapshot_positions": [asdict(p) for p in positions],
+                    "snapshot_source": snapshot_source,
+                    "limits": asdict(limits),
+                    "config": {
+                        "kelly_fraction": self.config.get("kelly_fraction"),
+                        "max_single_position": self.config.get(
+                            "max_single_position"
+                        ),
+                        "portfolio_control_mode": "shadow",
+                    },
                     "short_sizing": (
                         "heuristic" if short_sizing_heuristic else "legacy_weight"
                     )
@@ -1245,7 +1272,9 @@ class YiAlphaGraph:
                 "run_id": run_id,
                 "mode": "enforced",
                 "equity": snapshot.equity,
+                "reference_price": reference_price,
                 "positions": [asdict(p) for p in positions],
+                "snapshot_source": snapshot_source,
                 "candidate": asdict(candidate),
                 "decisions": [asdict(d) for d in decisions],
                 "resolver": asdict(result),
@@ -1254,6 +1283,15 @@ class YiAlphaGraph:
             }
             open_position = (
                 result.action != "VETOED" and result.final_size > 0.0 and side != "FLAT"
+            )
+            # Shadow acceptance item 2 — 拒绝开仓 ≠ 批准平仓: only an
+            # APPROVED close-intent ticket closes the existing same-symbol
+            # position; a VETO / FLAT / REDUCE candidate leaves the book
+            # untouched (commit's both-flags-False path).
+            close_existing = (
+                result.action == "APPROVED"
+                and side == "FLAT"
+                and legacy_intent == "CLOSE"
             )
             commit_final_ticket(
                 ticket_payload=ticket.model_dump(),
@@ -1269,6 +1307,7 @@ class YiAlphaGraph:
                     side, result.final_size if open_position else 0.0
                 ),
                 open_position=open_position,
+                close_existing=close_existing,
             )
             final_state["portfolio_control"] = {
                 "mode": "enforced",
@@ -1277,6 +1316,8 @@ class YiAlphaGraph:
                 "final_size": result.final_size,
                 "action": result.action,
                 "snapshot_id": snapshot_id,
+                "snapshot_source": snapshot_source,
+                "closed_existing_position": close_existing,
                 "eligibility_reasons": list(eligibility_reasons),
                 "short_sizing": (
                     "heuristic" if short_sizing_heuristic else "legacy_weight"
@@ -2144,6 +2185,13 @@ class YiAlphaGraph:
         # flag-off logs byte-identical to the pre-V2.1 shape.
         if final_state.get("run_id"):
             entry["run_id"] = final_state["run_id"]
+        # V2.4 shadow acceptance item 3: the portfolio-control record
+        # (shadow reconciliation dict / enforced outcome) persists into the
+        # run log — presence-gated, so legacy runs stay byte-identical.
+        if "portfolio_control_shadow" in final_state:
+            entry["portfolio_control_shadow"] = final_state["portfolio_control_shadow"]
+        if "portfolio_control" in final_state:
+            entry["portfolio_control"] = final_state["portfolio_control"]
         # V2.2: regime id — same key-presence contract (regime_state on AND
         # a computable regime; flag-off / uncomputable logs lack the key).
         if final_state.get("regime_id"):

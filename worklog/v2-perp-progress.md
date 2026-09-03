@@ -75,6 +75,20 @@
     5. **Mimosa 完整审计完成**：scanId `scan-2026-09-03T02-29-00.403Z-630d1fa5af3c`，seal `sha256:f2ea8697…05dc`，**30 findings（21 high/9 medium）全部位于 V2 之前的旧代码，V2 新面（账本事务/幂等/约束/resolver/新 web 端点）零 finding**。分布：pot_executor 代码注入×3（默认关 flag 已知风险）、app.js 前端污点启发×13、内部路径拼接污点×4（用户输入边界已有 safe_ticker_component/_validate_path_ticker/sanitize_cache_filename）、固定 vendor 主机 SSRF×7、reddit/sec_ownership XML 实体扩展×2（可后续 defusedxml 加固，分析只读路径非验收阻塞）。**审计结论按 Mimosa 纪律：不宣称项目完全安全**。
     - 用户路线指令：positioning_split 保持关闭（A/B 不作为加功能理由）；legacy 默认，新流程先 shadow（收集旧新差异/否决原因/空头票据/净收益归因），验收通过后才 enforced；enforced 仍是分析与账本约束非实盘授权。下一阶段目标：每张永续票据可解释、可重放、被后续结果检验。
 
+## Shadow 验收批（2026-09-03，基线锁定 `6cbfe1d`；2960 passed / ruff / mypy 三绿；不加版本 tag）
+
+22. **Shadow 验收五项落点**（用户指令：开发收住、只验证运行证据；先验收运行正确性再评估预测表现，两者不混为一个"通过"；positioning_split 保持 false）：
+    1. **非空组合快照**：`portfolio.load_positions_input()`=ledger open_positions ∪ 操作员只读 JSON 文件（config `portfolio_positions_file`，env YIALPHA_PORTFOLIO_POSITIONS_FILE；同符号文件行替换 ledger 行；坏文件降级 WARNING）；每张 snapshot/记录携带 `snapshot_source` 标签（empty/ledger/file/ledger+file:name）——shadow 预演永不静默对空组合。测试覆盖已有多头+已有空头+同符号近限（shadow 3 持仓预演）与超限（asset_class 0.9>0.6 + directional 0.9>0.8 双 RESIZE 钉值）。**注**：文件行不带 instrument_class 时默认 unknown_perp 会拆散类聚合——操作员文件应显式给类（config 注释已说明）。
+    2. **拒绝开仓≠批准平仓**：`commit_final_ticket` 增 `close_existing`（与 open_position 互斥）：开仓=同符号先关后开（重试幂等）；**批准平仓**=仅 APPROVED 且 side=FLAT 且 legacy_intent=CLOSE 才关仓不开新；**VETO/FLAT/REDUCE=双标志皆 False，旧仓一行不动**（钉死测试：种子仓 0.12 经 VETO 后原封不动）。REDUCE 的部分减量留给持仓生命周期（未实现，显式不假装）。
+    3. **完整对账依据**：shadow 记录扩为 16 键自包含 dict（mode/ticket_id/tradeability/reference_price/side/proposed/resolver/decisions/eligibility/candidate/snapshot_positions/snapshot_source/limits/config/short_sizing/snapshot_id），**经 `_log_state` presence-gated 持久化进 full_states_log**（此前只 riding state 不落日志——已修）；零无法解释翻方向/放大/关键缺失仍批准由性质断言钉住（side 回显、final≤proposed、multiplier∈[0,1]、5 rule 名齐）。
+    4. **scoreboard 样本入口**：写库矩阵精确化——shadow 写 **0** 行 portfolio_snapshots/positions/Final Ticket；prediction_ledger 记录阶段（runs/evidence/predictions/outcomes + tickets 镜像 CANDIDATE payload）与 portfolio_control_mode **完全独立**（钉死测试：shadow 下 prediction 提交正常、镜像有 CANDIDATE 行、组合三表零行）。评分入口=`yialpha scoreboard`→compute_outcomes→pending_predictions（仅 horizon 完整到期；funding 缺口=腿缺失 fail-closed；价格/funding/fees/slippage 分腿核对在 V2.1 测试已钉）。
+    5. **30 findings 逐项处置**（scan-2026-09-03T02-29-00.403Z）：
+       - **真实可达（2）→已修复**：reddit.py RSS / sec_ownership.py Form4 的 XML 实体扩展——新增 `dataflows/utils.safe_xml_root`：解析前拒 DOCTYPE/ENTITY（大小写不敏感全文扫描；合法 reddit/SEC feed 两者皆无）；sec 侧包装为 NoMarketDataError typed miss，reddit 侧 fail-soft。测试钉死（恶意 DTD 拒绝+干净 RSS 可解析）。
+       - **受条件限制（11）**：pot_executor 代码注入×3（pot_enabled 默认 False+独立显式 opt-in；开启即真实可达——保持关闭，不宣称已缓解）；路径穿越×4 中 perf_telemetry（路径来自 operator config 的 results_dir+ticker，操作员信任边界内）+ cli/main.py:1192（section_name 内部常量表）；SSRF×7 中 alpha_vantage/reddit/factor_model（固定 https 主机+urlencode 查询/符号经上游 normalize；无用户可控绝对 URL——内网不可达但保留条件标记）。
+       - **误报（17）**：app.js renderError/drawRatingCompare XSS×7（sink 链 errorBox→`esc()`=`window.YiUtil.escapeHTML` 已验证转义）；fetchJSON SSRF×4（客户端同源相对 /api/* 路径，无用户可控绝对 URL）；跨文件污点×2（common.js escapeHTML sink）；stocktwits.py SSRF（`safe_ticker_component` 已 sanitize，代码注释自证）；trading_graph/run_robust/cli 其余路径穿越×3（内部常量拼接或 safe_ticker 边界）。
+       - 处置原则（用户指令）：不因"旧代码/只读分析"认定非阻塞——XML 两点虽在只读分析路径仍按真实可达修复；PoT 按条件可达标记并保持默认关闭。
+    6. 261 日历披露维持假设标签（假日/DST/闭市/下一可交易 bar 未核验；相关年化结果保留 ⚠️），不算"日历验证通过"。
+
 ## 已冻结的契约决定
 
 1. **中央账本**：单文件 SQLite，config `ledger_db_path`（默认 `~/.yialpha/ledger/portfolio.db`，env `YIALPHA_LEDGER_DB`）。WAL + busy_timeout=5000 + BEGIN IMMEDIATE 原子提交；版本管理用 **schema_meta 表**（`schema_version` 行，非 PRAGMA user_version——Mimosa 钩子拦 f-string PRAGMA）；append-only（无 UPDATE 路径）。迁移 v1 = runs / instrument_snapshots / evidence / predictions / outcomes / tickets 六表（DDL 见 `yialpha/ledger/sqlite.py::_migrate`）。**所有 SQL 必须字面量+参数绑定**（Mimosa 钩子拦截变量 SQL，已两次拦截验证）。

@@ -231,6 +231,12 @@ _ENV_OVERRIDES = {
     # snapshot → constraints → resolver → final-ticket pipeline (perp runs
     # only; non-perp assets always take the legacy overlay).
     "YIALPHA_PORTFOLIO_CONTROL_MODE":       "portfolio_control_mode",
+    # Read-only positions input for shadow/enforced portfolio previews
+    # (shadow acceptance item 1): a JSON list of {symbol, side,
+    # signed_weight, instrument_class?} overlaid on the ledger's open
+    # positions. Empty = ledger-only (which is empty during the shadow
+    # phase) — set it to preview against a real or hypothetical book.
+    "YIALPHA_PORTFOLIO_POSITIONS_FILE":     "portfolio_positions_file",
 }
 
 
@@ -525,6 +531,13 @@ DEFAULT_CONFIG = _apply_env_overrides({
     #              or refuse — it can never change the side or grow the
     #              size. Non-perp assets always run the legacy overlay.
     "portfolio_control_mode": "legacy",
+    # Read-only positions input (shadow acceptance item 1): JSON list of
+    # {symbol, side, signed_weight, instrument_class?} overlaid on the
+    # ledger's open positions for portfolio previews. Empty = ledger-only.
+    # Shadow-phase usage: point it at a file describing the real (or
+    # hypothetical stress) book so constraint previews are exercised against
+    # a NON-empty portfolio; every snapshot/record carries its source label.
+    "portfolio_positions_file": "",
     # Central SQLite ledger DB (env YIALPHA_LEDGER_DB). One append-first
     # database holds instrument snapshots, run evidence, blind predictions,
     # outcomes and ticket mirrors (V2.4 adds positions/portfolio snapshots).

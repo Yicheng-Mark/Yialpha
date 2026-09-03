@@ -139,9 +139,15 @@ def _parse_form4(raw: bytes) -> dict:
     non-derivative common-stock trade.
     """
     try:
-        root = ET.fromstring(raw)
+        # Entity-expansion guard: DTD/ENTITY-bearing XML is refused before
+        # parsing (Mimosa acceptance fix; see utils.safe_xml_root).
+        from yialpha.dataflows.utils import safe_xml_root
+
+        root = safe_xml_root(raw, source="sec_form4")
     except ET.ParseError as exc:
         raise NoMarketDataError("form4", detail=f"could not parse Form 4 XML: {exc}") from exc
+    except ValueError as exc:
+        raise NoMarketDataError("form4", detail=str(exc)) from exc
 
     owner = _txt(root.find("reportingOwner/reportingOwnerId/rptOwnerName"))
     title = _txt(root.find("reportingOwner/reportingOwnerRelationship/officerTitle"))
