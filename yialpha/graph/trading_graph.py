@@ -809,10 +809,18 @@ class YiAlphaGraph:
             bridge_block = self._link_ticket_to_ledger(
                 ticket, final_state, ticker, str(trade_date), asset_type, close
             )
+            control_block = self._apply_portfolio_control(
+                ticket, decision, final_state, ticker, str(trade_date), asset_type,
+                equity=float(getattr(decision, "position_value", 0.0) or 0.0)
+                or float(state.equity or 0.0)
+                or 1.0,
+            )
             final_state["execution_ticket"] = ticket.model_dump()
             overlay += render_ticket_lines(ticket)
             if bridge_block:
                 overlay += bridge_block
+            if control_block:
+                overlay += control_block
         overlay += (
             f"- **Drawdown Regime**: {decision.breaker.regime}"
             f" ({decision.breaker.current_drawdown:.1%})\n"
@@ -883,13 +891,22 @@ class YiAlphaGraph:
                 # None while the regime stage is off/uncomputable, which is
                 # exactly the ticket's pre-V2.2 value.
                 ticket.regime_id = context.regime_id
-                attach_ticket(
-                    ticket_id=ticket.ticket_id,
-                    decision_id=ticket.decision_id,
-                    run_id=context.run_id,
-                    payload=ticket.model_dump(),
-                    ticket_version=ticket.ticket_version,
-                )
+                # V2.4 enforced mode: the atomic commit_final_ticket owns the
+                # ticket write (with the snapshot + position, in ONE
+                # transaction) — an earlier CANDIDATE mirror here would win
+                # the INSERT OR IGNORE and strand the final payload. Legacy
+                # and shadow modes mirror here as before.
+                if not (
+                    asset_type == "crypto_perp"
+                    and self.config.get("portfolio_control_mode") == "enforced"
+                ):
+                    attach_ticket(
+                        ticket_id=ticket.ticket_id,
+                        decision_id=ticket.decision_id,
+                        run_id=context.run_id,
+                        payload=ticket.model_dump(),
+                        ticket_version=ticket.ticket_version,
+                    )
             except Exception:  # noqa: BLE001 -- record stage must never break a run
                 logger.warning(
                     "ticket ledger linkage failed for %s on %s",
@@ -971,6 +988,216 @@ class YiAlphaGraph:
         except Exception:  # noqa: BLE001 -- record stage must never break a run
             logger.warning(
                 "fair-value bridge wiring failed for %s on %s",
+                ticker,
+                trade_date,
+                exc_info=True,
+            )
+            return ""
+
+    def _apply_portfolio_control(
+        self,
+        ticket,
+        decision,
+        final_state,
+        ticker: str,
+        trade_date: str,
+        asset_type: str,
+        equity: float = 1.0,
+    ) -> str:
+        """V2.4 Portfolio Control: candidate → snapshot → constraints → resolver.
+
+        Mode-gated (config ``portfolio_control_mode``), crypto_perp runs
+        only, fail-soft throughout:
+
+        * ``legacy`` (default) — no-op (byte-identical decisions, pinned).
+        * ``shadow`` — the legacy decision stands; the full pipeline ALSO
+          runs and renders a clearly-marked SHADOW section for diffing; the
+          result rides ``final_state["portfolio_control_shadow"]``; NO
+          ticket/snapshot/position rows are written.
+        * ``enforced`` — the resolver outcome is authoritative: ``final_size``
+          lands on the ticket, the status advances to APPROVED / RESIZED /
+          VETOED, and the final ticket + portfolio snapshot + position commit
+          atomically to the ledger DB. The resolver can only shrink or
+          refuse — it never changes the side (from the PM's explicit
+          ``desired_side`` or the frozen conservative rating mapping) and
+          never grows the size.
+
+        REDUCE/CLOSE intents map to FLAT here: V2.4 enforces ENTRY-side
+        control; shrinking/closing an EXISTING position rides the position
+        lifecycle (close path), not a new entry candidate.
+        """
+        mode = str(self.config.get("portfolio_control_mode") or "legacy")
+        if mode not in ("shadow", "enforced") or asset_type != "crypto_perp":
+            return ""
+        try:
+            from dataclasses import asdict
+            from typing import cast
+
+            from yialpha.graph import routing as routing_module
+            from yialpha.ledger.portfolio import (
+                commit_final_ticket,
+                new_snapshot_id,
+                open_positions,
+            )
+            from yialpha.ledger.run_context import current_ledger_run_context
+            from yialpha.risk.constraints import (
+                PortfolioLimits,
+                PortfolioSnapshot,
+                PositionView,
+                advisory_metrics,
+                evaluate_constraints,
+            )
+            from yialpha.risk.resolver import render_resolver_lines, resolve_constraints
+            from yialpha.risk.signed_math import Side, signed_position
+            from yialpha.tickets import TicketStatus, desired_side_from_decision
+
+            pm_fields = final_state.get("pm_decision_fields") or {}
+            # The overlay's canonical rating source: the structured pm_rating
+            # the PM node extracted (pm_decision_fields carries it too, but a
+            # degenerate/free-text state may lack the flattened copy).
+            rating_fields = dict(pm_fields)
+            rating_fields.setdefault(
+                "rating", final_state.get("pm_rating", "")
+            )
+            explicit_side = str(pm_fields.get("desired_side") or "").upper()
+            legacy_intent = desired_side_from_decision(rating_fields)
+            side = cast(
+                Side,
+                explicit_side
+                if explicit_side in ("LONG", "SHORT", "FLAT")
+                else ("LONG" if legacy_intent == "LONG" else "FLAT"),
+            )
+            proposed = (
+                max(0.0, float(decision.target_weight))
+                if side in ("LONG", "SHORT")
+                else 0.0
+            )
+            if proposed <= 0.0 and explicit_side == "SHORT":
+                # Legacy sizing is rating-tied — a bearish rating sizes to
+                # zero, which would make an EXPLICIT short dead on arrival.
+                # Interim V2.4 rule (disclosed): an explicit short enters at
+                # kelly_fraction x max_single_position (conservative default
+                # entry), replaced by signed-Kelly sizing when it lands.
+                proposed = float(self.config.get("kelly_fraction", 0.25) or 0.25) * float(
+                    self.config.get("max_single_position", 0.2) or 0.2
+                )
+            instrument_class = routing_module.instrument_class(asset_type, ticker)
+            candidate = PositionView(
+                symbol=ticker,
+                instrument_class=instrument_class,
+                side=side,
+                weight=signed_position(side, proposed),
+            )
+            open_rows = open_positions()
+            positions = tuple(
+                PositionView(
+                    symbol=row["symbol"],
+                    instrument_class=str(
+                        (row.get("payload") or {}).get("instrument_class")
+                        or "unknown_perp"
+                    ),
+                    side=cast(Side, str(row["side"])),
+                    weight=float(row["signed_weight"]),
+                )
+                for row in open_rows
+            )
+            snapshot = PortfolioSnapshot(
+                equity=equity,
+                positions=positions,
+            )
+            limits = PortfolioLimits(
+                max_single=float(self.config.get("max_single_position", 0.2) or 0.2)
+            )
+            decisions = evaluate_constraints(candidate, snapshot, limits)
+            result = resolve_constraints(decisions, proposed, side)
+            advisory = advisory_metrics(candidate, snapshot, limits)
+            context = current_ledger_run_context()
+            run_id = context.run_id if context is not None else None
+            snapshot_id = new_snapshot_id(run_id or ticket.ticket_id)
+
+            rule_lines = "\n".join(
+                f"- {d.rule}: {d.action} (x{d.multiplier:.3f})"
+                + (f" — {d.reasons[0]}" if d.reasons else "")
+                for d in decisions
+            )
+            if mode == "shadow":
+                final_state["portfolio_control_shadow"] = {
+                    "side": side,
+                    "proposed_size": proposed,
+                    "resolver": asdict(result),
+                    "decisions": [asdict(d) for d in decisions],
+                    "snapshot_id": snapshot_id,
+                }
+                return (
+                    f"\n\n---\n\n[PORTFOLIO CONTROL — SHADOW, not enforced]\n\n"
+                    f"- **Side**: {side} · **Proposed**: {proposed:.1%}\n"
+                    + render_resolver_lines(result)
+                    + "\n"
+                    + rule_lines
+                    + "\n- Advisory metrics computed and recorded only "
+                    "(never resize): see portfolio_control_shadow.\n"
+                )
+
+            # enforced: resolver outcome is authoritative.
+            ticket.status = {
+                "APPROVED": TicketStatus.APPROVED,
+                "RESIZED": TicketStatus.RESIZED,
+                "VETOED": TicketStatus.VETOED,
+            }[result.action]
+            ticket.final_size = result.final_size
+            ticket.margin_mode = "ISOLATED"
+            ticket.portfolio_snapshot_id = snapshot_id
+            ticket.risk_decision_ids = [d.rule for d in decisions]
+            snapshot_payload = {
+                "snapshot_id": snapshot_id,
+                "run_id": run_id,
+                "mode": "enforced",
+                "equity": snapshot.equity,
+                "positions": [asdict(p) for p in positions],
+                "candidate": asdict(candidate),
+                "decisions": [asdict(d) for d in decisions],
+                "resolver": asdict(result),
+                "advisory": advisory,
+            }
+            open_position = (
+                result.action != "VETOED" and result.final_size > 0.0 and side != "FLAT"
+            )
+            commit_final_ticket(
+                ticket_payload=ticket.model_dump(),
+                ticket_id=ticket.ticket_id,
+                decision_id=ticket.decision_id,
+                run_id=run_id,
+                ticket_version=ticket.ticket_version,
+                snapshot_payload=snapshot_payload,
+                snapshot_id=snapshot_id,
+                position_symbol=ticker,
+                position_side=side,
+                position_signed_weight=signed_position(
+                    side, result.final_size if open_position else 0.0
+                ),
+                open_position=open_position,
+            )
+            final_state["portfolio_control"] = {
+                "mode": "enforced",
+                "side": side,
+                "proposed_size": proposed,
+                "final_size": result.final_size,
+                "action": result.action,
+                "snapshot_id": snapshot_id,
+            }
+            return (
+                f"\n\n---\n\n[PORTFOLIO CONTROL — ENFORCED]\n\n"
+                f"- **Side**: {side} · **Proposed**: {proposed:.1%} · "
+                f"**Final**: {result.final_size:.1%} ({result.action})\n"
+                f"- **Margin**: ISOLATED · **Snapshot**: {snapshot_id}\n"
+                + render_resolver_lines(result)
+                + "\n"
+                + rule_lines
+                + "\n"
+            )
+        except Exception:  # noqa: BLE001 -- portfolio control must never break a run
+            logger.warning(
+                "portfolio control failed for %s on %s; legacy decision stands",
                 ticker,
                 trade_date,
                 exc_info=True,

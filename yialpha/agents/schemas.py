@@ -365,6 +365,17 @@ class PortfolioDecision(BaseModel):
             "Omit when no dual view was filled."
         ),
     )
+    desired_side: Literal["LONG", "SHORT", "FLAT"] | None = Field(
+        default=None,
+        description=(
+            "Optional V2.4 signed-position intent. Explicit LONG or FLAT "
+            "matches the conservative legacy mapping; SHORT is the ONLY way "
+            "this system may open a short position — the legacy rating "
+            "vocabulary can never produce one (Underweight/Sell map to "
+            "REDUCE/CLOSE, never SHORT). Omit to keep the legacy "
+            "rating-driven mapping."
+        ),
+    )
 
     @field_validator(
         "price_target", "confidence", "expected_return", "evidence_coverage",

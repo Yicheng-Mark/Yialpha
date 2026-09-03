@@ -48,7 +48,7 @@ from pathlib import Path
 # Highest schema version this binary knows. Bump + add a migration block in
 # _migrate() whenever a ledger table is renamed/removed/redefined (additive
 # optional columns with defaults do not need a migration).
-_KNOWN_SCHEMA_VERSION = 2
+_KNOWN_SCHEMA_VERSION = 3
 
 _ledger_lock = threading.Lock()
 _local = threading.local()
@@ -297,6 +297,52 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 ("2",),
+            )
+
+    if version < 3:
+        # v3 (V2.4 Portfolio Control): portfolio snapshots (the pre-resolver
+        # state the five hard constraints were evaluated against) and
+        # positions (the ticket → position key-chain tail). Both are written
+        # in ONE transaction with the final ticket by the resolver path
+        # (ledger/portfolio.py) — never independently.
+        with ledger_transaction(conn=conn) as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    run_id      TEXT,
+                    payload     TEXT NOT NULL,
+                    created_at  TEXT NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_run "
+                "ON portfolio_snapshots (run_id)"
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS positions (
+                    position_id   TEXT PRIMARY KEY,
+                    ticket_id     TEXT,
+                    run_id        TEXT,
+                    symbol        TEXT NOT NULL,
+                    side          TEXT NOT NULL,
+                    signed_weight REAL NOT NULL,
+                    opened_at     TEXT NOT NULL,
+                    closed_at     TEXT,
+                    payload       TEXT NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_positions_symbol "
+                "ON positions (symbol, closed_at)"
+            )
+            cur.execute(
+                "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("3",),
             )
 
 

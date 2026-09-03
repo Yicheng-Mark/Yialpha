@@ -323,7 +323,9 @@ def test_migration_v2_idempotent_and_duplicate_column_safe():
     row = conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert row[0] == "2"
+    # v3 (V2.4 portfolio tables) rides along; the v2 regimes/regime_id work
+    # is verified by the table/column assertions below.
+    assert row[0] == "3"
     # Re-running _migrate on the migrated DB must be a no-op, not an error.
     _migrate(conn)
     # The ALTER helpers must also swallow the duplicate-column error from a
@@ -356,7 +358,7 @@ def test_migration_upgrades_a_v1_database():
     row = conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert row[0] == "2"
+    assert row[0] == "3"
 
 
 # --------------------------------------------------------------------------- #

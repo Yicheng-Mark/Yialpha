@@ -55,6 +55,16 @@
 - **链上**：`onchain_flows.py` blockchain.info charts（keyless，estimated-transaction-volume-usd + n-unique-addresses，30d 窗，PIT 过滤未来点，PIT_REPLAYABLE，available_at=最后点时刻）；capability-absent 披露渲染；evidence category "onchain"（新类别，social 会误标）。
 - **config**：positioning_split=False（默认关待 A/B）/onchain_evidence=False + env 行 + conftest 扩展 + .env.example。
 
+## V2.4 Portfolio Control — ✅ 完成（2026-09-03，2941 passed / ruff clean / mypy 169 文件 clean）
+
+批次：K（子智能体，signed_math/constraints/resolver 纯数学，51 测试）+ M（子智能体，backtest 分轨，19 测试）+ L（主智能体，流水线）+ N（主智能体，Web API）。落点：
+- **单旋钮裁决**：`portfolio_control_mode`=legacy(默认)/shadow/enforced 取代 RFC 三 flag（staged rollout 一个旋钮表达完整）。
+- **K**：RiskDecision{rule,PASS|RESIZE|VETO,multiplier∈[0,1],reasons,metrics}（post_init 校验 VETO⇒0）；五硬约束冻结顺序 global_gross→asset_class→single_concentration→directional_concentration→correlation_cluster（函数名=rule 名）；multiplier=limit/current clip；超限=RESIZE 非 VETO（VETO 留给非有限输入/退化）；directional=候选方向净额（对冲净掉）；cluster_of=None→单符号簇（max_cluster=第二道符号帽，诚实：v1 无相关性分组数据）；约束崩溃→fail-closed VETO("constraint_error")；advisory（VaR/CVaR/beta/corr/USDT depeg/Binance outage/BTC×财报 gap 复合压力）只算不缩。signed_math：funding=-sign×notional×rate、镜像 ATR 止损/强平、同 bar 双触发保守先强平。
+- **M**：engine `_perp_instrument_class`（memo per (asset_type,symbol)，委托 routing）；年化走 `periods_per_year_for`（stock_perp=261/pure=365/equity=252，**crypto_spot 365 钉值靠"非 perp 家族不传 class"保住**）；corporate_actions 可选参数（拆股乘性/分红加性，按 event_date 前调整，None=字节不变）；fill 审计=已在下一**存在**bar 成交（24/7 与跳日两形状新钉）；MMR/同 bar 短侧新钉。**主智能体收口：执行侧 8 处 `asset_type=="crypto_perp"` 全部 re-key 为 is_perp_family**（M 只改了验证门；funding/model_liquidation/stop-sim/mark 触发/config/metrics 若不改，stock perp 可过验证却无强平建模——危险缺口）。
+- **L**：迁移 v3（portfolio_snapshots+positions）；`ledger/portfolio.py`（commit_final_ticket 单事务原子写 Final Ticket+Snapshot+Position，全 INSERT OR IGNORE 幂等；**同符号替换语义**：开新仓先关同符号旧仓 closed_at——生命周期转移非改写，重试不变量在符号级成立）；`_apply_portfolio_control`（legacy no-op 字节不变；shadow=全管道计算+[SHADOW] 段渲染+final_state 记录零写库；enforced=resolver 权威：final_size/status APPROVED|RESIZED|VETOED/margin_mode=ISOLATED/risk_decision_ids=5 rule 名/portfolio_snapshot_id 落票+原子入账；**REDUCE/CLOSE→FLAT 入场候选**（V2.4 管 entry 侧，缩/平存量走持仓生命周期 close 路径）；side=显式 desired_side 或保守 rating 映射，resolver 永不改 side）；enforced 下 `_link_ticket_to_ledger` 跳过 attach_ticket（原子提交独占票据写，防 CANDIDATE payload 抢占 OR IGNORE）；**显式 SHORT 过渡规则**：评分 Sell 时 legacy weight=0 → 显式空头用 kelly_fraction×max_single_position=5% 保守默认入场（披露，待 signed-Kelly）；rating 回退链 pm_fields.rating→final_state.pm_rating；equity 从 PortfolioState 传入。
+- **N**：web /api/tickets/{id}、/api/portfolio/snapshots/{id}、/api/positions（store 只读加载器+404 语义）；RFC17 矩阵审计=性质 8 条+集成 13 场景全部由各版本测试覆盖（K51+L9+M19+既有钉值）。
+- **坑**：pm_decision_fields 不总带 rating（测试壳）→ overlay 权威源 pm_rating 回退必加；mypy Side literal 需 cast 收窄；test_frozen_field_set pin 每版加字段都要补（V2.1 先例）。
+
 ## 已冻结的契约决定
 
 1. **中央账本**：单文件 SQLite，config `ledger_db_path`（默认 `~/.yialpha/ledger/portfolio.db`，env `YIALPHA_LEDGER_DB`）。WAL + busy_timeout=5000 + BEGIN IMMEDIATE 原子提交；版本管理用 **schema_meta 表**（`schema_version` 行，非 PRAGMA user_version——Mimosa 钩子拦 f-string PRAGMA）；append-only（无 UPDATE 路径）。迁移 v1 = runs / instrument_snapshots / evidence / predictions / outcomes / tickets 六表（DDL 见 `yialpha/ledger/sqlite.py::_migrate`）。**所有 SQL 必须字面量+参数绑定**（Mimosa 钩子拦截变量 SQL，已两次拦截验证）。

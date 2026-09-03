@@ -240,6 +240,30 @@ def api_calibration():
     return store.load_calibration()
 
 
+@app.get("/api/tickets/{ticket_id}")
+def api_ticket(ticket_id: str):
+    """One mirrored ExecutionTicket payload (V2.4 read-only)."""
+    payload = store.load_ticket(ticket_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"no ticket {ticket_id}")
+    return payload
+
+
+@app.get("/api/portfolio/snapshots/{snapshot_id}")
+def api_portfolio_snapshot(snapshot_id: str):
+    """One portfolio snapshot (constraints + resolver audit trail)."""
+    payload = store.load_portfolio_snapshot(snapshot_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"no snapshot {snapshot_id}")
+    return payload
+
+
+@app.get("/api/positions")
+def api_positions():
+    """Open ledger positions (V2.4 read-only)."""
+    return store.load_positions()
+
+
 @app.get("/api/health")
 def api_health():
     # sync def → Starlette threadpools it; the yfinance/DeepSeek probes block

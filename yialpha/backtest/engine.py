@@ -27,10 +27,10 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 import pandas as pd
@@ -42,6 +42,7 @@ from yialpha.backtest.metrics import (
     returns_from_equity,
     trade_quality_stats,
 )
+from yialpha.dataflows.vol_estimators import periods_per_year_for
 
 # V2.0 P0.1: the Binance fee constants moved to yialpha.risk.cost_model as
 # the single source of truth shared with the decision-time tradeability
@@ -52,7 +53,57 @@ from yialpha.risk.cost_model import (  # noqa: F401  (re-export)
     BNB_FEE_DISCOUNT,
 )
 
+if TYPE_CHECKING:
+    # Engine-side corporate-action wiring (V2.4) is shape-only: the records
+    # arrive fully built from the caller, so the dataclass is needed for the
+    # signature annotation alone and never at import time.
+    from yialpha.instruments.corporate_actions import CorporateActionRecord
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# V2.4 perp-class split: the perp-family classes and the classification seam.
+# The engine historically keyed perp semantics on the raw CLI asset_type
+# string ("crypto_perp"); a tokenized-stock perp enters through the SAME
+# string, so the string alone cannot tell a BTCUSDT from a MUUSDT run. The
+# seam delegates to the ONE shared classifier (yialpha.graph.routing) —
+# registry/warm consults are flag-gated and fetch-free — so a stock perp
+# routed via any entrance gets perp semantics where the gates use it.
+# ---------------------------------------------------------------------------
+#: The perpetual instrument family (see
+#: :func:`yialpha.graph.routing.instrument_class`).
+_PERP_INSTRUMENT_CLASSES = frozenset(
+    {"stock_perp", "pure_crypto_perp", "unknown_perp"}
+)
+
+#: Per-``(asset_type, symbol)`` memo for the classification seam. Routing
+#: never fetches (warmed snapshot or static seed, flag-gated registry), so one
+#: classification per instrument per process is enough; tests clear this dict
+#: alongside ``refresh_equity_perp_bases`` to keep classification ordering-
+#: deterministic.
+_INSTRUMENT_CLASS_CACHE: dict[tuple[str, str], str] = {}
+
+
+def _perp_instrument_class(asset_type: str, symbol: str) -> str:
+    """Classify one instrument via the shared routing seam, memoized.
+
+    Delegates to :func:`yialpha.graph.routing.instrument_class` (equity /
+    crypto_spot / stock_perp / pure_crypto_perp / unknown_perp) — the same
+    predicate every other entrance consults, so the engine and the live graph
+    can never disagree about what an instrument is. The import stays inside
+    the function to keep the engine importable without the routing graph and
+    to honor test monkeypatching of the routing classifier. The pure fallback
+    is the routing function's own logic (cache-or-seed, fetch-free).
+    """
+    key = (str(asset_type), str(symbol))
+    cached = _INSTRUMENT_CLASS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    from yialpha.graph.routing import instrument_class as _routing_class
+
+    klass = str(_routing_class(asset_type, symbol))
+    _INSTRUMENT_CLASS_CACHE[key] = klass
+    return klass
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +412,127 @@ def _binance_funding_provider(ticker: str, start: str, end: str) -> pd.Series:
     return pd.Series(agg, index=list(agg), dtype=float)
 
 
+def _action_symbol_universe(ticker: str) -> frozenset[str]:
+    """Symbols a corporate-action record may carry and still apply.
+
+    Accepts the exact instrument symbol (``MUUSDT``) and its base form
+    (``MU`` — the underlying the action is actually about), with dashed
+    perp spellings normalized. A record for any OTHER symbol is data for a
+    different instrument and is ignored, never mis-applied.
+    """
+    compact = str(ticker).strip().upper().replace("-", "")
+    symbols = {compact}
+    for suffix in ("USDT", "USDC"):
+        if compact.endswith(suffix) and len(compact) > len(suffix):
+            symbols.add(compact[: -len(suffix)])
+    return frozenset(symbols)
+
+
+def _split_ratio(record: CorporateActionRecord) -> float | None:
+    """New-shares-per-old-share from a split record's ``details``, else None.
+
+    ``details["ratio"]`` wins (``2.0`` = a 2:1 split halves prior prices);
+    the ``details["to"] / details["from"]`` pair is accepted as the equally
+    common venue spelling (``{"to": 2, "from": 1}``).
+    """
+    details = record.details or {}
+    raw_ratio = details.get("ratio")
+    if raw_ratio is not None:
+        try:
+            return float(raw_ratio)
+        except (TypeError, ValueError):
+            return None
+    raw_to, raw_from = details.get("to"), details.get("from")
+    if raw_to is not None and raw_from is not None:
+        try:
+            to_value, from_value = float(raw_to), float(raw_from)
+        except (TypeError, ValueError):
+            return None
+        if from_value != 0.0:
+            return to_value / from_value
+    return None
+
+
+def _apply_corporate_actions(
+    prices: pd.Series,
+    ticker: str,
+    records: Sequence[CorporateActionRecord],
+) -> tuple[pd.Series, int]:
+    """Back-adjust ``prices`` for splits/dividends; returns ``(series, n)``.
+
+    V2.4 honest skeleton: records arrive from the caller (there is no vendor
+    and no storage yet — ``None``, today's only production value, changes
+    nothing). Splits adjust MULTIPLICATIVELY (close bars strictly before the
+    ``event_date`` divide by the split ratio) and dividends ADDITIVELY (prior
+    bars subtract the per-share ``details["amount"]``); the ``event_date``
+    bar itself is the ex bar and stays unadjusted. Records apply in
+    chronological order so chained actions compose on the running adjusted
+    series, and the adjusted series feeds the mark-to-market, the
+    buy-and-hold benchmark and the asset-return windows alike (funding and
+    bar extremes stay on raw contract prices — they are venue observables,
+    not underlying economics). Malformed records raise ``ValueError``
+    (:func:`~yialpha.instruments.corporate_actions.validate_corporate_action`
+    plus ratio/amount checks): a wrong adjustment is worse than no backtest.
+    ``merger`` / ``ticker_change`` / ``other`` records are identity actions
+    with no price adjustment in this skeleton. The returned count is the
+    number of records that actually moved a price bar.
+    """
+    from yialpha.instruments.corporate_actions import validate_corporate_action
+
+    universe = _action_symbol_universe(ticker)
+    matching = [
+        record
+        for record in records
+        if str(record.symbol).strip().upper().replace("-", "") in universe
+    ]
+    adjusted = prices
+    applied = 0
+    for record in sorted(matching, key=lambda r: str(r.event_date)):
+        validate_corporate_action(record)
+        prior = adjusted.index < str(record.event_date)
+        if not prior.any():
+            continue
+        if record.action_type == "split":
+            ratio = _split_ratio(record)
+            if ratio is None or not np.isfinite(ratio) or ratio <= 0.0:
+                raise ValueError(
+                    f"split record for {record.symbol!r} effective "
+                    f"{record.event_date!r} needs a positive finite ratio "
+                    f"(details['ratio'], or details['to']/'from'); got "
+                    f"{record.details!r}"
+                )
+            values = adjusted.to_numpy(dtype=float, copy=True)
+            values[prior] /= ratio
+            adjusted = pd.Series(values, index=adjusted.index, dtype=float)
+            applied += 1
+        elif record.action_type == "dividend":
+            raw_amount = (record.details or {}).get("amount")
+            try:
+                amount = float(raw_amount) if raw_amount is not None else None
+            except (TypeError, ValueError):
+                amount = None
+            if amount is None or not np.isfinite(amount) or amount <= 0.0:
+                raise ValueError(
+                    f"dividend record for {record.symbol!r} effective "
+                    f"{record.event_date!r} needs a positive finite per-share "
+                    f"details['amount']; got {record.details!r}"
+                )
+            values = adjusted.to_numpy(dtype=float, copy=True)
+            values[prior] -= amount
+            if (values[prior] <= 0.0).any():
+                # A dividend larger than a prior price is a units error (raw
+                # vs split-adjusted amounts mixed); fail closed rather than
+                # emit a non-positive price the simulator would choke on.
+                raise ValueError(
+                    f"dividend adjustment for {record.symbol!r} effective "
+                    f"{record.event_date!r} drives a prior close to <= 0; "
+                    "check the amount's share-count basis"
+                )
+            adjusted = pd.Series(values, index=adjusted.index, dtype=float)
+            applied += 1
+    return adjusted, applied
+
+
 def run_backtest(
     graph: _GraphLike,
     ticker: str,
@@ -374,6 +546,7 @@ def run_backtest(
     run_tag: str = "default",
     price_provider: Callable[[str, str, str], pd.Series] = _yfinance_price_provider,
     funding_provider: Callable[[str, str, str], pd.Series] | None = None,
+    corporate_actions: Sequence[CorporateActionRecord] | None = None,
     periods_per_year: int | None = None,
     cost_bps: float = 0.0,
     taker_bps: float | None = None,
@@ -432,6 +605,19 @@ def run_backtest(
         fails closed (ValueError), and so do missing COVERAGE days (a day
         absent from the series would silently accrue zero drag;
         ``allow_funding_gaps=True`` accepts that approximation explicitly).
+    corporate_actions:
+        Optional caller-supplied corporate-action records for the traded
+        instrument or its underlying (V2.4 honest skeleton — no vendor, no
+        fetch, no storage; ``None``, today's only production value, changes
+        nothing). When provided, split records divide the close bars
+        STRICTLY before their ``event_date`` by the split ratio
+        (``details["ratio"]``, or ``details["to"]/details["from"]``) and
+        dividend records subtract the per-share ``details["amount"]`` from
+        those bars, BEFORE any returns are computed — the adjusted series
+        feeds the strategy, the buy-and-hold benchmark and the asset-return
+        windows alike. Records whose ``symbol`` is neither the instrument
+        symbol nor its base are ignored; the applied count is disclosed as
+        ``config_summary["corporate_actions_applied"]``.
     taker_bps / slippage_bps / bnb_discount / filters_provider:
         Execution-cost model for perp fills: taker fee in bps on the traded
         notional (``taker_bps=None`` falls back to the single ``cost_bps``),
@@ -518,30 +704,55 @@ def run_backtest(
         raise ValueError("execution_lag_bars must be an integer >= 1")
     if not (np.isfinite(leverage) and leverage >= 1.0):
         raise ValueError(f"leverage must be a finite number >= 1.0, got {leverage!r}")
-    if leverage != 1.0 and asset_type != "crypto_perp":
+    # V2.4 perp-class split: the perp-family gates key on the shared routing
+    # classification, not the raw asset_type string — a tokenized-stock perp
+    # (or an unresolvable perp) enters through asset_type="crypto_perp" and
+    # must get perp semantics instead of the spot/stock rejection. Pure-crypto
+    # perp and non-perp behaviour is unchanged (the family membership of
+    # "crypto_perp"+BTCUSDT and of every non-perp asset_type is the same
+    # verdict the string comparison produced).
+    instrument_klass = _perp_instrument_class(asset_type, ticker)
+    is_perp_family = instrument_klass in _PERP_INSTRUMENT_CLASSES
+    if leverage != 1.0 and not is_perp_family:
         raise ValueError(
-            "leverage is a crypto_perp-only parameter; a levered spot/stock "
-            "simulation would be a margin model this engine does not have"
+            "leverage is a crypto_perp-only parameter (perp family: "
+            "stock_perp / pure_crypto_perp / unknown_perp); a levered "
+            "spot/stock simulation would be a margin model this engine "
+            "does not have"
         )
-    if allow_short and asset_type != "crypto_perp":
+    if allow_short and not is_perp_family:
         raise ValueError(
-            "allow_short is a crypto_perp-only parameter; shorting spot/stock "
-            "involves locate/borrow mechanics this engine does not model"
+            "allow_short is a crypto_perp-only parameter (perp family: "
+            "stock_perp / pure_crypto_perp / unknown_perp); shorting "
+            "spot/stock involves locate/borrow mechanics this engine "
+            "does not model"
         )
     if liquidation_price_type is not None and liquidation_price_type not in ("mark", "last"):
         raise ValueError(
             f"liquidation_price_type must be 'mark' or 'last', got "
             f"{liquidation_price_type!r}"
         )
-    if liquidation_price_type == "mark" and asset_type != "crypto_perp":
+    if liquidation_price_type == "mark" and not is_perp_family:
         raise ValueError(
             "mark-price liquidation is a crypto_perp-only concept "
-            "(markPriceKlines is a perp endpoint)"
+            "(perp family: stock_perp / pure_crypto_perp / unknown_perp; "
+            "markPriceKlines is a perp endpoint)"
         )
     if slippage_bps < 0.0 or (taker_bps is not None and taker_bps < 0.0) or cost_bps < 0.0:
         raise ValueError("cost_bps / taker_bps / slippage_bps must be >= 0")
     if periods_per_year is None:
-        periods_per_year = 365 if asset_type.startswith("crypto") else 252
+        # V2.2 class-aware annualization (V2.4 wires it into the backtest):
+        # a stock perp's weekday-session candles annualize at 261, a pure
+        # crypto perp at 365, an unresolvable perp at the 252 equity
+        # convention. Only the perp classes REFINE the answer — passing e.g.
+        # the "crypto_spot" class would drag spot crypto to 252 and break the
+        # historical asset-type rule, so every non-perp class resolves via
+        # the None-class path (crypto 365 / everything else 252, unchanged).
+        periods_per_year = int(
+            periods_per_year_for(
+                asset_type, instrument_klass if is_perp_family else None,
+            )
+        )
     if periods_per_year < 1:
         raise ValueError("periods_per_year must be >= 1")
 
@@ -564,7 +775,7 @@ def run_backtest(
     # yfinance-shaped (SPY / 000300.SS), never Binance symbols.
     index_price_provider = price_provider
     price_provider_swapped = False
-    if asset_type == "crypto_perp" and price_provider is _yfinance_price_provider:
+    if is_perp_family and price_provider is _yfinance_price_provider:
         price_provider = _binance_perp_price_provider()
         price_provider_swapped = True
 
@@ -575,6 +786,16 @@ def run_backtest(
             "cannot mark the backtest to market."
         )
     prices = prices.sort_index()
+
+    # --- Corporate-action price adjustment (V2.4 honest skeleton) -----------
+    # Splits/dividends on the underlying are mechanics, not P&L: adjust the
+    # close series BEFORE any return, mark or benchmark is computed. None
+    # (the only production value today) leaves the series byte-identical.
+    corporate_actions_applied = 0
+    if corporate_actions:
+        prices, corporate_actions_applied = _apply_corporate_actions(
+            prices, ticker, corporate_actions,
+        )
 
     # --- Perp funding (long-only crypto_perp mode, 2026-08-16) ---------------
     # The engine remains a cash simulator at 1x; for a USDT-M perpetual it
@@ -587,7 +808,7 @@ def run_backtest(
     # research runs that accept the approximation).
     perp_funding: pd.Series | None = None
     funding_paid_total = 0.0
-    if asset_type == "crypto_perp":
+    if is_perp_family:
         provider = funding_provider or _binance_funding_provider
         try:
             perp_funding = provider(ticker, start_date, end_date)
@@ -658,14 +879,14 @@ def run_backtest(
     # fee buffer), triggered by the bar's adverse extreme when extremes are
     # available (else the close), exited at the liquidation price or the worse
     # close when the bar gapped through it.
-    model_liquidation = asset_type == "crypto_perp" and leverage > 1.0
+    model_liquidation = is_perp_family and leverage > 1.0
     # Stop-trigger simulation defaults ON for perps (a levered strategy whose
     # overlay publishes a stop must be priced with that stop actually firing)
     # and OFF everywhere else so spot/stock runs stay byte-identical.
     simulate_stops = (
         simulate_stop_triggers
         if simulate_stop_triggers is not None
-        else asset_type == "crypto_perp"
+        else is_perp_family
     )
     track_entry_basis = model_liquidation or simulate_stops
     stop_events: list[dict[str, Any]] = []
@@ -679,7 +900,7 @@ def run_backtest(
     # mark kline wicks for the liquidation check and last kline wicks for
     # stops instead of conflating them into one series.
     liq_price_type = liquidation_price_type or (
-        "mark" if asset_type == "crypto_perp" else "last"
+        "mark" if is_perp_family else "last"
     )
     liq_price_source = ""
     bar_lows: pd.Series | None = None      # liquidation trigger series
@@ -1198,7 +1419,7 @@ def run_backtest(
     # the forced-exit tallies and the signed funding totals behind the
     # config_summary event lists, so downstream consumers (report, web,
     # multi-run comparisons) do not have to re-derive them from configs.
-    if asset_type == "crypto_perp":
+    if is_perp_family:
         charge_day_count = max(
             1, sum(1 for d in prices.index if str(d) >= sorted_dates[0]),
         )
@@ -1242,6 +1463,9 @@ def run_backtest(
         metrics=metrics,
         config_summary={
             "asset_type": asset_type,
+            # V2.4 perp-class split: the resolved routing classification the
+            # run actually keyed on (perp gates / annualization).
+            "instrument_class": instrument_klass,
             "run_tag": run_tag,
             "cost_bps": cost_bps,
             "execution_lag_bars": execution_lag_bars,
@@ -1267,7 +1491,7 @@ def run_backtest(
                     ),
                     "perp_price_source": (
                         "binance perp klines"
-                        if asset_type == "crypto_perp"
+                        if is_perp_family
                         and index_price_provider is _yfinance_price_provider
                         and price_provider is not index_price_provider
                         else "caller-provided"
@@ -1302,7 +1526,11 @@ def run_backtest(
                         + ". Buy-and-hold stays a 1x long."
                     ),
                 }
-                if asset_type == "crypto_perp" else {}
+                if is_perp_family else {}
+            ),
+            **(
+                {"corporate_actions_applied": corporate_actions_applied}
+                if corporate_actions else {}
             ),
             **(
                 {"perp_liquidations": liq_events} if liq_events else {}
