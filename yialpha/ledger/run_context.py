@@ -60,6 +60,20 @@ reconstructed later — one non-replayable leg is enough to break that:
 * sentiment_analyst Binance Square block → ``binance_square`` /
   ``social`` / contract symbol / ``CONTRACT`` — ``LIVE_ONLY``
   (current-feed snapshot).
+* positioning_analyst positioning bundle (V2.3, perp runs with
+  ``positioning_split``) → ``positioning_bundle`` / ``binance_perp`` /
+  contract symbol / ``CONTRACT`` — the positioning half of the same
+  fetched bundle as ``perp_market_bundle``, so the replayability mapping
+  mirrors it exactly: ``LIVE_ONLY`` on live runs (depth/ADL/premium are
+  live views), ``PIT_REPLAYABLE`` on historical replays.
+* positioning_analyst on-chain flows block (V2.3, ``onchain_evidence``) →
+  ``onchain_flows`` / ``onchain`` (NEW category — on-chain network-activity
+  charts; no quality-ledger category exists for them, and ``social`` would
+  mislabel chart data) / contract symbol / ``CONTRACT`` —
+  ``PIT_REPLAYABLE``: the blockchain.info charts endpoint is
+  historical-capable and the block's points are PIT-filtered to the run's
+  as-of day, with ``available_at`` taken from the latest point timestamp
+  actually used.
 
 Categories align with the quality-ledger vocabulary
 (:data:`yialpha.dataflows.interface.TOOLS_CATEGORIES`) wherever one exists
@@ -173,6 +187,7 @@ def record_evidence_block(
     event_time: str | None = None,
     quality_status: str | None = None,
     source_url: str | None = None,
+    available_at: str | None = None,
 ) -> None:
     """Append one evidence row for an ``[EXTERNAL EVIDENCE]`` block.
 
@@ -182,7 +197,10 @@ def record_evidence_block(
     to one row. ``analysis_as_of`` comes from the bound context — the PIT
     guard lives in :func:`yialpha.ledger.evidence.record_evidence` and a
     violation (injection available after the run's as-of instant) is
-    logged and swallowed here, never raised into the data path. See the
+    logged and swallowed here, never raised into the data path.
+    ``available_at`` (V2.3, additive; ``None`` = now, the previous
+    behavior) lets a historical-capable vendor anchor its row to the
+    latest data-point timestamp instead of wall-clock fetch time. See the
     module docstring for the site → source/replayability/scope mapping.
     """
     context = current_ledger_run_context()
@@ -208,6 +226,7 @@ def record_evidence_block(
             replayability=replayability,
             quality_status=quality_status,
             analysis_as_of=context.analysis_as_of,
+            available_at=available_at,
         )
     except Exception:  # noqa: BLE001 -- record stage must never abort a run
         logger.warning(

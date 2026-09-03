@@ -25,6 +25,19 @@ ANALYST_NODE_SPECS: dict[str, AnalystNodeSpec] = {
         tool_node="tools_market",
         report_key="market_report",
     ),
+    "positioning": AnalystNodeSpec(
+        # V2.3 positioning split (flag positioning_split, default OFF):
+        # the positioning half of the perp bundle as a structured-output
+        # analyst. Inserted directly AFTER "market" wherever it is selected
+        # (see build_analyst_execution_plan) so the serial chain reads
+        # market -> positioning -> sentiment/...; in parallel mode it is one
+        # more fanned-out subgraph (order-independent).
+        key="positioning",
+        agent_node="Positioning Analyst",
+        clear_node="Msg Clear Positioning",
+        tool_node="tools_positioning",
+        report_key="positioning_report",
+    ),
     "social": AnalystNodeSpec(
         # Wire key stays "social" for saved-config back-compat; the
         # user-facing label is "Sentiment Analyst" to match the rename
@@ -56,8 +69,25 @@ ANALYST_NODE_SPECS: dict[str, AnalystNodeSpec] = {
 def build_analyst_execution_plan(
     selected_analysts: Iterable[str],
 ) -> AnalystExecutionPlan:
+    """Build the serial execution plan for the selected analysts.
+
+    V2.3 ordering rule: whenever "positioning" is selected it is placed
+    DIRECTLY after "market" (or first when market is absent) regardless of
+    where the caller listed it — the split's contract is that positioning
+    reads the same run's bundle right after the market analyst, and every
+    entrance (CLI filter, batch union, programmatic tuple) funnels through
+    this one plan builder, so the order can never drift per-entrance.
+    Flag-off runs never carry "positioning" (the CLI/batch filters gate
+    it), so existing plans are byte-identical to the pre-V2.3 build.
+    """
+    keys = list(selected_analysts)
+    if "positioning" in keys:
+        keys.remove("positioning")
+        insert_at = keys.index("market") + 1 if "market" in keys else 0
+        keys.insert(insert_at, "positioning")
+
     specs: list[AnalystNodeSpec] = []
-    for analyst_key in selected_analysts:
+    for analyst_key in keys:
         spec = ANALYST_NODE_SPECS.get(analyst_key)
         if spec is None:
             raise ValueError(f"unknown analyst key: {analyst_key}")

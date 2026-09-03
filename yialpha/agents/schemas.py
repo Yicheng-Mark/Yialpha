@@ -21,7 +21,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # LLMs sometimes write a placeholder string ("None", "N/A", ...) into an optional
 # numeric field instead of omitting it. Coerce those to None so the structured
@@ -223,6 +223,14 @@ class PortfolioDecision(BaseModel):
     ``price_target_basis``, ``underlying_price_target``,
     ``underlying_target_currency``). Renderers ignore them entirely, so a
     decision without them stays byte-identical to the pre-V2.1 markdown.
+
+    V2.3 additions (all optional, additive — no version bump): the
+    stock-perp DUAL VIEW (``underlying_direction``, ``contract_direction``,
+    ``basis_view``). On a tokenized-stock perp the EQUITY view (USD) and the
+    USDT CONTRACT view (premium / funding / liquidity) can legitimately
+    disagree — the PM states each separately instead of collapsing them into
+    one rating. All three default None; a decision without them renders
+    byte-identically to the pre-V2.3 markdown (pinned by tests).
     """
 
     rating: PortfolioRating = Field(
@@ -325,6 +333,38 @@ class PortfolioDecision(BaseModel):
             "(case-insensitive). The bridge accepts no other underlying unit."
         ),
     )
+    underlying_direction: Literal["bullish", "bearish", "neutral"] | None = Field(
+        default=None,
+        description=(
+            "Optional V2.3 dual view (stock-perp runs): the directional view on "
+            "the UNDERLYING equity in USD — exactly one of bullish / bearish / "
+            "neutral. Omit on non stock-perp instruments."
+        ),
+    )
+    contract_direction: (
+        Literal["bullish", "bearish", "neutral", "avoid_long", "avoid_short", "avoid"]
+        | None
+    ) = Field(
+        default=None,
+        description=(
+            "Optional V2.3 dual view (stock-perp runs): the view on the USDT "
+            "PERP contract itself — bullish / bearish / neutral / avoid_long / "
+            "avoid_short / avoid. The premium, funding and liquidity can justify "
+            "a contract view that disagrees with underlying_direction (e.g. "
+            "underlying bullish + avoid_long when the perp trades at a rich "
+            "premium with expensive positive funding). Omit on non stock-perp "
+            "instruments."
+        ),
+    )
+    basis_view: str | None = Field(
+        default=None,
+        description=(
+            "Optional V2.3 dual view (stock-perp runs): one short prose "
+            "sentence on the contract-vs-underlying basis (premium/discount, "
+            "funding carry) that explains why the two views agree or disagree. "
+            "Omit when no dual view was filled."
+        ),
+    )
 
     @field_validator(
         "price_target", "confidence", "expected_return", "evidence_coverage",
@@ -415,6 +455,15 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", "**Invalidation**: " + "; ".join(decision.invalidation)])
     if decision.evidence_coverage is not None:
         parts.extend(["", f"**Evidence Coverage**: {decision.evidence_coverage:.0%}"])
+    # V2.3 dual view (stock perps): a compact block ONLY when the PM filled
+    # at least one dual-view field. All-None renders byte-identically to the
+    # pre-V2.3 shape (pinned), so legacy parsers never see the new headers.
+    if decision.underlying_direction is not None:
+        parts.extend(["", f"**Underlying view**: {decision.underlying_direction}"])
+    if decision.contract_direction is not None:
+        parts.extend(["", f"**Contract view**: {decision.contract_direction}"])
+    if decision.basis_view:
+        parts.extend(["", f"**Basis view**: {decision.basis_view}"])
     return "\n".join(parts)
 
 
@@ -505,6 +554,96 @@ def render_sentiment_report(report: SentimentReport) -> str:
     return "\n".join([
         f"**Overall Sentiment:** **{report.overall_band.value}** "
         f"(Score: {report.overall_score:.1f}/10)",
+        f"**Confidence:** {report.confidence.capitalize()}",
+        "",
+        report.narrative,
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Positioning Analyst (V2.3)
+# ---------------------------------------------------------------------------
+
+
+class PositioningReport(BaseModel):
+    """Structured positioning report produced by the V2.3 Positioning Analyst.
+
+    The frozen contract: Positioning NEVER outputs a trade direction. There
+    is no ``direction``/``bullish``/``bearish`` field and the model config
+    forbids extras, so a provider that emits a direction key anyway FAILS
+    validation (structured attempt falls back; the freeze is schema-enforced,
+    pinned by tests). What the report carries instead is the positioning
+    FABRIC: who pays (funding bias), how crowded each side is, and how much
+    liquidity stands behind the move.
+
+    ``narrative`` preserves the rich source-by-source analysis;
+    :func:`render_positioning_report` prepends a deterministic header.
+    """
+
+    #: extra="forbid" IS the direction freeze: any key outside this schema
+    #: (notably a trade-direction key) fails validation instead of being
+    #: silently dropped.
+    model_config = ConfigDict(extra="forbid")
+
+    funding_bias: Literal["long_pays_expensive", "neutral", "long_gets_paid"] = Field(
+        description=(
+            "Funding carry read. Exactly one of: long_pays_expensive (net "
+            "positive cumulative funding — longs pay, the crowded side is "
+            "long), neutral (near-zero funding), long_gets_paid (net negative "
+            "cumulative funding — shorts pay)."
+        ),
+    )
+    crowding: Literal["crowded_long", "balanced", "crowded_short"] = Field(
+        description=(
+            "Leveraged-crowd positioning from OI build + long/short ratios + "
+            "taker flow. Exactly one of: crowded_long, balanced, crowded_short."
+        ),
+    )
+    liquidity_risk: Literal["thin", "normal", "deep"] = Field(
+        description=(
+            "Execution/liquidation-cascade risk from book depth, spread and "
+            "ADL quantiles. Exactly one of: thin, normal, deep."
+        ),
+    )
+    narrative: str = Field(
+        description=(
+            "Full positioning report covering, in order: "
+            "(1) funding carry (trailing sum, next-rate snapshot); "
+            "(2) open-interest build and its percentile; "
+            "(3) long/short ratios across the three vantage points with "
+            "cross-vantage divergence; "
+            "(4) taker order-flow aggression; "
+            "(5) book depth bands, slippage and ADL quantiles; "
+            "(6) spot-perp / index basis; "
+            "(7) on-chain flow context when the onchain block is present. "
+            "This is a POSITIONING read: describe crowding, carry and "
+            "liquidity — do NOT state a price direction or a trade "
+            "recommendation; the directional call belongs to other analysts. "
+            "(8) a markdown table summarising the key positioning signals, "
+            "their reading, source, and supporting evidence."
+        ),
+    )
+    confidence: Literal["low", "medium", "high"] = Field(
+        description=(
+            "Confidence in the positioning read based on component "
+            "availability. Use 'low' when one or more positioning components "
+            "carried an unavailable/skipped-live-only status; 'medium' when "
+            "the core (funding + OI + LSR) is present but thin; 'high' only "
+            "when the full positioning fabric was available."
+        ),
+    )
+
+
+def render_positioning_report(report: PositioningReport) -> str:
+    """Render a PositioningReport to the markdown shape the pipeline consumes.
+
+    Deterministic header (fabric labels + confidence) prepended to the
+    narrative; no direction line exists anywhere in the render.
+    """
+    return "\n".join([
+        f"**Positioning — funding:** {report.funding_bias} | "
+        f"**crowding:** {report.crowding} | "
+        f"**liquidity:** {report.liquidity_risk}",
         f"**Confidence:** {report.confidence.capitalize()}",
         "",
         report.narrative,

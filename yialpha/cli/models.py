@@ -8,6 +8,11 @@ class AnalystType(StrEnum):
     SOCIAL = "social"
     NEWS = "news"
     FUNDAMENTALS = "fundamentals"
+    # V2.3 positioning split: never user-selected — filter_analysts_for_
+    # asset_type appends it for crypto_perp runs when the positioning_split
+    # flag is on (default off pending A/B), so every entrance (interactive
+    # CLI, batch runner, scripts) funnels through one gate.
+    POSITIONING = "positioning"
 
 
 class AssetType(StrEnum):

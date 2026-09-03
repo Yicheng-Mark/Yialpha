@@ -43,6 +43,18 @@
 - **conftest**：`_runtime_ledger_isolated` 增 `"regime_state": False`；.env.example 增 YIALPHA_REGIME_STATE 注释行（双向覆盖测试钉）。
 - **测试**：tests/test_regime_state.py（25 个）：id 确定性/输入敏感/版本隔离/computed_at 剔除、纯币 live 装配、历史模式 LIVE 腿零调用零泄漏、stock_perp 装配+诚实缺口、全缺→None、session 桶、迁移 v2 幂等+重复列恢复、store 往返、predictions 带载+regime 冲突、outcome 透传、`_run_graph` 穿链 flag on/off/uncomputable、ticket 填充 on/None off、analyst 注入 on/off 字节不变+PIT tag、scoreboard by_regime+no_regime 桶、sessions_per_year 双类钉值、indicator 工具年化因数捕获。
 
+## V2.3 Specialization — ✅ 完成（2026-09-03，2862 passed / ruff clean / mypy 165 文件 clean）
+
+**执行注记**：子智能体实施途中撞 5h 用量上限终止（留下完整接线层）；主智能体接管补齐 config/env/conftest/CLI 注册/POSITIONING outcome 定价/PM 双观点透传/desired_side/全部测试（+18 测试）。落点：
+- **Positioning 分析师**：`positioning_analyst.py`（sentiment 型结构化输出无工具循环；复用 market 的 run_cached bundle 键=每 run 一次 fetch 服务两分析师）；`PositioningReport` **extra="forbid"**（direction 键直接 ValidationError——冻结是结构性的）；盲预测 scope=POSITIONING（direction=funding 累计和符号，`direction_note` 注入工具描述，工具描述插槽在 Args 前）；`render_positioning_block`（funding/OI/LSR/taker/depth/ADL/basis 段）。
+- **拆分裁决（偏差）**：flag-on 时 market analyst 的 bundle 块**保持不变**（positioning 数据在两块中重复而非从 market 移除）——重复优于数据丢失，且保证 flag-off/on 对现有报告字节零变化；若 A/B 后转默认再考虑去重。
+- **接线**：`analyst_execution` ANALYST_NODE_SPECS + 计划构建器把 positioning 钉在 market 后（任何入口顺序）；`conditional_logic.should_continue_positioning`；trading_graph 注册休眠 ToolNode([submit_prediction])（接线契约满足）；AgentState.positioning_report；CLI AnalystType.POSITIONING **不可用户选择**，`filter_analysts_for_asset_type` flag-on+crypto_perp 时追加（CLI 与 batch 同一门）。
+- **POSITIONING outcome**：`_funding_window_sum` 重构（原始累计和+最后结算日，`_funding_pnl_leg` 变薄壳）；分支在 MACRO 后、时间自算（**坑：分支在 analysis_dt 定义前，引用即 UnboundLocalError**）；net_return=realized funding sum（方向无关，钉死），无价格/成本腿，缺口→incomplete(funding_window)。
+- **PM 双观点**：PortfolioDecision +underlying_direction/contract_direction/basis_view（schema Field 描述驱动 LLM，**不加 system prompt 行**——prompt 字节不变）；render_pm_decision 仅填充时加行（None 字节不变钉死）；`_decision_fields_dict` 透传非 None。
+- **desired_side_from_decision**（tickets.py，record-only 供 V2.4）：Buy/Overweight→LONG、Hold→FLAT、Underweight→REDUCE、Sell→CLOSE、未知→FLAT；**永不返回 SHORT**（仅 V2.4 显式结构化字段可开空）；双观点字段不参与（保守读法）。
+- **链上**：`onchain_flows.py` blockchain.info charts（keyless，estimated-transaction-volume-usd + n-unique-addresses，30d 窗，PIT 过滤未来点，PIT_REPLAYABLE，available_at=最后点时刻）；capability-absent 披露渲染；evidence category "onchain"（新类别，social 会误标）。
+- **config**：positioning_split=False（默认关待 A/B）/onchain_evidence=False + env 行 + conftest 扩展 + .env.example。
+
 ## 已冻结的契约决定
 
 1. **中央账本**：单文件 SQLite，config `ledger_db_path`（默认 `~/.yialpha/ledger/portfolio.db`，env `YIALPHA_LEDGER_DB`）。WAL + busy_timeout=5000 + BEGIN IMMEDIATE 原子提交；版本管理用 **schema_meta 表**（`schema_version` 行，非 PRAGMA user_version——Mimosa 钩子拦 f-string PRAGMA）；append-only（无 UPDATE 路径）。迁移 v1 = runs / instrument_snapshots / evidence / predictions / outcomes / tickets 六表（DDL 见 `yialpha/ledger/sqlite.py::_migrate`）。**所有 SQL 必须字面量+参数绑定**（Mimosa 钩子拦截变量 SQL，已两次拦截验证）。

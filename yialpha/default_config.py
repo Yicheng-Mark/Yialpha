@@ -222,6 +222,11 @@ _ENV_OVERRIDES = {
     "YIALPHA_STOCK_PERP_FAIR_VALUE":        "stock_perp_fair_value",
     # V2.2 Context: versioned point-in-time RegimeState per perp run.
     "YIALPHA_REGIME_STATE":                 "regime_state",
+    # V2.3 Specialization: positioning-analyst split + optional on-chain
+    # evidence. Both stay OFF pending the A/B comparison (see the
+    # positioning_split comment in DEFAULT_CONFIG).
+    "YIALPHA_POSITIONING_SPLIT":            "positioning_split",
+    "YIALPHA_ONCHAIN_EVIDENCE":             "onchain_evidence",
 }
 
 
@@ -481,6 +486,24 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # evidence. Uncomputable regime -> disclosed as unavailable, never a
     # fake id. Set false for byte-identical pre-V2.2 prompts and state.
     "regime_state": True,
+    # --- V2.3 Specialization (flag-gated; perp runs only) ----------------------
+    # Positioning-analyst split (yialpha.agents.analysts.positioning_analyst).
+    # OFF by default pending the A/B comparison: when ON (and the run is
+    # crypto_perp), a dedicated structured-output Positioning Analyst is
+    # appended (execution order pinned right after Market) reading the
+    # POSITIONING half of the same perp bundle (funding/OI/LSR/taker/depth/
+    # ADL) — a report schema-incapable of stating a trade direction (funding
+    # bias / crowding / liquidity risk only) plus POSITIONING-scope blind
+    # predictions (the SIGN of the cumulative funding rate per horizon).
+    # The market analyst's own bundle block is unchanged, so flag-on only
+    # ADDS the analyst; no existing prompt/report bytes change.
+    "positioning_split": False,
+    # Optional on-chain flow evidence (yialpha.dataflows.onchain_flows):
+    # blockchain.info charts (keyless, historical-capable) appended to the
+    # positioning analyst's evidence as network-activity context when the
+    # split is on. OFF by default; capability-absent degrades to a
+    # disclosure block and never blocks a run.
+    "onchain_evidence": False,
     # Central SQLite ledger DB (env YIALPHA_LEDGER_DB). One append-first
     # database holds instrument snapshots, run evidence, blind predictions,
     # outcomes and ticket mirrors (V2.4 adds positions/portfolio snapshots).

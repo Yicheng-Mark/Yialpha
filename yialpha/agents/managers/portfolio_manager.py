@@ -112,14 +112,18 @@ def _decision_fields_dict(decision) -> dict:
         "evidence_coverage": decision.evidence_coverage,
         "schema_version": SCHEMA_VERSION,
     }
-    # V2.1 fair-value linkage fields (additive). Only NON-None values ride
-    # along, so a PM that does not emit them keeps pm_decision_fields — and
-    # therefore the logged state JSON — byte-identical to the pre-V2.1 shape.
+    # V2.1 fair-value linkage + V2.3 dual-view fields (additive). Only
+    # NON-None values ride along, so a PM that does not emit them keeps
+    # pm_decision_fields — and therefore the logged state JSON —
+    # byte-identical to the pre-V2.1 shape.
     for optional_key in (
         "price_target_currency",
         "price_target_basis",
         "underlying_price_target",
         "underlying_target_currency",
+        "underlying_direction",
+        "contract_direction",
+        "basis_view",
     ):
         value = getattr(decision, optional_key, None)
         if value is not None:

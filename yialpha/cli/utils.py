@@ -135,13 +135,23 @@ def filter_analysts_for_asset_type(
         AssetType.CRYPTO_SPOT,
     ):
         return analysts
-    if fundamentals_applicable(asset_type.value, ticker):
-        return list(analysts)
-    return [
-        analyst
-        for analyst in analysts
-        if analyst != AnalystType.FUNDAMENTALS
-    ]
+    filtered = list(analysts)
+    if not fundamentals_applicable(asset_type.value, ticker):
+        filtered = [
+            analyst for analyst in filtered if analyst != AnalystType.FUNDAMENTALS
+        ]
+    # V2.3 positioning split: APPEND the Positioning Analyst for crypto_perp
+    # runs when the flag is on (default off). Never user-selected; the
+    # execution-plan builder pins its position right after "market", so the
+    # append order here does not matter. Flag off -> the list is unchanged
+    # (byte-compat). This one gate serves the CLI AND the batch runner (it
+    # routes through this exact function).
+    if asset_type == AssetType.CRYPTO_PERP:
+        from yialpha.dataflows.config import get_config
+
+        if get_config().get("positioning_split"):
+            filtered.append(AnalystType.POSITIONING)
+    return filtered
 
 
 def get_analysis_date() -> str:

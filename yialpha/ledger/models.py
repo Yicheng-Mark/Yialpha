@@ -53,8 +53,13 @@ from typing import Any
 SCOPE_UNDERLYING = "UNDERLYING"
 SCOPE_CONTRACT = "CONTRACT"
 SCOPE_MACRO = "MACRO"
+#: V2.3 Positioning analyst scope: the call is about the SIGN of the
+#: cumulative funding rate over the horizon (up = longs pay net), never a
+#: trade direction on price. Scored by outcome_compute against the realized
+#: funding sum, not a price return.
+SCOPE_POSITIONING = "POSITIONING"
 #: Every admissible ``scope`` / ``prediction_scope`` value.
-SCOPES = frozenset({SCOPE_UNDERLYING, SCOPE_CONTRACT, SCOPE_MACRO})
+SCOPES = frozenset({SCOPE_UNDERLYING, SCOPE_CONTRACT, SCOPE_MACRO, SCOPE_POSITIONING})
 
 REPLAYABILITY_PIT_REPLAYABLE = "PIT_REPLAYABLE"
 REPLAYABILITY_LIVE_ONLY = "LIVE_ONLY"

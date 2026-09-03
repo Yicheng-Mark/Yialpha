@@ -52,6 +52,19 @@ class ConditionalLogic:
         """Determine if market analysis should continue."""
         return self._route_on_tool_calls(state, "tools_market", "Msg Clear Market")
 
+    def should_continue_positioning(self, state: AgentState) -> str:
+        """Determine if the positioning-analyst round should continue.
+
+        V2.3: the positioning analyst is structured-output (no tool loop),
+        so this router practically always resolves to the clear node — the
+        last message is its final AIMessage with no tool calls. The tool
+        branch exists for wiring parity with the other analysts (the serial
+        plan registers the tool node unconditionally).
+        """
+        return self._route_on_tool_calls(
+            state, "tools_positioning", "Msg Clear Positioning"
+        )
+
     def should_continue_social(self, state: AgentState) -> str:
         """Determine if sentiment-analyst tool round should continue.
 

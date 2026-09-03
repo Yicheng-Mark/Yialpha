@@ -150,6 +150,8 @@ def _runtime_ledger_isolated(tmp_path):
             "prediction_ledger": False,
             "stock_perp_fair_value": False,
             "regime_state": False,
+            "positioning_split": False,
+            "onchain_evidence": False,
         }
     )
     reset_ledger_state_for_test()

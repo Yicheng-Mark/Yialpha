@@ -65,6 +65,35 @@ def new_run_id() -> str:
     return "R" + uuid.uuid4().hex[:12]
 
 
+def desired_side_from_decision(fields: dict | None) -> str:
+    """Legacy-compatibility side mapping from a PM decision's rating.
+
+    V2.3 record-only helper (consumed by the V2.4 resolver): maps the
+    five-rating vocabulary onto the signed-position intents WITHOUT ever
+    inventing a short — only an explicit structured ``desired_side=SHORT``
+    (a V2.4 field) may open a short position:
+
+    * Buy / Overweight -> ``LONG``
+    * Hold -> ``FLAT``
+    * Underweight -> ``REDUCE``  (shrink or exit, never new short)
+    * Sell -> ``CLOSE``          (exit only, never new short)
+
+    Unknown / missing ratings map to ``FLAT`` (fail neutral). The V2.3
+    dual-view fields (``underlying_direction`` / ``contract_direction``)
+    are NOT consulted: they are opinions, and this mapping is deliberately
+    the most conservative reading of the one rating the legacy pipeline
+    already produces.
+    """
+    rating = str((fields or {}).get("rating") or "").strip().lower()
+    if rating in ("buy", "overweight"):
+        return "LONG"
+    if rating == "underweight":
+        return "REDUCE"
+    if rating == "sell":
+        return "CLOSE"
+    return "FLAT"
+
+
 class ExecutionTicket(BaseModel):
     """The frozen V2 ticket schema (see docs/V2_BASELINE.md).
 
