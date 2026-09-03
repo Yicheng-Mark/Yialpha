@@ -448,19 +448,34 @@ def compute_regime_state(
             missing.add("onboard_date")
         coverage["calendar"] = 1.0 if listing_age_days is not None else 0.0
         session_state = _session_state(analysis_as_of)
-        try:
-            end_exclusive = (
-                datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
-            ).strftime("%Y-%m-%d")
-            history = get_YFin_history_cached(
-                underlying_symbol or ticker,
-                _window_start(end_date, _KLINE_LOOKBACK_DAYS),
-                end_exclusive,
+        if underlying_symbol:
+            try:
+                end_exclusive = (
+                    datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+                ).strftime("%Y-%m-%d")
+                history = get_YFin_history_cached(
+                    underlying_symbol,
+                    _window_start(end_date, _KLINE_LOOKBACK_DAYS),
+                    end_exclusive,
+                )
+                equity_closes = [float(v) for v in history["Close"].dropna().tolist()]
+                underlying_trend = _trend_from_closes(equity_closes)
+            except Exception as exc:  # noqa: BLE001 — fail-soft per family
+                logger.info(
+                    "regime underlying history unavailable for %s: %s", ticker, exc
+                )
+        else:
+            # No PIT underlying mapping (registry read failed, or the row
+            # carried no underlying): the perp contract code is NOT a stock
+            # symbol, so the equity history source must never receive it.
+            # The leg is disclosed unavailable instead of silently queried
+            # with the contract symbol — the regime degrades honestly.
+            logger.info(
+                "regime underlying mapping unavailable for %s — equity leg "
+                "not queried (contract symbol withheld from the stock source)",
+                ticker,
             )
-            equity_closes = [float(v) for v in history["Close"].dropna().tolist()]
-            underlying_trend = _trend_from_closes(equity_closes)
-        except Exception as exc:  # noqa: BLE001
-            logger.info("regime underlying history unavailable for %s: %s", ticker, exc)
+            missing.add("underlying_symbol")
         if underlying_trend is None:
             missing.add("underlying_history")
         coverage["underlying"] = 1.0 if underlying_trend is not None else 0.0

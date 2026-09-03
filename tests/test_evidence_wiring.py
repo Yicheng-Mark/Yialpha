@@ -144,16 +144,20 @@ def test_record_evidence_block_flag_off_writes_nothing():
 
 
 @pytest.mark.unit
-def test_record_evidence_block_swallows_pit_violation():
+def test_record_evidence_block_anchors_available_at_to_run_as_of():
     set_config({"prediction_ledger": True})
-    run_id = _bind_run(as_of=(date.today() - timedelta(days=3)).isoformat())
-    # available_at defaults to now, which postdates the historical as_of:
-    # the ledger raises, the wrapper logs and swallows — never aborts.
+    as_of = (date.today() - timedelta(days=3)).isoformat()
+    run_id = _bind_run(as_of=as_of)
+    # available_at defaults to the run's analysis_as_of anchor (not wall
+    # clock): run-derived evidence for a historical replay is PIT-consistent
+    # and lands. Explicitly future available_at is PIT-rejected upstream.
     record_evidence_block(
         "s", "news_data", "BTCUSDT", SCOPE_CONTRACT, "PAYLOAD",
         replayability=REPLAYABILITY_PIT_REPLAYABLE,
     )
-    assert evidence_for_run(run_id) == []
+    rows = evidence_for_run(run_id)
+    assert len(rows) == 1
+    assert rows[0].available_at == as_of
 
 
 # ---- market analyst: perp market bundle ----------------------------------------

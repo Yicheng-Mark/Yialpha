@@ -698,6 +698,15 @@ def ensure_api_key(provider: str) -> str | None:
     if spec is not None and spec.key_optional:
         return os.environ.get(env_var)
 
+    # Key-pool providers (GLM Coding Plan, yialpha/llm_clients/key_pool.py):
+    # a populated *_API_KEYS pool satisfies the key requirement on its own —
+    # return one of its keys instead of prompting for the single-key var.
+    from yialpha.llm_clients.key_pool import api_key_pool, has_pool
+    if has_pool(provider):
+        pool = api_key_pool(provider)
+        if pool:
+            return pool[0]
+
     existing = os.environ.get(env_var)
     if existing:
         return existing

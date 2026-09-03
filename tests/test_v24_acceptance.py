@@ -79,7 +79,7 @@ def _bind_run(instrument_class: str = "pure_crypto_perp") -> None:
     )
 
 
-def _seed_open_position(symbol: str, weight: float) -> None:
+def _seed_open_position(symbol: str, weight: float, side: str = "LONG") -> None:
     commit_final_ticket(
         ticket_payload={"ticket_id": f"T-{symbol}"},
         ticket_id=f"T-{symbol}",
@@ -89,7 +89,7 @@ def _seed_open_position(symbol: str, weight: float) -> None:
         snapshot_payload={"positions": []},
         snapshot_id=new_snapshot_id(f"seed-{symbol}"),
         position_symbol=symbol,
-        position_side="LONG",
+        position_side=side,
         position_signed_weight=weight,
         open_position=True,
     )
@@ -309,12 +309,38 @@ def test_short_sizing_labeled_as_transitional_heuristic(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
-def test_short_resize_preserves_the_short_sign(tmp_path, monkeypatch):
+def test_short_proposal_into_net_long_heavy_book_is_vetoed(tmp_path, monkeypatch):
     _bind_run()
-    # Gross-heavy book: the heuristic 5% short must be clipped by
-    # global_gross while staying NEGATIVE (resize shrinks, never flips).
+    # Net-long-heavy book (0.98): no [0,1] scaling of the heuristic 5%
+    # short brings the final net long back under the limit, so the
+    # final-portfolio direction check must VETO — shrinking is not enough.
     _seed_open_position("ETHUSDT", 0.60)
     _seed_open_position("SOLUSDT", 0.38)
+    g = _make_graph(tmp_path, portfolio_control_mode="enforced")
+    _stub_prices(g, monkeypatch)
+    out = g._apply_risk_overlay(
+        "BTCUSDT", _TRADE_DATE,
+        _perp_state(
+            final_trade_decision="**Rating**: Sell\n\nThesis.",
+            pm_rating="Sell",
+            pm_decision_fields={"desired_side": "SHORT"},
+        ),
+        {"equity": 100_000},
+        asset_type="crypto_perp",
+    )
+    ticket = out["execution_ticket"]
+    assert ticket["status"] == TicketStatus.VETOED.value
+    assert not [p for p in open_positions() if p["symbol"] == "BTCUSDT"]
+
+
+@pytest.mark.unit
+def test_short_resize_preserves_the_short_sign(tmp_path, monkeypatch):
+    _bind_run()
+    # Short-side-heavy book (0.78 across two symbols): the heuristic 5%
+    # short is clipped by the same-direction headroom while staying
+    # NEGATIVE (resize shrinks, never flips).
+    _seed_open_position("ETHUSDT", -0.60, side="SHORT")
+    _seed_open_position("SOLUSDT", -0.18, side="SHORT")
     g = _make_graph(tmp_path, portfolio_control_mode="enforced")
     _stub_prices(g, monkeypatch)
     out = g._apply_risk_overlay(

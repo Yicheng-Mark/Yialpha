@@ -16,7 +16,8 @@ Rules enforced by this module:
   ``(run_id, sha256(payload))``, so the same block re-injected into one run
   (tool-loop re-entries, prompt replays) collapses to a single row.
 * **Point-in-time guard** — recording evidence whose ``available_at`` is
-  later than the run's ``analysis_as_of`` raises ``ValueError``: a
+  later than the run's ``analysis_as_of`` raises
+  :class:`PITEvidenceViolation` (a ``ValueError`` subclass): a
   prediction labelled "as of T" must never rest on data that did not exist
   at T. Date-vs-datetime normalization follows
   :func:`yialpha.ledger.models.pit_latest_instant` (a date-only
@@ -59,6 +60,18 @@ _EVIDENCE_COLUMNS = (
     "replayability",
     "quality_status",
 )
+
+
+class PITEvidenceViolation(ValueError):
+    """The point-in-time guard's typed rejection.
+
+    Raised when evidence ``available_at`` postdates the run's
+    ``analysis_as_of``: a prediction labelled "as of T" must never rest on
+    data that did not exist at T. Subclasses :class:`ValueError` so existing
+    ``except ValueError`` handling (and the fail-soft record stage in
+    :mod:`yialpha.ledger.run_context`, which inspects this type to disclose
+    the refusal explicitly) keeps working unchanged.
+    """
 
 
 def register_run(
@@ -119,11 +132,16 @@ def record_evidence(
     dedupes to one row and returns the same id. A *different* payload in the
     same run is a different row by construction.
 
-    ``available_at`` defaults to now (``utc_now_iso``). When
-    ``analysis_as_of`` is given, a ``ValueError`` is raised if the evidence
-    became available after that instant (PIT violation); a date-only
-    ``analysis_as_of`` admits any time on that UTC day. Foreign keys are
-    enforced: an unknown ``run_id`` raises ``sqlite3.IntegrityError``.
+    ``available_at`` defaults to now (``utc_now_iso``). The run-context
+    wrapper (:func:`yialpha.ledger.run_context.record_evidence_block`)
+    anchors an omitted ``available_at`` to the run's ``analysis_as_of``
+    before delegating here, so run-derived evidence is PIT-consistent by
+    construction; this raw fallback only covers direct callers. When
+    ``analysis_as_of`` is given, a :class:`PITEvidenceViolation` (a
+    ``ValueError`` subclass) is raised if the evidence became available
+    after that instant (PIT violation); a date-only ``analysis_as_of``
+    admits any time on that UTC day. Foreign keys are enforced: an unknown
+    ``run_id`` raises ``sqlite3.IntegrityError``.
     """
     validate_scope(scope)
     validate_replayability(replayability)
@@ -132,7 +150,9 @@ def record_evidence(
     if analysis_as_of is not None and pit_latest_instant(available) > (
         pit_latest_instant(analysis_as_of)
     ):
-        raise ValueError("evidence available_at exceeds analysis_as_of (PIT violation)")
+        raise PITEvidenceViolation(
+            "evidence available_at exceeds analysis_as_of (PIT violation)"
+        )
     evidence_id = new_evidence_id(run_id, payload_hash)
     values = {
         "evidence_id": evidence_id,

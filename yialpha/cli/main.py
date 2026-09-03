@@ -1813,15 +1813,24 @@ def config_check():
     # -- LLM provider + key ---------------------------------------------------
     provider = os.environ.get("YIALPHA_LLM_PROVIDER", "openai")
     key_env = get_api_key_env(provider)
-    key_set = bool(os.environ.get(key_env)) if key_env else True
+    from yialpha.llm_clients.key_pool import PROVIDER_API_KEYS_ENV, api_key_pool, has_pool
 
-    # Providers with key_env=None use other auth (AWS chain, local server, etc.)
-    if key_env is None:
+    pool_active = has_pool(provider) and bool(api_key_pool(provider))
+    if pool_active:
+        pool = api_key_pool(provider)
+        console.print(
+            f"  [green]✅[/green] Provider [bold]{provider}[/bold]: "
+            f"{PROVIDER_API_KEYS_ENV.get(provider, '?')} pool with "
+            f"{len(pool)} keys [dim](round-robin per request; 401/403 drops "
+            "a key for the process, 429 cools it down)[/dim]"
+        )
+    elif key_env is None:
+        # Providers with key_env=None use other auth (AWS chain, local server)
         console.print(
             f"  [green]✅[/green] Provider [bold]{provider}[/bold]: "
             "no API key required (AWS chain / local runtime)"
         )
-    elif key_set:
+    elif os.environ.get(key_env):
         console.print(
             f"  [green]✅[/green] Provider [bold]{provider}[/bold]: "
             f"{key_env} is [green]SET[/green]"
@@ -1992,7 +2001,7 @@ def config_check():
             )
 
     # -- Verdict --------------------------------------------------------------
-    ready = key_env is None or key_set
+    ready = pool_active or key_env is None or bool(key_env and os.environ.get(key_env))
     console.print()
     if ready:
         console.print("[bold green]✅ Configuration ready for analysis.[/bold green]")

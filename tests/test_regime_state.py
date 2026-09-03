@@ -55,11 +55,17 @@ _PAST = (date.today() - timedelta(days=40)).isoformat()
 
 @pytest.fixture(autouse=True)
 def _clean_record_stage():
+    from yialpha.dataflows.run_scope import reset_run_scope
+
     reset_ledger_run_context()
     quality.reset_quality()
+    # Start cold: a prior test's shell run must never serve its prefetch
+    # snapshot to this test (run-scope cache pollution in combined runs).
+    reset_run_scope()
     yield
     reset_ledger_run_context()
     quality.reset_quality()
+    reset_run_scope()
 
 
 # --------------------------------------------------------------------------- #
@@ -537,6 +543,33 @@ def test_run_graph_threads_regime_id_flag_on(tmp_path, monkeypatch):
     # the run context was re-bound with the regime id before the nodes run
     # (dropped again in the finally block)
     assert current_ledger_run_context() is None
+
+
+@pytest.mark.unit
+def test_run_graph_live_regime_as_of_is_intraday(tmp_path, monkeypatch):
+    # D7: a live same-day run hands compute_regime_state an INTRADAY as-of —
+    # a bare date normalizes to midnight in registry._asof_bound and would
+    # lexically exclude same-day snapshots — while end_date stays date-only
+    # (compute.py parses "%Y-%m-%d"). "Today" follows is_historical_date's
+    # own calendar (local date), derived at run time — never hardcoded.
+    set_config({"prediction_ledger": True, "regime_state": True})
+    stub = _stub_regime(monkeypatch)
+    calls: list[tuple[tuple, dict]] = []
+
+    def capture_compute(*args, **kwargs):
+        calls.append((args, kwargs))
+        return stub
+
+    monkeypatch.setattr("yialpha.regime.compute.compute_regime_state", capture_compute)
+    g = _make_graph_shell(tmp_path, prediction_ledger=True, regime_state=True)
+    _stub_pipeline(g)
+    today = date.today().isoformat()
+    g._run_graph("BTCUSDT", today, asset_type="crypto_perp")
+    assert calls  # flag on + crypto_perp -> the regime stage ran
+    args, kwargs = calls[0]
+    assert "T" in args[3]  # full ISO timestamp, not the bare date
+    assert kwargs["end_date"] == today
+    assert "T" not in kwargs["end_date"]
 
 
 @pytest.mark.unit

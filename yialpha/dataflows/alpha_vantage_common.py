@@ -8,6 +8,7 @@ from io import StringIO
 import pandas as pd
 import requests
 
+from ..logging_config import redact_secrets
 from .disk_cache import cached_or_fetch, vendor_cache_dir
 from .errors import (
     NoMarketDataError,
@@ -78,9 +79,12 @@ def _raw_api_request(function_name: str, params: dict) -> dict | str:
     """
     # Create a copy of params to avoid modifying the original
     api_params = params.copy()
+    # Kept for exception-message redaction below: vendor notices echo the key
+    # back verbatim, and the message must never carry it into logs (#R6).
+    api_key = get_api_key()
     api_params.update({
         "function": function_name,
-        "apikey": get_api_key(),
+        "apikey": api_key,
         "source": "yialpha",
     })
 
@@ -110,9 +114,14 @@ def _raw_api_request(function_name: str, params: dict) -> dict | str:
     # Alpha Vantage reports problems via "Information" / "Note". Classify so a
     # genuine rate limit and an invalid/missing key aren't conflated (#991):
     # rate-limit phrasing is checked first because those notices also mention
-    # "API key" ("your API key ... 25 requests per day").
+    # "API key" ("your API key ... 25 requests per day"). The notice is
+    # redacted BEFORE classification and raising: the vendor echoes the
+    # apikey back verbatim, and these messages propagate into caller logs
+    # (#R6). Scrubbing keeps the surrounding wording (and thus the
+    # rate-limit / bad-key classification) intact.
     notice = response_json.get("Information") or response_json.get("Note")
     if notice:
+        notice = redact_secrets(notice, extra_secrets=(api_key,))
         low = notice.lower()
         if any(m in low for m in ("rate limit", "requests per day", "call frequency", "premium")):
             raise AlphaVantageRateLimitError(f"Alpha Vantage rate limit exceeded: {notice}")
@@ -130,7 +139,8 @@ def _raw_api_request(function_name: str, params: dict) -> dict | str:
     if error_message:
         symbol = params.get("symbol") or params.get("tickers") or function_name
         raise NoMarketDataError(
-            str(symbol), detail=f"Alpha Vantage error: {error_message}"
+            str(symbol),
+            detail=f"Alpha Vantage error: {redact_secrets(str(error_message), extra_secrets=(api_key,))}",
         )
 
     return response_text

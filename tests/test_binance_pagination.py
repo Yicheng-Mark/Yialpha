@@ -10,6 +10,8 @@ import unittest
 from datetime import UTC, datetime
 from unittest import mock
 
+import pytest
+
 from yialpha.dataflows import binance
 
 _DAY_MS = 86_400_000
@@ -30,6 +32,15 @@ def _fake_funding_server(all_rows):
         start, end, limit = params["startTime"], params["endTime"], params["limit"]
         return [r for r in all_rows if start <= r["fundingTime"] <= end][:limit]
     return _mock
+
+
+def _daily_klines_with_close_time(base, n):
+    """Raw kline arrays as Binance serves them, with closeTime (element 6)."""
+    return [
+        [base + i * _DAY_MS, "1.0", "2.0", "0.5", "1.5", "100.0",
+         base + (i + 1) * _DAY_MS - 1]
+        for i in range(n)
+    ]
 
 
 class TestClosedWindowMemo(unittest.TestCase):
@@ -176,6 +187,45 @@ class TestKlinesPagination(unittest.TestCase):
         with mock.patch.object(binance, "_http_get", _fake_klines_server(all_klines)):
             out = binance.get_binance_klines("BTCUSDT", "2020-01-01", "2020-01-31")
         self.assertIn("# Total records: 10", out)
+
+
+@pytest.mark.unit
+class TestClosedAsOfFilter(unittest.TestCase):
+    """D5a: ``closed_as_of`` drops bars whose closeTime is after the given ms.
+
+    ``current_pit_end`` only clamps the requested window; the exchange still
+    returns the current day's still-forming bar, whose closeTime lies in the
+    future. Callers that must not read an unfinished candle pass
+    ``closed_as_of`` (epoch ms) and rows closing strictly after it are
+    dropped — after ``_paginate_history``, so the closed-window memo keeps
+    caching raw rows and each call filters by its own value. The default
+    ``None`` preserves the old behavior (forming bar included).
+    """
+
+    def test_rows_closing_after_closed_as_of_are_dropped(self):
+        # 12 daily bars from 2020-03-01; cut exactly at bar 5's closeTime —
+        # closeTime == cut survives the strict >, later bars drop.
+        base = int(datetime(2020, 3, 1, tzinfo=UTC).timestamp() * 1000)
+        all_klines = _daily_klines_with_close_time(base, 12)
+        cut = all_klines[5][6]
+        with mock.patch.object(binance, "_http_get", _fake_klines_server(all_klines)):
+            df = binance.binance_klines_frame(
+                "BTCUSDT", "2020-03-01", "2020-03-31", closed_as_of=cut,
+            )
+        self.assertEqual(len(df), 6)
+        self.assertEqual(df.index[0].strftime("%Y-%m-%d"), "2020-03-01")
+        self.assertEqual(df.index[-1].strftime("%Y-%m-%d"), "2020-03-06")
+
+    def test_default_none_keeps_forming_bar(self):
+        # The last bar's closeTime is far in the future (still forming); the
+        # default closed_as_of=None must keep it — the pre-D5a behavior.
+        base = int(datetime(2020, 6, 1, tzinfo=UTC).timestamp() * 1000)
+        all_klines = _daily_klines_with_close_time(base, 3)
+        all_klines[-1][6] = base + 30 * _DAY_MS  # forming: closes weeks later
+        with mock.patch.object(binance, "_http_get", _fake_klines_server(all_klines)):
+            df = binance.binance_klines_frame("BTCUSDT", "2020-06-01", "2020-06-30")
+        self.assertEqual(len(df), 3)
+        self.assertEqual(df.index[-1].strftime("%Y-%m-%d"), "2020-06-03")
 
 
 class TestFundingPagination(unittest.TestCase):

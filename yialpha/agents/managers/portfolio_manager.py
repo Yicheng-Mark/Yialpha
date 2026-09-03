@@ -124,6 +124,7 @@ def _decision_fields_dict(decision) -> dict:
         "underlying_direction",
         "contract_direction",
         "basis_view",
+        "desired_side",
     ):
         value = getattr(decision, optional_key, None)
         if value is not None:

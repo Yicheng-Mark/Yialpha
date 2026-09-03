@@ -108,11 +108,12 @@ def test_global_gross_pass_under_limit():
 
 @pytest.mark.unit
 def test_global_gross_resize_ratio_pinned():
-    # 0.6 existing + 0.65 candidate = 1.25 gross over max 1.0 -> 1.0/1.25 = 0.8.
+    # 0.6 existing + 0.65 candidate = 1.25 gross over max 1.0; the candidate
+    # only gets the UNUSED headroom: (1.0 - 0.6) / 0.65 = 0.6153846...
     snap = _snap((_pv(0.6, symbol="ETHUSDT"),))
     d = global_gross(_pv(0.65), snap, PortfolioLimits())
     assert d.action == "RESIZE"
-    assert d.multiplier == pytest.approx(0.8)
+    assert d.multiplier == pytest.approx((1.0 - 0.6) / 0.65)
     assert d.reasons == ["exceeds_limit"]
     assert d.metrics["post_gross"] == pytest.approx(1.25)
 
@@ -129,8 +130,9 @@ def test_candidate_replaces_same_symbol_position():
 
 @pytest.mark.unit
 def test_asset_class_groups_by_instrument_class():
-    # stock_perp sleeve 0.4 + 0.35 = 0.75 over 0.6 -> 0.8; the pure-crypto
-    # 0.3 does not consume the stock budget.
+    # stock_perp sleeve 0.4 + 0.35 = 0.75 over 0.6; the pure-crypto 0.3 does
+    # not consume the stock budget, and the candidate only gets the class
+    # headroom: (0.6 - 0.4) / 0.35 = 0.5714285...
     snap = _snap(
         (
             _pv(0.4, symbol="AAPLUSDT", cls="stock_perp"),
@@ -140,7 +142,7 @@ def test_asset_class_groups_by_instrument_class():
     d = asset_class(_pv(0.35, symbol="TSLAUSDT", cls="stock_perp"), snap, PortfolioLimits())
     assert d.rule == "asset_class"
     assert d.action == "RESIZE"
-    assert d.multiplier == pytest.approx(0.6 / 0.75)
+    assert d.multiplier == pytest.approx((0.6 - 0.4) / 0.35)
     assert d.metrics["post_class_gross"] == pytest.approx(0.75)
 
 
@@ -187,11 +189,12 @@ def test_directional_concentration_nets_same_side_gross():
 
 @pytest.mark.unit
 def test_directional_concentration_resize_without_hedge():
-    # Same book minus the short: net long 0.9 over 0.8 -> 0.8/0.9.
+    # Same book minus the short: the 0.5 net-long book leaves 0.8 - 0.5
+    # headroom for the 0.4 candidate -> (0.8 - 0.5) / 0.4 = 0.75.
     snap = _snap((_pv(0.5, symbol="ETHUSDT"),))
     d = directional_concentration(_pv(0.4), snap, PortfolioLimits())
     assert d.action == "RESIZE"
-    assert d.multiplier == pytest.approx(0.8 / 0.9)
+    assert d.multiplier == pytest.approx((0.8 - 0.5) / 0.4)
 
 
 @pytest.mark.unit
@@ -208,13 +211,14 @@ def test_directional_concentration_short_side_and_flat():
 
 @pytest.mark.unit
 def test_cluster_groups_via_cluster_of():
-    # BTC + ETH share the "majors" cluster: 0.25 + 0.3 = 0.55 over 0.4.
+    # BTC + ETH share the "majors" cluster: 0.25 + 0.3 = 0.55 over 0.4; the
+    # candidate only gets the cluster headroom: (0.4 - 0.25) / 0.3 = 0.5.
     limits = PortfolioLimits(cluster_of={"BTCUSDT": "majors", "ETHUSDT": "majors"})
     snap = _snap((_pv(0.25, symbol="BTCUSDT"),))
     d = constraints.correlation_cluster(_pv(0.3, symbol="ETHUSDT"), snap, limits)
     assert d.rule == "correlation_cluster"
     assert d.action == "RESIZE"
-    assert d.multiplier == pytest.approx(0.4 / 0.55)
+    assert d.multiplier == pytest.approx((0.4 - 0.25) / 0.3)
     assert d.metrics["post_cluster"] == pytest.approx(0.55)
 
 
@@ -508,12 +512,14 @@ def test_evaluate_then_resolve_end_to_end():
     snap = _snap((_pv(0.6, symbol="ETHUSDT"),))
     decisions = evaluate_constraints(_pv(0.65), snap, PortfolioLimits())
     r = resolve_constraints(decisions, 0.65, "LONG")
-    # Post book: gross 1.25, class 1.25, single 0.65, directional 1.25,
-    # cluster (default per-symbol) 0.65 -> the single cap binds at
-    # 0.2/0.65, landing the final size exactly on max_single.
+    # Old book: gross 0.6, class gross 0.6 (exactly the asset-class cap),
+    # net long 0.6. Headroom math: the class budget is fully consumed ->
+    # asset_class pins multiplier 0.0 (book_already_over_limit); every
+    # other rule also clips (0.4/0.65, 0.2/0.65, 0.2/0.65, 0.4/0.65), so
+    # all five still participate and the resolver lands at final size 0.0.
     assert r.action == "RESIZED"
-    assert r.final_multiplier == pytest.approx(0.2 / 0.65)
-    assert r.final_size == pytest.approx(0.2)
+    assert r.final_multiplier == pytest.approx(0.0)
+    assert r.final_size == pytest.approx(0.0)
     assert r.risk_decision_rules == [
         "global_gross",
         "asset_class",
@@ -522,6 +528,51 @@ def test_evaluate_then_resolve_end_to_end():
         "correlation_cluster",
     ]
     assert r.side == "LONG"
+
+
+@pytest.mark.unit
+def test_book_already_over_limit_pins_zero_multiplier():
+    # Design decision #2: an old book at/over a cap leaves ZERO headroom ->
+    # RESIZE with multiplier 0.0 and reason "book_already_over_limit". The
+    # risk layer shrinks the candidate to nothing; it NEVER de-risks the
+    # existing book to make room.
+    over = _snap((_pv(0.35, symbol="ETHUSDT"), _pv(0.30, symbol="SOLUSDT")))
+    d = asset_class(_pv(0.2), over, PortfolioLimits())
+    assert d.action == "RESIZE"
+    assert d.multiplier == 0.0
+    assert "book_already_over_limit" in d.reasons
+    # Exactly AT the cap is equally out of headroom (0.3 + 0.3 == 0.6).
+    at_limit = _snap((_pv(0.3, symbol="ETHUSDT"), _pv(0.3, symbol="SOLUSDT")))
+    d2 = asset_class(_pv(0.2), at_limit, PortfolioLimits())
+    assert d2.action == "RESIZE"
+    assert d2.multiplier == 0.0
+    assert "book_already_over_limit" in d2.reasons
+
+
+@pytest.mark.unit
+def test_resolve_compliant_old_book_new_candidate_lands_exactly():
+    # Acceptance Case 1 mirror: a COMPLIANT 0.55 pure-crypto book + a 0.20
+    # candidate. The class cap leaves exactly 0.05 of headroom, so the
+    # resolver lands the final size ON the cap and the replayed
+    # post-replacement book sits at (never over) 0.60.
+    snap = _snap(
+        (
+            _pv(0.19, symbol="ETHUSDT"),
+            _pv(0.18, symbol="SOLUSDT"),
+            _pv(0.18, symbol="XRPUSDT"),
+        )
+    )
+    candidate = _pv(0.20, symbol="BTCUSDT")
+    decisions = evaluate_constraints(candidate, snap, PortfolioLimits())
+    r = resolve_constraints(decisions, abs(candidate.weight), "LONG")
+    assert r.action == "RESIZED"
+    assert r.final_size == pytest.approx(0.05)
+    assert r.risk_decision_rules == ["asset_class"]
+    replay = evaluate_constraints(
+        _pv(r.final_size, symbol="BTCUSDT"), snap, PortfolioLimits()
+    )
+    class_decision = next(d for d in replay if d.rule == "asset_class")
+    assert class_decision.metrics["post_class_gross"] <= 0.60 + 1e-12
 
 
 @pytest.mark.unit
@@ -535,6 +586,199 @@ def test_render_resolver_lines():
     vtext = render_resolver_lines(v)
     assert "**Resolver**: VETOED" in vtext
     assert "**Veto reasons**: a:VETO" in vtext
+
+
+# --- R3 regressions: zero-contribution CLOSE + opposite-direction feasibility ---
+
+
+@pytest.mark.unit
+def test_zero_contribution_close_passes_at_remaining_class_cap():
+    # R3 counterexample 1 (reviewer portfolio_edge_checks.py case 2): ETH/
+    # SOL/XRP long 0.20 each + BTC long 0.10; closing BTC leaves the class
+    # gross at exactly the 0.60 cap. The candidate contributes 0.0 and can
+    # not be shrunk further, so the headroom branch (others 0.60 >= 0.60)
+    # must NOT strand the close as a zero-multiplier RESIZE — the upstream
+    # graph only executes APPROVED closes, so a RESIZED close leaves BTC
+    # open and the class at 0.70.
+    snap = _snap(
+        (
+            _pv(0.10, symbol="BTCUSDT"),
+            _pv(0.20, symbol="ETHUSDT"),
+            _pv(0.20, symbol="SOLUSDT"),
+            _pv(0.20, symbol="XRPUSDT"),
+        )
+    )
+    close = _pv(0.0, symbol="BTCUSDT", side="FLAT")
+    decisions = evaluate_constraints(close, snap, PortfolioLimits())
+    assert [d.rule for d in decisions] == [
+        "global_gross",
+        "asset_class",
+        "single_concentration",
+        "directional_concentration",
+        "correlation_cluster",
+    ]
+    for d in decisions:
+        assert d.action == "PASS", (d.rule, d.action, d.reasons)
+        assert d.multiplier == 1.0
+    class_decision = next(d for d in decisions if d.rule == "asset_class")
+    assert class_decision.metrics["post_class_gross"] == pytest.approx(0.60)
+    r = resolve_constraints(decisions, 0.0, "FLAT")
+    assert r.action == "APPROVED"
+    assert r.final_size == 0.0
+    # Post-close book: BTC gone, remaining class gross exactly at the cap.
+    remaining = sum(abs(p.weight) for p in snap.positions if p.symbol != "BTCUSDT")
+    assert remaining == pytest.approx(0.60)
+
+
+@pytest.mark.unit
+def test_zero_contribution_close_passes_over_remaining_class_cap():
+    # Same ordering pin with the remaining book STRICTLY over the cap: a
+    # zero-contribution close cannot be clipped into headroom it did not
+    # consume, and blocking it would strand the over-cap exposure instead
+    # of shrinking the book. The reported metric stays honest (0.70 > 0.60).
+    snap = _snap(
+        (
+            _pv(0.10, symbol="BTCUSDT"),
+            _pv(0.20, symbol="ETHUSDT"),
+            _pv(0.20, symbol="SOLUSDT"),
+            _pv(0.20, symbol="XRPUSDT"),
+            _pv(0.10, symbol="DOGEUSDT"),
+        )
+    )
+    decisions = evaluate_constraints(
+        _pv(0.0, symbol="BTCUSDT", side="FLAT"), snap, PortfolioLimits()
+    )
+    class_decision = next(d for d in decisions if d.rule == "asset_class")
+    assert class_decision.action == "PASS"
+    assert class_decision.metrics["post_class_gross"] == pytest.approx(0.70)
+    gross_decision = next(d for d in decisions if d.rule == "global_gross")
+    assert gross_decision.action == "PASS"
+    r = resolve_constraints(decisions, 0.0, "FLAT")
+    assert r.action == "APPROVED"
+
+
+def _hedge_book() -> tuple[PortfolioSnapshot, PortfolioLimits]:
+    """Reviewer case-3 book: gross 1.00, net LONG exactly at the 0.80 cap."""
+    positions = (
+        tuple(_pv(0.2, symbol=f"S{i}", cls="stock_perp") for i in range(3))
+        + tuple(_pv(0.15, symbol=f"C{i}") for i in range(2))
+        + (_pv(-0.1, symbol="BTCUSDT"),)
+    )
+    limits = PortfolioLimits()
+    assert sum(abs(p.weight) for p in positions) == pytest.approx(1.0)
+    assert sum(p.weight for p in positions) == pytest.approx(limits.max_directional)
+    return _snap(positions), limits
+
+
+@pytest.mark.unit
+def test_weakened_short_hedge_vetoed_on_opposite_direction_breach():
+    # R3 counterexample 2 (reviewer portfolio_edge_checks.py case 3): a
+    # compliant book at net LONG 0.80 (the cap) hedged by a -0.10 BTC short.
+    # Re-proposing the hedge at -0.01 passes every rule on the candidate's
+    # OWN (short) direction — net short 0.0 — but the ACTUAL final book nets
+    # LONG 0.89 > 0.80. No multiplier in [0, 1] restores feasibility (any
+    # shrink deepens the net long the hedge used to offset), and the risk
+    # layer never enlarges a candidate to manufacture the hedge back, so the
+    # replacement is refused outright and the pre-trade book stands.
+    snap, limits = _hedge_book()
+    candidate = _pv(-0.01, symbol="BTCUSDT")
+    decisions = evaluate_constraints(candidate, snap, limits)
+    for d in decisions:
+        if d.rule == "directional_concentration":
+            assert d.action == "VETO"
+            assert d.multiplier == 0.0
+            assert d.reasons == ["opposite_direction_exceeds_limit"]
+            assert d.metrics["post_directional"] == pytest.approx(0.0)
+            assert d.metrics["opposite_directional"] == pytest.approx(0.89)
+            assert d.metrics["max_directional"] == 0.8
+        else:
+            assert d.action == "PASS", (d.rule, d.action, d.reasons)
+    r = resolve_constraints(decisions, abs(candidate.weight), candidate.side)
+    assert r.action == "VETOED"
+    assert r.final_size == 0.0
+    assert "opposite_direction_exceeds_limit" in r.reasons
+    # Refusal keeps the pre-trade book: the -0.10 hedge stays and the net
+    # remains exactly at the cap.
+    assert sum(p.weight for p in snap.positions) == pytest.approx(0.8)
+
+
+@pytest.mark.unit
+def test_hedge_replacement_boundary_lands_on_cap_is_approved():
+    # The opposite-direction check must not over-block: a binary-exact book
+    # (0.5 + 0.25 long, -0.25 hedge) at net LONG 0.50 with max_directional
+    # 0.50 — re-proposing the hedge AT its size lands the final net exactly
+    # on the cap and stays APPROVED; a weakened -0.01 hedge breaches it and
+    # is VETOed.
+    limits = PortfolioLimits(max_single=0.25, max_directional=0.5)
+    snap = _snap(
+        (
+            _pv(0.5, symbol="S0", cls="stock_perp"),
+            _pv(0.25, symbol="S1", cls="stock_perp"),
+            _pv(-0.25, symbol="BTCUSDT"),
+        )
+    )
+    at_cap = _pv(-0.25, symbol="BTCUSDT")
+    decisions = evaluate_constraints(at_cap, snap, limits)
+    for d in decisions:
+        assert d.action == "PASS", (d.rule, d.action, d.reasons)
+    r = resolve_constraints(decisions, 0.25, "SHORT")
+    assert r.action == "APPROVED"
+    assert r.final_size == pytest.approx(0.25)
+
+    weakened = _pv(-0.01, symbol="BTCUSDT")
+    decisions = evaluate_constraints(weakened, snap, limits)
+    directional = next(d for d in decisions if d.rule == "directional_concentration")
+    assert directional.action == "VETO"
+    assert directional.reasons == ["opposite_direction_exceeds_limit"]
+    assert directional.metrics["opposite_directional"] == pytest.approx(0.74)
+    r = resolve_constraints(decisions, 0.01, "SHORT")
+    assert r.action == "VETOED"
+
+
+@pytest.mark.unit
+def test_weakened_long_hedge_on_net_short_book_vetoed():
+    # Mirror direction: the check is per-direction, not short-specific. A
+    # net SHORT book at the -0.50 cap hedged by a +0.25 long: weakening the
+    # long hedge to +0.01 pushes the SHORT-direction net to -0.74, beyond
+    # the 0.50 cap, with the candidate's own (long) exposure at 0.0 -> VETO.
+    limits = PortfolioLimits(max_single=0.25, max_directional=0.5)
+    snap = _snap(
+        (
+            _pv(-0.5, symbol="S0", cls="stock_perp"),
+            _pv(-0.25, symbol="S1", cls="stock_perp"),
+            _pv(0.25, symbol="BTCUSDT"),
+        )
+    )
+    candidate = _pv(0.01, symbol="BTCUSDT")
+    decisions = evaluate_constraints(candidate, snap, limits)
+    directional = next(d for d in decisions if d.rule == "directional_concentration")
+    assert directional.action == "VETO"
+    assert directional.reasons == ["opposite_direction_exceeds_limit"]
+    assert directional.metrics["opposite_directional"] == pytest.approx(0.74)
+    r = resolve_constraints(decisions, 0.01, "LONG")
+    assert r.action == "VETOED"
+    # The at-cap long hedge itself stays approvable.
+    decisions = evaluate_constraints(_pv(0.25, symbol="BTCUSDT"), snap, limits)
+    assert all(d.action == "PASS" for d in decisions)
+
+
+@pytest.mark.unit
+def test_side_weight_disagreement_resizes_into_opposite_headroom():
+    # Defensive path (produced nowhere upstream): a candidate whose weight
+    # points AGAINST its declared side GROWS the opposite exposure with
+    # size, so it is resized into the opposite headroom like any other
+    # contribution instead of being vetoed.
+    snap = _snap((_pv(-0.4, symbol="S0"),))
+    bad = PositionView(
+        symbol="BTCUSDT", instrument_class="pure_crypto_perp",
+        side="LONG", weight=-0.5,
+    )
+    d = directional_concentration(bad, snap, PortfolioLimits())
+    assert d.action == "RESIZE"
+    assert d.multiplier == pytest.approx((0.8 - 0.4) / 0.5)
+    # Metrics report the PROPOSED-size book (the resize multiplier is what
+    # lands the final book on the limit), matching every other rule.
+    assert d.metrics["post_directional"] == pytest.approx(0.9)
 
 
 # --- property loops ---------------------------------------------------------------

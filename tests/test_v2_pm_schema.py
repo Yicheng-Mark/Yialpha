@@ -15,6 +15,7 @@ from yialpha.agents.schemas import (
     PortfolioDecision,
     render_pm_decision,
 )
+from yialpha.tickets import desired_side_from_decision
 from yialpha.versions import SCHEMA_VERSION
 
 
@@ -117,6 +118,43 @@ def test_decision_fields_dict_flattens_everything():
     assert fields["invalidation"] == ["break of 190"]
     assert fields["evidence_coverage"] == 0.9
     assert fields["schema_version"] == SCHEMA_VERSION
+
+
+@pytest.mark.unit
+def test_decision_fields_dict_carries_explicit_short_desired_side():
+    # Mirror of acceptance repro Case 4: an explicit structured SHORT must
+    # survive the real PM -> state projection (not a hand-injected dict).
+    d = PortfolioDecision(
+        rating="Sell",
+        executive_summary="Offline fixture: explicitly propose a short position.",
+        investment_thesis="Offline acceptance fixture; no market recommendation.",
+        price_target=90.0,
+        confidence=0.7,
+        desired_side="SHORT",
+    )
+    fields = _decision_fields_dict(d)
+    assert fields["desired_side"] == "SHORT"
+    # Replay the graph's real side-selection expression (trading_graph.py,
+    # read-only): the explicit side wins where the legacy rating mapping
+    # alone could never produce SHORT (Sell maps to CLOSE).
+    explicit_side = str(fields.get("desired_side") or "").upper()
+    legacy_intent = desired_side_from_decision(fields)
+    side = (
+        explicit_side
+        if explicit_side in ("LONG", "SHORT", "FLAT")
+        else ("LONG" if legacy_intent == "LONG" else "FLAT")
+    )
+    assert side == "SHORT"
+    # Byte-identical contract: a PM that omits desired_side keeps the key
+    # absent from the serialized state JSON.
+    no_side = PortfolioDecision(
+        rating="Sell",
+        executive_summary="Offline fixture: explicitly propose a short position.",
+        investment_thesis="Offline acceptance fixture; no market recommendation.",
+        price_target=90.0,
+        confidence=0.7,
+    )
+    assert "desired_side" not in _decision_fields_dict(no_side)
 
 
 @pytest.mark.unit

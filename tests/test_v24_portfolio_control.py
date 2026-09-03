@@ -11,6 +11,10 @@ Mode matrix against the REAL overlay path (graph shell + stubbed loaders):
   scenario proves RESIZE; a desired_side=SHORT decision proves the signed
   path (negative signed_weight position); same-symbol replace semantics
   prove the retry invariant (one open position per symbol).
+
+Ledger-level cases pin the retry invariant's other half — an EXACT
+same-ticket replay is a full no-op — plus the all-or-nothing transaction
+rollback and the instrument_class ledger roundtrip (no operator file).
 """
 
 from __future__ import annotations
@@ -304,6 +308,204 @@ def test_enforced_same_symbol_retry_replaces_not_stacks(tmp_path, monkeypatch):
         "SELECT COUNT(*) AS n FROM positions WHERE symbol = ?", ("BTCUSDT",)
     ).fetchone()["n"]
     assert total == 2
+
+
+@pytest.mark.unit
+def test_enforced_exact_same_ticket_retry_is_noop(monkeypatch):
+    """An EXACT same-ticket replay is a complete no-op (repro Case 2).
+
+    Byte-identical commit arguments used twice: the second call must not
+    even close-and-reopen — ``open_positions()`` and the positions table
+    stay byte-identical. Runs against a private in-memory SQLite with
+    ``ledger_exists`` stubbed to a CONSTANT True, proving the replay gate
+    reads the positions table itself and cannot lean on the file-existence
+    helper (which an isolated harness may legitimately force True).
+    """
+    import sqlite3
+    from contextlib import contextmanager
+
+    import yialpha.ledger.portfolio as portfolio_module
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        "CREATE TABLE tickets (ticket_id TEXT PRIMARY KEY, decision_id TEXT, "
+        "run_id TEXT, payload TEXT, ticket_version TEXT, written_at TEXT);"
+        "CREATE TABLE portfolio_snapshots (snapshot_id TEXT PRIMARY KEY, "
+        "run_id TEXT, payload TEXT, created_at TEXT);"
+        "CREATE TABLE positions (position_id TEXT PRIMARY KEY, ticket_id TEXT, "
+        "run_id TEXT, symbol TEXT, side TEXT, signed_weight REAL, opened_at TEXT, "
+        "closed_at TEXT, payload TEXT);"
+    )
+
+    @contextmanager
+    def memory_transaction():
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            yield cursor
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    monkeypatch.setattr(portfolio_module, "ledger_transaction", memory_transaction)
+    monkeypatch.setattr(portfolio_module, "ledger_exists", lambda: True)
+    monkeypatch.setattr(
+        portfolio_module, "get_connection", lambda *, readonly=False: conn
+    )
+    args = {
+        "ticket_payload": {
+            "ticket_id": "T-RETRY-1",
+            "status": "APPROVED",
+            "instrument_class": "pure_crypto_perp",
+        },
+        "ticket_id": "T-RETRY-1",
+        "decision_id": None,
+        "run_id": None,
+        "ticket_version": "v1",
+        "snapshot_payload": {"positions": []},
+        "snapshot_id": "S-RETRY-1",
+        "position_symbol": "BTCUSDT",
+        "position_side": "LONG",
+        "position_signed_weight": 0.12,
+        "open_position": True,
+        "close_existing": False,
+    }
+    try:
+        assert commit_final_ticket(**args) is True
+        before = open_positions()
+        assert len(before) == 1
+
+        assert commit_final_ticket(**args) is True
+        # Same single open position (not closed by its own retry), and no
+        # second row stacked.
+        assert open_positions() == before
+        assert conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+@pytest.mark.unit
+def test_commit_final_ticket_transaction_rollback_on_error(monkeypatch):
+    """A failure inside the commit transaction leaves no residue anywhere.
+
+    The ticket and snapshot INSERTs succeed, then the position INSERT
+    explodes mid-transaction: the single ``BEGIN IMMEDIATE`` boundary must
+    roll ALL three tables back (``open_positions()`` empty) and the record
+    stage must return False instead of raising.
+    """
+    from contextlib import contextmanager
+
+    import yialpha.ledger.portfolio as portfolio_module
+    from yialpha.ledger.sqlite import get_connection
+
+    real_transaction = portfolio_module.ledger_transaction
+
+    class _CursorFailingOnPositionsInsert:
+        """Forwards to the real cursor; explodes on the positions INSERT."""
+
+        def __init__(self, cur):
+            self._cur = cur
+
+        def execute(self, sql, params=()):
+            if "INSERT OR IGNORE INTO positions" in sql:
+                raise RuntimeError("forced mid-transaction failure")
+            return self._cur.execute(sql, params)
+
+    @contextmanager
+    def failing_transaction():
+        with real_transaction() as cur:
+            yield _CursorFailingOnPositionsInsert(cur)
+
+    monkeypatch.setattr(portfolio_module, "ledger_transaction", failing_transaction)
+
+    committed = commit_final_ticket(
+        ticket_payload={"ticket_id": "T-BOOM-1", "status": "APPROVED"},
+        ticket_id="T-BOOM-1",
+        decision_id=None,
+        run_id=None,
+        ticket_version="v1",
+        snapshot_payload={"positions": []},
+        snapshot_id="S-BOOM-1",
+        position_symbol="BTCUSDT",
+        position_side="LONG",
+        position_signed_weight=0.10,
+        open_position=True,
+    )
+    assert committed is False
+    counts = get_connection(readonly=True).execute(
+        "SELECT (SELECT COUNT(*) FROM tickets) AS t, "
+        "(SELECT COUNT(*) FROM portfolio_snapshots) AS s, "
+        "(SELECT COUNT(*) FROM positions) AS p"
+    ).fetchone()
+    assert (counts["t"], counts["s"], counts["p"]) == (0, 0, 0)
+    assert open_positions() == []
+
+
+@pytest.mark.unit
+def test_ledger_position_carries_instrument_class_without_operator_file():
+    """A position's instrument class survives the ledger roundtrip alone.
+
+    No operator positions file exists (conftest blanks
+    ``portfolio_positions_file``), so the class must ride the commit itself:
+    first only inside ticket_payload (the repro Case 3 mirror — read back
+    with the exact graph extraction expression), then via the explicit
+    ``instrument_class`` kwarg, which also stamps the class onto a ticket
+    mirror whose payload carried none.
+    """
+    commit_final_ticket(
+        ticket_payload={
+            "ticket_id": "T-CLASS-PAYLOAD",
+            "status": "APPROVED",
+            "instrument_class": "pure_crypto_perp",
+        },
+        ticket_id="T-CLASS-PAYLOAD",
+        decision_id=None,
+        run_id=None,
+        ticket_version="v1",
+        snapshot_payload={"positions": []},
+        snapshot_id=new_snapshot_id("class-payload"),
+        position_symbol="BTCUSDT",
+        position_side="LONG",
+        position_signed_weight=0.10,
+        open_position=True,
+    )
+    commit_final_ticket(
+        ticket_payload={"ticket_id": "T-CLASS-KWARG", "status": "APPROVED"},
+        ticket_id="T-CLASS-KWARG",
+        decision_id=None,
+        run_id=None,
+        ticket_version="v1",
+        snapshot_payload={"positions": []},
+        snapshot_id=new_snapshot_id("class-kwarg"),
+        position_symbol="ETHUSDT",
+        position_side="LONG",
+        position_signed_weight=0.08,
+        open_position=True,
+        instrument_class="pure_crypto_perp",
+    )
+    by_symbol = {p["symbol"]: p for p in open_positions()}
+    # Case 3 mirror: the exact production extraction expression (fallback
+    # and all) sees the payload-borne class on the next graph snapshot.
+    observed = str(
+        (by_symbol["BTCUSDT"].get("payload") or {}).get("instrument_class")
+        or "unknown_perp"
+    )
+    assert observed == "pure_crypto_perp"
+    # Explicit kwarg path: same landing on the position row.
+    assert (
+        by_symbol["ETHUSDT"]["payload"]["instrument_class"] == "pure_crypto_perp"
+    )
+    # The kwarg also stamped the ticket mirror (its payload had no class).
+    from yialpha.ledger.sqlite import get_connection
+
+    mirrored = get_connection(readonly=True).execute(
+        "SELECT payload FROM tickets WHERE ticket_id = ?", ("T-CLASS-KWARG",)
+    ).fetchone()
+    assert '"instrument_class":"pure_crypto_perp"' in mirrored[0].replace(" ", "")
 
 
 @pytest.mark.unit
