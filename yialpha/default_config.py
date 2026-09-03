@@ -227,6 +227,10 @@ _ENV_OVERRIDES = {
     # positioning_split comment in DEFAULT_CONFIG).
     "YIALPHA_POSITIONING_SPLIT":            "positioning_split",
     "YIALPHA_ONCHAIN_EVIDENCE":             "onchain_evidence",
+    # V2.4 Portfolio Control: staged rollout knob for the candidate →
+    # snapshot → constraints → resolver → final-ticket pipeline (perp runs
+    # only; non-perp assets always take the legacy overlay).
+    "YIALPHA_PORTFOLIO_CONTROL_MODE":       "portfolio_control_mode",
 }
 
 
@@ -504,6 +508,23 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # split is on. OFF by default; capability-absent degrades to a
     # disclosure block and never blocks a run.
     "onchain_evidence": False,
+    # --- V2.4 Portfolio Control (perp runs only) --------------------------------
+    # portfolio_control_mode (env YIALPHA_PORTFOLIO_CONTROL_MODE), staged
+    # rollout of the resolver pipeline:
+    #   "legacy"  (default) — today's single risk overlay verbatim; the
+    #              resolver does not run (byte-identical decisions).
+    #   "shadow"  — the legacy decision stands, but the full new pipeline
+    #              (candidate → portfolio snapshot → five hard constraints →
+    #              min-multiplier resolver) ALSO runs and is recorded +
+    #              rendered as a clearly-marked SHADOW section for diffing.
+    #   "enforced"— the resolver outcome is authoritative for crypto_perp
+    #              runs: final_size lands on the ticket, the status advances
+    #              CANDIDATE → PENDING_RISK → APPROVED/RESIZED/VETOED, and
+    #              the final ticket + portfolio snapshot + position commit
+    #              atomically to the ledger DB. The resolver can only shrink
+    #              or refuse — it can never change the side or grow the
+    #              size. Non-perp assets always run the legacy overlay.
+    "portfolio_control_mode": "legacy",
     # Central SQLite ledger DB (env YIALPHA_LEDGER_DB). One append-first
     # database holds instrument snapshots, run evidence, blind predictions,
     # outcomes and ticket mirrors (V2.4 adds positions/portfolio snapshots).

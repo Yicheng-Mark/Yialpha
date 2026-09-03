@@ -138,6 +138,15 @@ class ExecutionTicket(BaseModel):
     price_target_basis: str | None = None
     quote_fx: dict | None = None
     basis_snapshot: dict | None = None
+    # V2.4 Portfolio Control (additive; legacy mode leaves all three unset):
+    # ISOLATED is the only supported margin mode (cross margin is an explicit
+    # unsupported verdict, never a silent approximation), risk_decision_ids
+    # back-references the RiskDecision rows recorded in the ticket payload,
+    # and portfolio_snapshot_id links the pre-resolver portfolio state the
+    # constraints were evaluated against.
+    margin_mode: str | None = None
+    risk_decision_ids: list[str] = Field(default_factory=list)
+    portfolio_snapshot_id: str | None = None
     analysis_as_of: str | None = None
     ticket_version: str = TICKET_VERSION
 

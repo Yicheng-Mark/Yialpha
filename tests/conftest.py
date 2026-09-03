@@ -152,6 +152,7 @@ def _runtime_ledger_isolated(tmp_path):
             "regime_state": False,
             "positioning_split": False,
             "onchain_evidence": False,
+            "portfolio_control_mode": "legacy",
         }
     )
     reset_ledger_state_for_test()

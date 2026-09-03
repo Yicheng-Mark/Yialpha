@@ -281,6 +281,57 @@ def load_calibration() -> dict:
         return {"available": False, "hint": "yialpha scoreboard"}
 
 
+def load_ticket(ticket_id: str) -> dict | None:
+    """One mirrored ticket payload by id (V2.4 read-only surface)."""
+    import json as _json
+
+    from yialpha.ledger.sqlite import get_connection, ledger_exists
+
+    if not ledger_exists():
+        return None
+    try:
+        row = get_connection(readonly=True).execute(
+            "SELECT ticket_id, run_id, payload, ticket_version, written_at "
+            "FROM tickets WHERE ticket_id = ?",
+            (ticket_id,),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 -- read-only UI path degrades, never raises
+        return None
+    if row is None:
+        return None
+    try:
+        payload = _json.loads(row["payload"])
+    except (TypeError, ValueError):
+        payload = None
+    return {
+        "ticket_id": row["ticket_id"],
+        "run_id": row["run_id"],
+        "ticket_version": row["ticket_version"],
+        "written_at": row["written_at"],
+        "payload": payload,
+    }
+
+
+def load_portfolio_snapshot(snapshot_id: str) -> dict | None:
+    """One portfolio snapshot by id (V2.4 read-only surface)."""
+    from yialpha.ledger.portfolio import snapshot_by_id
+    from yialpha.ledger.sqlite import ledger_exists
+
+    if not ledger_exists():
+        return None
+    return snapshot_by_id(snapshot_id)
+
+
+def load_positions() -> dict:
+    """Open positions + the resolver/pipeline state they came from."""
+    from yialpha.ledger.portfolio import open_positions
+    from yialpha.ledger.sqlite import ledger_exists
+
+    if not ledger_exists():
+        return {"available": False, "positions": []}
+    return {"available": True, "positions": open_positions()}
+
+
 def load_run(ticker: str, date: str) -> dict | None:
     """Full report view: rating badge + overlay card + 5 collapsible sections."""
     path = _strategy_dir(ticker) / f"full_states_log_{date}.json"

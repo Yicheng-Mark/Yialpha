@@ -36,6 +36,8 @@ def test_frozen_field_set_is_complete():
         # V2.1 fair-value linkage (additive optionals; TICKET_VERSION stays v1)
         "underlying_target", "contract_target", "price_target_basis",
         "quote_fx", "basis_snapshot",
+        # V2.4 portfolio-control linkage (additive optionals, same rule)
+        "margin_mode", "risk_decision_ids", "portfolio_snapshot_id",
         "analysis_as_of", "ticket_version",
     }
     assert fields == expected
