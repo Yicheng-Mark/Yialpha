@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from yialpha.ledger.sqlite import get_connection, ledger_exists, ledger_transaction, utc_now_iso
@@ -67,6 +68,80 @@ def open_positions() -> list[dict[str, Any]]:
     return out
 
 
+def load_positions_input() -> tuple[list[dict[str, Any]], str]:
+    """READ-ONLY portfolio snapshot input for shadow/enforced previews.
+
+    Shadow acceptance item 1: shadow mode writes no positions, so previews
+    against the (empty) ledger alone would prove nothing about the
+    constraints. The input is therefore composed of TWO read-only layers:
+
+    1. the ledger's open positions (populated only when the enforced mode
+       has actually committed positions);
+    2. an operator-maintained JSON file (config ``portfolio_positions_file``,
+       a list of ``{"symbol", "side", "signed_weight", "instrument_class"?}``
+       objects) OVERLAID on top — same-symbol file rows replace ledger rows.
+
+    Returns ``(rows, source_label)`` where the label names exactly what fed
+    the snapshot (``"empty"`` / ``"ledger"`` / ``"file"`` /
+    ``"ledger+file:<name>"``) so every preview is auditable. A malformed or
+    unreadable file degrades to the ledger-only view with a WARNING — the
+    preview never fails on its input book.
+    """
+    ledger_rows = open_positions()
+    rows = list(ledger_rows)
+    source = "ledger" if ledger_rows else "empty"
+
+    from yialpha.dataflows.config import get_config
+
+    path = str(get_config().get("portfolio_positions_file") or "").strip()
+    if not path:
+        return rows, source
+    try:
+        entries = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(entries, list):
+            raise ValueError("positions file must be a JSON list")
+        file_rows: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or "symbol" not in entry:
+                continue
+            file_rows.append(
+                {
+                    "position_id": f"file:{entry['symbol']}",
+                    "ticket_id": None,
+                    "run_id": None,
+                    "symbol": str(entry["symbol"]),
+                    "side": str(entry.get("side") or (
+                        "LONG" if float(entry.get("signed_weight", 0.0)) >= 0 else "SHORT"
+                    )),
+                    "signed_weight": float(entry.get("signed_weight", 0.0)),
+                    "opened_at": "",
+                    "payload": {
+                        "instrument_class": entry.get("instrument_class")
+                        or "unknown_perp",
+                        "source": "positions_file",
+                    },
+                }
+            )
+    except Exception:  # noqa: BLE001 -- input book degrades, never breaks
+        logger.warning(
+            "portfolio_positions_file %r unreadable/malformed; previewing "
+            "against the ledger view only",
+            path,
+            exc_info=True,
+        )
+        return rows, source
+
+    # Overlay: a file row REPLACES the same-symbol ledger row (the file is
+    # the operator's current statement of the book).
+    by_symbol = {row["symbol"]: row for row in rows}
+    for file_row in file_rows:
+        by_symbol[file_row["symbol"]] = file_row
+    rows = list(by_symbol.values())
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    source = f"ledger+file:{name}" if ledger_rows else f"file:{name}"
+    return rows, source
+
+
 def snapshot_by_id(snapshot_id: str) -> dict[str, Any] | None:
     """One portfolio snapshot payload (read-only web/API surface)."""
     if not ledger_exists():
@@ -100,16 +175,23 @@ def commit_final_ticket(
     position_side: str,
     position_signed_weight: float,
     open_position: bool,
+    close_existing: bool = False,
 ) -> bool:
-    """Atomically write the Final Ticket + Snapshot + (optional) Position.
+    """Atomically write the Final Ticket + Snapshot + position transition.
 
-    All three rows commit inside ONE ``BEGIN IMMEDIATE`` transaction; every
-    INSERT is OR IGNORE, so re-running the same resolver output for the same
-    run (checkpoint retry) is a no-op. ``open_position=False`` (FLAT / VETO /
-    REDUCE-to-zero) still commits the ticket + snapshot but writes no
-    position row — the audit trail exists without a position having been
-    opened. Fail-soft by the record-stage invariant: a ledger error is
-    logged and swallowed (returns False), never raised into the run.
+    All rows commit inside ONE ``BEGIN IMMEDIATE`` transaction; every INSERT
+    is OR IGNORE, so re-running the same resolver output for the same run
+    (checkpoint retry) is a no-op. The position transition distinguishes the
+    two sanctioned mutations (shadow acceptance item 2 — 拒绝开仓 ≠ 批准平仓):
+
+    * ``open_position=True``  — an approved/resized ENTRY: the same symbol's
+      prior open row closes first (replace semantics; one open position per
+      symbol), then the new row opens.
+    * ``close_existing=True`` (mutually exclusive) — an APPROVED
+      close-intent ticket: the same symbol's open row closes, and NOTHING
+      opens.
+    * both False — a VETO / FLAT candidate: existing rows are UNTOUCHED.
+      Refusing a new trade never modifies the current book.
     """
     now = utc_now_iso()
     serialized_ticket = json.dumps(ticket_payload, sort_keys=True, default=str)
@@ -165,6 +247,16 @@ def commit_final_ticket(
                         now,
                         serialized_position,
                     ),
+                )
+            elif close_existing:
+                # Approved CLOSE intent: close the same symbol's open row and
+                # open nothing. The anti-case is deliberate — a VETOed or
+                # FLAT ticket takes this branch NEVER (both flags False) and
+                # therefore cannot touch the current book.
+                cur.execute(
+                    "UPDATE positions SET closed_at = ? "
+                    "WHERE symbol = ? AND closed_at IS NULL",
+                    (now, position_symbol),
                 )
         return True
     except Exception:  # noqa: BLE001 -- record stage must never abort a run

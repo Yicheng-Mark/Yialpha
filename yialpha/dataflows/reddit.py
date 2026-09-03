@@ -150,7 +150,12 @@ def _fetch_subreddit_rss(
     req = Request(url, headers={"User-Agent": _UA})
     try:
         with urlopen(req, timeout=timeout) as resp:
-            root = ET.fromstring(resp.read())
+            # Entity-expansion guard (Mimosa acceptance fix, see
+            # yialpha.dataflows.utils.safe_xml_root): DTD/ENTITY-bearing
+            # XML is refused before parsing.
+            from yialpha.dataflows.utils import safe_xml_root as _safe_xml
+
+            root = _safe_xml(resp.read(), source="reddit_rss")
     except HTTPError as exc:
         if exc.code == 429 and _retry:
             wait = _retry_after_seconds(exc) or 5.0

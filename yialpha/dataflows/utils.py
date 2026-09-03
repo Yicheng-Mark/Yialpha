@@ -251,3 +251,29 @@ def proxy_map() -> dict[str, str]:
         "https": os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY"),
     }
     return {k: v for k, v in raw.items() if v is not None}
+
+
+def safe_xml_root(raw: bytes | str, *, source: str):
+    """Parse untrusted XML with DOCTYPE/ENTITY refused before parsing.
+
+    Security-scan acceptance fix (2026-09-03, Mimosa findings on
+    reddit.py / sec_ownership.py): stdlib ``xml.etree`` never resolves
+    EXTERNAL entities, but it DOES expand internal ones — a crafted feed
+    could trigger quadratic/billion-laughs entity expansion. Both expansion
+    and external-entity resolution ride on a DTD, so any document whose
+    prolog/body contains ``<!DOCTYPE`` or ``<!ENTITY`` (case-insensitive) is
+    REFUSED outright rather than parsed. The legitimate feeds this project
+    consumes (reddit.com RSS, SEC EDGAR Form 4 XML over HTTPS) carry
+    neither; a document that does is either hostile or malformed, and both
+    deserve the same refusal.
+    """
+    import xml.etree.ElementTree as ET
+
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+    lowered = text.lower()
+    if "<!doctype" in lowered or "<!entity" in lowered:
+        raise ValueError(
+            f"{source}: refused XML containing a DTD/ENTITY declaration "
+            "(entity-expansion guard); not parsed"
+        )
+    return ET.fromstring(text)
