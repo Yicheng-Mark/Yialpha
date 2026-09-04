@@ -172,6 +172,27 @@ def test_invoke_structured_falls_back_when_result_is_none():
 
 
 @pytest.mark.unit
+def test_render_bug_propagates_instead_of_silent_fallback():
+    # A bug in the caller's render() must surface as the real exception, not
+    # be misread as a structured-call failure that discards an already-
+    # successful result and triggers a second (free-text) LLM call.
+    from yialpha.agents.utils.structured import invoke_structured_or_freetext
+
+    structured = MagicMock()
+    structured.invoke.return_value = MagicMock(rating="Buy")
+    plain = MagicMock()
+
+    def _broken_render(_result):
+        raise TypeError("render bug")
+
+    with pytest.raises(TypeError, match="render bug"):
+        invoke_structured_or_freetext(
+            structured, plain, "prompt", render=_broken_render, agent_name="t"
+        )
+    plain.invoke.assert_not_called()
+
+
+@pytest.mark.unit
 class TestTraderAgent:
     def test_structured_path_produces_rendered_markdown(self):
         captured = {}

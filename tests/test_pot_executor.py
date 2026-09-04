@@ -111,6 +111,39 @@ class TestPoTExecutor:
         assert res.ok is False
         assert res.code_ran is False
 
+    # 4b. Security: pandas/numpy deserialization and file-IO payloads.
+    def test_security_blocks_read_pickle(self):
+        # pd.read_pickle is arbitrary code execution (pickle deserialization).
+        res = self._exec(code="result = pd.read_pickle('/tmp/x.pkl')")
+        assert res.ok is False
+        assert res.code_ran is False
+        assert res.error is not None
+        assert "reject" in res.error.lower() or "block" in res.error.lower()
+
+    def test_security_blocks_np_load_allow_pickle(self):
+        # np.load(..., allow_pickle=True) deserializes arbitrary objects.
+        res = self._exec(code="result = np.load('/tmp/x.npy', allow_pickle=True)")
+        assert res.ok is False
+        assert res.code_ran is False
+        assert res.error is not None
+        assert "reject" in res.error.lower() or "block" in res.error.lower()
+
+    def test_security_blocks_to_csv(self):
+        # DataFrame.to_csv writes arbitrary host files.
+        res = self._exec(
+            code="result = pd.DataFrame({'a': [1]}).to_csv('/tmp/out.csv')"
+        )
+        assert res.ok is False
+        assert res.code_ran is False
+        assert res.error is not None
+        assert "reject" in res.error.lower() or "block" in res.error.lower()
+
+    def test_security_blocks_read_csv(self):
+        # pd.read_csv reads arbitrary host files.
+        res = self._exec(code="result = pd.read_csv('/etc/passwd')")
+        assert res.ok is False
+        assert res.code_ran is False
+
     # 5. Runtime error propagates as ok=False, no host crash.
     def test_division_by_zero(self):
         res = self._exec(code="result = 1 / 0")
@@ -125,6 +158,15 @@ class TestPoTExecutor:
         assert res.code_ran is True
         assert res.error is not None
         assert "result" in res.error.lower()
+
+    def test_injected_result_key_cannot_fake_success(self):
+        # A stale ``result`` in the injected data must not be read back as the
+        # computed answer when the code never assigns one.
+        res = self._exec(code="x = 5", data={"result": 42})
+        assert res.ok is False
+        assert res.code_ran is True
+        assert res.error is not None
+        assert "no result extracted" in res.error
 
     # 6. result_var override.
     def test_result_var_override(self):
@@ -149,11 +191,30 @@ class TestPoTExecutor:
         assert res.error is not None
         assert "max_lines" in res.error
 
+    def test_oversized_single_line_rejected(self):
+        # A single pathological line must not bypass the character cap.
+        code = "x = " + "1" * pot_executor_module._MAX_CODE_CHARS
+        assert code.count("\n") == 0
+        res = self._exec(code=code)
+        assert res.ok is False
+        assert res.code_ran is False
+        assert res.error is not None
+        assert "max characters" in res.error
+
     def test_empty_code_rejected(self):
         res = self._exec(code="")
         assert res.ok is False
         assert res.code_ran is False
         assert res.error is not None
+
+    def test_non_positive_timeout_is_clamped_to_a_watchdog(self):
+        # None/0/negative would otherwise disable the deadline entirely and
+        # run LLM-generated code unbounded; they must clamp to a minimal one.
+        assert PoTExecutor(timeout_seconds=0).timeout_seconds >= 1.0
+        assert PoTExecutor(timeout_seconds=-5).timeout_seconds >= 1.0
+        assert PoTExecutor(timeout_seconds=None).timeout_seconds >= 1.0  # type: ignore[arg-type]
+        # The default positive timeout is left untouched.
+        assert PoTExecutor(timeout_seconds=0.05).timeout_seconds == 0.05
 
     # Sanity: the restricted builtins actually remove __import__.
     def test_import_inside_sandbox_fails(self):

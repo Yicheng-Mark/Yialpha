@@ -145,15 +145,20 @@ def invoke_structured_or_freetext(
                 # the tool, leaving the parser with nothing to return. Treat it
                 # as a structured miss and fall back, with a clear reason.
                 raise ValueError("structured output returned no parsed result")
-            md = render(result)
-            if extract is not None:
-                return md, extract(result)
-            return md
         except Exception as exc:
             logger.warning(
                 "%s: structured-output invocation failed (%s); retrying once as free text",
                 agent_name, exc,
             )
+        else:
+            # render/extract are the caller's own code, deliberately outside
+            # the try: a bug in them must surface as the real exception, not
+            # be misread as a structured-call failure that discards an
+            # already-successful result and triggers a second LLM call.
+            md = render(result)
+            if extract is not None:
+                return md, extract(result)
+            return md
 
     response = plain_llm.invoke(prompt)
     if extract is not None:
