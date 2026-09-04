@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import time
+from datetime import UTC, date, datetime, timedelta
+
 import pandas as pd
 import pytest
 
+from yialpha.dataflows import binance as bn
 from yialpha.risk.derivatives_stress import (
     MIN_WINDOW,
     DerivativesStressReport,
@@ -204,3 +208,168 @@ def test_fetcher_builds_series_from_records(monkeypatch):
     assert out["taker_ratio"] == pytest.approx(1.2)
     # basis = perp/index − 1 > 0 on these synthetic frames.
     assert (out["basis"] > 0).all()
+
+
+_FUTURES_DATA_STRESS_PATHS = (
+    "/futures/data/openInterestHist",
+    "/futures/data/globalLongShortAccountRatio",
+)
+
+
+class _Capture:
+    """Fake ``_http_get`` recording every ``(path, params)`` verbatim.
+
+    The ``_fake_http`` stub above is params-blind — that is exactly how the
+    live ``-1130`` and the 29-row off-by-one below both slipped through: a
+    stub that ignores its arguments cannot show the wrong window was asked
+    for. This one records, and the tests pin the exact values.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def __call__(
+        self,
+        path: str,
+        params: dict,
+        symbol_for_error: str,
+        canonical: str,
+        base: str = bn._FAPI_BASE,
+        weight_key: str = "fapi",
+        headers: dict | None = None,
+    ) -> object:
+        self.calls.append((path, dict(params)))
+        return []
+
+    def params_for(self, path: str) -> dict:
+        return next(p for pth, p in self.calls if pth == path)
+
+
+class _KlinesCapture:
+    """Fake ``binance_klines_frame`` recording its window; serves no candles."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        interval: str = "1d",
+        venue: str = "binance_perp",
+        price_type: str = "last",
+        *,
+        closed_as_of: int | None = None,
+    ) -> pd.DataFrame:
+        self.calls.append((start_date, end_date))
+        return pd.DataFrame()
+
+
+def _end_of_day_ms(end_date: str) -> int:
+    """Mirror the fetcher's own ``end_ms``: UTC end-of-day, inclusive."""
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=UTC)
+    return int((end_dt.timestamp() + 86399) * 1000)
+
+
+@pytest.mark.unit
+def test_futures_data_start_clamped_to_retention_window(monkeypatch):
+    """Regression pin for the live -1130 ``parameter 'startTime' is invalid``.
+
+    ``/futures/data/*`` retains only the last 30 days AND rejects a wider
+    startTime/endTime span with HTTP 400 — it does NOT silently truncate. The
+    caller's default window is 90 days, so the data layer must clamp the two
+    ``/futures/data/*`` stress requests into the retention window, while the
+    full-history funding endpoint keeps the whole 90 days.
+
+    Doubles as the PIT pin: ``end_date`` here is in the PAST, so ``end_ms`` is
+    already below now and the now-clamp must be a no-op — a replay window is
+    never dragged forward to the real present.
+    """
+    cap = _Capture()
+    klines = _KlinesCapture()
+    monkeypatch.setattr(bn, "_http_get", cap)
+    monkeypatch.setattr(bn, "binance_klines_frame", klines)
+
+    # Historical replay: 5 days back from the real clock, computed at run time.
+    end_dt = (datetime.now(UTC) - timedelta(days=5)).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    end_date = end_dt.strftime("%Y-%m-%d")
+    end_ms = _end_of_day_ms(end_date)
+    start_ms = int((end_dt - timedelta(days=90)).timestamp() * 1000)
+    assert end_ms < int(time.time() * 1000)  # a replay window is strictly past
+
+    bn.derivatives_stress_series("BTCUSDT", end_date)
+
+    retention_ms = bn._FUTURES_DATA_RETENTION_DAYS * 86_400_000
+    for path in _FUTURES_DATA_STRESS_PATHS:
+        params = cap.params_for(path)
+        assert params["endTime"] == end_ms  # NOT dragged to now — PIT intact
+        assert params["startTime"] == end_ms - retention_ms
+        # The endpoint hard-rejects (400 -1130) a span beyond retention.
+        assert params["endTime"] - params["startTime"] <= retention_ms
+        assert params["period"] == "1d"
+        assert params["limit"] == 30
+
+    # Untouched siblings: funding is the full-history /fapi endpoint (90 days
+    # stays legal there), taker only looks back 2 days, basis goes via klines.
+    funding = cap.params_for("/fapi/v1/fundingRate")
+    assert funding["startTime"] == start_ms
+    assert funding["endTime"] == end_ms
+    assert funding["endTime"] - funding["startTime"] > retention_ms
+
+    taker = cap.params_for("/futures/data/takerlongshortRatio")
+    assert taker["startTime"] == end_ms - 2 * 86_400_000
+    assert taker["endTime"] == end_ms
+    assert taker["limit"] == 2
+
+    window_start = (end_dt - timedelta(days=90)).strftime("%Y-%m-%d")
+    assert klines.calls == [(window_start, end_date)] * 2
+
+
+@pytest.mark.unit
+def test_futures_data_end_clamped_to_now_when_local_date_leads_utc(monkeypatch):
+    """The off-by-one that made live OI/LSR arrive as 29 rows (< MIN_WINDOW 30).
+
+    ``end_ms`` is the LOCAL end-of-day. Past local midnight in UTC+8 the local
+    date is already tomorrow while UTC is still today, so ``end_ms`` lands hours
+    in the FUTURE; measuring the retention window back from that future instant
+    pushes ``startTime`` past a daily row that already exists, and the server
+    returns 29 of the 30 rows the score needs. Clamping ``endTime`` to now
+    re-anchors the window on the real present and the 30th row comes back — and
+    it keeps the repo's PIT discipline of never asking for future data.
+    """
+    cap = _Capture()
+    klines = _KlinesCapture()
+    monkeypatch.setattr(bn, "_http_get", cap)
+    monkeypatch.setattr(bn, "binance_klines_frame", klines)
+
+    end_date = date.today().isoformat()
+    end_ms = _end_of_day_ms(end_date)
+    # Reproduce the observed live condition: the requested window ends 30h
+    # after the real present (local date one day ahead of the UTC date).
+    now_ms = end_ms - 30 * 3_600_000
+    monkeypatch.setattr(bn, "_now_ms", lambda: now_ms)
+
+    bn.derivatives_stress_series("BTCUSDT", end_date)
+
+    retention_ms = bn._FUTURES_DATA_RETENTION_DAYS * 86_400_000
+    for path in _FUTURES_DATA_STRESS_PATHS:
+        params = cap.params_for(path)
+        assert params["endTime"] == now_ms  # clamped off the future end-of-day
+        assert params["endTime"] < end_ms
+        assert params["startTime"] == now_ms - retention_ms
+        # Exactly the retention horizon: wide enough for 30 daily rows, never
+        # wide enough to trip the 400 -1130 span rejection.
+        assert params["endTime"] - params["startTime"] == retention_ms
+
+    # The clamp is scoped to the two retention-limited series: funding and
+    # taker keep the PIT ``end_ms`` anchor they had before.
+    funding = cap.params_for("/fapi/v1/fundingRate")
+    assert funding["endTime"] == end_ms
+    assert funding["startTime"] == end_ms - (90 * 86_400_000 + 86_399_000)
+    taker = cap.params_for("/futures/data/takerlongshortRatio")
+    assert taker["endTime"] == end_ms
+    assert taker["startTime"] == end_ms - 2 * 86_400_000
+    assert klines.calls[0][1] == end_date

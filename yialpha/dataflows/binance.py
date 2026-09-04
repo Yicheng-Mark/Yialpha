@@ -85,6 +85,18 @@ def reset_history_memo_for_test() -> None:
     with _HISTORY_MEMO_LOCK:
         _HISTORY_MEMO.clear()
 
+
+def _now_ms() -> int:
+    """Current UTC epoch milliseconds, as a module-level indirection.
+
+    Not an inline ``time.time()``: the PIT window anchors that read it must be
+    injectable, because the failure mode they guard against — a LOCAL date
+    ahead of the UTC date, so the requested window ends in the future — only
+    reproduces on a real clock once a day and cannot be pinned otherwise.
+    """
+    return int(time.time() * 1000)
+
+
 # The /futures/data/* family (openInterestHist, the *Ratio endpoints, taker
 # volume, basis) accepts startTime/endTime, but Binance retains ONLY the most
 # recent 30 days for these series — a window that ends before that horizon
@@ -2034,12 +2046,22 @@ def derivatives_stress_series(
     is PIT-clamped to ``end_date`` via :func:`current_pit_end`.
 
     Live-run practicality (why the REST paths, not the vision archive):
-    ``/futures/data/*`` retains only the LAST 30 DAYS, so OI/LSR typically
-    arrive as ~30 points — enough for the score's ``MIN_WINDOW`` while the
-    report carries the ``thin_history`` flag; funding and the klines-based
-    basis cover the full requested window. Downloading ~90 per-day archive
-    zips on a live decision path would cost far more than the extra context
-    is worth; deep-history stress belongs to offline IC work.
+    ``/futures/data/*`` retains only the last 30 days AND rejects a request
+    whose ``startTime``/``endTime`` span exceeds that horizon with HTTP 400
+    ``-1130`` ("parameter 'startTime' is invalid") — the server does NOT
+    silently truncate — so the OI/LSR window is clamped client-side before the
+    request: ``endTime`` to ``min(end_ms, now)``, ``startTime`` to
+    ``_FUTURES_DATA_RETENTION_DAYS`` back from that anchor. The ``min`` is
+    deliberate, not a typo — ``end_ms`` is the LOCAL end-of-day, so a run after
+    local midnight would otherwise measure retention back from an instant still
+    in the future and lose a daily row that already exists (29 points, one
+    short of ``MIN_WINDOW``); a replay's ``end_ms`` is already below now and is
+    left exactly where PIT put it. The two typically arrive as ~30 points,
+    enough for the score's ``MIN_WINDOW`` while the report carries the
+    ``thin_history`` flag; funding (full-history ``/fapi/v1/fundingRate``) and
+    the klines-based basis cover the full requested window. Downloading ~90
+    per-day archive zips on a live decision path would cost far more than the
+    extra context is worth; deep-history stress belongs to offline IC work.
     """
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
     end_clamped = current_pit_end(end_date) or end_date
@@ -2067,6 +2089,18 @@ def derivatives_stress_series(
         logger.info("stress series funding unavailable for %s: %s", canonical, exc)
         out["funding"] = None
 
+    # /futures/data/* retains only the last _FUTURES_DATA_RETENTION_DAYS days
+    # and rejects a wider startTime/endTime span with HTTP 400 -1130 ("parameter
+    # 'startTime' is invalid") — no silent truncation — so clamp client-side;
+    # funding (/fapi full history) and basis (klines) keep the full start_ms.
+    # Anchor on min(end_ms, now) because end_ms is the LOCAL end-of-day: past
+    # local midnight it lies in the FUTURE, and measuring retention back from a
+    # future instant drops a daily row that already exists (29 < MIN_WINDOW 30).
+    data_end_ms = min(end_ms, _now_ms())
+    data_start_ms = max(
+        start_ms, data_end_ms - _FUTURES_DATA_RETENTION_DAYS * 86_400_000
+    )
+
     for name, path, value_key in (
         ("open_interest", "/futures/data/openInterestHist", "sumOpenInterest"),
         ("global_lsr", "/futures/data/globalLongShortAccountRatio", "longShortRatio"),
@@ -2077,8 +2111,8 @@ def derivatives_stress_series(
                 {
                     "symbol": canonical,
                     "period": "1d",
-                    "startTime": start_ms,
-                    "endTime": end_ms,
+                    "startTime": data_start_ms,
+                    "endTime": data_end_ms,
                     "limit": 30,
                 },
                 symbol,

@@ -102,7 +102,6 @@ class _PoolState:
         permanently-dead one so the request still reaches the API and fails
         with the provider's real status code instead of a synthetic error.
         """
-        now = time.monotonic()
         cooling = sorted(
             (until, idx) for idx, until in self.dead_until.items() if idx not in self.permanent
         )
@@ -122,7 +121,7 @@ class _PoolState:
 
 
 _states: dict[str, _PoolState] = {}
-_clients: dict[str, "httpx.Client"] = {}
+_clients: dict[str, httpx.Client] = {}
 _lock = threading.Lock()
 
 

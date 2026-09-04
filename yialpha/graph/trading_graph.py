@@ -439,6 +439,8 @@ class YiAlphaGraph:
                     # NAME as the news/fundamentals instances — each analyst's
                     # ToolNode holds its own scope-charging instance.
                     web_search_market,
+                    # Generic instance — dispatch is by NAME; _ACTIVE_CAPTURE_KEY routes entries to the live analyst's capture.
+                    submit_prediction,
                 ]
             ),
             "social": ToolNode(
@@ -477,6 +479,8 @@ class YiAlphaGraph:
                     # key is missing / budget is exhausted, so registering it
                     # here is always safe (never aborts a run).
                     web_search,
+                    # Generic instance — dispatch is by NAME; _ACTIVE_CAPTURE_KEY routes entries to the live analyst's capture.
+                    submit_prediction,
                 ]
             ),
             "fundamentals": ToolNode(
@@ -534,6 +538,8 @@ class YiAlphaGraph:
                     # by the analyst only when web_search_enabled is on AND
                     # the run date is live; always safe to register.
                     web_search_fundamentals,
+                    # Generic instance — dispatch is by NAME; _ACTIVE_CAPTURE_KEY routes entries to the live analyst's capture.
+                    submit_prediction,
                 ]
             ),
         }

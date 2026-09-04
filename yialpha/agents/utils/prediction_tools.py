@@ -362,6 +362,20 @@ def prediction_capture_pending() -> bool:
     )
 
 
+def analyst_capture_is_empty(analyst: str) -> bool:
+    """True when ``analyst`` has an ARMED capture holding no entries.
+
+    Gates the dedicated fallback prediction round in the tool-loop analysts
+    (market / news / fundamentals): when the tool loop already delivered
+    entries a second round would double-file, and when no capture is armed
+    (:func:`begin_prediction_capture` never ran, or ran without a bound run
+    context) the fallback would be a wasted LLM call whose entries the tool
+    ignores anyway.
+    """
+    capture = (_CAPTURE_SCOPE.get() or {}).get(analyst)
+    return isinstance(capture, _PredictionCapture) and not capture.entries
+
+
 def flush_predictions() -> list[str]:
     """Submit every pending capture; ONE ``submit_predictions`` call each.
 
