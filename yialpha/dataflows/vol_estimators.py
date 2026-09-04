@@ -24,7 +24,6 @@ import numpy as np
 import pandas as pd
 
 from yialpha.instruments.sessions import (
-    SESSION_BINANCE_TRADFI,
     SESSION_CONTINUOUS,
     trading_sessions_between,
 )
@@ -43,17 +42,19 @@ _SESSIONS_WINDOW = ("2025-01-01", "2026-01-01")
 
 
 def sessions_per_year(instrument_class: str | None) -> float:
-    """Sessions per year for an instrument class, derived from its session
-    calendar via :func:`yialpha.instruments.sessions.trading_sessions_between`
-    over :data:`_SESSIONS_WINDOW`.
+    """Sessions per year for an instrument class.
 
     * ``pure_crypto_perp`` → the continuous count over the 365-day window
-      (exactly 365 — every day trades);
-    * ``stock_perp`` → the weekday-session count over the same window (261
-      for 2025). This is the DERIVABLE TradFi factor: Binance's holiday
-      calendar is not yet machine-verified (see the sessions module
-      caveat), so the classic 252 convention cannot be reconstructed — the
-      weekday count is the honest, calendar-based ~252-class answer.
+      derived via :func:`yialpha.instruments.sessions.trading_sessions_between`
+      over :data:`_SESSIONS_WINDOW` (exactly 365 — every day trades);
+    * ``stock_perp`` → 365 as well, the same continuous caliber as pure
+      crypto: klines machine evidence (2026-09-04) shows Binance
+      tokenized-stock perps (MUUSDT, listed 2026-04-07) traded WITH VOLUME
+      through every full US-market holiday (2026-05-25 / 06-19 / 07-03) and
+      every weekend bar (14/14 carried volume, ~1/4–1/3 of a normal day;
+      zero-volume days = 0) — a 24/7 calendar. The old 261 weekday count
+      (2025 working days) and NYSE's 252 are both FALSIFIED; annualizing at
+      261 UNDERSTATED annualized vol (true/old ≈ sqrt(365/261) ≈ 1.18).
     * anything else (``unknown_perp`` / ``equity`` / ``None``) → the 252
       equity convention (the historical default).
     """
@@ -62,9 +63,9 @@ def sessions_per_year(instrument_class: str | None) -> float:
             trading_sessions_between(SESSION_CONTINUOUS, *_SESSIONS_WINDOW)
         )
     if instrument_class == "stock_perp":
-        return float(
-            trading_sessions_between(SESSION_BINANCE_TRADFI, *_SESSIONS_WINDOW)
-        )
+        # Klines-verified 24/7 (see docstring): same caliber as pure crypto,
+        # so share the measured 365 factor instead of a weekday-count guess.
+        return CRYPTO_TRADING_DAYS_PER_YEAR
     return TRADING_DAYS_PER_YEAR
 
 
@@ -78,12 +79,15 @@ def periods_per_year_for(
     behaviour), matching the backtest engine's ``periods_per_year`` rule.
 
     ``instrument_class`` (V2.2 determinism fix) refines the crypto_perp
-    case: a tokenized-stock perp (``stock_perp``) follows Binance's
-    published TradFi sessions, not 24/7 — annualizing its weekday-session
-    candles at 365 overstated annualized vol by sqrt(365/261) ≈ 1.18. A
-    known class wins over the asset-type rule; ``None``/unknown keeps the
+    case: a tokenized-stock perp (``stock_perp``) annualizes at the same
+    klines-verified 24/7 factor 365 as pure crypto — machine evidence
+    (2026-09-04) shows Binance stock perps trade through full US-market
+    holidays and weekends with volume, so the retired 261 weekday factor
+    UNDERSTATED annualized vol (true/old ≈ sqrt(365/261) ≈ 1.18). A known
+    class wins over the asset-type rule; ``None``/unknown keeps the
     historical asset-type behaviour (byte-identical for pure crypto and
-    equities — only stock-perp paths change).
+    equities — the stock-perp caliber moved from the falsified 261 guess
+    to the measured 365).
     """
     if instrument_class is not None:
         return sessions_per_year(instrument_class)

@@ -134,14 +134,15 @@ def _indicators_core(
         )
 
     frame_reset = frame.reset_index()
-    # Vol annualization by instrument class (V2.2 determinism fix): a
-    # tokenized-stock perp follows Binance's published TradFi sessions, so
-    # its weekday-session candles annualize on the sessions-per-year factor
-    # (via instruments.sessions), NOT the 24/7 crypto 365 — the crypto
-    # factor overstated stock-perp vol by sqrt(365/261) ≈ 1.18. The class
-    # signal is the deterministic warm/seed base map (no ledger, no flag):
-    # an EQUITY base means stock_perp, anything else on Binance candles is
-    # pure crypto.
+    # Vol annualization by instrument class (V2.2 determinism fix): the
+    # sessions-per-year factor comes from instruments.sessions. Klines
+    # machine evidence (2026-09-04) shows a tokenized-stock perp trades
+    # 24/7 (full US-market holidays + weekends carry volume), so its factor
+    # is the continuous 365 — the same as pure crypto; the retired 261
+    # weekday factor understated stock-perp vol (true/old ≈
+    # sqrt(365/261) ≈ 1.18). The class signal is the deterministic warm/
+    # seed base map (no ledger, no flag): an EQUITY base means stock_perp,
+    # anything else on Binance candles is pure crypto.
     instrument_class = (
         "stock_perp" if venue == "perp" and stock_perp_underlying(symbol) else
         "pure_crypto_perp"

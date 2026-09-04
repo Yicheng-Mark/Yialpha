@@ -5,12 +5,15 @@ The three calendar identifiers were previously defined inline in
 is their canonical home) and routing re-exports the SAME names, so every
 existing importer keeps working unchanged.
 
-Caveat (known open item): Binance's exact TradFi perp session calendar — the
-published trading hours and holiday schedule for tokenized-stock perpetuals —
-is NOT yet machine-verified. The weekday approximation in
-:func:`trading_sessions_between` is reserved for annualization work in V2.4
-and must be disclosed as an approximation, never presented as the exchange's
-official calendar.
+Verification (2026-09-04): Binance tokenized-stock perpetuals trade 24/7 —
+klines machine evidence (MUUSDT, listed 2026-04-07) shows they traded WITH
+VOLUME through every full US-market holiday (2026-05-25 / 06-19 / 07-03) and
+every weekend (14/14 weekend bars carried volume, ~1/4–1/3 of a normal day;
+zero-volume days = 0). Annualization therefore uses the continuous 365
+factor and does NOT consume the weekday approximation in
+:func:`trading_sessions_between` anymore; that approximation survives only
+as the date-only ET session bucket / listing-exchange convention, never
+presented as the exchange's official calendar.
 """
 from __future__ import annotations
 
@@ -19,26 +22,29 @@ from datetime import date, timedelta
 #: Pure-crypto contracts trade continuously (24/7) — no session boundaries.
 SESSION_CONTINUOUS = "continuous_24_7"
 
-#: A tokenized-stock perp follows Binance's PUBLISHED TradFi sessions (PR5
-#: corrected the old "trades 24/7" assumption).
+#: A tokenized-stock perp's registry/routing calendar label (V2.2 frozen
+#: value). Klines machine evidence (2026-09-04) later VERIFIED the original
+#: "trades 24/7" reality — full US-market holidays and weekends carry
+#: volume — so annualization uses the continuous 365 factor; the label
+#: itself must not change (it feeds deterministic classifications).
 SESSION_BINANCE_TRADFI = "binance_published_tradfi_sessions"
 
 #: Plain equities follow their listing exchange's session calendar.
 SESSION_EXCHANGE = "listing_exchange_sessions"
 
-#: ACCEPTANCE-PHASE DISCLOSURE (2026-09-03): every sessions-per-year figure
-#: derived for a TradFi-like calendar below is a WEEKDAY-COUNT ASSUMPTION,
-#: not a verified trading calendar. Binance's TradFi perp session hours,
-#: market-holiday closures, DST-shifted sessions and next-tradable-bar
-#: behavior during US market close are UNVERIFIED (open item — needs one
-#: real exchangeInfo/kline probe). Until then, any annualization built on
-#: these counts must carry this caveat (the backtest engine records it in
-#: ``config_summary["session_calendar_assumption"]`` and renders it in the
-#: report). Verification of this calendar does NOT change the API — only
-#: the counts and this constant's wording.
+#: CALENDAR DISCLOSURE (verified 2026-09-04; supersedes the 2026-09-03
+#: weekday-count assumption): one real klines probe (MUUSDT, listed
+#: 2026-04-07) shows Binance stock perps trade 24/7 — all full US-market
+#: holidays in the window (2026-05-25 / 06-19 / 07-03) and all 14 weekend
+#: bars carried volume (~1/4–1/3 of a normal day; zero-volume days = 0),
+#: so both 261 (2025 working days) and 252 (NYSE) are falsified and the
+#: sessions/year factor is the continuous 365. The backtest engine records
+#: this disclosure in ``config_summary["session_calendar_assumption"]``
+#: and renders it in the report. Verification did NOT change the API —
+#: only the counts and this constant's wording.
 SESSION_CALENDAR_CAVEAT = (
-    "weekday-count assumption; Binance TradFi calendar "
-    "(holidays/DST/closures) not machine-verified"
+    "klines-verified 24/7 calendar (2026-09-04 probe: full US-market "
+    "holidays and weekends traded with volume); sessions/year factor 365"
 )
 
 #: Calendars whose sessions are approximated by NYSE-style weekdays.
@@ -56,9 +62,10 @@ def trading_sessions_between(calendar: str, start_date: str, end_date: str) -> i
 
     * ``SESSION_CONTINUOUS``: the plain calendar-day delta (every day trades).
     * ``SESSION_BINANCE_TRADFI`` / ``SESSION_EXCHANGE``: an NYSE-style weekday
-      count (Mon-Fri). Weekend-only closure is an APPROXIMATION — Binance's
-      exact TradFi perp calendar (hours + holidays) is not yet
-      machine-verified; the count is reserved for annualization in V2.4.
+      count (Mon-Fri) — a date-only approximation. Klines evidence
+      (2026-09-04) verified stock perps trade 24/7, so annualization no
+      longer consumes this count (factor 365); it remains for the ET
+      session bucket / listing-exchange disclosure only.
 
     Raises ``ValueError`` for an unknown calendar, malformed ISO dates, or an
     inverted window.
