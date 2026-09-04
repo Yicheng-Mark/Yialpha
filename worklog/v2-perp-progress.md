@@ -89,6 +89,15 @@
        - 处置原则（用户指令）：不因"旧代码/只读分析"认定非阻塞——XML 两点虽在只读分析路径仍按真实可达修复；PoT 按条件可达标记并保持默认关闭。
     6. 261 日历披露维持假设标签（假日/DST/闭市/下一可交易 bar 未核验；相关年化结果保留 ⚠️），不算"日历验证通过"。
 
+## 2026-09-04 晚间批（子智能体并行：SEC UA 销账 / 日历机器核实 261→365 / housekeeping / enforced 门槛写死）— ✅ 完成（3059 passed / ruff clean / mypy 179 文件 clean；`e0b961c` + `ff2e9db` + 本批 2 commit）
+
+23. **A1 SEC fair-access UA 销账**（round-3e 起 sec_edgar 403 欠账）：`YIALPHA_SEC_USER_AGENT="YiAlpha research zhang12120113@gmail.com"` 落 .env；.env.example 行按 YIALPHA_LEDGER_DB 先例保留注释文档形式（env-example 双向钉测试 3 项绿——getenv 直读键不激活进 example）。验证：MU live fundamentals 实抓 SEC 腿 HTTP 200，companyfacts（CIK 723125）落 `~/.yialpha/cache/sec/`。
+24. **A2 exchangeInfo 时段字段核实（机器证据）**：MUUSDT 共 24 keys，无任何 session/tradingHours/calendar 字段（时间类仅 onboardDate/deliveryDate/timeInForce）→ **已核实缺失**，exchangeInfo 路径关闭；onboardDate=2026-04-07T13:30Z（美东 09:30，TradFi 锚定印证）。
+25. **A3 假日/周末停市核实（机器证据，口径反转）**：MUUSDT 1d klines（窗口 2026-05-18→07-10，54 bar；上架晚于 2025 假日故取 2026 已过假日）——三个美股全日假日（05-25 Memorial / 06-19 Juneteenth / 07-03 Independence observed）**全部带量 bar**（5.1万–36万张，与相邻交易日同量级），14 个周末 bar 全带量，零量日=0，假日/周末量能≈平日 1/4–1/3（更薄但不改日历）。**结论：Binance 股票永续 24/7 全年无休，261（2025 工作日数）与 252（NYSE）皆证伪 → 年化因子 365**（与 pure_crypto_perp 同口径；261 把年化波动低估 sqrt(365/261)≈1.18 倍）。
+26. **261→365 修正（本批执行，7 文件）**：vol_estimators stock_perp 分支改返回 CRYPTO_TRADING_DAYS_PER_YEAR（`_SESSIONS_WINDOW` 保留，pure 分支仍引用非死代码）；sessions.py 只改披露文案（SESSION_CALENDAR_CAVEAT="klines-verified 24/7 … factor 365"，常量与 weekday 计数语义零改动）；engine.py `config_summary["session_calendar_assumption"]` 值+注释同步（键名与装配逻辑不变）；binance_indicator_tools 注释同步；钉值测试 261→365（test_backtest_perp_classes / test_regime_state / test_v24_acceptance；report.py 渲染动态取 config 无需改）。**未动** V2.2 冻结的 ET session 桶（date-only=工作日 regular/周末 closed）——牵连 regime_id 语义需 bump REGIME_VERSION，与"regime 标签 vs 实际 24/7 交易"的偏差一起留用户裁决。**范围外残留（下一批）**：market_regime.py 3 处 docstring、routing.py:48 注释、fundamentals_analyst.py:151 提示词仍写 "published TradFi sessions"（被 test_news_contract_angle.py:264-271 钉死，需连测试一起改）。
+27. **E housekeeping**：ci.yml checkout v4→v5 / setup-python v5→v6 实际 **16 处**（8 job×2）；test_deepseek_reasoning.py 改造为 **GLM 等价 live-call**（GLM key 在位才真跑、缺 key 干净 skip、无永久 skip；DeepSeek 单测保留——客户端仍是活代码）；get_binance_basis 的 in-200 -4104 重抛 NoMarketDataError 以结构性缺失开头（"no basis data for this symbol"，vendor_code 附带 debuggable，errors.py 加可选属性 + 3 新单测）。
+28. **F enforced 晋升门槛（写死，数字用户保留调整权）**：≥5 轮 shadow × ≥4 符号 × ≥30 条成熟预测 × 0 条失败 invariant × time_and_link_audit 全绿 × 校准方向合理 → 允许**单符号**试运行 enforced；enforced→实盘永远单独经用户显式授权。每次 Track B scoreboard 批读对照汇报进度缺口。
+
 ## 已冻结的契约决定
 
 1. **中央账本**：单文件 SQLite，config `ledger_db_path`（默认 `~/.yialpha/ledger/portfolio.db`，env `YIALPHA_LEDGER_DB`）。WAL + busy_timeout=5000 + BEGIN IMMEDIATE 原子提交；版本管理用 **schema_meta 表**（`schema_version` 行，非 PRAGMA user_version——Mimosa 钩子拦 f-string PRAGMA）；append-only（无 UPDATE 路径）。迁移 v1 = runs / instrument_snapshots / evidence / predictions / outcomes / tickets 六表（DDL 见 `yialpha/ledger/sqlite.py::_migrate`）。**所有 SQL 必须字面量+参数绑定**（Mimosa 钩子拦截变量 SQL，已两次拦截验证）。
@@ -112,7 +121,11 @@
 ## 用户决定记录
 
 - 2026-09-03：V2.1→V2.4 连续推进；基线用户自提交（已验证 `adec679` 干净）；盲预测用 submit_prediction 工具调用；FX 用 Binance 现货 USDC 反推；**重点只做永续，其他资产不动**；**最大化子智能体使用**（上下文预算）。
+- 2026-09-04（晚间行动计划）：A3 klines 证据驱动 261→365 当晚直接执行；F 门槛数字按用户提案写死；Track B 09-05 晚首试 scoreboard（严格可读 09-06 08:00 后，未成熟就顺延）；Track C 每晚 BTC+ETH+MU 固定班底+每周轮换 1 槽，发射窗本地 08:00–23:00，每轮复制 round-5 脚本目录+provenance code_state=当晚 HEAD；Mimosa deep 扫描由用户 UI 触发（outputDir `C:\Users\warri\.mimosa-scans\yialpha`，agent 无触发路径——扩展市场亦无连接器）。
 
 ## 下一步
 
-前置完成后并行派发 A/B/D 三个后台子智能体 → 完成后派发 C/E → 主智能体做 F → 门禁 → tag v2.1.0。
+- 09-05 08:00 后：round-6 发射（BTC+ETH+MU；复制 round-5 脚本目录，code_state=当晚 HEAD；验收=preflight/reconcile/scoreboard 三 PASS）。
+- 09-05 晚：Track B scoreboard 首批（1d outcome 未成熟就顺延到 09-06 08:00 后硬读）：`YIALPHA_LEDGER_DB=analysis_output/shadow-glm-round5-20260904/ledger.db .venv-dev/Scripts/yialpha.exe scoreboard --results-dir <round5 目录>`。看四样：① 三分析师盲预测 accuracy/Brier；② live SHORT（MU −0.05）1d 兑现；③ ECE 只看方向；④ by_regime 切片。
+- 用户 UI 触发 Mimosa deep 扫描 → 密封报告按真实可达/条件可达/误报三分类处置 → roadmap 销账。
+- 下一批：365 范围外残留（第 26 条）+ ET session 桶/regime_id 语义裁决。
