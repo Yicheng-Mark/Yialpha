@@ -148,3 +148,61 @@ def test_api_compare_skips_ticker_with_only_unreadable_logs(client, monkeypatch,
     assert response.status_code == 200
     tickers = [e["ticker"] for e in response.json()["tickers"]]
     assert tickers == ["AAPL"]
+
+
+# --------------------------------------------------------------------------- #
+# DNS-rebinding defense: Host header allowlist middleware
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_evil_host_header_gets_403(client):
+    """A rebinding domain resolving to 127.0.0.1 must not be served — the
+    browser would treat the cross-origin page as same-origin and could drive
+    POST /api/analyze (LLM spend) or read positions/reports."""
+    response = client.get("/", headers={"Host": "evil.example.com"})
+    assert response.status_code == 403
+
+
+@pytest.mark.unit
+def test_analyze_post_with_evil_host_never_reaches_spawn(client, monkeypatch):
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("rebinding request reached process spawn")
+
+    monkeypatch.setattr(runner, "spawn", fail_if_called)
+    response = client.post(
+        "/api/analyze",
+        json={"ticker": "AAPL", "date": date.today().isoformat()},
+        headers={"Host": "evil.example.com"},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.unit
+def test_loopback_host_headers_are_allowed(client):
+    for host in ("127.0.0.1:8000", "localhost:8000", "[::1]:8000",
+                 "127.0.0.1", "localhost", "::1", "LOCALHOST:8000"):
+        response = client.get("/", headers={"Host": host})
+        assert response.status_code == 200, f"loopback Host {host!r} rejected"
+
+
+@pytest.mark.unit
+def test_testclient_default_host_is_allowed(client):
+    # Starlette's TestClient sends Host: testserver; the suite must keep
+    # exercising the real middleware rather than bypassing it.
+    assert client.get("/").status_code == 200
+
+
+@pytest.mark.unit
+def test_missing_host_header_rejected(client):
+    response = client.get("/", headers={"Host": ""})
+    assert response.status_code == 403
+
+
+@pytest.mark.unit
+def test_extra_allowed_hosts_via_env(client, monkeypatch):
+    monkeypatch.setenv("YIALPHA_WEB_ALLOWED_HOSTS", "lan.example.com, other.example.net")
+    assert client.get("/", headers={"Host": "lan.example.com"}).status_code == 200
+    assert client.get(
+        "/", headers={"Host": "other.example.net:9999"}).status_code == 200
+    monkeypatch.delenv("YIALPHA_WEB_ALLOWED_HOSTS")
+    # Env read per request: removing it closes the hole again immediately.
+    assert client.get("/", headers={"Host": "lan.example.com"}).status_code == 403

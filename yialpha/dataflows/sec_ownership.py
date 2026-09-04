@@ -85,14 +85,53 @@ _FTD_URL = "https://www.sec.gov/files/data/fails-deliver-data/cnsfails{yyyymm}{h
 _MAX_FORM4 = 25
 
 
+def _as_of_date(curr_date: str | None) -> date:
+    """Parse an LLM-supplied as-of date into a :class:`date`, degrading to
+    ``date.today()`` instead of crashing the tool.
+
+    An LLM can emit malformed ``curr_date`` values (``"2026/08/01"``,
+    ``"garbage"`` — forms the strict ``date.fromisoformat`` rejects), which
+    previously raised a bare :class:`ValueError` straight out of the tool.
+    The fallback keeps the same direction as
+    :func:`yialpha.dataflows.utils.is_historical_date`'s handling of
+    unparseable input: the value must never crash and never leak. For an
+    as-of *upper bound*, today is the conservative ceiling — no real filing
+    is dated later than today, so the PIT gate can never admit not-yet-public
+    rows. Empty/None is genuine live mode -> today, without a warning.
+    """
+    text = (curr_date or "").strip()[:10]
+    if not text:
+        return date.today()
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        logger.warning(
+            "sec_ownership: unparseable curr_date %r; falling back to today (%s)",
+            curr_date, date.today(),
+        )
+        return date.today()
+
+
 def _ftd_pub_lag_days() -> int:
-    """Publication-lag (days) before a FTD cutoff file is treated as public."""
+    """Publication-lag (days) before a FTD cutoff file is treated as public.
+
+    A negative configured value is *rejected*, not clamped to 0: 0 would mean
+    "visible on publication day", silently weakening point-in-time
+    correctness. Like :func:`yialpha.dataflows.disk_cache.max_stale_days`,
+    a negative/garbage value falls back to the default."""
     raw = get_config().get("ftd_pub_lag_days", 10)
     try:
         n = int(raw)
     except (TypeError, ValueError):
         return 10
-    return n if n >= 0 else 0
+    if n < 0:
+        logger.warning(
+            "sec_ownership: ftd_pub_lag_days=%r is negative; falling back to "
+            "the default 10 (a negative lag would treat FTD files as visible "
+            "on publication day and weaken point-in-time correctness)", raw,
+        )
+        return 10
+    return n
 
 
 def _fetch_submissions(cik: int) -> dict:
@@ -193,8 +232,10 @@ def get_form4_insider_trading(
     subs = _fetch_submissions(cik)
 
     # Live mode: no as-of upper bound; anchor the look-back window at today.
+    # A malformed LLM date ("2026/08/01") degrades to today via the helper
+    # instead of raising bare ValueError out of the tool.
     upper = (curr_date or "")[:10]
-    upper_d = date.fromisoformat(upper) if upper else date.today()
+    upper_d = _as_of_date(curr_date)
     lower_d = upper_d - timedelta(days=int(look_back_days))
 
     recent = (subs.get("filings") or {}).get("recent") or {}
@@ -210,6 +251,12 @@ def get_form4_insider_trading(
     # match the PIT window (filingDate within [lower_d, upper_d]).
     for i, form in enumerate(forms):
         if form != "4":
+            continue
+        if i >= len(accessions):
+            # Malformed submissions payload: the parallel accessionNumber
+            # array is shorter than `form`. Without the accession the filing
+            # cannot be fetched — skip it instead of an IndexError crashing
+            # the tool (same defensive posture as the filingDate slice above).
             continue
         fd = (filing_dates[i] if i < len(filing_dates) else "")[:10]
         try:
@@ -435,8 +482,7 @@ def get_ftd_data(
     no rows -> an informative "no fails reported" string (it does NOT resolve a
     CIK, unlike Form 4).
     """
-    upper = (curr_date or "")[:10]
-    upper_d = date.fromisoformat(upper) if upper else date.today()
+    upper_d = _as_of_date(curr_date)   # malformed input degrades, not crashes
     start_d = upper_d - timedelta(days=int(look_back_days))
     lag = _ftd_pub_lag_days()
 
@@ -527,7 +573,14 @@ def _sec_13f_pub_lag_days() -> int:
         n = int(raw)
     except (TypeError, ValueError):
         return 45
-    return n if n >= 0 else 0
+    if n < 0:
+        logger.warning(
+            "sec_ownership: sec_13f_pub_lag_days=%r is negative; falling back "
+            "to the default 45 (a negative lag would treat unpublished 13F "
+            "datasets as public and weaken point-in-time correctness)", raw,
+        )
+        return 45
+    return n
 
 
 def _normalize_cusip(raw: str) -> str:
@@ -551,7 +604,9 @@ def _extract_cusip(facts: dict, curr_date: str | None) -> str:
         raise NoMarketDataError(
             "cusip", detail="dei:EntityCusip not reported in companyfacts") from err
     upper = (curr_date or "")[:10]
-    upper_d = date.fromisoformat(upper) if upper else None
+    # Live mode (empty) keeps the no-gate None; a malformed value degrades to
+    # today via the helper — the PIT gate then still applies, conservatively.
+    upper_d = _as_of_date(upper) if upper else None
 
     valid: list[tuple[date, str]] = []
     for rec in records:
@@ -741,8 +796,7 @@ def get_institutional_holdings(
     facts = _fetch_company_facts(cik)
     cusip = _extract_cusip(facts, curr_date)
 
-    upper = (curr_date or "")[:10]
-    upper_d = date.fromisoformat(upper) if upper else date.today()
+    upper_d = _as_of_date(curr_date)   # malformed input degrades, not crashes
     lower_d = upper_d - timedelta(days=int(look_back_days))
     lag = _sec_13f_pub_lag_days()
     visible_end = upper_d - timedelta(days=lag)
@@ -837,8 +891,16 @@ def get_institutional_holdings(
     for name, s in ranked:
         out.write(f"{name[:34]:<34} | {s['shares']:>12,.0f} | "
                   f"{s['value'] / 1e6:>10,.2f} | {s['filing_date'] or 'n/a'}\n")
-    out.write(
-        f"\nSummary: {len(agg)} institutional holder(s) for {ticker} in {rq_label}; "
-        f"top {len(ranked)} = ${top_val / 1e6:,.1f}M "
-        f"({100 * top_val / total_val:.1f}% of reported ${total_val / 1e6:,.1f}M).")
+    # An all-zero VALUE dataset (every holder reported $0) makes total_val 0:
+    # skip the concentration percentage instead of a ZeroDivisionError.
+    if total_val > 0:
+        out.write(
+            f"\nSummary: {len(agg)} institutional holder(s) for {ticker} in {rq_label}; "
+            f"top {len(ranked)} = ${top_val / 1e6:,.1f}M "
+            f"({100 * top_val / total_val:.1f}% of reported ${total_val / 1e6:,.1f}M).")
+    else:
+        out.write(
+            f"\nSummary: {len(agg)} institutional holder(s) for {ticker} in {rq_label}; "
+            f"top {len(ranked)} = ${top_val / 1e6:,.1f}M "
+            f"(concentration n/a: reported value total is $0).")
     return out.getvalue().rstrip("\n")

@@ -17,6 +17,7 @@ Start (from the project root):
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
 import time
 from datetime import datetime
@@ -42,7 +43,11 @@ from yialpha.logging_config import setup_logging  # noqa: E402
 setup_logging()
 
 from fastapi import FastAPI, HTTPException  # noqa: E402
-from fastapi.responses import FileResponse, RedirectResponse  # noqa: E402
+from fastapi.responses import (  # noqa: E402
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+)
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
@@ -121,6 +126,60 @@ async def add_security_headers(request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     return response
+
+
+# Hostnames the loopback-bound server trusts in the ``Host`` header. The
+# ``testserver`` entry is what Starlette's TestClient sends, so the test
+# suite exercises the same middleware the production server runs.
+_TRUSTED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1", "testserver"})
+_EXTRA_ALLOWED_HOSTS_ENV = "YIALPHA_WEB_ALLOWED_HOSTS"
+
+
+def _hostname_of(host_header: str) -> str:
+    """Extract the bare hostname from a ``Host`` header value (port stripped,
+    IPv6 brackets removed), lowercased. Compares hostname-only so the check is
+    port-agnostic (the dev server's port may differ between invocations)."""
+    host = host_header.strip().lower()
+    if not host:
+        return ""
+    if host.startswith("["):                     # [::1]:8000
+        end = host.find("]")
+        return host[1:end] if end != -1 else host[1:]
+    if host.count(":") == 1:                     # host:port (single colon)
+        return host.rsplit(":", 1)[0]
+    return host                                  # bare name or bare ::1
+
+
+def _allowed_hostnames() -> frozenset[str]:
+    """Trusted hostnames plus any operator/test-injected extras.
+
+    DNS-rebinding defense: the app binds 127.0.0.1, but a rebinding attack
+    points ``evil.example.com`` at the victim's loopback — the browser then
+    considers those cross-origin requests same-origin and will happily drive
+    ``POST /api/analyze`` (spending the configured LLM key) or read positions
+    and reports. Only requests whose Host header's hostname is a loopback
+    alias (or an explicit ``YIALPHA_WEB_ALLOWED_HOSTS`` entry — comma-
+    separated, for reverse proxies or tests) are served; everything else gets
+    403. Read per request so environment changes take effect without a
+    process restart in tests."""
+    hosts = set(_TRUSTED_HOSTNAMES)
+    for name in os.environ.get(_EXTRA_ALLOWED_HOSTS_ENV, "").split(","):
+        name = name.strip().lower()
+        if name:
+            hosts.add(_hostname_of(name))
+    return frozenset(hosts)
+
+
+@app.middleware("http")
+async def verify_host_header(request, call_next):
+    """Reject requests whose Host header does not name this local server."""
+    hostname = _hostname_of(request.headers.get("host", ""))
+    if hostname not in _allowed_hostnames():
+        return JSONResponse(
+            status_code=403,
+            content={"detail": f"untrusted Host header: {hostname!r}"},
+        )
+    return await call_next(request)
 
 
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
