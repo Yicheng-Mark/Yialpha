@@ -92,9 +92,11 @@ def _trade_stats(history: list[dict[str, Any]]) -> tuple[int, int, float, float]
         if ret > 0:
             wins += 1
             win_vals.append(float(ret))
-        else:
+        elif ret < 0:
             losses += 1
             loss_vals.append(abs(float(ret)))
+        # ret == 0: a flat trade is neither a win nor a loss — counting it
+        # as a loss would bias the Kelly win rate downward.
     avg_win = sum(win_vals) / len(win_vals) if win_vals else 1.0
     avg_loss = sum(loss_vals) / len(loss_vals) if loss_vals else 1.0
     return wins, losses, avg_win, avg_loss

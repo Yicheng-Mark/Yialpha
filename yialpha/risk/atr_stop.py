@@ -73,7 +73,14 @@ def latest_atr_from_frame(ohlcv: pd.DataFrame) -> tuple[float, float]:
     work = ohlcv
     if rows > 1:
         try:
-            last_day = pd.Timestamp(ohlcv.index[-1]).normalize()
+            last_ts = pd.Timestamp(ohlcv.index[-1])
+            if last_ts.tzinfo is not None:
+                # Fold an aware stamp onto the file-wide naive-UTC
+                # convention; comparing aware vs naive raises TypeError,
+                # which used to be swallowed below and silently kept the
+                # forming bar in the ATR window.
+                last_ts = last_ts.tz_convert("UTC").tz_localize(None)
+            last_day = last_ts.normalize()
             today_utc = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
             if last_day >= today_utc:
                 work = ohlcv.iloc[:-1]

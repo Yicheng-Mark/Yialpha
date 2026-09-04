@@ -364,7 +364,7 @@ def _funding_window_sum(
 ) -> tuple[float | None, str | None]:
     """Raw cumulative funding over ``(window_start_dt, window_end_dt]``.
 
-    Returns ``(sum, last_settlement_iso_date)``; the sum is None when the
+    Returns ``(sum, last_settlement_iso_datetime)``; the sum is None when the
     settlement grid inside the window cannot be proven complete (no
     settlements, cadence uninferrable, or an expected slot absent) — fail
     closed per leg. The sum is UNSIGNED by position: it is the realized
@@ -402,7 +402,10 @@ def _funding_window_sum(
             return None, None
         expected += step
     total = sum(rate for _, rate in in_window)
-    last_iso = max(moment for moment, _ in in_window).date().isoformat()
+    # Full settlement instant (ISO datetime), never a bare date: this feeds
+    # ``outcome_available_at``, whose contract pins an exact timestamp —
+    # the moment the last settled funding rate in the window became known.
+    last_iso = max(moment for moment, _ in in_window).isoformat()
     return total, last_iso
 
 

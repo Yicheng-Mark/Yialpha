@@ -337,8 +337,12 @@ def compute_regime_state(
         frame = binance_klines_frame(
             ticker, _window_start(end_date, _KLINE_LOOKBACK_DAYS), end_date, "1d",
         )
-        closes = [float(v) for v in frame["Close"].dropna().tolist()]
-        opens = [float(v) for v in frame["Open"].dropna().tolist()]
+        # Row-aligned drop: dropping each column independently would misalign
+        # the two lists when one column holds an isolated NaN, pairing an
+        # open with the WRONG prior close (a gap across trading days).
+        oc = frame[["Open", "Close"]].dropna()
+        closes = [float(v) for v in oc["Close"].tolist()]
+        opens = [float(v) for v in oc["Open"].tolist()]
         trend = _trend_from_closes(closes)
         realized_vol = _realized_vol_pct(closes)
         if len(opens) >= 2 and closes[-2] > 0:

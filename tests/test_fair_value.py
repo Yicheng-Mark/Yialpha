@@ -14,6 +14,8 @@ Pins the frozen contract in three parts:
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from yialpha.agents.schemas import PortfolioDecision, render_pm_decision
@@ -45,6 +47,18 @@ def test_missing_current_basis_is_diagnostic_only():
     assert result.contract_target_usdt == pytest.approx(100.0 / 0.9993)
     assert result.missing_inputs == ("current_basis",)
     assert len(result.chain) == 4
+
+
+@pytest.mark.unit
+def test_nan_underlying_target_is_unusable_not_computed():
+    # A NaN target used to pass the computable gate and store NaN into the
+    # ledger. It must be refused through the existing missing-input path.
+    result = fair_value_bridge(float("nan"), 0.9993, 0.0002)
+    assert result.contract_target_usdt is None
+    assert result.missing_inputs == ("underlying_target",)
+    assert result.chain == ()
+    # The unusable input is kept on the result so the caller can log it.
+    assert math.isnan(result.underlying_target_usd)
 
 
 @pytest.mark.unit

@@ -102,15 +102,19 @@ def fair_value_bridge(
     rendered as a warning) and does not block the conversion.
 
     Validation (every failure keeps the inputs on the result so the caller
-    can log what it had): ``underlying_target_usd`` None or ``usdt_usd``
-    None → ``contract_target_usdt`` is None plus the matching
-    ``missing_inputs`` entry; ``usdt_usd`` that is non-finite, ``<= 0``, or
-    outside [0.9, 1.1] → ``"fx_out_of_band"`` (and contract None). The
+    can log what it had): ``underlying_target_usd`` None or non-finite →
+    ``contract_target_usdt`` is None plus the matching
+    ``missing_inputs`` entry; ``usdt_usd`` None → the same; ``usdt_usd``
+    that is non-finite, ``<= 0``, or outside [0.9, 1.1] →
+    ``"fx_out_of_band"`` (and contract None). The
     chain is emitted with full-precision operands rendered to fixed
     decimals — the STORED target is never rounded.
     """
     missing: list[str] = []
-    if underlying_target_usd is None:
+    underlying_unusable = underlying_target_usd is None or not math.isfinite(
+        underlying_target_usd
+    )
+    if underlying_unusable:
         missing.append(MISSING_UNDERLYING)
     fx_out_of_band = False
     if usdt_usd is None:
@@ -126,7 +130,12 @@ def fair_value_bridge(
     if current_basis is None:
         missing.append(MISSING_CURRENT_BASIS)
 
-    computable = underlying_target_usd is not None and usdt_usd is not None and not fx_out_of_band
+    computable = (
+        underlying_target_usd is not None
+        and not underlying_unusable
+        and usdt_usd is not None
+        and not fx_out_of_band
+    )
     if not computable:
         return FairValueResult(
             underlying_target_usd=underlying_target_usd,

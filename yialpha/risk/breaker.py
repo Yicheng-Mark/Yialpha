@@ -204,6 +204,11 @@ class DrawdownBreaker:
             return False, "equity_value must be a positive finite number"
 
         pv = float(position_value) if position_value is not None else 0.0
+        if not isfinite(pv) or pv < 0.0:
+            # NaN slips past every ``>`` cap comparison and a negative
+            # position can never trip it — reject both outright, the same
+            # way the equity_value guard above rejects a bad equity.
+            return False, "position_value must be a non-negative finite number"
         single_frac = pv / eq
         if single_frac > self.max_single_position + 1e-12:
             return (

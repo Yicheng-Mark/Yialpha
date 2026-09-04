@@ -234,6 +234,23 @@ class TestDrawdownBreaker:
         assert allowed is False
         assert "sector" in reason.lower()
 
+    def test_check_exposure_rejects_non_finite_position(self):
+        # NaN survives every '>' cap comparison and inf always "fits" —
+        # non-finite positions must be rejected outright, not waved through.
+        b = DrawdownBreaker()
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            allowed, reason = b.check_exposure(bad, equity_value=100.0)
+            assert allowed is False, bad
+            assert "position_value" in reason
+
+    def test_check_exposure_rejects_negative_position(self):
+        # A negative position can never trip the cap; it is still not a
+        # valid exposure reading and takes the rejection path.
+        b = DrawdownBreaker()
+        allowed, reason = b.check_exposure(-5.0, equity_value=100.0)
+        assert allowed is False
+        assert "position_value" in reason
+
     def test_reset_clears_state(self):
         b = DrawdownBreaker()
         b.update(100.0)

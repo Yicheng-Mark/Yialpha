@@ -169,13 +169,15 @@ def compute_stress(
         components["oi_zscore"] = round(oi_result[0], 2)
         windows["oi_zscore"] = oi_result[1]
 
-    if components:
-        available = {
-            k: components[k] for k in _SCORE_WEIGHTS if k in components
-        }
-        total_w = sum(_SCORE_WEIGHTS[k] for k in available)
+    available = {
+        k: components[k] for k in _SCORE_WEIGHTS if k in components
+    }
+    total_w = sum(_SCORE_WEIGHTS[k] for k in available)
+    if total_w > 0.0:
         score = round(sum(v * _SCORE_WEIGHTS[k] for k, v in available.items()) / total_w)
     else:
+        # Zero direction components (OI alone is state, not direction): the
+        # honest neutral 50 + explicit flag — never a ZeroDivisionError.
         score = 50
         flags.append("insufficient_history")
 
