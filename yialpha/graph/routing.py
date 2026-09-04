@@ -45,12 +45,16 @@ from yialpha.instruments.registry import (
 )
 
 # Session calendars. Pure-crypto contracts trade continuously; a
-# tokenized-stock perp follows Binance's PUBLISHED TradFi sessions (PR5
-# corrected the old "trades 24/7" assumption), and its filings/earnings land
-# on the US session calendar; plain equities follow their listing exchange.
-# V2.1: the canonical definitions live in yialpha.instruments.sessions;
-# imported here so this module keeps re-exporting the same names for every
-# existing ``from yialpha.graph.routing import SESSION_*`` importer.
+# tokenized-stock perp ALSO trades 24/7 — klines machine evidence
+# (2026-09-04) shows volume through weekends and full US-market holidays
+# (annualization factor 365), reversing PR5's "PUBLISHED TradFi sessions"
+# reading; only its filings/earnings land on the US session calendar, and
+# the SESSION_BINANCE_TRADFI label below stays frozen (it feeds
+# deterministic classifications). Plain equities follow their listing
+# exchange. V2.1: the canonical definitions live in
+# yialpha.instruments.sessions; imported here so this module keeps
+# re-exporting the same names for every existing
+# ``from yialpha.graph.routing import SESSION_*`` importer.
 from yialpha.instruments.sessions import (
     SESSION_BINANCE_TRADFI,
     SESSION_CONTINUOUS,

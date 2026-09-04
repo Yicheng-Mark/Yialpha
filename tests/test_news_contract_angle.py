@@ -9,7 +9,8 @@ Pins:
     stock-news vendors that cannot answer a MUUSDT query;
   * the dual-angle token budgets (article cap / char cap);
   * high-confidence ETF detection and the fund-framing nudge;
-  * the TradFi-perp trading-session wording (no false "24/7" claim).
+  * the stock-perp trading-session wording (klines-verified 24/7 — the
+    falsified "published trading sessions" claim stays gone).
 """
 
 from __future__ import annotations
@@ -261,11 +262,14 @@ def test_company_stock_gets_no_fund_nudge():
 
 
 @pytest.mark.unit
-def test_stock_perp_nudge_no_false_247_claim():
+def test_stock_perp_nudge_klines_verified_247_wording():
     prompt = _capture_fundamentals_prompt(
         _fundamentals_state("MUUSDT", "crypto_perp")
     )
-    # The false claim is gone; sessions wording points at Binance's specs.
-    assert "trades 24/7 while" not in prompt
-    assert "published trading sessions" in prompt
-    assert "NOT the 24/7 crypto calendar" in prompt
+    # The falsified "published trading sessions" wording is gone; the nudge
+    # states the klines-verified 24/7 reality (2026-09-04 machine evidence).
+    assert "published trading sessions" not in prompt
+    assert "NOT the 24/7 crypto calendar" not in prompt
+    assert "trade 24/7" in prompt
+    assert "klines-verified" in prompt
+    assert "filings and earnings land on the US session calendar" in prompt
