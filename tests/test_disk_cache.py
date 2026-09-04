@@ -362,6 +362,33 @@ def test_successful_write_publishes_via_replace(tmp_path):
 
 
 @pytest.mark.unit
+def test_atomic_tmp_path_stays_inside_cache_dir(tmp_path, monkeypatch):
+    """The os.replace staging path must never leave the cache directory.
+
+    tmp_path is derived from an already-containment-checked ``validated``
+    path via ``with_name(<name>.<pid>.<tid>.tmp)`` — pinned here so a future
+    refactor of the publish step cannot reintroduce an unvalidated
+    ``open()`` target (Mimosa L2 false-positive at disk_cache.py:291).
+    """
+    captured: list = []
+    real_replace = os.replace
+
+    def spy_replace(src, dst):
+        captured.append((src, dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(dc.os, "replace", spy_replace)
+    fetch, _calls = _fetch_ok(b"fresh-bytes")
+    dc.cached_or_fetch(str(tmp_path), "f.json", fetch, ttl_days=1.0, vendor="t")
+
+    assert len(captured) == 1
+    src, dst = captured[0]
+    assert os.path.realpath(src).startswith(os.path.realpath(tmp_path))
+    assert src.name.startswith("f.json.") and src.name.endswith(".tmp")
+    assert os.path.realpath(dst) == os.path.realpath(tmp_path / "f.json")
+
+
+@pytest.mark.unit
 def test_concurrent_writers_never_leave_partial_file(tmp_path):
     """N threads racing one expired entry must leave exactly one COMPLETE file.
 
