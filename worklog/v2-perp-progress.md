@@ -163,3 +163,18 @@
 - 09-05 晚：Track B scoreboard 首批（1d outcome 未成熟就顺延到 09-06 08:00 后硬读）：`YIALPHA_LEDGER_DB=analysis_output/shadow-glm-round5-20260904/ledger.db .venv-dev/Scripts/yialpha.exe scoreboard --results-dir <round5 目录>`。看四样：① 三分析师盲预测 accuracy/Brier；② live SHORT（MU −0.05）1d 兑现；③ ECE 只看方向；④ by_regime 切片。
 - 用户 UI 触发 Mimosa deep 扫描 → 密封报告按真实可达/条件可达/误报三分类处置 → roadmap 销账。
 - 下一批：365 范围外残留（第 26 条）+ ET session 桶/regime_id 语义裁决。
+
+## 2026-09-05 全仓 bug/漏洞排查批（5+5 子智能体并行：侦察→修复）— ✅ 完成（3154 passed / ruff clean / mypy 22 模块 clean；5 个 fix commit + 1 个 test commit）
+
+5 个 Explore 子智能体分区侦察（PoT 沙箱 / dataflows / risk+ledger / 安全面 / 测试缺口）→ 汇总 ~35 项发现 → 分诊后 5 个 general-purpose 子智能体并行修复（文件互不重叠）→ 主智能体补 tickets_mirror 同秒 tiebreaker + lint/mypy 收口。**门禁三绿**：`pytest -q` 3154 passed + 3 skipped（原有可选依赖 skip）/ `ruff check yialpha web tests` clean / mypy（改动 22 模块）clean。
+
+**关键修复（按严重度）**：
+- 高：`risk/derivatives_stress.compute_stress` 仅 OI 成分时 total_w=0 除零（违背 fail-open 承诺）；`dataflows/disk_cache` 非原子写（崩溃留下"永久新鲜"的截断缓存）→ tmp+os.replace；binance funding 单页 1000 条丢最新数据（1h 节奏合约 90 天 ≈2160 条）→ `_paginate_history`；PoT 沙箱 `pd.read_pickle`/`np.load(allow_pickle=True)` 反序列化逃逸 + 注入 `result` 键伪造 ok=True → token 守卫 + 命名空间剔除保留键。
+- 中：`ledger/sqlite.ledger_transaction` COMMIT 移入 try（提交失败回滚，防 thread-local 连接永久 wedge）；backtest CAGR 非正权益全损返回 -1；regime `overnight_gap_bps` 按行对齐 dropna（孤立 NaN 曾跨日配对进 regime preimage）；stockstats socket 超时深度计数（跨线程污染进程默认值）；stockstats/y_finance "today" 钉 UTC（本地钟超前冻结 same-day 刷新）；market_data_validator 空结果统一 NoMarketDataError（fail-soft 契约）；sec_ownership 畸形 curr_date 四处崩点 → `_as_of_date` 降级；web Host 头白名单中间件（DNS rebinding 防护，`YIALPHA_WEB_ALLOWED_HOSTS` 可扩展）；binance `_paginate_history` 上限告警方向纠正（丢的是最新尾部）。
+- 低：breaker NaN position_value 拒绝、Kelly 零收益交易不计胜负、atr_stop tz-aware 索引归一、fair_value NaN 目标价记 missing、outcome POSITIONING 时间戳补全 ISO datetime、vol_estimators 正值过滤、binance_filters double-checked 拉取、pot max_lines 加字符上限/timeout 钳位、pot_integration invoke 失败消耗重试预算、structured render/extract 移出 try、tickets_mirror rowid tiebreaker、sec_ownership 负 lag 回退默认+告警。
+
+**新测试 ~100 个**（3057→3154）：PoT 逃逸/注入守卫、disk_cache 半写/并发、funding 分页、validator typed error、socket 交错、UTC 时区（毒化本地钟证明走 UTC）、bad-tick 过滤、filters 并发单拉、OI-only stress、COMMIT 回滚、负权益 CAGR、NaN/负仓位拒绝、零收益 Kelly、NaN 目标价、tz-aware ATR、畸形 curr_date、Host 403/放行、stats_handler 16 线程、http_client 代理/reset/单例、tickets_mirror 幂等/降级/同秒。
+
+**明确不做（行为语义变更，挂账）**：backtest/engine 的 ① minNotional 残仓永不可平 ② 尾部截短窗口仍计入 raw_return ③ 权益≤0 记伪造 0 收益——三者都改回测语义/历史数字，需单独裁决；`dataflows/utils.is_historical_date` 本地时区保持原状（A 股路径共用且入口日期用本地钟铸造，单侧改 UTC 引入新错）。
+
+**杂项**：stats_handler 报错调用不计数、token 累加无类型防御（现由 pydantic 挡住）记录在 test 注释中未修；commit 钩子提示 Mimosa scanner_enobufs（缓冲不足未出完整结论）——上一轮密封审计不含本批改动，建议用户下次 UI 触发 deep 扫描覆盖本批。
