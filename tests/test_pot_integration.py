@@ -52,6 +52,18 @@ def test_extract_code_block_no_fence_returns_raw():
 
 
 @pytest.mark.unit
+def test_extract_code_block_prose_with_equals_rejected():
+    # Prose that merely contains an '=' must not be executed as a program.
+    assert extract_code_block("The total return is 10% = 0.10, sorry.") == ""
+
+
+@pytest.mark.unit
+def test_extract_code_block_bare_result_reference_rejected():
+    # A bare 'result' reference parses but assigns nothing: not runnable code.
+    assert extract_code_block("result") == ""
+
+
+@pytest.mark.unit
 def test_compute_happy_path_string_response():
     llm = FakeLLM(["```python\nresult = (prices[-1]/prices[0] - 1) * 100\n```"])
     analyzer = PotAnalyzer(llm)
@@ -115,6 +127,46 @@ def test_compute_llm_invoke_failure_returns_error():
     out = analyzer.compute("Compute", data={})
     assert out.ok is False
     assert "llm invoke failed" in out.error
+
+
+@pytest.mark.unit
+def test_compute_llm_invoke_failure_consumes_retry_budget():
+    # An invoke failure must spend the retry loop like every other failure
+    # path, not return immediately with attempts left on the table.
+    class BoomLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, prompt):
+            self.calls += 1
+            raise RuntimeError("api down")
+
+    llm = BoomLLM()
+    analyzer = PotAnalyzer(llm, max_retries=1)
+    out = analyzer.compute("Compute", data={})
+    assert out.ok is False
+    assert "llm invoke failed" in out.error
+    assert out.attempts == 2
+    assert llm.calls == 2
+
+
+@pytest.mark.unit
+def test_compute_recovers_after_transient_invoke_failure():
+    class FlakyThenOKLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, prompt):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("transient outage")
+            return "```python\nresult = 6 * 7\n```"
+
+    analyzer = PotAnalyzer(FlakyThenOKLLM(), max_retries=1)
+    out = analyzer.compute("Compute", data={})
+    assert out.ok is True
+    assert out.result == 42
+    assert out.attempts == 2
 
 
 @pytest.mark.unit

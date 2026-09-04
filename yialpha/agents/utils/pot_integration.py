@@ -13,6 +13,7 @@ guarantees the arithmetic is correct by externalizing it to Python.
 
 from __future__ import annotations
 
+import ast
 import logging
 import re
 from dataclasses import dataclass
@@ -63,13 +64,33 @@ def _build_prompt(question: str, data: dict | None, hint: str) -> str:
     )
 
 
+def _contains_assignment(source: str) -> bool:
+    """True iff ``source`` parses as Python and contains an assignment.
+
+    Gates the no-fence fallback in :func:`extract_code_block`: prose that
+    merely contains an ``=`` sign ("The return is 10% = 0.10") must not be
+    handed to the sandbox as a program. The executor's convention requires an
+    assignment to ``result`` anyway, so requiring an assignment node is both
+    stricter and closer to what could actually succeed in the sandbox.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    return any(
+        isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+        for node in ast.walk(tree)
+    )
+
+
 def extract_code_block(text: str) -> str:
     """Pull the first ```python``` block out of an LLM response.
 
-    When there is no fence, only treat the raw text as code if it looks like
-    code (contains an assignment or a ``result`` reference); otherwise return
-    "" so a prose refusal ("I cannot compute that.") is reported as
-    "no code block" rather than executed as a broken program.
+    When there is no fence, only treat the raw text as code if it parses as
+    Python and contains at least one assignment; otherwise return "" so a
+    prose refusal ("I cannot compute that.") — or prose that merely contains
+    an ``=`` sign — is reported as "no code block" rather than executed as a
+    broken program.
     """
     if not text:
         return ""
@@ -77,7 +98,7 @@ def extract_code_block(text: str) -> str:
     if m:
         return m.group(1).strip()
     candidate = text.strip()
-    if "=" in candidate or "result" in candidate:
+    if _contains_assignment(candidate):
         return candidate
     return ""
 
@@ -100,8 +121,11 @@ class PotAnalyzer:
                 response = self.llm.invoke(prompt)
             except Exception as exc:  # noqa: BLE001 -- LLM failure shouldn't crash the caller
                 logger.warning("PoT LLM invoke failed: %s", exc)
-                return PotAnalysis(question=question, code="", result=None, ok=False,
+                # Consume the retry budget like every other failure path so a
+                # transient invoke error still gets its repair attempt.
+                last = PotAnalysis(question=question, code="", result=None, ok=False,
                                    error=f"llm invoke failed: {exc}", attempts=attempt + 1)
+                continue
 
             code = extract_code_block(_content(response))
             if not code:

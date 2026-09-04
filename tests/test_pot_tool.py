@@ -75,6 +75,19 @@ class TestPotComputeTool:
         assert "PoT error" in result
         assert "invalid JSON" in result
 
+    @pytest.mark.parametrize("bad_json", ["[]", "42", '"a string"'])
+    def test_non_object_json_returns_error(self, bad_json):
+        """Valid JSON that is not an object is rejected before reaching the sandbox."""
+        llm = MagicMock()
+        with patch(
+            "yialpha.agents.utils.pot_tool.PotAnalyzer"
+        ) as MockAnalyzer:
+            t = make_pot_compute_tool(llm)
+            result = t.invoke({"question": "q", "data_json": bad_json})
+        assert "PoT error" in result
+        assert "object" in result
+        MockAnalyzer.return_value.compute.assert_not_called()
+
     def test_empty_data_json_works(self):
         """Empty data_json defaults to {} and delegates to the analyzer."""
         llm = MagicMock()

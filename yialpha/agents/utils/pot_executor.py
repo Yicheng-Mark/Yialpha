@@ -23,7 +23,7 @@ SECURITY MODEL — read this before relying on this module:
        (``__import__``, ``import os``, ``subprocess``, ``open(``, ...) before
        any code runs. This is defense-in-depth; the restricted builtins are the
        real barrier.
-    4. Code size (line count) is capped to bound runtime.
+    4. Code size (line count and character count) is capped to bound runtime.
     5. A best-effort timeout is applied. On POSIX main threads this uses
        ``SIGALRM``. Windows host execution is refused entirely until PoT runs
        in a terminable, process-isolated sandbox.
@@ -272,8 +272,28 @@ _DANGEROUS_TOKENS: tuple[str, ...] = (
     "delattr(",
     "breakpoint(",
     "input(",
+    # pandas/numpy deserialization and host filesystem IO. ``read_pickle`` is
+    # arbitrary code execution (pickle deserialization RCE), as is
+    # ``np.load(..., allow_pickle=True)``; ``to_csv``/``read_csv``/
+    # ``to_pickle`` are arbitrary host file read/write. A numerics sandbox has
+    # no legitimate use for any of them.
+    "read_pickle",
+    "to_pickle",
+    "allow_pickle",
+    "read_csv(",
+    "to_csv(",
     "__",
 )
+
+# Upper bound on raw source size (characters). The line cap alone is not
+# enough: a single pathological multi-megabyte line would otherwise pass it.
+_MAX_CODE_CHARS = 100_000
+
+# Namespace keys injected ``data`` may never occupy: the builtins barrier and
+# module aliases are sandbox escapes, and the result slots must stay empty so
+# generated code that never assigns ``result`` is not credited with a stale
+# injected value from the caller's data.
+_RESERVED_NAMESPACE_KEYS = ("__builtins__", "np", "pd", "result", "result_var")
 
 
 def _sandbox_namespace(data: dict | None) -> dict:
@@ -293,9 +313,10 @@ def _sandbox_namespace(data: dict | None) -> dict:
     }
     if data:
         for key, value in data.items():
-            # Never let injected data clobber the builtins barrier or the
-            # canonical module aliases — that would be a sandbox escape.
-            if key in ("__builtins__", "np", "pd"):
+            # Never let injected data clobber the builtins barrier, the
+            # canonical module aliases, or the result slots — that would be a
+            # sandbox escape (or a stale value masquerading as the answer).
+            if key in _RESERVED_NAMESPACE_KEYS:
                 continue
             namespace[key] = value
     return namespace
@@ -335,12 +356,20 @@ class PoTExecutor:
     Parameters:
         timeout_seconds: Best-effort wall-clock cap on supported hosts. On a
             POSIX main thread a hard ``SIGALRM`` is used. Windows calls are
-            rejected by :class:`PoTEnableSwitch` before execution.
+            rejected by :class:`PoTEnableSwitch` before execution. A value of
+            ``None``/``0``/negative is clamped to a minimal 1-second watchdog
+            rather than disabling the deadline entirely.
         max_lines: Maximum number of lines of source code accepted. Longer
             inputs are rejected before execution.
     """
 
+    _MIN_TIMEOUT_SECONDS = 1.0
+
     def __init__(self, timeout_seconds: float = 10.0, max_lines: int = 200) -> None:
+        # A non-positive or absent timeout would run LLM-generated code with
+        # no watchdog at all; clamp to a minimal positive deadline instead.
+        if timeout_seconds is None or timeout_seconds <= 0:
+            timeout_seconds = self._MIN_TIMEOUT_SECONDS
         self.timeout_seconds = timeout_seconds
         self.max_lines = max_lines
 
@@ -388,6 +417,18 @@ class PoTExecutor:
                 error=(
                     f"PoTExecutor: code exceeds max_lines "
                     f"({line_count} > {self.max_lines})."
+                ),
+                code_ran=False,
+            )
+
+        if len(code) > _MAX_CODE_CHARS:
+            return PoTResult(
+                ok=False,
+                result=None,
+                stdout="",
+                error=(
+                    f"PoTExecutor: code exceeds max characters "
+                    f"({len(code)} > {_MAX_CODE_CHARS})."
                 ),
                 code_ran=False,
             )

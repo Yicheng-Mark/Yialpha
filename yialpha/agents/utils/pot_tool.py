@@ -71,6 +71,11 @@ def make_pot_compute_tool(llm: Any):
             data = json.loads(data_json) if data_json else {}
         except json.JSONDecodeError as exc:
             return f"PoT error: invalid JSON in data_json ({exc})"
+        if not isinstance(data, dict):
+            return (
+                "PoT error: data_json must be a JSON object (dict of named "
+                f"values), got {type(data).__name__}."
+            )
 
         analysis = analyzer.compute(question, data=data)
         if analysis.ok:
