@@ -8,9 +8,9 @@ Pins the perp-class split:
   mark-price liquidation) accept a stock perp while equity keeps the
   historical rejection.
 * Annualization: ``periods_per_year`` defaults resolve through
-  ``periods_per_year_for`` — stock_perp 261 / pure_crypto_perp 365 /
-  equity 252 / crypto_spot 365 (unchanged) / unknown_perp 252; an explicit
-  override still wins.
+  ``periods_per_year_for`` — stock_perp 365 / pure_crypto_perp 365
+  (klines-verified 24/7, 2026-09-04) / equity 252 / crypto_spot 365
+  (unchanged) / unknown_perp 252; an explicit override still wins.
 * Next-tradable-bar fills on BOTH series shapes: a 24/7 calendar-daily
   series and a stock-perp-like weekday series with session gaps (the fill
   lands on the next PRESENT bar, never an absent calendar day).
@@ -133,23 +133,25 @@ def test_pure_crypto_perp_run_class_and_annualization():
 
 
 @pytest.mark.unit
-def test_stock_perp_run_class_and_annualization_261():
+def test_stock_perp_run_class_and_annualization_365():
     """A tokenized-stock perp enters through asset_type="crypto_perp" — the
-    SEAM (not the string) resolves stock_perp and annualizes its
-    weekday-session candles at 261 instead of the 24/7 factor 365."""
+    SEAM (not the string) resolves stock_perp and annualizes it at 365:
+    klines-verified 24/7 (2026-09-04 probe — full US-market holidays and
+    weekends traded with volume), the same factor as pure crypto."""
     res = run_backtest(
         FakeGraph({"2024-01-01": "Buy"}), "MUUSDT", ["2024-01-01"],
         **_PERP_KW,
     )
     assert res.config_summary["instrument_class"] == "stock_perp"
-    assert res.config_summary["periods_per_year"] == 261
-    # Acceptance item 4: 261 is an ASSUMPTION (weekday count), not a
-    # verified Binance TradFi calendar — the limitation must ride the
-    # config summary of every stock-perp backtest.
+    assert res.config_summary["periods_per_year"] == 365
+    # Acceptance item 4 (updated): the calendar disclosure must ride the
+    # config summary of every stock-perp backtest — now the VERIFIED
+    # caliber (klines 2026-09-04: 24/7, factor 365), not an assumption.
     caveat = res.config_summary["session_calendar_assumption"]
-    assert "weekday" in caveat
-    assert "NOT verified" in caveat
-    assert res.metrics is not None  # 261 flowed through the metric suite
+    assert "365 sessions/year" in caveat
+    assert "klines-verified" in caveat
+    assert "24/7" in caveat
+    assert res.metrics is not None  # 365 flowed through the metric suite
 
 
 @pytest.mark.unit

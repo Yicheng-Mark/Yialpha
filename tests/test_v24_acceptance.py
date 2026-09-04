@@ -10,8 +10,10 @@ Post-delivery acceptance, NOT new features. The user's acceptance criteria:
    stage disclosure becomes binding.
 3. Short sizing labeled as what it is: a TRANSITIONAL HEURISTIC (kelly x
    max_single), never signed-Kelly; resize preserves the short sign.
-4. 261 as calendar assumption: pinned in test_backtest_perp_classes.py
-   (config_summary caveat) + report renders it.
+4. Calendar disclosure (klines-verified 24/7, factor 365 — the 261
+   weekday-count assumption falsified 2026-09-04): pinned in
+   test_backtest_perp_classes.py (config_summary caveat) + report renders
+   it.
 5. Independent security scan: run separately (Mimosa deep scan).
 """
 

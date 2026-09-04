@@ -742,9 +742,12 @@ def run_backtest(
         raise ValueError("cost_bps / taker_bps / slippage_bps must be >= 0")
     if periods_per_year is None:
         # V2.2 class-aware annualization (V2.4 wires it into the backtest):
-        # a stock perp's weekday-session candles annualize at 261, a pure
-        # crypto perp at 365, an unresolvable perp at the 252 equity
-        # convention. Only the perp classes REFINE the answer — passing e.g.
+        # a stock perp annualizes at 365 like a pure crypto perp — klines
+        # machine evidence (2026-09-04) shows Binance stock perps trade 24/7
+        # (full US-market holidays and weekends carry volume), so the retired
+        # 261 weekday count understated vol — and an unresolvable perp keeps
+        # the 252 equity convention. Only the perp classes REFINE the
+        # answer — passing e.g.
         # the "crypto_spot" class would drag spot crypto to 252 and break the
         # historical asset-type rule, so every non-perp class resolves via
         # the None-class path (crypto 365 / everything else 252, unchanged).
@@ -1471,18 +1474,19 @@ def run_backtest(
             "execution_lag_bars": execution_lag_bars,
             "execution_price": "next available close",
             "periods_per_year": periods_per_year,
-            # Calendar honesty: a stock perp's sessions/year is a WEEKDAY
-            # assumption, not a verified Binance TradFi session calendar —
-            # market holidays, DST-shifted sessions and closure handling are
-            # UNVERIFIED (open item). Downstream consumers must treat every
-            # annualized stock-perp figure as assumption-based until the
-            # calendar is machine-verified.
+            # Calendar disclosure: a stock perp's 24/7 calendar is klines-
+            # VERIFIED (2026-09-04 machine evidence: MUUSDT traded with
+            # volume through every full US-market holiday and all weekend
+            # bars, ~1/4–1/3 of a normal day's volume; zero-volume days = 0),
+            # so the 365 factor is measured, not assumed. The disclosure
+            # rides the config summary of every stock-perp backtest.
             **(
                 {
                     "session_calendar_assumption": (
-                        f"{periods_per_year} weekday sessions/year — Binance "
-                        "TradFi calendar NOT verified (holidays/DST/closures "
-                        "unconfirmed); annualized figures are assumption-based"
+                        f"{periods_per_year} sessions/year — klines-verified "
+                        "24/7 calendar (2026-09-04 probe: full US-market "
+                        "holidays and weekends traded with volume); factor "
+                        "measured, not assumed"
                     )
                 }
                 if instrument_klass == "stock_perp"

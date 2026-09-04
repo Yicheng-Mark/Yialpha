@@ -828,7 +828,6 @@ def test_sessions_per_year_pinned_by_instrument_class():
         sessions_per_year,
     )
     from yialpha.instruments.sessions import (
-        SESSION_BINANCE_TRADFI,
         SESSION_CONTINUOUS,
         trading_sessions_between,
     )
@@ -839,14 +838,15 @@ def test_sessions_per_year_pinned_by_instrument_class():
         SESSION_CONTINUOUS, "2025-01-01", "2026-01-01"
     )
     assert sessions_per_year("stock_perp") == trading_sessions_between(
-        SESSION_BINANCE_TRADFI, "2025-01-01", "2026-01-01"
-    ) == 261.0  # weekday sessions of 2025
+        SESSION_CONTINUOUS, "2025-01-01", "2026-01-01"
+    ) == 365.0  # klines-verified 24/7 (2026-09-04): same caliber as pure crypto
     # equity / unknown keep the 252 convention
     assert sessions_per_year("equity") == TRADING_DAYS_PER_YEAR
     assert sessions_per_year(None) == TRADING_DAYS_PER_YEAR
     # A known class wins over the asset-type rule: a tokenized-stock perp
-    # no longer annualizes at the 24/7 crypto 365.
-    assert periods_per_year_for("crypto_perp", "stock_perp") == pytest.approx(261.0)
+    # annualizes at the klines-verified 24/7 factor 365 (the retired 261
+    # weekday count understated vol — true/old ≈ sqrt(365/261) ≈ 1.18).
+    assert periods_per_year_for("crypto_perp", "stock_perp") == pytest.approx(365.0)
     assert periods_per_year_for("crypto_perp", "pure_crypto_perp") == (
         CRYPTO_TRADING_DAYS_PER_YEAR
     )
@@ -876,7 +876,7 @@ def test_binance_indicator_tool_annualizes_stock_perp_on_sessions(monkeypatch):
         bit, "stock_perp_underlying", lambda s: "MU" if str(s).upper() == "MUUSDT" else None
     )
     out = bit._indicators_core("MUUSDT", _TODAY, 5, "perp", "rvol_20")
-    assert captured["ppy"] == pytest.approx(261.0)  # stock perp: sessions factor
+    assert captured["ppy"] == pytest.approx(365.0)  # stock perp: sessions factor
     assert "DATA_UNAVAILABLE" not in out
     captured.clear()
     bit._indicators_core("BTCUSDT", _TODAY, 5, "perp", "rvol_20")
