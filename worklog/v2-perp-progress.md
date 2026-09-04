@@ -106,6 +106,8 @@
 
 **CI 曾红一条，是既有 flake、不是本晚任何一批的回退**：run 33888549307（`5b6f0e9`）与 33889350509（`f4fecf8`）的 `tests (py3.13)` 均挂在 `tests/test_fundamentals_bundle.py::test_bundle_routes_all_four_core_calls_for_underlying`。真因：`fetch_fundamentals_bundle` 用 `ThreadPoolExecutor(max_workers=4)`（`fundamentals_bundle.py:198`）并发派发四个核心调用，而该测试断言**精确到达顺序**——这是线程竞态，不是产品契约（本地全量 pytest 两晚都绿，只在 CI 负载下翻脸）。已修（`dbdb518`）：两侧 sorted，保留 list 比较故重复/缺漏仍会失败；本地 10 连跑全绿（但真正的论据是结构性的——断言不再读线程到达顺序）。**新会话若看到 f4fecf8/5b6f0e9 的红，按此处理，不要回滚 R 或 S。**
 
+**CI 收口（新会话 2026-09-04 23:43 复核）**：HEAD `503491e` 的 run 33889872220 **conclusion=success**——tests py3.11 / py3.13 / win-py3.12、mypy、ruff strict、lockfile / clean-install / 三个 extras smoke 全绿（weekly full 按计划 skipped）；`dbdb518` 的 flake 修复由此获得 CI 侧背书。本节抬头"新会话第一步查 CI"指令已完成使命，09-05 会话可直接从未完成队列第 3 项（round-6）开始。
+
 **未完成队列**：
 1. ~~**R 残留清理批**~~ **已完成且本地三绿**（`bdc4148`，23:09 推送）：4 文件——market_regime.py ×3 docstring、routing.py 注释块（写明 SESSION_BINANCE_TRADFI 保持冻结）、fundamentals_analyst.py:151 提示词、test_news_contract_angle.py 钉值。门禁：ruff 绿、mypy 179 文件绿、**全量 pytest 绿（23:05 启动、23:16 结束：3059 passed / 3 skipped / 73 subtests passed / 638.94s）**。**一个诚实的口径限制**：该次 pytest 与 S 的 regime 改动并发，pytest 在收集期即完成 import，故这绿**验的是 R 的树、不验 S**——S 必须自己挣三绿，不要拿这条数字当 S 的通过证据。新会话仍应确认最新 HEAD 的 CI run 绿（33887869646 已被并发取消，见本节抬头）。
 2. ~~**S — session 桶 24/7 + REGIME_VERSION v2→v3**~~ **已完成**（`f4fecf8`，23:24 推送，详见本节抬头"S 批已落地"段）。红线均守住：`SESSION_BINANCE_TRADFI` 冻结未动、regime 包 mypy 自查干净、禁改文件（.env*/worklog/.github/market_regime.py/fundamentals_analyst.py/test_news_contract_angle.py）零触碰。**已接受的后果**：regime_id 断层——round-5 账本里的 v2 id 保留不迁移，scoreboard `by_regime` 切片会新旧分列，这本身就是披露，不是缺陷。
