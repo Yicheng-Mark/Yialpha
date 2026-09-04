@@ -98,6 +98,18 @@
 27. **E housekeeping**：ci.yml checkout v4→v5 / setup-python v5→v6 实际 **16 处**（8 job×2）；test_deepseek_reasoning.py 改造为 **GLM 等价 live-call**（GLM key 在位才真跑、缺 key 干净 skip、无永久 skip；DeepSeek 单测保留——客户端仍是活代码）；get_binance_basis 的 in-200 -4104 重抛 NoMarketDataError 以结构性缺失开头（"no basis data for this symbol"，vendor_code 附带 debuggable，errors.py 加可选属性 + 3 新单测）。
 28. **F enforced 晋升门槛（写死，数字用户保留调整权）**：≥5 轮 shadow × ≥4 符号 × ≥30 条成熟预测 × 0 条失败 invariant × time_and_link_audit 全绿 × 校准方向合理 → 允许**单符号**试运行 enforced；enforced→实盘永远单独经用户显式授权。每次 Track B scoreboard 批读对照汇报进度缺口。
 
+## 会话交接（2026-09-04 23:10，主会话上下文耗尽，新会话按序执行）
+
+**今晚已完成并推送**：`e0b961c`（A1 SEC UA）→ `ff2e9db`（E housekeeping）→ `8b12ecf`（261→365）→ `0fd05f6`（worklog）；CI run 33861203380 全绿（tests py3.11/3.13/win-py3.12 + mypy + ruff strict + install smokes）。
+
+**未完成队列**：
+1. **R 残留清理批（改动在工作树，门禁 2.5/3 绿）**：4 文件——market_regime.py ×3 docstring、routing.py 注释块、fundamentals_analyst.py:151 提示词、test_news_contract_angle.py 钉值（14 passed）；ruff 绿、mypy 179 文件绿；**全量 pytest 23:05 后台启动、结果待确认**。新会话第一步：`.venv-dev/Scripts/python.exe -m pytest -q` → 绿则 commit（`docs(v2.4): 365 residue — TradFi-session wording aligned with klines-verified 24/7`）+ push；红则审 diff。
+2. **S — session 桶 24/7 + REGIME_VERSION v2→v3（用户已裁决"今晚一起改"，未启动）**：stock_perp 的 date-only session 桶不再标周末/假日 closed，改连续语义（对齐 klines 实证与已落地 365 因子）；versions.py REGIME_VERSION bump + docstring 记理由；test_regime_state.py 钉值同步（session 桶 + 版本隔离测试）。**红线**：routing.py 的 SESSION_BINANCE_TRADFI 标签保持冻结（喂确定性分类，R 的新注释已写明）；regime 包不在 CI mypy scope 但仍须干净；regime_id 断层用户已接受（round-5 账本 v2 id 保留，scoreboard by_regime 新旧分列即披露，无需迁移）。三绿后 commit+push。
+3. **L — round-6：今晚不可发**——真实原因：S 必须先落（provenance code_state=S 后 HEAD），S 预计 00:15 完成已过发射窗；**不是**因为跨午夜完成会红（round-3e 先例：23:52 发射、跨午夜完成、audit 0 issues——陷阱绑定的是**发射时刻**本地日 vs analysis_as_of UTC 日，完成时刻无关）。**09-05 早 08:00 后发**：复制 round-5 目录 → `shadow-glm-round6-20260905`，provenance code_state=S 之后的 HEAD，符号 BTC+ETH+MU（预算紧则 MU+ETH，BTC 次日补），WMI run_phase.cmd 模式（run_shadow.py 进程内设 env），验收 preflight/reconcile/scoreboard 三 PASS。发射窗=[本地 08:00, 23:59]（按发射时刻计）。
+4. **Track B — scoreboard 首批**：09-05 晚首试、09-06 08:00 后硬读（命令与四看点见"下一步"）。round-5 账本 by_regime 仍是 v2 id（S 只影响新 run），属预期。
+5. **Track D — Mimosa deep**：仅用户 UI 可触发（agent 无路径、扩展市场无连接器）：`security_scan(project=Yialpha, depth=deep, outputDir=C:\Users\warri\.mimosa-scans\yialpha)`（目录已建）；enobufs → 关吃内存应用重试 → 再不行 depth=normal 先解欠；密封报告按三分类处置。
+6. **F 门槛进度基线**（每次 Track B 批读后对照）：1 轮闭环（round-5）/ 2 符号（BTC、MU）/ 0 成熟预测 / 0 失败 invariant。
+
 ## 已冻结的契约决定
 
 1. **中央账本**：单文件 SQLite，config `ledger_db_path`（默认 `~/.yialpha/ledger/portfolio.db`，env `YIALPHA_LEDGER_DB`）。WAL + busy_timeout=5000 + BEGIN IMMEDIATE 原子提交；版本管理用 **schema_meta 表**（`schema_version` 行，非 PRAGMA user_version——Mimosa 钩子拦 f-string PRAGMA）；append-only（无 UPDATE 路径）。迁移 v1 = runs / instrument_snapshots / evidence / predictions / outcomes / tickets 六表（DDL 见 `yialpha/ledger/sqlite.py::_migrate`）。**所有 SQL 必须字面量+参数绑定**（Mimosa 钩子拦截变量 SQL，已两次拦截验证）。
