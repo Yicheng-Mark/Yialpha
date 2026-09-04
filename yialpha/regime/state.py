@@ -20,9 +20,11 @@ answer. This module is that answer:
   fields render; ``missing_inputs`` is always listed — a partial regime
   never masquerades as a complete one).
 
-Frozen classifier definitions (REGIME_VERSION v2 — bump
+Frozen classifier definitions (REGIME_VERSION v3 — bump
 :data:`yialpha.versions.REGIME_VERSION` when ANY of these changes, so
-historical regime tags never silently mix definitions):
+historical regime tags never silently mix definitions; v3 redefined ONLY
+the stock-perp ``session_state`` bucket to the klines-verified 24/7
+calendar):
 
 * **trend_regime / underlying_trend** — daily close vs SMA50/SMA200 on the
   series' own candles: ``up`` when close > SMA50 AND close > SMA200,
@@ -61,12 +63,19 @@ historical regime tags never silently mix definitions):
   thin/wide, ``moderate`` when stressed with a normal book, ``low`` when not
   stressed (live depth feeds the book half; historical runs answer from the
   PIT stress legs alone).
-* **session_state** — NYSE-equivalent America/New_York buckets
-  (``pre_market`` 04:00–09:30, ``regular`` 09:30–16:00, ``post_market``
-  16:00–20:00, ``closed`` otherwise incl. weekends). A date-only
-  ``analysis_as_of`` is read as that date's regular session on weekdays
-  (documented approximation: the daily pipeline names the session it
-  analysed) and ``closed`` on weekends.
+* **session_state** — continuous 24/7 bucket since REGIME_VERSION v3
+  (klines machine evidence 2026-09-04: Binance stock perps trade through
+  weekends and full US-market holidays with volume), so the value is
+  always ``continuous_24_7``
+  (:data:`yialpha.instruments.sessions.SESSION_CONTINUOUS`) and NEVER
+  ``closed`` — the as-of instant no longer matters. The former
+  NYSE-equivalent America/New_York vocabulary (``pre_market`` 04:00–09:30,
+  ``regular`` 09:30–16:00, ``post_market`` 16:00–20:00, ``closed``
+  otherwise incl. weekends; date-only as-of = that weekday's regular
+  session / weekend closed) is DORMANT: its deterministic hand-rolled
+  ET/DST machinery is retained in
+  :func:`yialpha.regime.compute._et_session_state` for any future class
+  with a genuine session calendar.
 * **listing_age_days** — calendar days from the registry's PIT
   ``onboard_date`` to the analysis date.
 * **earnings_window / sector_index_trend** — honest gaps this version:
@@ -246,7 +255,7 @@ def render_regime_block(state: RegimeState) -> str:
     if state.session_state is not None:
         lines.append(
             f"- **Session state**: {state.session_state} "
-            "(NYSE-equivalent local hours, approximated)"
+            "(24/7 continuous — klines-verified 2026-09-04)"
         )
     if state.listing_age_days is not None:
         lines.append(f"- **Listing age**: {state.listing_age_days} days")

@@ -28,11 +28,23 @@ Which constant versions what:
     notional, with funding PnL computed as ``-sign x notional x rate``.
     v1 had no consumers (reserved only).
 ``REGIME_VERSION``
-    v2 (since V2.2 Context): the frozen ``RegimeState`` classifier
-    definitions in :mod:`yialpha.regime.state` — the contract this stamp
-    protects. Changing ANY definition below bumps this so historical regime
-    tags never silently mix definitions (the id preimage starts with the
-    version string, so a bump also mints disjoint ids). Frozen definitions:
+    v3 (v2 frozen at V2.2 Context; bumped in V2.4): the frozen
+    ``RegimeState`` classifier definitions in :mod:`yialpha.regime.state` —
+    the contract this stamp protects. Changing ANY definition below bumps
+    this so historical regime tags never silently mix definitions (the id
+    preimage starts with the version string, so a bump also mints disjoint
+    ids).
+
+    v2 -> v3 bump reason (2026-09-04): the stock_perp ``session_state``
+    bucket switched from the V2.2 NYSE-equivalent ET approximation
+    (date-only weekday = regular / weekend = closed) to the klines-verified
+    24/7 continuous semantics — a machine probe (MUUSDT) showed Binance
+    stock perps trade with volume through every weekend and full US-market
+    holiday (zero-volume days = 0), so weekends/holidays are never
+    ``closed`` and the bucket is always ``continuous_24_7``. Ledger rows
+    keep their v2 ids (accepted regime_id discontinuity; the scoreboard
+    ``by_regime`` slice lists v2/v3 separately as the disclosure). Frozen
+    definitions:
 
     * **trend / underlying_trend** — daily close vs SMA50/SMA200 on the
       series' own candles: ``up`` iff close > both SMAs, ``down`` iff below
@@ -54,9 +66,12 @@ Which constant versions what:
     * **market_stress** — any-trigger composite: |funding| ≥ 1%/7d,
       |spot basis| ≥ 50 bps, |index basis| ≥ 50 bps, |overnight gap| ≥
       100 bps, or OI ≥ 90th pct with +10% 1d build.
-    * **session_state** — NYSE-equivalent Eastern buckets (pre_market
-      04:00–09:30 / regular 09:30–16:00 / post_market 16:00–20:00 / closed;
-      date-only as-of names the weekday session, weekends closed).
+    * **session_state** — v3: the continuous 24/7 bucket
+      (``continuous_24_7``, :data:`yialpha.instruments.sessions.SESSION_CONTINUOUS`)
+      for stock_perp, independent of the as-of instant; the v2
+      NYSE-equivalent ET buckets (pre_market 04:00–09:30 / regular
+      09:30–16:00 / post_market 16:00–20:00 / closed; date-only as-of
+      naming the weekday session, weekends closed) are dormant.
     * **listing_age_days** — calendar days from the registry PIT
       ``onboard_date``; **confidence_components** — per-family availability
       weights in [0, 1].
@@ -70,4 +85,4 @@ SCHEMA_VERSION = "v1"
 COST_MODEL_VERSION = "v1"
 TICKET_VERSION = "v1"
 FEATURE_VERSION = "v2"
-REGIME_VERSION = "v2"
+REGIME_VERSION = "v3"
