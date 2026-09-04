@@ -42,6 +42,24 @@ _FILTERS_TTL_S = 600.0
 
 _filters_cache: dict[tuple[str, str], tuple[float, SymbolFilters]] = {}
 _filters_lock = threading.Lock()
+# Per-key gate around the miss path: the TTL check happens under
+# _filters_lock, but the network fetch must not hold it (that would block
+# every other symbol's cache hit). Without a gate, N threads that all miss the
+# TTL together each issue their own identical exchangeInfo request; the gate
+# lets the first fetcher work while the rest block, and the double-checked
+# cache re-read inside the gate serves them from the winner's result.
+_fetch_gates: dict[tuple[str, str], threading.Lock] = {}
+_fetch_gates_guard = threading.Lock()
+
+
+def _fetch_gate(key: tuple[str, str]) -> threading.Lock:
+    """The (stable, never removed) miss-path gate lock for ``key``."""
+    with _fetch_gates_guard:
+        gate = _fetch_gates.get(key)
+        if gate is None:
+            gate = threading.Lock()
+            _fetch_gates[key] = gate
+        return gate
 
 
 @dataclass(frozen=True)
@@ -106,34 +124,45 @@ def get_symbol_filters(
     """
     canonical = normalize_symbol_for_venue(symbol, venue)
     key = (venue, canonical)
-    now = time.monotonic()
     with _filters_lock:
         hit = _filters_cache.get(key)
-        if hit is not None and not force_refresh and now - hit[0] < _FILTERS_TTL_S:
+        if hit is not None and not force_refresh and time.monotonic() - hit[0] < _FILTERS_TTL_S:
             return hit[1]
 
-    if venue == "binance_spot":
-        data = _http_get(
-            "/api/v3/exchangeInfo", {"symbol": canonical},
-            symbol, canonical, base=_spot_host(), weight_key="spot",
-        )
-    else:
-        data = _http_get(
-            "/fapi/v1/exchangeInfo", {"symbol": canonical},
-            symbol, canonical,
-        )
+    # Miss (or forced refresh): only one thread per key may be in flight.
+    with _fetch_gate(key):
+        # Double-checked locking: a concurrent first fetch may have populated
+        # the cache while we waited on the gate — serve it instead of
+        # repeating the network round trip.
+        with _filters_lock:
+            hit = _filters_cache.get(key)
+            if hit is not None and not force_refresh and (
+                time.monotonic() - hit[0] < _FILTERS_TTL_S
+            ):
+                return hit[1]
 
-    symbols = data.get("symbols") if isinstance(data, dict) else None
-    if not isinstance(symbols, list) or not symbols:
-        raise NoMarketDataError(
-            symbol, canonical,
-            f"exchangeInfo has no entry for {canonical} on {venue} "
-            "(delisted or unknown symbol)",
-        )
-    filters = _extract_filters(symbols[0], canonical)
-    with _filters_lock:
-        _filters_cache[key] = (time.monotonic(), filters)
-    return filters
+        if venue == "binance_spot":
+            data = _http_get(
+                "/api/v3/exchangeInfo", {"symbol": canonical},
+                symbol, canonical, base=_spot_host(), weight_key="spot",
+            )
+        else:
+            data = _http_get(
+                "/fapi/v1/exchangeInfo", {"symbol": canonical},
+                symbol, canonical,
+            )
+
+        symbols = data.get("symbols") if isinstance(data, dict) else None
+        if not isinstance(symbols, list) or not symbols:
+            raise NoMarketDataError(
+                symbol, canonical,
+                f"exchangeInfo has no entry for {canonical} on {venue} "
+                "(delisted or unknown symbol)",
+            )
+        filters = _extract_filters(symbols[0], canonical)
+        with _filters_lock:
+            _filters_cache[key] = (time.monotonic(), filters)
+        return filters
 
 
 def quantize_order(

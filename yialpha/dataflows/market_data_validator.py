@@ -37,17 +37,28 @@ def _verified_rows(symbol: str, curr_date: str) -> pd.DataFrame:
     ``load_ohlcv`` already normalizes the Date column and filters out
     look-ahead rows, but we re-apply the cutoff defensively — this is a
     verification path, so it must not trust its input to be pre-filtered.
+
+    Every "no usable rows" outcome raises the typed
+    :class:`NoMarketDataError` (never a bare ``ValueError``):
+    :func:`build_verified_market_snapshot` fail-soft contract catches exactly
+    that type to degrade into a ``DATA_UNAVAILABLE`` sentinel — a plain
+    ``ValueError`` (e.g. when the PIT cutoff filters out every row) would
+    punch through it and crash the caller.
     """
     data = load_ohlcv(symbol, curr_date)
     if data is None or data.empty:
-        raise ValueError(f"No OHLCV data available for {symbol}.")
+        raise NoMarketDataError(
+            symbol, None, f"no OHLCV data available for {symbol}"
+        )
 
     df = data.copy()
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
     df = df[df["Date"] <= pd.to_datetime(curr_date)].sort_values("Date")
     if df.empty:
-        raise ValueError(f"No OHLCV rows on or before {curr_date} for {symbol}.")
+        raise NoMarketDataError(
+            symbol, None, f"no OHLCV rows on or before {curr_date} for {symbol}"
+        )
     return df
 
 

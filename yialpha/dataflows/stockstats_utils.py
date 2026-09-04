@@ -61,25 +61,47 @@ if _HTTP_TIMEOUT_ENV is not None and _HTTP_TIMEOUT_ENV != "":
         )
 
 
+# Depth-counted patch state for _scoped_yf_socket_timeout (same pattern as
+# timeout_shim.default_request_timeout). Save/restore must NOT be per-call:
+# thread A saves prev=None, thread B saves prev=30 (A's patch), A exits and
+# restores None, B exits and "restores" 30 — the process default is then
+# permanently polluted with the YF timeout. With the counter, only the
+# OUTERMOST entrant saves the pre-existing default and only the OUTERMOST
+# leaver restores it, so interleaved/nested windows cannot leak a value.
+_yf_timeout_state_lock = threading.Lock()
+_yf_timeout_depth = 0
+_yf_timeout_prev: float | None = None
+
+
 @contextmanager
 def _scoped_yf_socket_timeout():
     """Apply YF_HTTP_TIMEOUT as the socket default for the duration only.
 
     yfinance's no-timeout calls (``.info``/``get_news``/``Search``) create raw
     sockets that inherit ``socket.getdefaulttimeout()``; setting it around the
-    attempt (and restoring the prior value after) binds exactly those calls.
-    Concurrent workers race only between identical values, so the restore
-    window is harmless.
+    attempt binds exactly those calls. The default timeout is process-global,
+    so concurrent/nested windows are reference-counted under a module lock:
+    the outermost entry saves the caller's default and the outermost exit
+    restores it — a mid-window restore from one thread can never clobber
+    another thread's still-active window.
     """
+    global _yf_timeout_depth, _yf_timeout_prev
     if YF_HTTP_TIMEOUT is None:
         yield
         return
-    prev = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(YF_HTTP_TIMEOUT)
+    with _yf_timeout_state_lock:
+        if _yf_timeout_depth == 0:
+            _yf_timeout_prev = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(YF_HTTP_TIMEOUT)
+        _yf_timeout_depth += 1
     try:
         yield
     finally:
-        socket.setdefaulttimeout(prev)
+        with _yf_timeout_state_lock:
+            _yf_timeout_depth -= 1
+            if _yf_timeout_depth == 0:
+                socket.setdefaulttimeout(_yf_timeout_prev)
+                _yf_timeout_prev = None
 
 # A vendor's latest OHLCV row this many calendar days before the requested date
 # is treated as stale. Generous enough to span long holiday weekends, tight
@@ -232,6 +254,21 @@ def _assert_ohlcv_not_stale(
         )
 
 
+def _utc_today() -> pd.Timestamp:
+    """Today anchored to UTC, not the host-local clock.
+
+    This cache serves the yfinance path (US/global tickers; the A-share path
+    is the akshare/baostock native vendor, which never touches it). A
+    host-local ``pd.Timestamp.today()`` classifies "same day" by whatever
+    timezone the process happens to run in — on an Asia/Shanghai host the
+    local date runs hours ahead of the UTC date, so a window that can still
+    gain today's (US-session) row was treated as an immutable historical day
+    and the same-day refresh rule never fired. UTC is the exchange-neutral
+    anchor Yahoo's own request windows are issued in.
+    """
+    return pd.Timestamp.now(tz="UTC")
+
+
 def _needs_same_day_refresh(data_file, curr_date_dt, today_date) -> bool:
     """Whether a cached frame must be refetched to reflect the requested day.
 
@@ -255,7 +292,7 @@ def _ohlcv_cache_window() -> tuple[str, str]:
     name is fixed; freshness of the reused file is governed by its mtime via
     ``_needs_same_day_refresh``.
     """
-    today_date = pd.Timestamp.today()
+    today_date = _utc_today()
     start_str = (today_date - pd.DateOffset(years=5)).strftime("%Y-%m-%d")
     end_str = (today_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     return start_str, end_str
@@ -352,7 +389,7 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     curr_date_dt = pd.to_datetime(curr_date)
 
     data_file = _ohlcv_cache_path(config, safe_symbol)
-    today_date = pd.Timestamp.today()
+    today_date = _utc_today()
     start_str, end_str = _ohlcv_cache_window()
 
     # The cache read + (on miss) download + write must be atomic per symbol:
@@ -454,7 +491,7 @@ def read_cached_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame | None:
 
     config = get_config()
     curr_date_dt = pd.to_datetime(curr_date)
-    today_date = pd.Timestamp.today()
+    today_date = _utc_today()
 
     data_file = _ohlcv_cache_path(config, safe_symbol)
     if not os.path.exists(data_file):

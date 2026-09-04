@@ -233,11 +233,13 @@ def _paginate_history(
         if len(page) < page_limit:  # final partial page reached
             break
     if len(out) >= _FAPI_PAGINATION_SAFETY_CAP:
-        # NOTE: hit pagination safety cap. Older rows may be truncated; the
-        # recent rows (which drive the decision) are still complete.
+        # NOTE: hit pagination safety cap. The cursor walks FORWARD from
+        # start_ms, so the accumulated rows cover the OLDEST part of the
+        # window; the most RECENT rows (which drive the decision) are the
+        # side that got truncated — not the old ones.
         logger.warning(
             "Binance %s pagination hit safety cap (%d rows) for %s; "
-            "older rows may be truncated",
+            "recent rows may be truncated (forward pagination from start_ms)",
             path, _FAPI_PAGINATION_SAFETY_CAP, symbol_for_error,
         )
     if cacheable and out:
@@ -2090,14 +2092,18 @@ def derivatives_stress_series(
     out: dict[str, Any] = {}
 
     try:
-        rows = _http_get(
+        # Paged via _paginate_history (same as get_binance_funding_rate):
+        # /fapi/v1/fundingRate caps at 1000 rows/page and returns them
+        # oldest-first, so a single limit=1000 request on a 1h-cadence contract
+        # (24 * 90 ≈ 2160 rows in a 90-day window) would keep only the OLDEST
+        # 1000 and silently drop the most recent, decision-critical entries.
+        rows = _paginate_history(
             "/fapi/v1/fundingRate",
-            {
-                "symbol": canonical,
-                "startTime": start_ms,
-                "endTime": end_ms,
-                "limit": 1000,
-            },
+            {"symbol": canonical},
+            _FAPI_FUNDING_LIMIT,
+            lambda r: r["fundingTime"],  # ms timestamp on each funding row
+            start_ms,
+            end_ms,
             symbol,
             canonical,
         )
@@ -2123,7 +2129,7 @@ def derivatives_stress_series(
         ("global_lsr", "/futures/data/globalLongShortAccountRatio", "longShortRatio"),
     ):
         try:
-            rows = _http_get(
+            hist_rows = _http_get(
                 path,
                 {
                     "symbol": canonical,
@@ -2135,7 +2141,7 @@ def derivatives_stress_series(
                 symbol,
                 canonical,
             )
-            series = _stress_series_from_records(rows, "timestamp", value_key)
+            series = _stress_series_from_records(hist_rows, "timestamp", value_key)
             out[name] = series if len(series) > 0 else None
         except Exception as exc:  # noqa: BLE001 — component fail-open
             logger.info("stress series %s unavailable for %s: %s", name, canonical, exc)
@@ -2169,7 +2175,7 @@ def derivatives_stress_series(
 
     # Taker aggression: latest daily buySellRatio (float, not a series).
     try:
-        rows = _http_get(
+        ratio_rows = _http_get(
             "/futures/data/takerlongshortRatio",
             {
                 "symbol": canonical,
@@ -2181,7 +2187,7 @@ def derivatives_stress_series(
             symbol,
             canonical,
         )
-        series = _stress_series_from_records(rows, "timestamp", "buySellRatio")
+        series = _stress_series_from_records(ratio_rows, "timestamp", "buySellRatio")
         out["taker_ratio"] = float(series.iloc[-1]) if len(series) > 0 else None
     except Exception as exc:  # noqa: BLE001 — component fail-open
         logger.info("stress taker_ratio unavailable for %s: %s", canonical, exc)

@@ -1,7 +1,7 @@
 import json
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from io import StringIO
 from typing import Annotated
 
@@ -59,7 +59,15 @@ def _history_cache_ttl_days(end_date: str) -> float:
         end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
     except (ValueError, TypeError):
         return _STATEMENT_CACHE_TTL_DAYS
-    if end_dt >= datetime.now().date():
+    # UTC anchor, not the host-local clock: this module serves Yahoo (US/global
+    # tickers). On a host whose local date runs AHEAD of the UTC date (e.g.
+    # Asia/Shanghai past local midnight), a local "today" misclassified a
+    # window ending on the UTC-current day — where the US session is often
+    # still open or its close not yet published — as immutable history and
+    # pinned it in cache for 24h, so the day's final bar never arrived. The
+    # residual UTC-vs-exchange skew only ever costs extra refetches, never a
+    # stale serve.
+    if end_dt >= datetime.now(UTC).date():
         return OHLCV_CACHE_TTL_SECONDS / 86400.0
     return _STATEMENT_CACHE_TTL_DAYS
 
