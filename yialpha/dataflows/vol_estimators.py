@@ -108,6 +108,11 @@ def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
     out = out.dropna(subset=["Open", "High", "Low", "Close"])
+    # Bad ticks (a vendor glitch can emit Low=0 / negative fills) make every
+    # log-ratio here ±inf — one such row poisons a whole rolling window of
+    # Parkinson/GK/YZ with inf/NaN. Prices are strictly positive by definition,
+    # so drop non-positive rows outright.
+    out = out[(out[["Open", "High", "Low", "Close"]] > 0).all(axis=1)]
     return out if not out.empty else pd.DataFrame()
 
 

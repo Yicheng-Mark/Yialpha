@@ -295,6 +295,123 @@ def test_throttle_no_sleep_when_spaced():
 
 
 # --------------------------------------------------------------------------- #
+# atomic cache write (tmp file + os.replace)
+# --------------------------------------------------------------------------- #
+class _MidWriteCrash:
+    """Intercept wb-mode opens of the cache's temp files: write half, die.
+
+    Simulates the process dying halfway through a cache write. With the old
+    ``write_bytes`` implementation the target file itself was truncated at
+    open time, so the surviving (fresh-mtime!) file was corrupt until the next
+    successful fetch past the TTL. The atomic path must keep the previous
+    complete file intact and clean up the temp file instead.
+    """
+
+    def __init__(self, real_open, prefix: str):
+        self._real_open = real_open
+        self._prefix = prefix
+
+    def __call__(self, file, mode="r", *args, **kwargs):
+        if "w" in mode and "b" in mode and str(file).startswith(self._prefix):
+            fh = self._real_open(file, mode, *args, **kwargs)
+            real_write = fh.write
+
+            def write(data):
+                real_write(data[: len(data) // 2])
+                raise OSError(5, "simulated crash mid-write")
+
+            fh.write = write
+            return fh
+        return self._real_open(file, mode, *args, **kwargs)
+
+
+@pytest.mark.unit
+def test_crash_mid_write_keeps_previous_cache_intact(tmp_path, monkeypatch, caplog):
+    import builtins
+
+    path = tmp_path / "f.json"
+    path.write_bytes(b"old-complete-cache")
+    old_mtime = time.time() - 5 * 86_400  # expired so the fetch/write path runs
+    os.utime(path, (old_mtime, old_mtime))
+
+    monkeypatch.setattr(
+        builtins, "open",
+        _MidWriteCrash(builtins.open, str(path)),
+    )
+    fetch, _ = _fetch_ok(b"brand-new-payload")
+    with caplog.at_level("WARNING"):
+        out = dc.cached_or_fetch(str(tmp_path), "f.json", fetch, ttl_days=1.0, vendor="t")
+    # The call itself still succeeds (caching is best-effort) ...
+    assert out == b"brand-new-payload"
+    assert any("could not write cache" in r.message for r in caplog.records)
+    # ... but the previous COMPLETE cache file is untouched, not truncated.
+    assert path.read_bytes() == b"old-complete-cache"
+    leftovers = [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []
+
+
+@pytest.mark.unit
+def test_successful_write_publishes_via_replace(tmp_path):
+    fetch, calls = _fetch_ok(b"fresh-bytes")
+    out = dc.cached_or_fetch(str(tmp_path), "f.json", fetch, ttl_days=1.0, vendor="t")
+    assert out == b"fresh-bytes"
+    assert (tmp_path / "f.json").read_bytes() == b"fresh-bytes"
+    assert calls["n"] == 1
+    # No temp files may survive a successful publish.
+    assert [p.name for p in tmp_path.iterdir()] == ["f.json"]
+
+
+@pytest.mark.unit
+def test_concurrent_writers_never_leave_partial_file(tmp_path):
+    """N threads racing one expired entry must leave exactly one COMPLETE file.
+
+    Before the atomic write, interleaved ``write_bytes`` truncations could
+    leave a half-length file that then read back as valid (fresh mtime) cache.
+    Each writer produces a distinct full payload; the surviving file must be
+    byte-identical to one of them — never a mix or a prefix.
+    """
+    import threading
+
+    payloads = [f"payload-{i:02d}-{'x' * 200}".encode() for i in range(8)]
+
+    def make_fetch(payload):
+        def fetch() -> bytes:
+            return payload
+        return fetch
+
+    path = tmp_path / "f.json"
+    path.write_bytes(b"expired")
+    old_mtime = time.time() - 5 * 86_400
+    os.utime(path, (old_mtime, old_mtime))
+
+    barrier = threading.Barrier(len(payloads), timeout=10)
+    results: list[bytes] = []
+
+    def worker(payload):
+        barrier.wait()
+        results.append(
+            dc.cached_or_fetch(
+                str(tmp_path), "f.json", make_fetch(payload),
+                ttl_days=1.0, vendor="t",
+            )
+        )
+
+    import threading as _th
+
+    threads = [_th.Thread(target=worker, args=(p,)) for p in payloads]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert len(results) == len(payloads)
+    on_disk = path.read_bytes()
+    assert on_disk in payloads, "final file must be one COMPLETE payload"
+    leftovers = [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []
+
+
+# --------------------------------------------------------------------------- #
 # json round-trip shape used by baostock
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit

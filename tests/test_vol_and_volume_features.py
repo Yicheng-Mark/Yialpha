@@ -305,3 +305,39 @@ class TestDerivedDispatchThroughConsumers:
         df = pd.read_csv(tmp_path / "TEST_5d.csv")
         assert {"rvol_20", "obv", "rsi"} <= set(df.columns)
         assert int(df["rvol_20"].notna().sum()) > 30
+
+
+@pytest.mark.unit
+class TestBadTickPositivePriceFilter:
+    def test_zero_low_tick_does_not_poison_range_estimators(self):
+        """A vendor glitch emitting Low=0 makes log(H/L) -inf; before the
+        positive-price filter in _clean_ohlcv, one such row inf-poisoned a
+        whole rolling window of Parkinson/GK/YZ. Every estimator must now
+        emit finite values (the bad row is dropped, not propagated)."""
+        closes = list(np.linspace(100.0, 130.0, 60))
+        frame = _frame(closes, n=60)
+        frame.loc[frame.index[10], "Low"] = 0.0  # the bad tick
+        frame.loc[frame.index[10], "High"] = 0.0  # High=0 same class of glitch
+        rolling = (close_to_close_vol, parkinson_vol, garman_klass_vol,
+                   yang_zhang_vol)
+        for estimator in rolling:
+            out = estimator(frame, window=5).dropna()
+            assert len(out) > 0, estimator.__name__
+            assert np.isfinite(out).all(), estimator.__name__
+        out = ewma_vol(frame).dropna()
+        assert np.isfinite(out).all()
+
+    def test_negative_open_is_dropped_too(self):
+        closes = list(np.linspace(100.0, 130.0, 60))
+        frame = _frame(closes, n=60)
+        frame.loc[frame.index[20], "Open"] = -5.0
+        for estimator in (close_to_close_vol, garman_klass_vol):
+            out = estimator(frame, window=5).dropna()
+            assert np.isfinite(out).all(), estimator.__name__
+
+    def test_all_bad_rows_yield_empty_series_not_inf(self):
+        closes = [100.0] * 30
+        frame = _frame(closes, n=30)
+        frame["Low"] = 0.0
+        out = parkinson_vol(frame, window=5)
+        assert out.dropna().empty

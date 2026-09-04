@@ -33,6 +33,7 @@ can therefore never resolve outside the cache directory.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -272,8 +273,27 @@ def cached_or_fetch(
             return None
         raise
 
+    # Atomic publish: write a same-directory temp file FIRST, then os.replace
+    # it over the target. A plain ``write_bytes`` truncates the existing cache
+    # at open time, so a crash (or a concurrent reader) between open and last
+    # write leaves a TRUNCATED file whose fresh mtime then serves as "fresh"
+    # for the whole TTL — a poisoned cache no fetch ever repairs. os.replace is
+    # atomic on both POSIX and Windows, so readers observe either the complete
+    # old file or the complete new one, never a partial write. The temp name is
+    # process/thread-unique so two writers of the same entry cannot interleave
+    # into one temp file; flush() (not fsync) suffices — it protects against
+    # process death, which is this cache's failure model, without the latency
+    # of a disk flush per cache write.
+    tmp_path = validated.with_name(
+        f"{validated.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
     try:
-        validated.write_bytes(raw)
+        with open(tmp_path, "wb") as fh:
+            fh.write(raw)
+            fh.flush()
+        os.replace(tmp_path, validated)
     except OSError as exc:  # noqa: BLE001 -- caching is best-effort
         logger.warning("%s: could not write cache %s: %s", vendor, validated, exc)
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
     return raw

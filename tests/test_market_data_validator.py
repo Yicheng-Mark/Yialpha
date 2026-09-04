@@ -46,15 +46,26 @@ class TestVerifiedSnapshot:
         assert "Latest trading row used: 2026-05-15" in snap
         assert "Recent verified closes" in snap
 
-    def test_raises_when_no_rows_on_or_before_date(self, monkeypatch):
+    def test_empty_after_pit_filter_raises_typed_error(self, monkeypatch):
+        # Regression pin (fail-soft contract): when every row is filtered out
+        # by the curr_date cutoff, _verified_rows used to raise a bare
+        # ValueError that punched through build_verified_market_snapshot's
+        # NoMarketDataError handler and crashed the caller. It must raise the
+        # typed error so the snapshot degrades to the sentinel instead.
         monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: _sample_ohlcv())
-        with pytest.raises(ValueError):
-            validator.build_verified_market_snapshot("COF", "2020-01-01")
+        with pytest.raises(NoMarketDataError):
+            validator._verified_rows("COF", "2020-01-01")
+        snap = validator.build_verified_market_snapshot("COF", "2020-01-01")
+        assert snap.startswith("DATA_UNAVAILABLE")
+        assert "2020-01-01" in snap
 
-    def test_raises_on_empty_data(self, monkeypatch):
+    def test_empty_frame_raises_typed_error_and_degrades(self, monkeypatch):
         monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: pd.DataFrame())
-        with pytest.raises(ValueError):
-            validator.build_verified_market_snapshot("COF", "2026-05-13")
+        with pytest.raises(NoMarketDataError):
+            validator._verified_rows("COF", "2026-05-13")
+        snap = validator.build_verified_market_snapshot("COF", "2026-05-13")
+        assert snap.startswith("DATA_UNAVAILABLE")
+        assert "COF" in snap
 
     def test_look_back_window_capped_at_30(self, monkeypatch):
         monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: _sample_ohlcv())

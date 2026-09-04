@@ -265,6 +265,38 @@ class TestFundingPagination(unittest.TestCase):
         self.assertEqual(times, sorted(times))
 
 
+class TestSafetyCapMessageDirection(unittest.TestCase):
+    """The 50000-row cap truncates the RECENT tail, not the old rows.
+
+    The paginator's cursor walks FORWARD from start_ms, so when the cap is hit
+    the accumulated rows are the oldest part of the window; the warning used to
+    claim the opposite ("older rows may be truncated"), which would send an
+    operator chasing the wrong end of the data.
+    """
+
+    def test_cap_warning_names_recent_rows_as_truncated(self):
+        base = int(datetime(2024, 1, 1, tzinfo=UTC).timestamp() * 1000)
+        rows = [
+            {"fundingTime": base + i * _FUND_MS, "fundingRate": "0.0001",
+             "symbol": "BTCUSDT"}
+            for i in range(400)
+        ]
+        # Shrink the cap instead of building 50000 rows: the check reads the
+        # module global on every loop iteration.
+        with mock.patch.object(binance, "_FAPI_PAGINATION_SAFETY_CAP", 250), \
+                mock.patch.object(binance, "_http_get",
+                                  _fake_funding_server(rows)), \
+                self.assertLogs(binance.logger, level="WARNING") as logs:
+            binance._paginate_history(
+                "/fapi/v1/fundingRate", {"symbol": "BTCUSDT"}, 100,
+                lambda r: r["fundingTime"], base, base + 400 * _FUND_MS,
+                "BTCUSDT", "BTCUSDT",
+            )
+        warning = "\n".join(logs.output)
+        self.assertIn("recent rows may be truncated", warning)
+        self.assertNotIn("older rows may be truncated", warning)
+
+
 class TestNoDataStillRaises(unittest.TestCase):
     def test_empty_klines_raises_no_market_data(self):
         from yialpha.dataflows.errors import NoMarketDataError

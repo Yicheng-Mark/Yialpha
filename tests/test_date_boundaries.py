@@ -44,9 +44,15 @@ def test_load_ohlcv_requests_inclusive_end(monkeypatch, tmp_path):
     set_config({"data_cache_dir": str(tmp_path)})
     captured = {}
 
+    # The OHLCV cache anchors "today" at UTC (see stockstats_utils._utc_today),
+    # so the harness derives its dates from the same UTC anchor — a host-local
+    # clock running ahead of UTC must not shift the expectation by a day.
+    def _utc_today_norm():
+        return pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
+
     def fake_download(symbol, start, end, **kwargs):
         captured["end"] = end
-        idx = pd.to_datetime([pd.Timestamp.today().normalize()])
+        idx = pd.to_datetime([_utc_today_norm()])
         return pd.DataFrame(
             {"Open": [100.0], "High": [100.0], "Low": [100.0],
              "Close": [100.0], "Volume": [1]},
@@ -54,8 +60,10 @@ def test_load_ohlcv_requests_inclusive_end(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr(su.yf, "download", fake_download)
-    today = pd.Timestamp.today().strftime("%Y-%m-%d")
+    today = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
     su.load_ohlcv("AAPL", today)
 
-    expected_end = (pd.Timestamp.today() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    expected_end = (
+        pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=1)
+    ).strftime("%Y-%m-%d")
     assert captured["end"] == expected_end  # tomorrow -> today's row included (#986)
