@@ -148,12 +148,11 @@ _STOCK_PERP_NUDGE = (
     "explicitly. The usual grounding rules apply unchanged: cite reporting "
     "periods and filing dates, honor the filing lag, and write 'data not "
     "available' rather than estimating. Keep the perp framing in mind when "
-    "weighing the evidence: TradFi perps follow Binance's published trading "
-    "sessions (NOT the 24/7 crypto calendar — check the exchange's contract "
-    "page for session times), while filings and earnings land on the US "
-    "session calendar, so fundamentals inform DIRECTION and earnings-gap "
-    "risk, not entry timing; funding cost and leverage are assessed by "
-    "other analysts."
+    "weighing the evidence: Binance tokenized-stock perps trade 24/7 "
+    "(klines-verified: weekends and US-market holidays carry volume), "
+    "while filings and earnings land on the US session calendar, so "
+    "fundamentals inform DIRECTION and earnings-gap risk, not entry "
+    "timing; funding cost and leverage are assessed by other analysts."
 )
 
 # Appended when the instrument (plain stock or perp underlying) is a

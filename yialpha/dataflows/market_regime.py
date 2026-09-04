@@ -286,10 +286,10 @@ def classify_vol_state(
     Labels: low (<25th), normal, high (>75th), extreme (>90th). ``None``
     when the rvol history is too short to rank against. The percentile is
     scale-invariant, but the reported annualized level uses the asset's own
-    calendar — refined by ``instrument_class`` when known (V2.2: a
-    tokenized-stock perp annualizes on its weekday-session count, not the
-    24/7 crypto 365) — so the displayed number matches the indicator tools'
-    scale.
+    calendar — refined by ``instrument_class`` when known (a tokenized-stock
+    perp annualizes on the klines-verified 24/7 factor 365, same caliber as
+    pure crypto — 2026-09-04 machine evidence falsified the old weekday-count
+    261 guess) — so the displayed number matches the indicator tools' scale.
     """
     rvol = close_to_close_vol(
         df, window=_VOL_WINDOW,
@@ -341,9 +341,11 @@ def _regime_vol_class(ticker: str, asset_type: str | None) -> str | None:
 
     Deterministic, flag-independent: on a ``crypto_perp`` run the warm/seed
     EQUITY base map decides — a tokenized-stock perp (``stock_perp``)
-    annualizes its weekday-session candles on the sessions-per-year factor,
-    not the 24/7 crypto 365; a pure-crypto perp stays continuous. Non-perp
-    runs return ``None`` (the asset-type rule already covers them).
+    annualizes on the klines-verified 24/7 factor 365 (2026-09-04 machine
+    evidence: Binance stock perps trade through weekends and full US-market
+    holidays with volume), the same caliber as a pure-crypto perp, which
+    stays continuous. Non-perp runs return ``None`` (the asset-type rule
+    already covers them).
     """
     if asset_type != "crypto_perp":
         return None
@@ -365,9 +367,9 @@ def format_regime_context(
 
     ``asset_type`` (e.g. from the graph state) annualizes the vol state on
     the asset's own calendar — 365 for 24/7 crypto, 252 otherwise, and a
-    tokenized-stock perp (derived via the EQUITY base map) on its
-    weekday-session factor — so the reported level matches the Binance
-    indicator tools' scale.
+    tokenized-stock perp (derived via the EQUITY base map) on the same
+    klines-verified 24/7 factor 365 — so the reported level matches the
+    Binance indicator tools' scale.
     """
     try:
         data = _load_regime_ohlcv(ticker, curr_date, asset_type)
