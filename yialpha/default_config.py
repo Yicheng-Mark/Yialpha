@@ -490,7 +490,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "stock_perp_fair_value": True,
     # V2.2 Context stage (yialpha.regime): ON by default (shadow). Per
     # crypto_perp run, a versioned point-in-time RegimeState (REGIME_VERSION
-    # v2) is computed from the existing PIT seams, stored in the regimes
+    # v3) is computed from the existing PIT seams, stored in the regimes
     # table, and its id threaded onto predictions / tickets / outcomes; the
     # market analyst additionally sees the stored block as marked external
     # evidence. Uncomputable regime -> disclosed as unavailable, never a

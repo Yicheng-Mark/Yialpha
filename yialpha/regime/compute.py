@@ -60,6 +60,7 @@ from yialpha.dataflows.perp_bundle import (
 from yialpha.dataflows.utils import is_historical_date
 from yialpha.dataflows.y_finance import get_YFin_history_cached
 from yialpha.instruments.registry import classify_perp
+from yialpha.instruments.sessions import SESSION_CONTINUOUS
 from yialpha.ledger.sqlite import utc_now_iso
 from yialpha.regime.state import RegimeState, compute_regime_id
 from yialpha.versions import REGIME_VERSION
@@ -149,9 +150,9 @@ def _is_edt(moment_utc: datetime) -> bool:
     """US daylight-saving window (2nd-Sunday-March .. 1st-Sunday-November).
 
     Boundaries taken at their UTC instants (02:00 local == 07:00/06:00 UTC).
-    A hand-rolled rule on purpose: it keeps the session bucket deterministic
-    on hosts without the ``tzdata`` package and documents itself as the
-    approximation it is (see :func:`_session_state`).
+    A hand-rolled rule on purpose: it keeps the ET session bucket
+    deterministic on hosts without the ``tzdata`` package and documents
+    itself as the approximation it is (see :func:`_et_session_state`).
     """
     year = moment_utc.year
     march1 = datetime(year, 3, 1)
@@ -163,16 +164,22 @@ def _is_edt(moment_utc: datetime) -> bool:
     return dst_start <= moment_utc < dst_end
 
 
-def _session_state(analysis_as_of: str) -> str:
-    """NYSE-equivalent session bucket for the as-of instant (approximation).
+def _et_session_state(analysis_as_of: str) -> str:
+    """DORMANT NYSE-equivalent ET session bucket (pre-v3 stock_perp rule).
 
-    Full timestamps are shifted to US Eastern (DST approximated by
-    :func:`_is_edt`) and bucketed: pre_market 04:00-09:30, regular
+    Klines machine evidence (2026-09-04) verified that Binance stock perps
+    trade 24/7 — full US-market holidays and weekends all carried volume —
+    so stock_perp now takes the continuous bucket in :func:`_session_state`
+    and this ET machinery is dead code for it. It is deliberately RETAINED
+    (not deleted): the hand-rolled DST rule (:func:`_is_edt`) keeps the
+    bucket deterministic without ``tzdata``, and any future instrument class
+    with a genuine session calendar may reuse it as-is.
+
+    Semantics (unchanged from REGIME_VERSION v2): full timestamps are
+    shifted to US Eastern and bucketed pre_market 04:00-09:30, regular
     09:30-16:00, post_market 16:00-20:00, closed otherwise (weekends always
-    closed). A date-only ``analysis_as_of`` names that date's session:
-    ``regular`` on weekdays (the daily pipeline describes the session it
-    analysed), ``closed`` on weekends — the granularity a date-only value
-    can honestly carry.
+    closed); a date-only value reads ``regular`` on weekdays and ``closed``
+    on weekends; an unparseable value reads ``closed``.
     """
     raw = str(analysis_as_of).strip()
     date_only = "t" not in raw.lower()
@@ -196,6 +203,23 @@ def _session_state(analysis_as_of: str) -> str:
     if 960 <= minutes < 1200:  # 16:00-20:00
         return "post_market"
     return "closed"
+
+
+def _session_state(analysis_as_of: str) -> str:  # noqa: ARG001
+    """Continuous 24/7 session bucket for stock_perp (REGIME_VERSION v3).
+
+    Klines machine evidence (2026-09-04, MUUSDT probe): Binance tokenized-
+    stock perpetuals trade through every weekend and full US-market holiday
+    with volume (zero-volume days = 0), so the V2.2 "date-only weekday =
+    regular / weekend = closed" NYSE-equivalent approximation contradicted
+    the venue's actual calendar. The bucket is now the continuous one
+    (:data:`~yialpha.instruments.sessions.SESSION_CONTINUOUS`,
+    ``"continuous_24_7"``) regardless of the as-of value — weekends and
+    holidays are never ``closed``. ``analysis_as_of`` is intentionally
+    unused: a 24/7 calendar has no as-of-dependent session. The dormant ET
+    machinery survives in :func:`_et_session_state`.
+    """
+    return SESSION_CONTINUOUS
 
 
 def _depth_regimes(depth: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
@@ -289,7 +313,7 @@ def compute_regime_state(
 ) -> RegimeState | None:
     """Assemble the run's :class:`RegimeState`, or ``None`` when uncomputable.
 
-    Per-class field groups (frozen with REGIME_VERSION v2):
+    Per-class field groups (frozen with REGIME_VERSION v3):
     ``pure_crypto_perp`` → COMMON + PURE-CRYPTO; ``stock_perp`` → COMMON +
     STOCK-PERP; ``unknown_perp`` (or an unset class on a perp run) → COMMON
     only, conservative. Non-perp asset types return ``None`` — the regime

@@ -160,7 +160,9 @@ def test_regime_id_deterministic_and_input_sensitive():
     later = replace(same, computed_at="2026-09-03T23:59:59+00:00")
     assert compute_regime_id(later) == first
     # the version prefix isolates definitions across a REGIME_VERSION bump
-    assert compute_regime_id(same, "v3") != first
+    # (v3 default vs the retired v2 definitions -> disjoint ids)
+    assert compute_regime_id(same, "v2") != first
+    assert compute_regime_id(same, "v4") != first
     # a plain mapping (stored payload) re-derives the same id
     assert compute_regime_id(asdict(same)) == first
 
@@ -272,7 +274,7 @@ def test_stock_perp_assembly_with_known_gaps(monkeypatch):
     assert state.listing_age_days == (
         date.fromisoformat(_TODAY) - date(2024, 6, 1)
     ).days
-    assert state.session_state == "regular"  # date-only weekday as-of
+    assert state.session_state == "continuous_24_7"  # v3: 24/7 bucket
     assert state.index_mark_basis_bps is not None
     assert state.overnight_gap_bps is not None
     assert state.contract_liquidity == "deep"
@@ -309,14 +311,34 @@ def test_non_perp_asset_returns_none():
 
 @pytest.mark.unit
 def test_session_state_buckets():
+    # v3 (klines-verified 2026-09-04): stock_perp trades 24/7, so EVERY
+    # as-of form lands in the continuous bucket — weekends and US holidays
+    # are never "closed", and the bucket no longer depends on the instant.
+    from yialpha.instruments.sessions import SESSION_CONTINUOUS
+
+    assert SESSION_CONTINUOUS == "continuous_24_7"
+    assert rc._session_state("2026-09-03") == SESSION_CONTINUOUS  # Thursday
+    assert rc._session_state("2026-09-05") == SESSION_CONTINUOUS  # Saturday
+    assert rc._session_state("2026-07-03") == SESSION_CONTINUOUS  # US holiday
+    assert rc._session_state("2026-09-03T14:30:00+00:00") == SESSION_CONTINUOUS
+    assert rc._session_state("2026-09-03T02:00:00+00:00") == SESSION_CONTINUOUS
+    assert rc._session_state("not-a-date") == SESSION_CONTINUOUS
+
+
+@pytest.mark.unit
+def test_dormant_et_session_state_machinery_retained():
+    # The pre-v3 NYSE-equivalent ET buckets are dead code for stock_perp but
+    # deliberately retained for future session-calendar classes: pin that the
+    # machinery still reproduces the frozen v2 semantics byte-for-byte.
     # Date-only weekday/weekend approximation
-    assert rc._session_state("2026-09-03") == "regular"  # Thursday
-    assert rc._session_state("2026-09-05") == "closed"  # Saturday
+    assert rc._et_session_state("2026-09-03") == "regular"  # Thursday
+    assert rc._et_session_state("2026-09-05") == "closed"  # Saturday
     # Full instants in EDT (2026-09-03): 14:30 UTC = 10:30 ET (regular)
-    assert rc._session_state("2026-09-03T14:30:00+00:00") == "regular"
-    assert rc._session_state("2026-09-03T13:00:00+00:00") == "pre_market"
-    assert rc._session_state("2026-09-03T21:00:00+00:00") == "post_market"
-    assert rc._session_state("2026-09-03T02:00:00+00:00") == "closed"
+    assert rc._et_session_state("2026-09-03T14:30:00+00:00") == "regular"
+    assert rc._et_session_state("2026-09-03T13:00:00+00:00") == "pre_market"
+    assert rc._et_session_state("2026-09-03T21:00:00+00:00") == "post_market"
+    assert rc._et_session_state("2026-09-03T02:00:00+00:00") == "closed"
+    assert rc._et_session_state("garbage") == "closed"
 
 
 # --------------------------------------------------------------------------- #
