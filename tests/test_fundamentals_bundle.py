@@ -211,11 +211,14 @@ def test_bundle_routes_all_four_core_calls_for_underlying(monkeypatch):
 
     monkeypatch.setattr(fb, "route_to_vendor", fake_route)
     bundle = fb.fetch_fundamentals_bundle("crypto_perp", "MUUSDT", _TODAY)
-    methods = [m for m, _ in calls]
-    assert methods == [
+    methods = sorted(m for m, _ in calls)
+    # Order-insensitive on purpose: the bundle dispatches these four through a
+    # ThreadPoolExecutor, so arrival order is a thread race, not a contract
+    # (flaked on CI py3.13). Sorted lists, not a set, so duplicates still fail.
+    assert methods == sorted([
         "get_fundamentals", "get_income_statement",
         "get_balance_sheet", "get_cashflow",
-    ]
+    ])
     # every call addresses the UNDERLYING equity, not the perp symbol
     for _m, args in calls:
         assert args[0] == "MU"
