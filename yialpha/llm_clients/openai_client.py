@@ -11,8 +11,8 @@ from langchain_openai import ChatOpenAI
 from ._timeout import resolve_timeout
 from .api_key_env import get_api_key_env
 from .base_client import BaseLLMClient, normalize_content
-from .key_pool import api_key_pool, get_pool_http_client
 from .capabilities import get_capabilities
+from .key_pool import api_key_pool, get_pool_http_client
 from .validators import validate_model
 
 logger = logging.getLogger(__name__)

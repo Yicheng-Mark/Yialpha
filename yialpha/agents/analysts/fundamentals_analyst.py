@@ -25,7 +25,9 @@ from yialpha.agents.utils.agent_utils import (
 )
 from yialpha.agents.utils.pot_tool import make_pot_compute_tool
 from yialpha.agents.utils.prediction_tools import (
+    analyst_capture_is_empty,
     begin_prediction_capture,
+    dispatch_prediction_tool_calls,
     make_submit_prediction_tool,
     settle_prediction_capture,
 )
@@ -418,6 +420,26 @@ def create_fundamentals_analyst(llm):
         # calls — see the market analyst's note): flush captured entries or
         # record the no-call quality sentinel. Fail-soft either way.
         if predictions_armed and not getattr(result, "tool_calls", None):
+            # Fallback dedicated round (sentiment/positioning pattern): when the
+            # tool loop delivered no entries (dispatch gap or the model never
+            # called the tool), bind ONLY submit_prediction, let the model file
+            # from its finished report, and execute the calls in-node.
+            if analyst_capture_is_empty("fundamentals"):
+                try:
+                    response = llm.bind_tools(
+                        [make_submit_prediction_tool(prediction_instrument)]
+                    ).invoke(
+                        prompt.format_messages(
+                            messages=list(llm_messages) + [result]
+                        )
+                    )
+                    dispatch_prediction_tool_calls(response)
+                except Exception:  # noqa: BLE001 — capture must never break the report
+                    logger.warning(
+                        "fundamentals blind-prediction fallback round failed for %s",
+                        prediction_instrument,
+                        exc_info=True,
+                    )
             settle_prediction_capture("fundamentals", prediction_instrument)
 
         # Shared final-report extraction: "" while tool calls are pending,

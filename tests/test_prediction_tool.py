@@ -450,3 +450,152 @@ def test_market_node_full_integration_predictions_and_evidence(monkeypatch):
     evidence_ids = [ev.evidence_id for ev in evidence]
     assert all(list(row.evidence_ids) == evidence_ids for row in rows)
     assert quality.snapshot_quality() == []
+
+
+# ---- graph ToolNode dispatch wiring (round-3e P0 regression) ------------------
+# The integration above lets the mock LLM invoke the bound tool ITSELF ("as the
+# ToolNode would"), which hid the real gap: the graph's market/news/fundamentals
+# ToolNodes never registered submit_prediction, so live tool calls died with
+# "not a valid tool". These tests drive the REAL ToolNodes built by
+# YiAlphaGraph._create_tool_nodes.
+
+
+def _graph_tool_nodes():
+    """The graph's real ToolNode map (test_market_toolnode.py stub pattern)."""
+    from types import SimpleNamespace
+
+    from yialpha.graph.trading_graph import YiAlphaGraph
+
+    fake_self = SimpleNamespace(quick_thinking_llm=object())  # PoT closure only
+    return YiAlphaGraph._create_tool_nodes(fake_self)
+
+
+def _invoke_tool_node(node, ai_message: AIMessage):
+    """Drive a real ToolNode the way the compiled graph does (runtime injected)."""
+    from langgraph._internal._constants import CONF, CONFIG_KEY_RUNTIME
+    from langgraph.runtime import Runtime
+
+    return node.invoke(
+        {"messages": [ai_message]},
+        config={CONF: {CONFIG_KEY_RUNTIME: Runtime()}},
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("node_name", "analyst"),
+    [("market", "market"), ("news", "news"), ("fundamentals", "fundamentals")],
+)
+def test_graph_tool_node_dispatches_submit_prediction(node_name, analyst):
+    _bind_perp_run()
+    pt.begin_prediction_capture(analyst, "BTCUSDT", SCOPE_CONTRACT)
+
+    tool_nodes = _graph_tool_nodes()
+    ai_message = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "submit_prediction",
+                "args": {"predictions": _entries()},
+                "id": "call-1",
+                "type": "tool_call",
+            }
+        ],
+    )
+    out = _invoke_tool_node(tool_nodes[node_name], ai_message)
+
+    tool_message = out["messages"][0]
+    content = str(tool_message.content)
+    assert "not a valid tool" not in content
+    assert getattr(tool_message, "status", None) != "error"
+    assert "accepted horizons [1, 5, 21]" in content
+    # The generic instance routed the entries into THIS analyst's capture via
+    # the _ACTIVE_CAPTURE_KEY registry entry (not a ContextVar sibling write).
+    assert pt.prediction_capture_pending() is True
+
+
+# ---- dedicated fallback prediction rounds (market / news / fundamentals) ------
+
+
+class _FallbackLLM(Runnable):
+    """Report round files NOTHING (final report immediately); the dedicated
+    fallback round then answers with one submit_prediction tool call."""
+
+    def __init__(self):
+        super().__init__()
+        self.bound_per_call: list[list[str]] = []
+        self.calls = 0
+
+    def invoke(self, inp, config=None, **kwargs):  # noqa: ARG002
+        self.calls += 1
+        if self.calls == 1:
+            return AIMessage(content="FINAL REPORT", tool_calls=[])
+        return AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "submit_prediction",
+                    "args": {"predictions": _entries()},
+                    "id": "call-2",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+    def bind_tools(self, tools, **kwargs):  # noqa: ARG002
+        self.bound_per_call.append([tool.name for tool in tools])
+        return self
+
+
+@pytest.mark.unit
+def test_market_fallback_round_files_when_tool_loop_did_not(monkeypatch):
+    set_config({"prediction_ledger": True, "perp_market_bundle": True})
+    quality.ensure_run_context()
+    _bind_perp_run()
+    monkeypatch.setattr(
+        pb, "fetch_perp_market_bundle", lambda s, d: {"symbol": s, "as_of": d}
+    )
+    monkeypatch.setattr(pb, "render_perp_bundle_block", lambda b: "MARKET BLOCK")
+
+    llm = _FallbackLLM()
+    result = market_analyst.create_market_analyst(llm)(_perp_state())
+
+    assert result["market_report"] == "FINAL REPORT"
+    # The fallback round bound ONLY the prediction tool.
+    assert llm.bound_per_call[-1] == ["submit_prediction"]
+    rows = predictions_for_run(_RUN_ID)
+    assert [row.horizon_days for row in rows] == [1, 5, 21]
+    assert all(row.analyst == "market" for row in rows)
+    assert all(row.instrument_id == "BTCUSDT" for row in rows)
+    assert all(row.prediction_scope == SCOPE_CONTRACT for row in rows)
+    # Filed -> no optional_unavailable sentinel.
+    assert quality.snapshot_quality() == []
+
+
+@pytest.mark.unit
+def test_news_fallback_round_files_under_underlying_scope(monkeypatch):
+    import yialpha.agents.analysts.news_analyst as na
+    from yialpha.ledger.models import SCOPE_UNDERLYING
+
+    set_config({"prediction_ledger": True})
+    quality.ensure_run_context()
+    run_id = "run-mu-pred-fb"
+    set_ledger_run_context(
+        run_id, "MUUSDT", "crypto_perp", "stock_perp", _TODAY
+    )
+    register_run(run_id, "MUUSDT", "crypto_perp", "stock_perp", _TODAY)
+    monkeypatch.setattr(na, "_fetch_company_news", lambda u, s, e: "COMPANY BLOCK")
+    monkeypatch.setattr(na, "_fetch_perp_contract_news", lambda t, d: "CONTRACT BLOCK")
+
+    llm = _FallbackLLM()
+    result = na.create_news_analyst(llm)(_perp_state("MUUSDT"))
+
+    assert result["news_report"] == "FINAL REPORT"
+    assert llm.bound_per_call[-1] == ["submit_prediction"]
+    rows = predictions_for_run(run_id)
+    assert [row.horizon_days for row in rows] == [1, 5, 21]
+    assert all(row.analyst == "news" for row in rows)
+    # Stock-perp semantics: the forecast is filed for the underlying equity.
+    assert all(row.instrument_id == "MU" for row in rows)
+    assert all(row.prediction_scope == SCOPE_UNDERLYING for row in rows)
+    assert quality.snapshot_quality() == []

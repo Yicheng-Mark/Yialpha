@@ -36,7 +36,9 @@ from yialpha.agents.utils.agent_utils import (
     web_search_market,
 )
 from yialpha.agents.utils.prediction_tools import (
+    analyst_capture_is_empty,
     begin_prediction_capture,
+    dispatch_prediction_tool_calls,
     make_submit_prediction_tool,
     settle_prediction_capture,
 )
@@ -762,6 +764,26 @@ def create_market_analyst(llm):
         # grows on later rounds, colliding with the rows' immutability check.
         # An empty buffer records the no-call quality sentinel instead.
         if predictions_armed and not getattr(result, "tool_calls", None):
+            # Fallback dedicated round (sentiment/positioning pattern): when the
+            # tool loop delivered no entries (dispatch gap or the model never
+            # called the tool), bind ONLY submit_prediction, let the model file
+            # from its finished report, and execute the calls in-node.
+            if analyst_capture_is_empty("market"):
+                try:
+                    response = llm.bind_tools(
+                        [make_submit_prediction_tool(ticker)]
+                    ).invoke(
+                        prompt.format_messages(
+                            messages=list(llm_messages) + [result]
+                        )
+                    )
+                    dispatch_prediction_tool_calls(response)
+                except Exception:  # noqa: BLE001 — capture must never break the report
+                    logger.warning(
+                        "market blind-prediction fallback round failed for %s",
+                        ticker,
+                        exc_info=True,
+                    )
             settle_prediction_capture("market", ticker)
 
         # Shared final-report extraction: "" while tool calls are pending,
