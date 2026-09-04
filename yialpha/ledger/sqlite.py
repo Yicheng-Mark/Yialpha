@@ -409,7 +409,17 @@ def ledger_transaction(
     except BaseException:
         connection.execute("ROLLBACK")
         raise
-    connection.execute("COMMIT")
+    try:
+        connection.execute("COMMIT")
+    except BaseException:
+        # A failed COMMIT (disk full, SQLITE_BUSY, ...) leaves the
+        # transaction open on this thread-local connection — every later
+        # BEGIN IMMEDIATE would then die with "cannot start a transaction
+        # within a transaction". Roll the dangling transaction back and
+        # surface the original commit error untouched.
+        with suppress(sqlite3.Error):
+            connection.execute("ROLLBACK")
+        raise
 
 
 def reset_ledger_state_for_test() -> None:

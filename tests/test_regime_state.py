@@ -903,3 +903,39 @@ def test_binance_indicator_tool_annualizes_stock_perp_on_sessions(monkeypatch):
     captured.clear()
     bit._indicators_core("BTCUSDT", _TODAY, 5, "perp", "rvol_20")
     assert captured["ppy"] == pytest.approx(365.0)  # pure crypto unchanged
+
+
+@pytest.mark.unit
+def test_overnight_gap_survives_isolated_open_nan(monkeypatch):
+    """An isolated NaN in the Open column must not misalign the legs.
+
+    Dropping each column independently shifts the open list against the
+    close list, so ``opens[-1] / closes[-2]`` can pair bars from
+    non-adjacent days. The row-aligned drop removes the offending ROW from
+    both lists, keeping the gap a true adjacent-day overnight reading.
+    """
+    closes = [100.0, 110.0, 120.0, 130.0, 140.0]
+    opens = [99.0, 109.0, 119.0, 129.0, float("nan")]  # isolated NaN, last row
+    frame = _frame(closes, opens=opens)
+
+    def fake_klines(symbol, start_date, end_date, interval="1d",
+                    venue="binance_perp", price_type="last"):
+        return frame
+
+    monkeypatch.setattr(rc, "binance_klines_frame", fake_klines)
+    monkeypatch.setattr(rc, "get_binance_funding_rate", lambda s, a, b: _FUNDING_CSV)
+    monkeypatch.setattr(rc, "_fetch_open_interest", lambda s, d: dict(_OI_OK))
+    monkeypatch.setattr(rc, "_fetch_lsr", lambda s, d: dict(_LSR_OK))
+    monkeypatch.setattr(rc, "_fetch_taker", lambda s, d: dict(_TAKER_OK))
+    monkeypatch.setattr(rc, "_fetch_depth_bands", lambda s: dict(_DEPTH_OK))
+
+    state = rc.compute_regime_state(
+        "BTCUSDT", "crypto_perp", "pure_crypto_perp", _PAST,
+        end_date=_PAST,
+    )
+    assert state is not None
+    # Row-aligned: the NaN-open row drops whole, so the gap pairs the last
+    # surviving open (129.0, day 4) with the prior day's close (120.0, day 3)
+    # — NOT the misaligned 129.0/130.0 same-row pairing the independent
+    # dropna produced.
+    assert state.overnight_gap_bps == pytest.approx((129.0 / 120.0 - 1.0) * 1e4)

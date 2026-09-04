@@ -65,7 +65,7 @@ def ticket_for_run(run_id: str) -> dict[str, Any] | None:
     try:
         row = get_connection(readonly=True).execute(
             "SELECT payload FROM tickets WHERE run_id = ? "
-            "ORDER BY written_at DESC LIMIT 1",
+            "ORDER BY written_at DESC, rowid DESC LIMIT 1",
             (run_id,),
         ).fetchone()
     except Exception:  # noqa: BLE001 -- read helpers degrade, never raise

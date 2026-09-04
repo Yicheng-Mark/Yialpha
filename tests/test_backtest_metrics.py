@@ -163,3 +163,23 @@ def test_inline_smoke_example():
     assert math.isfinite(m.cagr)
     assert math.isfinite(m.sharpe)
     assert math.isfinite(m.deflated_sharpe)
+
+
+@pytest.mark.unit
+def test_negative_terminal_equity_is_total_loss():
+    # Six points -> n=5 -> fractional exponent (252/5): a negative final
+    # ratio used to produce a complex number and crash float(). A negative
+    # terminal equity IS a total loss (-100%), not an exception.
+    eq = [100.0, 80.0, 60.0, 40.0, 20.0, -10.0]
+    m = compute_metrics(eq)
+    assert m.total_return == -1.0
+    assert m.cagr == -1.0
+
+
+@pytest.mark.unit
+def test_zero_start_equity_is_total_loss():
+    # eq[0] == 0 used to divide by zero (numpy: inf metrics); the honest
+    # degenerate reading is a total loss.
+    m = compute_metrics([0.0, 5.0, 10.0])
+    assert m.total_return == -1.0
+    assert m.cagr == -1.0

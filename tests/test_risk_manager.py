@@ -299,3 +299,21 @@ def test_funding_gate_skips_flat_positions_and_honors_config():
                      funding_rate_annualized=0.90)
     assert flat.target_weight == 0.0
     assert "Funding drag" not in flat.rationale
+
+
+@pytest.mark.unit
+def test_trade_stats_zero_return_counts_as_neither_win_nor_loss():
+    from yialpha.risk.manager import _trade_stats
+
+    wins, losses, avg_win, avg_loss = _trade_stats([
+        {"ticker": "A", "return": 0.05},
+        {"ticker": "B", "return": 0.0},
+        {"ticker": "C", "return": -0.04},
+        {"ticker": "D", "return": 0.0},
+        {"ticker": "E", "return": 0.02},
+    ])
+    # Flat trades used to be booked as losses, dragging the Kelly win rate
+    # down — a zero return is now skipped entirely.
+    assert (wins, losses) == (2, 1)
+    assert avg_win == pytest.approx((0.05 + 0.02) / 2)
+    assert avg_loss == pytest.approx(0.04)

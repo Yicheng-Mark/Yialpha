@@ -221,3 +221,18 @@ def test_positioning_funding_gap_fails_closed(monkeypatch):
     assert row.status == "incomplete"
     assert "funding_window" in (row.legs_missing or "")
     assert row.net_return is None
+
+
+@pytest.mark.unit
+def test_positioning_outcome_available_at_is_iso_datetime(monkeypatch):
+    """``outcome_available_at`` is the last settlement INSTANT — a full ISO
+    datetime with a time part. A bare 'YYYY-MM-DD' violates the module's
+    own contract (ISO datetime, never a bare date)."""
+    monkeypatch.setattr(oc, "get_binance_funding_rate", lambda *a: _funding_csv(0.0001))
+    _seed_positioning("up")
+    compute_outcomes(_NOW)
+    (row,) = all_outcomes()
+    assert row.status == "complete"
+    # Last in-window settlement 2026-08-30T00:00 UTC — not the bare
+    # 2026-08-30 the previous implementation stored.
+    assert row.outcome_available_at == "2026-08-30T00:00:00+00:00"

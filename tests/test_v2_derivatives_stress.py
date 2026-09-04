@@ -129,6 +129,21 @@ def test_oi_zscore_zero_std_does_not_crash():
 
 
 @pytest.mark.unit
+def test_oi_only_report_is_neutral_not_zero_division():
+    # OI has >= MIN_WINDOW points but every direction component is missing:
+    # components holds oi_zscore alone, so the direction-weight sum is 0.
+    # The report must fall to the honest neutral 50 + insufficient_history,
+    # never raise ZeroDivisionError from the 0-weight division.
+    report = compute_stress(open_interest=_spike())
+    assert "oi_zscore" in report.components       # OI itself was scored
+    for name in ("funding_pct", "lsr_pct", "basis_pct"):
+        assert name in report.missing
+        assert name not in report.components
+    assert report.crowding_score == 50
+    assert "insufficient_history" in report.risk_flags
+
+
+@pytest.mark.unit
 def test_render_line_carries_score_states_and_flags():
     report = compute_stress(
         funding=_rising(), global_lsr=_rising(), basis=_rising(),
@@ -373,3 +388,70 @@ def test_futures_data_end_clamped_to_now_when_local_date_leads_utc(monkeypatch):
     assert taker["endTime"] == end_ms
     assert taker["startTime"] == end_ms - 2 * 86_400_000
     assert klines.calls[0][1] == end_date
+
+
+@pytest.mark.unit
+def test_funding_window_over_one_page_is_paged(monkeypatch):
+    """Regression pin: the fetcher used ONE limit=1000 ``_http_get`` for the
+    funding series, but /fapi/v1/fundingRate returns rows oldest-first and caps
+    each page at 1000 — a 1h-cadence contract's 90-day window (~2160 rows)
+    kept only its OLDEST 1000 rows and silently dropped the most recent,
+    decision-critical settlements. It must page via ``_paginate_history``
+    (same as ``get_binance_funding_rate``) and retain the newest row.
+    """
+    bn.reset_history_memo_for_test()
+
+    hour_ms = 3_600_000
+    end_date = "2024-06-30"
+    end_ms = _end_of_day_ms(end_date)
+    start_ms = int(
+        (datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=UTC)
+         - timedelta(days=90)).timestamp() * 1000
+    )
+    in_window = [
+        {"fundingTime": start_ms + i * hour_ms, "fundingRate": f"{i * 1e-6:.8f}",
+         "symbol": "BTCUSDT"}
+        for i in range((end_ms - start_ms) // hour_ms + 1)
+    ]
+    assert len(in_window) > 1000  # one 1000-row page cannot cover the window
+
+    funding_pages: list[tuple[int, int, int]] = []
+
+    def _fake_http(path, params, *args, **kwargs):  # noqa: ANN001
+        if path == "/fapi/v1/fundingRate":
+            start, end, limit = (
+                params["startTime"], params["endTime"], params["limit"],
+            )
+            funding_pages.append((start, end, limit))
+            return [
+                r for r in in_window if start <= r["fundingTime"] <= end
+            ][:limit]
+        return []  # OI / LSR / taker stubs
+
+    def _fake_klines(*args, **kwargs):  # noqa: ANN001
+        return pd.DataFrame()
+
+    monkeypatch.setattr(bn, "_http_get", _fake_http)
+    monkeypatch.setattr(bn, "binance_klines_frame", _fake_klines)
+
+    out = bn.derivatives_stress_series("BTCUSDT", end_date, window_days=90)
+
+    # Three pages (1000 + 1000 + remainder), cursor advancing forward.
+    assert len(funding_pages) == 3
+    assert funding_pages[0][0] == start_ms
+    assert funding_pages[1][0] > funding_pages[0][0]
+    assert funding_pages[2][0] > funding_pages[1][0]
+    assert all(limit == bn._FAPI_FUNDING_LIMIT for _, _, limit in funding_pages)
+
+    series = out["funding"]
+    assert len(series) == len(in_window)  # nothing dropped
+    # The most recent settlement survives — the old bug lost exactly these —
+    # and the series keeps its full oldest..newest span.
+    assert series.index[-1] == pd.Timestamp(
+        in_window[-1]["fundingTime"], unit="ms", tz="UTC"
+    )
+    assert series.index[0] == pd.Timestamp(
+        in_window[0]["fundingTime"], unit="ms", tz="UTC"
+    )
+    assert series.iloc[-1] == pytest.approx(float(in_window[-1]["fundingRate"]))
+    assert series.iloc[0] == pytest.approx(float(in_window[0]["fundingRate"]))

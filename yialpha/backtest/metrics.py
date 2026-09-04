@@ -440,8 +440,16 @@ def compute_metrics(
     std_ret = float(returns.std(ddof=0))
 
     # --- Return levels ----------------------------------------------------
-    total_return = float(eq[-1] / eq[0] - 1.0)
-    cagr = float((eq[-1] / eq[0]) ** (ppy / n) - 1.0)
+    # A non-positive start OR end equity is a total loss by definition:
+    # eq[0] <= 0 would divide by zero and a negative eq[-1]/eq[0] ratio
+    # raised to a fractional power yields a complex number. Degrade to -1
+    # (same guard style as the Sharpe/Calmar conditionals below).
+    if eq[0] <= 0.0 or eq[-1] <= 0.0:
+        total_return = -1.0
+        cagr = -1.0
+    else:
+        total_return = float(eq[-1] / eq[0] - 1.0)
+        cagr = float((eq[-1] / eq[0]) ** (ppy / n) - 1.0)
 
     # --- Annualized volatility -------------------------------------------
     volatility = std_ret * math.sqrt(ppy)
