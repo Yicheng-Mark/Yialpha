@@ -737,5 +737,122 @@ def test_13f_router_optional_category_degrades_to_sentinel(monkeypatch, tmp_path
     assert out.startswith("NO_DATA_AVAILABLE")
 
 
+# --------------------------------------------------------------------------- #
+# Hardening regressions (malformed LLM input / degenerate data)
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_date", ["2026/08/01", "garbage", ""])
+def test_form4_malformed_curr_date_degrades_not_crashes(
+        monkeypatch, tmp_path, bad_date, caplog):
+    """An LLM-emitted malformed curr_date ("2026/08/01" is a documented form)
+    must degrade via _as_of_date instead of a bare ValueError from
+    date.fromisoformat. Empty string stays genuine live mode (no warning)."""
+    _patch_form4(monkeypatch, tmp_path)
+    with caplog.at_level("WARNING", logger="yialpha.dataflows.sec_ownership"):
+        out = sec_ownership.get_form4_insider_trading("AAPL", bad_date, 180)
+    assert "# Form 4 Insider Trading for AAPL" in out
+    assert isinstance(out, str)
+    if bad_date:
+        assert any("unparseable curr_date" in r.message for r in caplog.records)
+    else:
+        assert not any("unparseable curr_date" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_ftd_malformed_curr_date_degrades_not_crashes(monkeypatch, tmp_path):
+    _patch_ftd(monkeypatch, tmp_path)
+    out = sec_ownership.get_ftd_data("AAPL", "2026/08/01", 90)
+    assert "# Fails-to-Deliver for AAPL" in out
+
+
+@pytest.mark.unit
+def test_13f_malformed_curr_date_degrades_not_crashes(monkeypatch, tmp_path,
+                                                      caplog):
+    """get_institutional_holdings hits two former crash sites (the
+    _extract_cusip PIT gate and the window anchor); the malformed date must
+    degrade to today at both."""
+    cover = COVER_HEADER + "\n" + "00010A\t0001\t2024-05-15\tSAFE CAPITAL\t2024-03-31"
+    holding = HOLDING_HEADER + "\n" + (
+        "00010A\tAPPLE INC\t037833100\tCOM\t10000\t100\tSH\t\tSOLE\t100\t0\t0"
+    )
+    _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
+    with caplog.at_level("WARNING", logger="yialpha.dataflows.sec_ownership"):
+        out = sec_ownership.get_institutional_holdings("AAPL", "2026/08/01", 180)
+    assert "# 13F Institutional Holdings for AAPL" in out
+    assert any("unparseable curr_date" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_form4_short_accession_array_skips_not_crashes(monkeypatch, tmp_path):
+    """Malformed submissions JSON where accessionNumber is shorter than the
+    parallel `form` array: the accessionless filing is skipped (IndexError
+    previously crashed the tool); filings that DO have accessions still render."""
+    monkeypatch.setattr(sec_ownership, "_cache_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(sec_ownership, "_cik_for_ticker", lambda t: 320193)
+    subs = (
+        b'{"cik":320193,"filings":{"recent":{'
+        b'"form":["4","4"],'
+        b'"accessionNumber":["000032019324000003"],'
+        b'"filingDate":["2024-07-01","2024-04-01"],'
+        b'"primaryDocument":["f3.xml","f1.xml"]'
+        b"}}}"
+    )
+
+    def fetch(_path, url, ttl_days):
+        if "submissions" in url:
+            return subs
+        for doc, payload in XML_BY_DOC.items():
+            if doc in url:
+                return payload
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(sec_ownership, "_cached_or_fetch", fetch)
+    out = sec_ownership.get_form4_insider_trading("AAPL", "2024-07-15", 180)
+    assert "JEFF WILLIAMS" in out        # the filing WITH an accession renders
+    assert "KATHERINE ADAMS" not in out  # accessionless filing skipped
+
+
+@pytest.mark.unit
+def test_13f_all_zero_values_skips_concentration_not_crash(monkeypatch,
+                                                           tmp_path):
+    """Every holder reporting $0 makes total_val 0 — the concentration
+    percentage is skipped (100*top/total was a ZeroDivisionError), not the
+    whole tool call."""
+    cover = COVER_HEADER + "\n" + "00009A\t0001\t2024-05-15\tZERO CAPITAL\t2024-03-31"
+    holding = HOLDING_HEADER + "\n" + (
+        "00009A\tAPPLE INC\t037833100\tCOM\t0\t100\tSH\t\tSOLE\t100\t0\t0\n"
+        "00009A\tAPPLE INC\t037833100\tCOM\t0\t200\tSH\t\tSOLE\t200\t0\t0"
+    )
+    _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
+    out = sec_ownership.get_institutional_holdings("AAPL", "2024-06-15", 180)
+    assert "ZERO CAPITAL" in out
+    assert "Summary" in out
+    assert "concentration n/a" in out
+
+
+@pytest.mark.unit
+def test_negative_pub_lags_fall_back_to_defaults(monkeypatch, caplog):
+    """A negative pub-lag would mean "visible on publication day", silently
+    weakening PIT — the conservative direction (as in disk_cache.max_stale_days)
+    is falling back to the DEFAULT with a warning, never clamping to 0."""
+    from yialpha.dataflows import config as cfgmod
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "ftd_pub_lag_days": -3,
+                           "sec_13f_pub_lag_days": -7})
+        with caplog.at_level("WARNING", logger="yialpha.dataflows.sec_ownership"):
+            assert sec_ownership._ftd_pub_lag_days() == 10
+            assert sec_ownership._sec_13f_pub_lag_days() == 45
+    finally:
+        cfgmod.set_config(orig)
+    messages = [r.message for r in caplog.records]
+    assert any("ftd_pub_lag_days" in m for m in messages)
+    assert any("sec_13f_pub_lag_days" in m for m in messages)
+    # The valid-zero escape hatch (never serve pre-lag data) still works.
+    cfgmod.set_config({**orig, "ftd_pub_lag_days": 0})
+    assert sec_ownership._ftd_pub_lag_days() == 0
+    cfgmod.set_config(orig)
+
+
 if __name__ == "__main__":
     unittest.main()
