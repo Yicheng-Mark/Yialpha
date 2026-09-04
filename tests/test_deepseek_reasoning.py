@@ -9,6 +9,14 @@ Two pieces verified:
    suppresses ``tool_choice`` for models that reject it (V4 + reasoner),
    matching DeepSeek's official tool-calling pattern at
    https://api-docs.deepseek.com/guides/tool_calls.
+
+The deepseek provider (chat class + capability rows + key mapping) is
+still live in the codebase, so the unit tests above stay. The former
+DeepSeek live-call test was replaced by a GLM equivalent: the GLM
+providers are the actively-wired stack (key pool, Coding Plan
+endpoints), so the end-to-end structured-output round-trip now runs
+against GLM — and only when a real GLM key is configured; without one
+it skips cleanly (key-gated, never a permanent skip).
 """
 
 import os
@@ -180,40 +188,58 @@ class TestStructuredOutputCapabilityDispatch:
 
 
 # ---------------------------------------------------------------------------
-# Live API: structured output round-trips against the real DeepSeek backend
+# Live API: structured output round-trips against the real GLM backend
 # ---------------------------------------------------------------------------
 
 
-def _has_real_deepseek_key():
-    key = os.environ.get("DEEPSEEK_API_KEY", "")
-    return bool(key) and key != "placeholder"
+def _glm_live_provider() -> str | None:
+    """Return ``"glm"`` / ``"glm-cn"`` when a REAL GLM key is configured.
+
+    Both the single-key vars and the comma-separated key-pool vars count
+    (the pool is the typical GLM Coding Plan setup, and ``get_llm``
+    prefers the pool transport when present). ``placeholder`` — what
+    tests/conftest.py's autouse fixture injects for unset vars — never
+    counts, so a CI run without secrets skips cleanly instead of firing
+    a doomed request.
+    """
+    for provider, single, pool in (
+        ("glm", "ZHIPU_API_KEY", "ZHIPU_API_KEYS"),
+        ("glm-cn", "ZHIPU_CN_API_KEY", "ZHIPU_CN_API_KEYS"),
+    ):
+        for var in (single, pool):
+            val = os.environ.get(var, "").strip()
+            if val and val != "placeholder":
+                return provider
+    return None
 
 
 @pytest.mark.integration
 @pytest.mark.skipif(
-    not _has_real_deepseek_key(),
-    reason="DEEPSEEK_API_KEY not set (or placeholder); skipping live API call",
+    _glm_live_provider() is None,
+    reason="no real GLM key (ZHIPU_API_KEY / ZHIPU_CN_API_KEY / *_API_KEYS "
+    "pool); skipping live API call",
 )
-class TestDeepSeekLiveStructuredOutput:
-    """End-to-end: a real DeepSeek V4-pro call returns a typed instance.
+class TestGLMLiveStructuredOutput:
+    """End-to-end: a real GLM call returns a typed instance.
 
-    Verifies the no-tool_choice path doesn't trigger the 400 reported in
-    issue #678 and that the structured-output binding still parses to a
-    Pydantic instance.
+    Exercises the current primary OpenAI-compatible stack — glm / glm-cn
+    through the provider registry (NormalizedChatOpenAI, default
+    capability row: function_calling with tool_choice) — the same
+    structured-output round-trip the former DeepSeek live test covered,
+    now against the provider the repo actually wires.
     """
 
     class _Pick(BaseModel):
         action: str
         confidence: float
 
-    def test_v4_pro_returns_structured_output(self):
-        client = DeepSeekChatOpenAI(
-            model="deepseek-v4-pro",
-            api_key=os.environ["DEEPSEEK_API_KEY"],
-            base_url="https://api.deepseek.com",
-            timeout=60,
-        )
-        bound = client.with_structured_output(self._Pick)
+    def test_glm_returns_structured_output(self):
+        from yialpha.llm_clients.openai_client import OpenAIClient
+
+        llm = OpenAIClient(
+            "glm-5.3", provider=_glm_live_provider(), timeout=60,
+        ).get_llm()
+        bound = llm.with_structured_output(self._Pick)
         result = bound.invoke(
             "Pick BUY or SELL or HOLD for a tech stock with strong earnings. "
             "Confidence is a float between 0 and 1."

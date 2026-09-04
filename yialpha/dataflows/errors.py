@@ -35,6 +35,10 @@ class NoMarketDataError(VendorError):
         self.symbol = symbol
         self.canonical = canonical or symbol
         self.detail = detail
+        # Vendor error-body code (e.g. Binance's in-200 {"code": -4104, ...}),
+        # set by fetchers that parse one. Lets callers tell an API-level
+        # rejection apart from a transport failure without parsing text.
+        self.vendor_code: int | str | None = None
         msg = f"No market data for {symbol!r}"
         if canonical and canonical != symbol:
             msg += f" (queried as {canonical!r})"

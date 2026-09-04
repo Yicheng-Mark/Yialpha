@@ -498,11 +498,13 @@ def _http_get(
 
     # Binance signals errors inside a 200 body as {"code": <non-zero>, "msg": ...}.
     if isinstance(parsed, dict) and parsed.get("code") and parsed.get("code") != 200:
-        raise NoMarketDataError(
+        err = NoMarketDataError(
             symbol_for_error,
             canonical,
             f"Binance code {parsed.get('code')}: {parsed.get('msg')}",
         )
+        err.vendor_code = parsed.get("code")  # API-level rejection marker
+        raise err
 
     return parsed
 
@@ -1310,10 +1312,12 @@ def get_binance_basis(
     basisRate``.
 
     Note: newer TRADIFI perps (e.g. stock-perps like AAPLUSDT/MUUSDT) are
-    unsupported by this endpoint and return a Binance error body, which
-    ``_http_get`` surfaces as ``NoMarketDataError`` — the router then degrades
-    to a sentinel so the analyst notes "basis unavailable" rather than crashing.
-    Major crypto perps (BTCUSDT, ETHUSDT, …) return real data.
+    unsupported by this endpoint — Binance answers with an in-200 error body
+    (e.g. code -4104), re-raised here as ``NoMarketDataError`` leading with
+    the structural fact ("no basis data for this symbol") instead of the bare
+    vendor code, so the router degrades to a sentinel and the analyst notes
+    "basis unavailable" rather than seeing a cryptic API error. Major crypto
+    perps (BTCUSDT, ETHUSDT, …) return real data.
 
     ``period`` selects the granularity (``"1d"`` default; intraday values are
     timestamped ``YYYY-MM-DD HH:MM`` and scale the row limit, capped at the
@@ -1344,7 +1348,20 @@ def get_binance_basis(
     if not extra:
         params["limit"] = limit
 
-    rows = _http_get("/futures/data/basis", params, symbol, canonical)
+    try:
+        rows = _http_get("/futures/data/basis", params, symbol, canonical)
+    except NoMarketDataError as exc:
+        if exc.vendor_code is None:
+            raise  # transport/HTTP failure — keep the vendor's own message
+        # API-level rejection: the endpoint does not serve basis rows for
+        # this pair (TRADIFI/stock perps like MUUSDT have no
+        # /futures/data/basis coverage). Lead with the structural fact;
+        # the vendor's code/msg stays in the detail for debuggability.
+        raise NoMarketDataError(
+            symbol, canonical,
+            f"no basis data for this symbol (the /futures/data/basis "
+            f"endpoint does not cover it): {exc.detail}",
+        ) from exc
     records: list[dict] = []
     if isinstance(rows, list):
         for r in rows:

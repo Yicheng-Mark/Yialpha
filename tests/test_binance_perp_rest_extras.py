@@ -16,6 +16,7 @@ Hermetic: ``_http_get`` is monkeypatched.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -164,6 +165,70 @@ def test_invalid_period_rejected_before_any_request(monkeypatch):
         with pytest.raises(ValueError, match="period"):
             fn("BTCUSDT", 7, period="3h")
     assert cap.calls == []
+
+
+# ---- basis: API-level rejection discloses the structural gap ------------------
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, text: str):
+        self.status_code = status_code
+        self.text = text
+        self.headers: dict = {}
+
+    def json(self):
+        return json.loads(self.text)
+
+
+@pytest.mark.unit
+def test_http_get_error_body_sets_vendor_code(monkeypatch):
+    """An in-200 Binance error body ({"code": -4104, ...}) raises
+    NoMarketDataError carrying the vendor_code marker, so endpoint wrappers
+    can tell an API-level rejection from a transport failure without parsing
+    the message text."""
+    monkeypatch.setattr(
+        bn, "_do_request",
+        lambda *_a, **_k: _FakeResponse(
+            200, '{"code": -4104, "msg": "basis not supported"}'
+        ),
+    )
+    with pytest.raises(NoMarketDataError) as ei:
+        bn._http_get("/futures/data/basis", {"pair": "MUUSDT"}, "MUUSDT", "MUUSDT")
+    assert ei.value.vendor_code == -4104
+    assert "-4104" in str(ei.value)
+
+
+@pytest.mark.unit
+def test_basis_api_rejection_discloses_structural_gap(monkeypatch):
+    """MUUSDT-style stock perps have NO /futures/data/basis coverage: Binance
+    answers with an in-200 error body (observed code -4104). The raised
+    NoMarketDataError must lead with the structural "no basis data for this
+    symbol" semantics instead of the bare vendor code, while keeping the
+    vendor detail for debugging."""
+    def _fake_http_get(path, params, symbol, canonical, **_k):
+        exc = NoMarketDataError(symbol, canonical, "Binance code -4104: no data")
+        exc.vendor_code = -4104
+        raise exc
+
+    monkeypatch.setattr(bn, "_http_get", _fake_http_get)
+    with pytest.raises(NoMarketDataError) as ei:
+        bn.get_binance_basis("MUUSDT", 7)
+    assert "no basis data for this symbol" in str(ei.value)
+    assert "-4104" in str(ei.value)  # vendor detail preserved
+
+
+@pytest.mark.unit
+def test_basis_transport_failure_keeps_vendor_message(monkeypatch):
+    """A transport-level NoMarketDataError (no vendor_code) passes through
+    unchanged — the structural claim is made only for API-level rejections,
+    not for transient HTTP failures."""
+    def _fake_http_get(path, params, symbol, canonical, **_k):
+        raise NoMarketDataError(symbol, canonical, "Binance HTTP 503: overload")
+
+    monkeypatch.setattr(bn, "_http_get", _fake_http_get)
+    with pytest.raises(NoMarketDataError, match="Binance HTTP 503") as ei:
+        bn.get_binance_basis("BTCUSDT", 7)
+    assert "no basis data for this symbol" not in str(ei.value)
 
 
 @pytest.mark.unit
