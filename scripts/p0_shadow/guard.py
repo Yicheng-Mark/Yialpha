@@ -182,18 +182,28 @@ def _write_path(value: object) -> Path:
     return path
 
 
+def _normalize_sqlite_uri(raw: str, platform: str) -> str:
+    """Strip the file: scheme the way sqlite itself resolves it.
+
+    sqlite accepts file:///C:/... drive URIs (any number of leading slashes)
+    on Windows and file:///abs/path (empty authority) on POSIX; only
+    //server/share UNC targets must stay rejected by the caller.
+    """
+    if platform == "nt":
+        drive = re.match(r"^/+([A-Za-z]:/.+)$", raw)
+        if drive:
+            return drive.group(1)
+    elif raw.startswith("///"):
+        return raw[2:]
+    return raw
+
+
 def _sqlite_path(value: object) -> Path:
     if not isinstance(value, (str, bytes, os.PathLike)):
         raise GuardError("SQLite requires an explicit cohort path")
     raw = os.fsdecode(value)
     if raw.startswith("file:"):
-        raw = unquote(raw[5:].split("?", 1)[0])
-        # sqlite accepts file:///C:/... drive URIs (any number of leading
-        # slashes) on Windows; only UNC //server/share targets stay rejected.
-        if os.name == "nt":
-            drive = re.match(r"^/+([A-Za-z]:/.+)$", raw)
-            if drive:
-                raw = drive.group(1)
+        raw = _normalize_sqlite_uri(unquote(raw[5:].split("?", 1)[0]), os.name)
     if not raw or raw == ":memory:" or raw.startswith("//"):
         raise GuardError("SQLite requires an explicit cohort file")
     target = _write_path(raw)
