@@ -166,11 +166,8 @@ def _denied(operation, *args, **kwargs):
 
 def _denied_spawn():
     """The guard denies spawning external programs on any platform."""
-    spawn = getattr(os, "startfile", None) or getattr(os, "posix_spawn", None)
-    if spawn is None:  # pragma: no cover - main platforms always provide one
-        pytest.skip("no platform spawn entry point to deny")
     with pytest.raises(GuardError):
-        if spawn is os.startfile:  # Windows
+        if os.name == "nt":  # Windows
             os.startfile(".")
         else:  # POSIX
             os.posix_spawn(sys.executable, [sys.executable], os.environ)
