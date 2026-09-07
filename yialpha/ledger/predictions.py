@@ -48,6 +48,7 @@ from yialpha.ledger.sqlite import (
     ledger_transaction,
     utc_now_iso,
 )
+from yialpha.ledger.time_contract import encode_timing
 from yialpha.versions import FEATURE_VERSION, SCHEMA_VERSION
 
 #: Every ``predictions`` column, in INSERT/SELECT order (v1 DDL order + the
@@ -75,6 +76,7 @@ _PREDICTION_COLUMNS = (
     "debate_revision",
     "revision_reason",
     "regime_id",
+    "timing",
 )
 
 #: Columns that define content identity — everything except ``created_at``.
@@ -113,6 +115,7 @@ def _insert_entries(
     debate_revision: int | None,
     revision_reason: str | None,
     regime_id: str | None = None,
+    timing_json: str | None = None,
 ) -> list[str]:
     """Check-then-insert a batch of rows on an open transaction cursor.
 
@@ -149,13 +152,14 @@ def _insert_entries(
             "debate_revision": debate_revision,
             "revision_reason": revision_reason,
             "regime_id": regime_id,
+            "timing": timing_json,
         }
         existing = cur.execute(
             "SELECT prediction_id, run_id, analyst, instrument_id, prediction_scope, "
             "horizon_days, direction, prob_up, expected_return, target_price, "
             "target_currency, price_basis, confidence, evidence_ids, analysis_as_of, "
             "created_at, schema_version, feature_version, original_prediction_id, "
-            "debate_revision, revision_reason, regime_id FROM predictions "
+            "debate_revision, revision_reason, regime_id, timing FROM predictions "
             "WHERE prediction_id = ?",
             (prediction_id,),
         ).fetchone()
@@ -176,8 +180,8 @@ def _insert_entries(
             "horizon_days, direction, prob_up, expected_return, target_price, "
             "target_currency, price_basis, confidence, evidence_ids, "
             "analysis_as_of, created_at, schema_version, feature_version, "
-            "original_prediction_id, debate_revision, revision_reason, regime_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "original_prediction_id, debate_revision, revision_reason, regime_id, timing) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             tuple(values[column] for column in _PREDICTION_COLUMNS),
         )
         prediction_ids.append(prediction_id)
@@ -193,6 +197,8 @@ def submit_predictions(
     analysis_as_of: str,
     evidence_ids: Sequence[str] | None = None,
     regime_id: str | None = None,
+    *,
+    timing: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Write one analyst's blind predictions for the run; returns the new ids.
 
@@ -211,6 +217,7 @@ def submit_predictions(
     """
     validate_scope(prediction_scope)
     validated = _validated_entries(entries)
+    timing_json = encode_timing(timing)
     with ledger_transaction() as cur:
         return _insert_entries(
             cur,
@@ -225,6 +232,7 @@ def submit_predictions(
             debate_revision=None,
             revision_reason=None,
             regime_id=regime_id,
+            timing_json=timing_json,
         )
 
 
@@ -233,6 +241,8 @@ def revise_prediction(
     entries: Sequence[Mapping[str, Any] | PredictionEntry],
     revision_reason: str,
     analysis_as_of: str,
+    *,
+    timing: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Append a post-debate revision chain link; returns the new row ids.
 
@@ -246,13 +256,16 @@ def revise_prediction(
     racing the primary key.
     """
     validated = _validated_entries(entries)
+    # A revision is a new prediction: its caller must supply its own snapshot.
+    # Never inherit a previous prediction's formation/reference timestamps.
+    timing_json = encode_timing(timing)
     with ledger_transaction() as cur:
         original = cur.execute(
             "SELECT prediction_id, run_id, analyst, instrument_id, prediction_scope, "
             "horizon_days, direction, prob_up, expected_return, target_price, "
             "target_currency, price_basis, confidence, evidence_ids, analysis_as_of, "
             "created_at, schema_version, feature_version, original_prediction_id, "
-            "debate_revision, revision_reason, regime_id FROM predictions "
+            "debate_revision, revision_reason, regime_id, timing FROM predictions "
             "WHERE prediction_id = ?",
             (original_prediction_id,),
         ).fetchone()
@@ -260,6 +273,8 @@ def revise_prediction(
             raise ValueError(
                 f"original prediction {original_prediction_id} not found in ledger"
             )
+        if original["timing"] is not None and timing_json is None:
+            raise ValueError("a versioned prediction revision requires its own timing snapshot")
         root_id = original["original_prediction_id"] or original["prediction_id"]
         max_row = cur.execute(
             "SELECT MAX(debate_revision) FROM predictions "
@@ -281,6 +296,7 @@ def revise_prediction(
             debate_revision=next_revision,
             revision_reason=revision_reason,
             regime_id=original["regime_id"],
+            timing_json=timing_json,
         )
 
 
@@ -296,11 +312,7 @@ def predictions_for_run(run_id: str) -> list[AnalystPrediction]:
     rows = (
         get_connection(readonly=True)
         .execute(
-            "SELECT prediction_id, run_id, analyst, instrument_id, prediction_scope, "
-            "horizon_days, direction, prob_up, expected_return, target_price, "
-            "target_currency, price_basis, confidence, evidence_ids, analysis_as_of, "
-            "created_at, schema_version, feature_version, original_prediction_id, "
-            "debate_revision, revision_reason, regime_id FROM predictions "
+            "SELECT * FROM predictions "
             "WHERE run_id = ? "
             "ORDER BY horizon_days, debate_revision, prediction_id",
             (run_id,),
@@ -317,11 +329,7 @@ def prediction_by_id(prediction_id: str) -> AnalystPrediction | None:
     row = (
         get_connection(readonly=True)
         .execute(
-            "SELECT prediction_id, run_id, analyst, instrument_id, prediction_scope, "
-            "horizon_days, direction, prob_up, expected_return, target_price, "
-            "target_currency, price_basis, confidence, evidence_ids, analysis_as_of, "
-            "created_at, schema_version, feature_version, original_prediction_id, "
-            "debate_revision, revision_reason, regime_id FROM predictions "
+            "SELECT * FROM predictions "
             "WHERE prediction_id = ?",
             (prediction_id,),
         )
@@ -337,11 +345,7 @@ def revisions_of(original_prediction_id: str) -> list[AnalystPrediction]:
     rows = (
         get_connection(readonly=True)
         .execute(
-            "SELECT prediction_id, run_id, analyst, instrument_id, prediction_scope, "
-            "horizon_days, direction, prob_up, expected_return, target_price, "
-            "target_currency, price_basis, confidence, evidence_ids, analysis_as_of, "
-            "created_at, schema_version, feature_version, original_prediction_id, "
-            "debate_revision, revision_reason, regime_id FROM predictions "
+            "SELECT * FROM predictions "
             "WHERE original_prediction_id = ? "
             "ORDER BY debate_revision, horizon_days",
             (original_prediction_id,),

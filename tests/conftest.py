@@ -122,7 +122,9 @@ def _runtime_prefetch_bundles_off():
     """
     from yialpha.dataflows.config import set_config
 
-    set_config({"fundamentals_bundle": False})
+    # Advisory regime_context fetches OHLCV independently of regime_state.
+    # Tests exercising that feature must opt in with their own mocked data.
+    set_config({"fundamentals_bundle": False, "regime_context": False})
     yield
 
 
@@ -174,3 +176,35 @@ def _hermetic_perp_overlay_mark(monkeypatch):
     monkeypatch.setattr(
         YiAlphaGraph, "_latest_mark_close", lambda self, t, d: None,
     )
+    # The live stress advisory has its own five vendor requests. Historical
+    # dates (older than the production 3-day window) never fetch, so those
+    # keep the real renderer and its disclosure; recent dates get a stub.
+    from datetime import date, datetime, timedelta
+
+    _real_stress_line = YiAlphaGraph._render_stress_line
+
+    def _hermetic_stress_line(self, ticker, trade_date):
+        try:
+            dt = datetime.strptime(trade_date, "%Y-%m-%d").date()
+        except ValueError:
+            dt = None
+        if dt is None or dt < date.today() - timedelta(days=3):
+            return _real_stress_line(ticker, trade_date)
+        return "- **Derivatives Stress**: n/a (offline test)\n"
+
+    monkeypatch.setattr(YiAlphaGraph, "_render_stress_line", _hermetic_stress_line)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_prediction_reference(monkeypatch):
+    """Forecast acceptance cannot fetch live prices during offline tests.
+
+    Default to explicit unavailable references. Reference-contract tests
+    override these module-level vendor seams with their simulated bars.
+    """
+    import pandas as pd
+
+    from yialpha.ledger import time_contract
+
+    monkeypatch.setattr(time_contract, "binance_klines_frame", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(time_contract, "get_YFin_history_cached", lambda *a, **k: pd.DataFrame())

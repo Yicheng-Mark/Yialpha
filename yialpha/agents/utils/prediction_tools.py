@@ -45,9 +45,11 @@ unaffected without it, so ``no_data``/``core_error`` would overstate it).
 from __future__ import annotations
 
 import logging
+from _thread import LockType
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import Annotated, Any
 
 from langchain_core.tools import BaseTool, tool
@@ -58,6 +60,7 @@ from yialpha.ledger.evidence import evidence_ids_for_run
 from yialpha.ledger.models import PredictionEntry, coerce_prediction_entry
 from yialpha.ledger.predictions import submit_predictions
 from yialpha.ledger.run_context import current_ledger_run_context
+from yialpha.ledger.time_contract import capture_prediction_timing, encode_timing
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +84,7 @@ class PredictionEntryInput(BaseModel):
     """
 
     horizon_days: int = Field(
-        description="Forecast horizon in days: 1, 5, or 21 — exactly one entry per horizon."
+        description="Forecast horizon in calendar days: 1, 5, or 21 — one entry per horizon."
     )
     direction: str = Field(
         description="'up', 'down' or 'flat' — the forecast price direction over the horizon."
@@ -126,6 +129,14 @@ direction and prob_up always refer to {instrument_phrase} (the instrument
 named in this description): direction is your forecast for its price move
 over the horizon ('up' = positive return, 'down' = negative, 'flat' =
 approximately unchanged) and prob_up is P(return > 0) in [0, 1].
+Horizons are 1, 5 and 21 calendar days from acceptance of this submission,
+not from the start of research. The system freezes the latest already-closed
+daily reference price before acceptance; the endpoint is the latest daily
+close knowable by the fixed horizon end. This daily reference-return
+benchmark uses daily precision and is not an executable submission price.
+An equity weekend with no new closed session is unscoreable; its calendar
+deadline does not move to Monday. Funding-only forecasts use the submission
+instant and fixed calendar deadline instead of price references.
 expected_return is the expected fractional return over the horizon (0.02
 = +2%) or null. target_price (with target_currency 'USDT' or 'USD' and
 price_basis 'last' or 'mark') and confidence (0..1) are optional. Entries
@@ -181,14 +192,34 @@ def _record_submitted_entries(
         )
     accepted: list[int] = []
     errors: list[str] = []
-    for index, entry in enumerate(entries):
-        try:
-            coerced = _coerce_tool_entry(entry)
-        except (TypeError, ValueError) as exc:
-            errors.append(f"entry {index + 1}: {exc}")
-            continue
-        capture.entries.append(coerced)
-        accepted.append(coerced.horizon_days)
+    # ToolNode executes calls concurrently; the first accepted horizon owns
+    # its snapshot even while vendor I/O releases the GIL.
+    with capture._lock:
+        new_entries: dict[int, PredictionEntry] = {}
+        existing = {entry.horizon_days: entry for entry in capture.entries}
+        for index, entry in enumerate(entries):
+            try:
+                coerced = _coerce_tool_entry(entry)
+            except (TypeError, ValueError) as exc:
+                errors.append(f"entry {index + 1}: {exc}")
+                continue
+            previous = new_entries.get(coerced.horizon_days, existing.get(coerced.horizon_days))
+            if previous is not None:
+                if previous != coerced:
+                    errors.append(f"entry {index + 1}: horizon {coerced.horizon_days} is immutable once accepted")
+                else:
+                    accepted.append(coerced.horizon_days)  # replay retains original snapshot
+                continue
+            if capture.submitted:
+                errors.append(f"entry {index + 1}: this capture has already been settled")
+                continue
+            new_entries[coerced.horizon_days] = coerced
+            accepted.append(coerced.horizon_days)
+        if new_entries:
+            timing = capture_prediction_timing(capture.instrument_id, capture.prediction_scope)
+            for horizon, coerced in new_entries.items():
+                capture.entries.append(coerced)
+                capture.timings[horizon] = dict(timing)
     head = (
         f"accepted horizons {sorted(accepted)} for {capture.analyst} on "
         f"{capture.instrument_id} ({capture.prediction_scope}) — committed."
@@ -260,7 +291,11 @@ class _PredictionCapture:
     instrument_id: str
     prediction_scope: str
     entries: list[PredictionEntry] = field(default_factory=list)
+    timings: dict[int, dict[str, Any]] = field(default_factory=dict)
+    written_horizons: set[int] = field(default_factory=set)
+    evidence_ids: tuple[str, ...] | None = None
     submitted: bool = False
+    _lock: LockType = field(default_factory=Lock, repr=False, compare=False)
 
     def matches(
         self, run_id: str, analyst: str, instrument_id: str, prediction_scope: str
@@ -377,7 +412,7 @@ def analyst_capture_is_empty(analyst: str) -> bool:
 
 
 def flush_predictions() -> list[str]:
-    """Submit every pending capture; ONE ``submit_predictions`` call each.
+    """Submit each capture grouped by its already-frozen acceptance snapshot.
 
     Uses the bound run context (``analysis_as_of`` from it, evidence ids
     via :func:`yialpha.ledger.evidence.evidence_ids_for_run`); no-op
@@ -391,33 +426,46 @@ def flush_predictions() -> list[str]:
     context = current_ledger_run_context()
     if context is None:
         return []
-    pending = [
+    candidates = [
         capture
         for capture in (_CAPTURE_SCOPE.get() or {}).values()
         if isinstance(capture, _PredictionCapture)
-        and not capture.submitted
-        and capture.entries
         and capture.run_id == context.run_id
     ]
-    if not pending:
+    if not candidates:
         return []
     try:
-        evidence_ids = evidence_ids_for_run(context.run_id)
+        evidence_ids: tuple[str, ...] | None = None
         written: list[str] = []
-        for capture in sorted(pending, key=lambda item: item.analyst):
-            written.extend(
-                submit_predictions(
-                    run_id=context.run_id,
-                    analyst=capture.analyst,
-                    instrument_id=capture.instrument_id,
-                    prediction_scope=capture.prediction_scope,
-                    entries=list(capture.entries),
-                    analysis_as_of=context.analysis_as_of,
-                    evidence_ids=evidence_ids,
-                    regime_id=context.regime_id,
-                )
-            )
-            capture.submitted = True
+        for capture in sorted(candidates, key=lambda item: item.analyst):
+            with capture._lock:
+                # Check after waiting for any in-flight acceptance or flush.
+                if capture.submitted or not capture.entries:
+                    continue
+                if capture.evidence_ids is None:
+                    if evidence_ids is None:
+                        evidence_ids = tuple(evidence_ids_for_run(context.run_id))
+                    capture.evidence_ids = evidence_ids
+                groups: dict[str | None, list[PredictionEntry]] = {}
+                for entry in capture.entries:
+                    if entry.horizon_days not in capture.written_horizons:
+                        groups.setdefault(encode_timing(capture.timings[entry.horizon_days]), []).append(entry)
+                for entries in groups.values():
+                    written.extend(
+                        submit_predictions(
+                            run_id=context.run_id,
+                            analyst=capture.analyst,
+                            instrument_id=capture.instrument_id,
+                            prediction_scope=capture.prediction_scope,
+                            entries=entries,
+                            analysis_as_of=context.analysis_as_of,
+                            evidence_ids=capture.evidence_ids,
+                            regime_id=context.regime_id,
+                            timing=capture.timings[entries[0].horizon_days],
+                        )
+                    )
+                    capture.written_horizons.update(entry.horizon_days for entry in entries)
+                capture.submitted = True
         return written
     except Exception:  # noqa: BLE001 -- never abort the run on ledger failure
         logger.warning(

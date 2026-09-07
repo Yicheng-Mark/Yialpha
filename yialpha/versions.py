@@ -86,3 +86,9 @@ COST_MODEL_VERSION = "v1"
 TICKET_VERSION = "v1"
 FEATURE_VERSION = "v2"
 REGIME_VERSION = "v3"
+
+# Daily reference-time/scoring semantics are independent of funding/return
+# FEATURE_VERSION. Missing prediction timing identifies historical v2 rows.
+PREDICTION_TIME_VERSION = "close_reference_v1"
+OUTCOME_COMPUTE_VERSION = "close_reference_v1"
+LEGACY_OUTCOME_VERSION = "legacy_daily_v1"

@@ -487,7 +487,7 @@ def test_equity_weekend_horizon_end_resolves_on_friday(
 @pytest.mark.unit
 def test_equity_holiday_endpoint_gap_stays_pending(monkeypatch: pytest.MonkeyPatch):
     """An expected trading-day endpoint whose bar never prints (holiday) is
-    permanently pending — an earlier bar must not stand in for it."""
+    pending during grace, then terminal; an earlier bar never replaces it."""
     seams = _Seams(
         # Friday 2026-08-28 (the expected endpoint) never prints a bar;
         # Thursday 08-27 exists and must not be used as the exit
@@ -509,14 +509,14 @@ def test_equity_holiday_endpoint_gap_stays_pending(monkeypatch: pytest.MonkeyPat
     assert detail.legs_missing == ("contract_price",)
     assert detail.reason == "horizon_end_bar_missing"
     assert all_outcomes() == []  # nothing written, stays on the worklist
-    # fail-closed is permanent: a later batch still finds no 08-28 bar
+    # At the fixed retry deadline the unresolved gap becomes terminal.
     later = compute_outcomes("2026-09-10")
     assert (later.considered, later.completed) == (1, 0)
-    assert later.details[0].status == "pending"
-    assert all_outcomes() == []
-    assert [
-        item["prediction_id"] for item in pending_predictions("2026-09-10")
-    ] == [prediction_id]
+    assert later.details[0].status == "incomplete"
+    record = outcomes_for_prediction(prediction_id)[0]
+    assert record.net_return is None
+    assert record.scoring_context["reason"] == "horizon_end_bar_missing"
+    assert pending_predictions("2026-09-10") == []
 
 
 @pytest.mark.unit
@@ -659,10 +659,9 @@ def test_intraday_asof_entry_not_knowable_is_unscoreable(
     # the composed view (and benchmark) stay in-memory disclosures
     assert detail.net_return == pytest.approx(-0.0017)  # 0 - 0.0003 - 0.0014
     assert detail.reason == "strategy_view_return=-0.001700"
-    # an un-scoreable row never retires the prediction from the worklist
-    assert [item["prediction_id"] for item in pending_predictions(
-        "2026-08-28T00:00:00+00:00"
-    )] == [prediction_id]
+    # The gate remains enforced; immutable terminal rows now retire.
+    assert record.scoring_context["reason"] == "intraday_entry_not_knowable"
+    assert pending_predictions("2026-08-28T00:00:00+00:00") == []
 
 
 @pytest.mark.unit
@@ -783,9 +782,9 @@ def test_unresolvable_oldest_rows_do_not_starve_later_due_rows(
     (good_record,) = outcomes_for_prediction(good_id)
     assert good_record.status == "complete"
 
-    # the second default batch: the completed row retired, the stuck head is
-    # skipped without conflict (idempotent replays, no immutable-rewrite hit)
+    # The next batch expires the gaps without immutable-rewrite conflicts.
     second = compute_outcomes("2026-09-10")
     assert second.considered == 200
     assert second.completed == 0
-    assert all(row.status == "pending" for row in second.details)
+    assert all(row.status == "incomplete" for row in second.details)
+    assert compute_outcomes("2026-09-11").considered == 0

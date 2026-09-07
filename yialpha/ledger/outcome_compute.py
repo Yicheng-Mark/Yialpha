@@ -1,121 +1,35 @@
-"""Forward outcome computation: due blind predictions -> realized net returns.
+"""Forward outcomes with versioned price/time contracts.
 
-:func:`compute_outcomes` walks the
-:func:`yialpha.ledger.outcomes.pending_predictions` worklist and appends one
-outcome row per due ``(prediction, horizon)`` carrying the full attribution
-decomposition the calibration scoreboard later joins on. Every vendor /
-mirror read goes through three module-level seams — imported HERE (not at
-their home modules) so tests monkeypatch this module's bindings:
+New predictions persist ``timing`` at tool acceptance. ``close_reference_v1``
+uses that immutable daily-close reference, with horizon end = formation +
+1/5/21 calendar days and exit = last daily close at/before the fixed end.
+UTC day D is conservatively closed at D+1 00:00 (equity dates also require a
+weekday). Exact endpoint history is required; no earlier substitute is used.
+Price and funding share ``(reference_price_at, exit_close]``. This daily
+reference-return benchmark does not model a fill at the intraday submission.
 
-* ``binance_klines_frame`` — perp daily last-price klines (venue
-  ``binance_perp``, ``price_type="last"``), the same frame the analysts read;
-* ``get_binance_funding_rate`` — the perp funding-rate history CSV (the
-  funding seam the perp bundle maps to);
-* ``get_YFin_history_cached`` — the equity history seam used for stock-perp
-  underlyings (the same one ``yialpha.accuracy`` prices equities on).
+Predictions without timing retain ``legacy_daily_v1`` semantics: date labels
+use the original daily approximation, while intraday entries whose bars close
+after analysis_as_of remain blocked by the knowability gate. They are never
+silently rebuilt with a different entry. Newly computed legacy rows disclose
+the old price window and version; already stored rows are not rewritten.
 
-Conventions pinned here (each is a measurable contract, not an implementation
-detail):
+Only in-memory pending results retry. Any persisted outcome is immutable and
+retires from the worklist, including old pending/incomplete rows. A fixed
+same-session equity window is terminal incomplete. Missing endpoint data can
+retry until horizon end + 7 calendar days, then becomes terminal incomplete.
+New attribution gaps use the same grace period; legacy missing attribution
+retains its original immediate-incomplete behavior. New price/funding vendor
+exceptions obey the same grace period; other errors remain isolated per-row
+failures. A completing page ends the batch and a page with
+no completions advances, so unavailable oldest rows cannot starve later rows.
 
-* **Price window.** Daily bars are labeled by their session date and a bar
-  labeled ``D`` counts as available from ``D 00:00 UTC`` (entry = last bar
-  at or before ``analysis_as_of``, the same baseline semantics as
-  ``yialpha.accuracy``). The exit must be the
-  horizon end's own CLOSED bar, never a last-available stand-in: a perp
-  trades 24/7 so the bar dated ``min(analysis_as_of + horizon_days,
-  now_as_of)`` itself is required (an earlier last bar is a history gap),
-  an equity horizon end relaxes to the last trading day at/before it (a
-  weekend horizon end resolves on Friday's bar), and a bar dated ``now`` is
-  still forming and never qualifies. The fetch window reaches
-  ``_LOOKBACK_BUFFER_DAYS`` before the analysis date so a weekend/holiday
-  analysis date still finds an entry bar.
-* **One window for every leg.** A daily bar labeled ``D`` is provably final
-  at ``D+1 00:00 UTC`` (the end of its labeled day) — that instant is the
-  bar's close moment, and every leg attributes the SAME holding window:
-  price measures ``entry_close -> exit_close``, funding integrates
-  ``(entry_close, exit_close]`` (never the nominal ``analysis_as_of`` /
-  ``horizon_end`` instants, which can sit a half-day off the bars both
-  legs are priced on), and ``outcome_available_at`` is the exact exit
-  close instant (ISO datetime), never a bare date.
-* **Intraday knowability gate.** The entry baseline above deems the
-  analysis-date bar knowable AT the analysis midnight — the convention
-  ``yialpha.accuracy`` shares. An intraday ``analysis_as_of`` sits between
-  daily grid points: when the selected entry bar is dated the as-of's own
-  day, its close is realized only at the NEXT midnight — after the
-  prediction was made — so the entry level was not knowable when the call
-  was made and daily precision cannot pin the exact as-of. Such samples
-  are written as an explicit un-scoreable ``incomplete`` row (never
-  ``complete`` on a daily-approximation disclosure); the aligned legs and
-  the direction-aware view stay in-memory disclosures on the detail. An
-  intraday as-of whose entry bar closes before the as-of (e.g. a weekend
-  as-of entering on Friday's bar) keeps every window knowable and scores
-  normally.
-* **Skip-vs-incomplete.** When the horizon-end endpoint bar is not closed
-  and visible yet — exit not strictly after the entry bar, the endpoint
-  bar still forming (dated ``now``), or absent from closed history (a perp
-  gap / an equity holiday: fail-closed, permanently pending) — nothing is
-  written: the prediction stays ``pending`` on the worklist and is retried
-  next batch, the detail's ``reason`` disclosing which case. When the
-  vendor frame cannot supply an ENTRY bar at all, the row is written
-  ``incomplete`` with leg ``"contract_price"`` — a visible, fail-closed
-  record that the analysis date itself is unpriceable.
-* **Funding sign (fixed long-pay benchmark).** ``funding_pnl =
-  -sum(funding_rate)`` over settlements in ``(entry_close, exit_close]``
-  for EVERY direction — the long pays positive funding. The
-  leg, and therefore ``net_return`` and the calibration label, is
-  direction-invariant: the same market path realizes the same label
-  whichever way the prediction pointed. The direction-aware strategy view
-  (``sign(direction) * (price_return + long funding pnl)`` minus ticket
-  costs — costs stay costs for every direction; ``flat`` is no position:
-  0) is disclosed ONLY in the
-  detail's ``reason`` string (``strategy_view_return=...``) — never in the
-  label or the append-only schema. A gap in the funding grid inside the
-  window (mode settlement cadence inferred from the fetched series, then
-  every expected slot verified present) fails the leg closed:
-  ``funding_pnl=None`` + ``legs_missing += "funding"``.
-* **legs_missing lists only legs that SHOULD exist.** Funding exists only
-  for CONTRACT-scope predictions on perp runs; the underlying leg exists
-  only for ``stock_perp`` runs. A leg that is structurally not applicable
-  (e.g. funding on an UNDERLYING-scope row) is stored ``None`` and is NOT a
-  missing leg.
-* **Net composition.** ``net_return = contract_price_return + funding_pnl -
-  fees - slippage`` where ``funding_pnl`` contributes only when it should
-  exist (UNDERLYING-scope rows omit it — the call was about the equity, not
-  the perp's carry). Status is ``complete`` exactly when all four
-  contributing legs are present; ``basis_return`` / ``underlying_return``
-  are diagnostic legs and their absence never blocks ``net_return``.
-* **Ticket costs.** Fees and slippage come from the run's ticket mirror
-  (latest ``tickets`` row for the run). When the payload carries the cost
-  model's decomposition (``entry_fee_bps`` / ``exit_fee_bps`` /
-  ``entry_slippage_bps`` / ``exit_slippage_bps``, flat or nested under
-  ``cost_detail`` / ``cost_estimate`` / ``cost``) the carry legs are excluded
-  — funding is measured from realized history, never double charged. When
-  the payload carries only the scalar ``estimated_cost`` total, the whole
-  total is booked under ``fees`` with ``slippage=0.0`` (``net_return`` is
-  invariant to the label split; the scalar may embed expected carry —
-  disclosed approximation). No usable ticket row → both ``None`` +
-  ``"ticket_cost"``.
-* **basis_return** is the same-window approximation
-  ``contract_price_return - underlying_return`` (a true basis decomposition
-  would need matched contract/underlying marks at both endpoints).
-* **Failure isolation.** Every per-prediction vendor/ledger error is caught:
-  the row counts ``failed`` in the report and the batch continues. Writes go
-  through :func:`yialpha.ledger.outcomes.write_outcome` (idempotent on
-  identical content; a conflicting rewrite of an existing outcome row raises
-  and surfaces as ``failed`` — outcomes are append-only facts).
-* **outcome_available_at** is the exit bar's close instant (ISO datetime,
-  ``D+1T00:00:00+00:00`` for the bar labeled ``D``) — the moment the bar
-  the exit leg used provably closed: the horizon end itself, or the Friday
-  bar a weekend equity horizon end resolves on.
-* **Batch walk (starvation guard).** :func:`compute_outcomes` walks the
-  due worklist in pages of ``limit`` rows (oldest first). Only a
-  ``complete`` outcome retires a prediction, so a page that completes
-  nothing (the oldest permanently endpoint-less rows) is skipped and the
-  walk advances one page — later due predictions are visited without the
-  operator widening ``limit``. The walk stops at the first completing
-  page, keeping steady-state batch cost at ``limit`` rows; a fully
-  unresolvable backlog degrades that one batch to a full worklist scan
-  (the worklist query itself already reads every due row).
+Funding remains the direction-invariant long-pay benchmark (-sum(rate));
+the existing direction-aware strategy view is a separate detail disclosure.
+Fees and slippage are charged once. New scoring requires their decomposition
+and excludes expected carry; legacy scalar-cost fallback is preserved only
+under its explicit legacy version. Diagnostic underlying/basis gaps never
+block an otherwise fully attributed contract label. See docs/P0_TIME_CONTRACT.md.
 """
 
 from __future__ import annotations
@@ -123,9 +37,10 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -141,12 +56,17 @@ from yialpha.ledger.models import (
 )
 from yialpha.ledger.outcomes import pending_predictions, write_outcome
 from yialpha.ledger.sqlite import get_connection
+from yialpha.versions import LEGACY_OUTCOME_VERSION, OUTCOME_COMPUTE_VERSION
 
 logger = logging.getLogger(__name__)
 
 #: Days fetched before the analysis date so a weekend/holiday analysis date
 #: still finds an entry bar ("last close at/before analysis_as_of").
 _LOOKBACK_BUFFER_DAYS = 10
+
+# Missing endpoint/funding/cost data may arrive late. No immutable outcome is
+# written during this grace period; at the fixed deadline the gap is terminal.
+_RETRY_GRACE_DAYS = 7
 
 #: Registry instrument classes that denote a perpetual contract (anything
 #: else — plain equities — prices on the equity seam).
@@ -182,11 +102,11 @@ class OutcomeComputeDetail:
     marks a skipped row (horizon end not yet bar-visible — nothing written,
     the prediction stays on the worklist); ``"skipped"`` marks a row this
     writer deliberately does not score (MACRO scope); ``"failed"`` marks an
-    isolated per-row error (``error`` carries the message). ``reason`` is an
-    in-memory disclosure that deliberately never touches the append-only
-    outcome schema: why a pending row is not complete yet (e.g.
-    ``horizon_end_bar_not_closed``) and the direction-aware
-    ``strategy_view_return=...`` on scored rows.
+    isolated per-row error (``error`` carries the message). ``reason``
+    discloses why a pending row is not complete yet and the direction-aware
+    ``strategy_view_return=...`` on scored rows. New writes also persist
+    diagnostic reasons and window provenance in ``scoring_context``; a
+    blocked legacy gate may retain a composed view only on this detail.
     """
 
     prediction_id: str
@@ -220,17 +140,33 @@ class OutcomeComputeReport:
 # --------------------------------------------------------------------------- #
 # Vendor seam adapters (tests monkeypatch the module-level bindings above)
 # --------------------------------------------------------------------------- #
-def _dated_close_series(frame: pd.DataFrame) -> pd.Series:
-    """Normalize a vendor OHLCV frame to a date-indexed close series."""
+class _ConflictingDailyClose(ValueError):
+    """A required daily close has contradictory vendor observations."""
+
+
+def _dated_close_series(
+    frame: pd.DataFrame, *, exact_dates: set[date] | None = None,
+) -> pd.Series:
+    """Normalize closes, refusing conflicting observations on required dates.
+
+    New scoring supplies its fixed boundaries. Identical duplicates are one
+    observation; conflicts outside those boundaries do not block the window.
+    Legacy callers retain their original normalization when dates are absent.
+    """
     if frame is None or frame.empty:
         return pd.Series(dtype=float)
     series = frame["Close"].astype(float)
     series.index = pd.to_datetime(series.index).date
+    for day in sorted(exact_dates or ()):
+        observations = series[series.index == day]
+        if observations.nunique(dropna=False) > 1:
+            raise _ConflictingDailyClose(day.isoformat())
     return series[~series.index.duplicated(keep="last")].sort_index()
 
 
 def _perp_close_series(
-    symbol: str, start_date: str, end_date: str, now_as_of: str
+    symbol: str, start_date: str, end_date: str, now_as_of: str,
+    *, exact_dates: set[date] | None = None,
 ) -> pd.Series:
     """Perp daily last-price closes (the contract series).
 
@@ -244,16 +180,19 @@ def _perp_close_series(
         price_type="last",
         closed_as_of=int(timestamp_as_utc(now_as_of).timestamp() * 1000),
     )
-    return _dated_close_series(frame)
+    return _dated_close_series(frame, exact_dates=exact_dates)
 
 
-def _equity_close_series(symbol: str, start_date: str, end_date: str) -> pd.Series:
+def _equity_close_series(
+    symbol: str, start_date: str, end_date: str,
+    *, exact_dates: set[date] | None = None,
+) -> pd.Series:
     """Equity daily closes; +1 day on the end because the seam's end is EXCLUSIVE."""
     end_exclusive = (
         datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
     ).strftime("%Y-%m-%d")
     frame = get_YFin_history_cached(symbol, start_date, end_exclusive)
-    return _dated_close_series(frame)
+    return _dated_close_series(frame, exact_dates=exact_dates)
 
 
 def _underlying_equity_symbol(instrument_id: str) -> str:
@@ -304,7 +243,7 @@ def _last_trading_day_at_or_before(day: date) -> date:
 
     Pure weekday arithmetic, deliberately no holiday calendar: a holiday gap
     inside the week surfaces as a missing expected endpoint and the row
-    stays pending (fail-closed).
+    retries until the fixed grace deadline, then becomes incomplete.
     """
     while day.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
         day -= timedelta(days=1)
@@ -379,7 +318,17 @@ def _funding_window_sum(
         window_start_dt.date().isoformat(),
         window_end_dt.date().isoformat(),
     )
-    settlements = _parse_funding_csv(csv_text)
+    # A duplicate vendor row is not another settlement. Conflicting rates at
+    # one instant are ambiguous and fail closed; data past the fixed endpoint
+    # cannot change cadence or any attribution inside this window.
+    unique: dict[datetime, float] = {}
+    for moment, rate in _parse_funding_csv(csv_text):
+        if moment > window_end_dt:
+            continue
+        if not math.isfinite(rate) or (moment in unique and unique[moment] != rate):
+            return None, None
+        unique[moment] = rate
+    settlements = sorted(unique.items())
     if not settlements:
         return None, None
     in_window = [
@@ -397,6 +346,10 @@ def _funding_window_sum(
     present = {moment for moment, _ in settlements}
     step = timedelta(hours=cadence)
     expected = settlements[0][0]
+    # Extend the observed grid backwards to the start as well. Starting at
+    # the first returned settlement alone would conceal a leading gap.
+    while expected > window_start_dt:
+        expected -= step
     while expected <= window_end_dt:
         if expected > window_start_dt and expected not in present:
             return None, None
@@ -447,7 +400,9 @@ def _cost_split_from_mapping(source: dict[str, Any]) -> tuple[float, float] | No
     return fees, slippage
 
 
-def _ticket_cost_legs(run_id: str) -> tuple[str | None, float | None, float | None]:
+def _ticket_cost_legs(
+    run_id: str, *, require_decomposition: bool = False,
+) -> tuple[str | None, float | None, float | None]:
     """Latest ticket mirror for the run -> (ticket_id, fees, slippage).
 
     Carries legs are never booked here (funding is measured from realized
@@ -481,8 +436,12 @@ def _ticket_cost_legs(run_id: str) -> tuple[str | None, float | None, float | No
     ]
     for source in sources:
         split = _cost_split_from_mapping(source)
-        if split is not None:
+        if split is not None and all(math.isfinite(v) and v >= 0 for v in split):
             return ticket_id, split[0], split[1]
+    if require_decomposition:
+        # The scalar total can contain expected funding for another horizon.
+        # New outcomes cannot charge it alongside realized holding-window carry.
+        return ticket_id, None, None
     total = payload.get("estimated_cost")
     if isinstance(total, (int, float)) and not isinstance(total, bool):
         return ticket_id, float(total), 0.0
@@ -513,8 +472,209 @@ def _strategy_view_reason(
     return f"strategy_view_return={view:+.6f}"
 
 
+def _compute_reference_outcome(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
+    """Score a frozen reference using only the contract persisted at submission.
+
+    Calendar horizons start at formation. Both price boundaries are daily
+    closes, at/before formation and horizon end respectively. This is an
+    explicitly dated reference-return benchmark, not an intraday fill model.
+    """
+    from yialpha.ledger.time_contract import validate_timing
+
+    prediction_id, run_id = str(item["prediction_id"]), str(item["run_id"])
+    horizon = int(item["horizon_days"])
+    scope, symbol = str(item["prediction_scope"]), str(item["instrument_id"])
+    now_dt = timestamp_as_utc(now_as_of)
+    context: dict[str, Any] = {"version": OUTCOME_COMPUTE_VERSION}
+
+    def result(
+        status: Literal["pending", "complete", "incomplete"], reason: str,
+        missing: tuple[str, ...] = (), **legs: Any,
+    ) -> OutcomeComputeDetail:
+        context["reason"] = reason
+        outcome_id = None
+        if status in {"complete", "incomplete"}:
+            outcome_id = write_outcome(
+                prediction_id, run_id, horizon, status=status,
+                legs_missing=missing or None, regime_id=item.get("regime_id"),
+                scoring_context=context, **legs,
+            )
+        return OutcomeComputeDetail(
+            prediction_id, run_id, horizon, status, legs_missing=missing,
+            net_return=legs.get("net_return"), outcome_id=outcome_id, reason=reason,
+        )
+
+    try:
+        if item.get("timing_error"):
+            raise ValueError(str(item["timing_error"]))
+        timing = validate_timing(item["timing"])
+        if timing is None:
+            raise ValueError("missing prediction timing")
+    except (ValueError, TypeError, KeyError) as exc:
+        return result("incomplete", f"invalid_prediction_timing: {exc}", (LEG_CONTRACT_PRICE,))
+
+    formed = timestamp_as_utc(timing["prediction_formed_at"])
+    horizon_end = formed + timedelta(days=horizon)
+    context.update(
+        prediction_formed_at=formed.isoformat(), horizon_end=horizon_end.isoformat(),
+        reference_source=timing.get("reference_source"),
+        reference_price=timing.get("reference_price"),
+        reference_available_at=timing.get("reference_available_at"),
+        reference_observed_at=timing.get("reference_observed_at"),
+        retry_deadline=(horizon_end + timedelta(days=_RETRY_GRACE_DAYS)).isoformat(),
+    )
+    if now_dt < horizon_end:
+        return result("pending", "horizon_not_elapsed")
+
+    def unavailable(reason: str, missing: tuple[str, ...], **legs: Any):
+        terminal = now_dt >= horizon_end + timedelta(days=_RETRY_GRACE_DAYS)
+        return result("incomplete" if terminal else "pending", reason, missing, **legs)
+
+    if scope == SCOPE_MACRO:
+        return result("incomplete", "scope_not_price_scoreable")
+    if scope == SCOPE_POSITIONING:
+        # Preserve the existing cumulative-funding label and its sign.
+        context.update(window_start=formed.isoformat(), window_end=horizon_end.isoformat())
+        try:
+            total, _ = _funding_window_sum(symbol, formed, horizon_end)
+        except Exception as exc:  # vendor read only; immutable writes stay outside
+            return unavailable(f"funding_fetch_failed:{type(exc).__name__}", (LEG_FUNDING_WINDOW,))
+        if total is None or not math.isfinite(total):
+            return unavailable("funding_window_missing", (LEG_FUNDING_WINDOW,))
+        return result(
+            "complete", "funding_window_complete", funding_pnl=total, net_return=total,
+            outcome_available_at=horizon_end.isoformat(),
+        )
+
+    is_perp = (
+        item["instrument_class"] in _PERP_INSTRUMENT_CLASSES
+        or item.get("asset_type") == "crypto_perp"
+    )
+    stock_perp = item["instrument_class"] == "stock_perp"
+    equity = (scope == SCOPE_UNDERLYING and stock_perp) or not is_perp
+    expected_source = "yfinance:1d:close" if equity else "binance_perp:1d:last"
+    if timing.get("reference_error") or timing.get("reference_price") is None:
+        return result(
+            "incomplete", "reference_unavailable_at_prediction: "
+            + str(timing.get("reference_error") or "missing_price"), (LEG_CONTRACT_PRICE,),
+        )
+    if timing.get("reference_source") != expected_source:
+        return result("incomplete", "reference_source_mismatch", (LEG_CONTRACT_PRICE,))
+
+    entry_dt = timestamp_as_utc(timing["reference_price_at"])
+    expected_entry_day = formed.date() - timedelta(days=1)
+    endpoint_day = horizon_end.date() - timedelta(days=1)
+    if equity:
+        expected_entry_day = _last_trading_day_at_or_before(expected_entry_day)
+        endpoint_day = _last_trading_day_at_or_before(endpoint_day)
+    if entry_dt != _bar_close_moment(expected_entry_day.isoformat()):
+        return result("incomplete", "reference_not_latest_closed_daily_bar", (LEG_CONTRACT_PRICE,))
+    exit_dt = _bar_close_moment(endpoint_day.isoformat())
+    context.update(
+        window_start=entry_dt.isoformat(), window_end=exit_dt.isoformat(),
+        endpoint_source=expected_source, endpoint_precision="daily_close_utc",
+    )
+    if exit_dt <= entry_dt:
+        return result("incomplete", "no_new_trading_session", (LEG_CONTRACT_PRICE,))
+    if exit_dt > now_dt or exit_dt > horizon_end:
+        return result("pending", "horizon_end_bar_not_closed", (LEG_CONTRACT_PRICE,))
+
+    start_date = (entry_dt.date() - timedelta(days=_LOOKBACK_BUFFER_DAYS)).isoformat()
+    end_date = endpoint_day.isoformat()
+    price_symbol = _underlying_equity_symbol(symbol) if equity and stock_perp else symbol
+    exact_dates = {expected_entry_day, endpoint_day} if equity else {endpoint_day}
+    try:
+        series = (
+            _equity_close_series(price_symbol, start_date, end_date, exact_dates=exact_dates)
+            if equity else _perp_close_series(
+                symbol, start_date, end_date, now_as_of, exact_dates=exact_dates,
+            )
+        )
+    except _ConflictingDailyClose as exc:
+        return unavailable(f"price_bar_conflict:{exc}", (LEG_CONTRACT_PRICE,))
+    except Exception as exc:  # only source acquisition participates in grace
+        return unavailable(f"price_fetch_failed:{type(exc).__name__}", (LEG_CONTRACT_PRICE,))
+    exit_bar = _last_close_at_or_before(series, end_date)
+    if exit_bar is None or exit_bar.bar_date != end_date:
+        return unavailable("horizon_end_bar_missing", (LEG_CONTRACT_PRICE,))
+    if not math.isfinite(exit_bar.close) or exit_bar.close <= 0:
+        return unavailable("horizon_end_price_invalid", (LEG_CONTRACT_PRICE,))
+    if equity:
+        # Yahoo's adjusted Close can revise old prices after corporate
+        # actions. Use the historical reference only to verify a common
+        # price basis; never substitute it for the immutable entry value.
+        entry_day = (entry_dt.date() - timedelta(days=1)).isoformat()
+        current_reference = _last_close_at_or_before(series, entry_day)
+        if (
+            current_reference is None or current_reference.bar_date != entry_day
+            or not math.isfinite(current_reference.close) or current_reference.close <= 0
+        ):
+            return unavailable("equity_reference_basis_unverifiable", (LEG_CONTRACT_PRICE,))
+        if not math.isclose(
+            current_reference.close, float(timing["reference_price"]),
+            rel_tol=1e-9, abs_tol=1e-12,
+        ):
+            return result("incomplete", "equity_reference_basis_changed", (LEG_CONTRACT_PRICE,))
+        context["reference_basis_check"] = "matched_frozen_close"
+    # Every return uses the frozen reference, including after this basis check.
+    price_return = exit_bar.close / float(timing["reference_price"]) - 1.0
+    missing: set[str] = set()
+    underlying_return = None
+    if stock_perp:
+        if equity:
+            underlying_return = price_return
+        else:
+            # Diagnostic only; unmatched closes cannot manufacture a basis.
+            try:
+                underlying = _equity_close_series(
+                    _underlying_equity_symbol(symbol), start_date, end_date,
+                    exact_dates={entry_dt.date() - timedelta(days=1), endpoint_day},
+                )
+                entry_day = (entry_dt.date() - timedelta(days=1)).isoformat()
+                u_entry = _last_close_at_or_before(underlying, entry_day)
+                u_exit = _last_close_at_or_before(underlying, end_date)
+                if (
+                    u_entry is not None and u_exit is not None
+                    and u_entry.bar_date == entry_day and u_exit.bar_date == end_date
+                    and all(math.isfinite(v) and v > 0 for v in (u_entry.close, u_exit.close))
+                ):
+                    underlying_return = u_exit.close / u_entry.close - 1.0
+            except Exception:  # optional diagnostic must not block contract pricing
+                logger.debug("underlying diagnostic unavailable for %s", symbol, exc_info=True)
+        if underlying_return is None:
+            missing.add(LEG_UNDERLYING)
+    funding = None
+    funding_required = scope == SCOPE_CONTRACT and is_perp
+    if funding_required:
+        try:
+            funding, gap = _funding_pnl_leg(symbol, entry_dt, exit_dt)
+        except Exception as exc:
+            context["funding_error"] = f"funding_fetch_failed:{type(exc).__name__}"
+            funding, gap = None, True
+        if gap or funding is None or not math.isfinite(funding):
+            funding = None
+            missing.add(LEG_FUNDING)
+    ticket_id, fees, slippage = _ticket_cost_legs(run_id, require_decomposition=True)
+    if fees is None or slippage is None:
+        missing.add(LEG_TICKET_COST)
+    legs = {
+        "contract_price_return": price_return, "underlying_return": underlying_return,
+        "basis_return": price_return - underlying_return if underlying_return is not None else None,
+        "funding_pnl": funding, "fees": fees, "slippage": slippage, "ticket_id": ticket_id,
+        "outcome_available_at": exit_dt.isoformat(),
+    }
+    if missing - {LEG_UNDERLYING}:
+        return unavailable("attribution_legs_missing", tuple(sorted(missing)), **legs)
+    assert fees is not None and slippage is not None
+    net = price_return + (funding or 0.0) - fees - slippage
+    reason = _strategy_view_reason(str(item["direction"]), price_return, funding or 0.0, fees, slippage)
+    return result("complete", reason, tuple(sorted(missing)), net_return=net, **legs)
+
+
 def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
     """Resolve one pending prediction into a written (or skipped) outcome."""
+    if item.get("timing") is not None or item.get("timing_error"):
+        return _compute_reference_outcome(item, now_as_of)
     prediction_id = str(item["prediction_id"])
     run_id = str(item["run_id"])
     horizon = int(item["horizon_days"])
@@ -524,6 +684,31 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
     instrument_id = str(item["instrument_id"])
     instrument_class = item["instrument_class"]
     asset_type = str(item["asset_type"] or "")
+    legacy_context: dict[str, Any] = {
+        "version": LEGACY_OUTCOME_VERSION,
+        "reference_source": "legacy_daily_history_reconstruction",
+        "horizon_end": (
+            timestamp_as_utc(analysis_as_of) + timedelta(days=horizon)
+        ).isoformat(),
+        "reason": "legacy_daily_convention",
+    }
+
+    def write_legacy(*args: Any, **kwargs: Any) -> str:
+        return write_outcome(*args, scoring_context=legacy_context, **kwargs)
+
+    def missing_endpoint(reason: str) -> OutcomeComputeDetail:
+        deadline = timestamp_as_utc(legacy_context["horizon_end"]) + timedelta(
+            days=_RETRY_GRACE_DAYS,
+        )
+        if timestamp_as_utc(now_as_of) < deadline:
+            return detail("pending", legs_missing=(LEG_CONTRACT_PRICE,), reason=reason)
+        legacy_context.update(reason=reason, retry_deadline=deadline.isoformat())
+        outcome_id = write_legacy(
+            prediction_id, run_id, horizon, status="incomplete",
+            legs_missing=[LEG_CONTRACT_PRICE], regime_id=item.get("regime_id"),
+        )
+        return detail("incomplete", legs_missing=(LEG_CONTRACT_PRICE,),
+                      outcome_id=outcome_id, reason=reason)
 
     def detail(
         status: str,
@@ -565,7 +750,8 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
             instrument_id, position_analysis_dt, position_horizon_end_dt
         )
         if total is None:
-            outcome_id = write_outcome(
+            legacy_context["reason"] = "funding_window_missing"
+            outcome_id = write_legacy(
                 prediction_id,
                 run_id,
                 horizon,
@@ -576,7 +762,12 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
             return detail(
                 "incomplete", legs_missing=(LEG_FUNDING_WINDOW,), outcome_id=outcome_id
             )
-        outcome_id = write_outcome(
+        legacy_context.update(
+            window_start=position_analysis_dt.isoformat(),
+            window_end=position_horizon_end_dt.isoformat(),
+            reason="funding_window_complete",
+        )
+        outcome_id = write_legacy(
             prediction_id,
             run_id,
             horizon,
@@ -624,10 +815,15 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
         series = _equity_close_series(instrument_id, start_date, end_date)
 
     entry = _last_close_at_or_before(series, analysis_dt.date().isoformat())
-    if entry is None:
+    if entry is None or (
+        not prices_on_equity_seam and entry.bar_date != analysis_dt.date().isoformat()
+    ):
         # The analysis date itself is unpriceable (vendor window does not
-        # reach back): visible fail-closed record, prediction stays due.
-        outcome_id = write_outcome(
+        # reach back): visible fail-closed terminal record.
+        legacy_context["reason"] = (
+            "legacy_entry_unavailable" if entry is None else "legacy_entry_bar_missing"
+        )
+        outcome_id = write_legacy(
             prediction_id, run_id, horizon, status="incomplete",
             legs_missing=[LEG_CONTRACT_PRICE], regime_id=item.get("regime_id"),
         )
@@ -651,9 +847,22 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
     else:
         exit_bar = _last_close_at_or_before(series, end_date)
         expected_endpoint = horizon_end_dt.date()
+    if prices_on_equity_seam and expected_endpoint.isoformat() <= entry.bar_date:
+        # A fixed Sunday end resolving to the same Friday cannot acquire a
+        # new session by waiting until Monday. Preserve the original horizon.
+        legacy_context.update(
+            reason="no_new_trading_session",
+            window_start=_bar_close_moment(entry.bar_date).isoformat(),
+            window_end=_bar_close_moment(expected_endpoint.isoformat()).isoformat(),
+        )
+        outcome_id = write_legacy(
+            prediction_id, run_id, horizon, status="incomplete",
+            legs_missing=[LEG_CONTRACT_PRICE], regime_id=item.get("regime_id"),
+        )
+        return detail("incomplete", legs_missing=(LEG_CONTRACT_PRICE,),
+                      outcome_id=outcome_id, reason="no_new_trading_session")
     if exit_bar is None or exit_bar.bar_date <= entry.bar_date:
-        # Horizon end not yet bar-visible: nothing written, stays pending.
-        return detail("pending", legs_missing=(LEG_CONTRACT_PRICE,))
+        return missing_endpoint("horizon_end_bar_missing")
     if prices_on_equity_seam:
         endpoint_complete = exit_bar.bar_date >= expected_endpoint.isoformat()
     else:
@@ -662,17 +871,13 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
             and exit_bar.bar_date < now_date.isoformat()
         )
     if not endpoint_complete:
-        return detail(
-            "pending",
-            legs_missing=(LEG_CONTRACT_PRICE,),
-            reason=(
+        return missing_endpoint(
                 # endpoint session is today: the bar is still forming;
                 # otherwise its session already passed without printing a
                 # bar (perp history gap / equity holiday) — fail-closed
                 "horizon_end_bar_not_closed"
                 if expected_endpoint >= now_date
                 else "horizon_end_bar_missing"
-            ),
         )
     contract_price_return = exit_bar.close / entry.close - 1.0
     # The one holding window every leg attributes: the entry/exit bars' close
@@ -682,6 +887,12 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
     # different window than the others.
     entry_close_dt = _bar_close_moment(entry.bar_date)
     exit_close_dt = _bar_close_moment(exit_bar.bar_date)
+    legacy_context.update(
+        window_start=entry_close_dt.isoformat(), window_end=exit_close_dt.isoformat(),
+        reference_price=entry.close,
+        reference_source="legacy_yfinance_daily" if prices_on_equity_seam else "legacy_binance_daily",
+        entry_precision="date_label" if analysis_date_only else "intraday",
+    )
 
     # --- underlying diagnostic leg (stock perps only) ------------------------
     underlying_return: float | None = None
@@ -761,7 +972,8 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
         # un-scoreable row (never ``complete`` on a daily-approximation
         # disclosure); the aligned legs and the composed view stay in-memory
         # disclosures on the detail.
-        gate_outcome_id = write_outcome(
+        legacy_context["reason"] = "intraday_entry_not_knowable"
+        gate_outcome_id = write_legacy(
             prediction_id,
             run_id,
             horizon,
@@ -786,7 +998,8 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
             reason=reason,
         )
 
-    outcome_id = write_outcome(
+    legacy_context["reason"] = reason or "attribution_legs_missing"
+    outcome_id = write_legacy(
         prediction_id,
         run_id,
         horizon,
@@ -821,8 +1034,8 @@ def compute_outcomes(now_as_of: str, *, limit: int = 200) -> OutcomeComputeRepor
     Walks :func:`yialpha.ledger.outcomes.pending_predictions` in pages of
     ``limit`` rows (oldest first), resolves each one through the module
     seams, and appends the outcome row via the idempotent
-    :func:`yialpha.ledger.outcomes.write_outcome`. Only a ``complete``
-    outcome retires a prediction from the worklist, so a page that completes
+    :func:`yialpha.ledger.outcomes.write_outcome`. Any written outcome retires
+    its prediction, while in-memory pending results retry. A page that completes
     nothing — e.g. the oldest permanently endpoint-less rows — is skipped
     and the walk advances one page: later due predictions are visited
     without the operator widening ``limit``. The walk stops at the first

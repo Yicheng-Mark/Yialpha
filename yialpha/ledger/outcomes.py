@@ -17,11 +17,12 @@ Immutability follows the ledger-wide contract — the table's
   append-only facts, not fields to be tuned.
 
 ``legs_missing`` is stored as a sorted JSON array (the same canonical form
-as prediction ``evidence_ids``); ``None``/empty is stored as NULL. A row
-with ``status='pending'`` (horizon not fully resolvable yet) or
-``'incomplete'`` (data legs missing) deliberately stays on the
-:func:`pending_predictions` worklist — only ``'complete'`` retires a
-prediction from it.
+as prediction ``evidence_ids``); ``None``/empty is stored as NULL. Every
+persisted outcome retires its prediction from automatic processing: even
+historical ``pending``/``incomplete`` rows are immutable. Retryable data
+availability is an in-memory scorer result, never an outcome rewrite.
+``scoring_context`` identifies the version, reference source and exact
+holding window; NULL denotes the historical daily-close convention.
 
 Date-vs-datetime normalization: see
 :func:`yialpha.ledger.models.timestamp_as_utc` — a pure date counts as
@@ -30,8 +31,9 @@ midnight UTC.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from yialpha.ledger.models import (
@@ -48,6 +50,7 @@ from yialpha.ledger.sqlite import (
     ledger_transaction,
     utc_now_iso,
 )
+from yialpha.versions import OUTCOME_COMPUTE_VERSION
 
 #: Every admissible outcome ``status`` (checked at runtime despite the
 #: Literal signature — the ledger must never carry a typo'd status).
@@ -74,6 +77,7 @@ _OUTCOME_COLUMNS = (
     "outcome_available_at",
     "computed_at",
     "regime_id",
+    "scoring_context",
 )
 
 
@@ -95,6 +99,7 @@ def write_outcome(
     outcome_available_at: str | None = None,
     ticket_id: str | None = None,
     regime_id: str | None = None,
+    scoring_context: dict[str, Any] | None = None,
 ) -> str:
     """Append one outcome row; returns the deterministic ``outcome_id``.
 
@@ -109,6 +114,8 @@ def write_outcome(
     if status not in OUTCOME_STATUSES:
         raise ValueError(f"status {status!r} not in {sorted(OUTCOME_STATUSES)}")
     horizon = validate_horizon_days(horizon_days)
+    if scoring_context is not None and not isinstance(scoring_context, dict):
+        raise ValueError("scoring_context must be an object or None")
     outcome_id = new_outcome_id(prediction_id, horizon)
     values: dict[str, Any] = {
         "outcome_id": outcome_id,
@@ -129,13 +136,17 @@ def write_outcome(
         "outcome_available_at": outcome_available_at,
         "computed_at": utc_now_iso(),
         "regime_id": regime_id,
+        "scoring_context": (
+            json.dumps(scoring_context, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            if scoring_context is not None else None
+        ),
     }
     with ledger_transaction() as cur:
         existing = cur.execute(
             "SELECT outcome_id, prediction_id, run_id, ticket_id, horizon_days, "
             "status, contract_price_return, underlying_return, basis_return, "
             "funding_pnl, fees, slippage, liquidation_loss, net_return, "
-            "legs_missing, outcome_available_at, computed_at, regime_id "
+            "legs_missing, outcome_available_at, computed_at, regime_id, scoring_context "
             "FROM outcomes WHERE outcome_id = ?",
             (outcome_id,),
         ).fetchone()
@@ -155,8 +166,8 @@ def write_outcome(
             "(outcome_id, prediction_id, run_id, ticket_id, horizon_days, status, "
             "contract_price_return, underlying_return, basis_return, funding_pnl, "
             "fees, slippage, liquidation_loss, net_return, legs_missing, "
-            "outcome_available_at, computed_at, regime_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "outcome_available_at, computed_at, regime_id, scoring_context) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             tuple(values[column] for column in _OUTCOME_COLUMNS),
         )
     return outcome_id
@@ -166,18 +177,18 @@ def pending_predictions(now_as_of: str) -> list[dict[str, Any]]:
     """Due-and-unscored predictions: the outcome writer's worklist.
 
     A prediction is pending when its horizon has elapsed —
-    ``timestamp_as_utc(analysis_as_of) + horizon_days`` calendar days
+    ``prediction_formed_at + horizon_days`` calendar days (legacy rows use
+    ``timestamp_as_utc(analysis_as_of)``)
     ``<= timestamp_as_utc(now_as_of)`` (date-only strings are midnight UTC) —
-    AND no outcome row with ``status='complete'`` exists for that
-    ``(prediction_id, horizon_days)``; a ``pending``/``incomplete`` outcome
-    keeps the prediction on the list for retry.
+    AND no outcome row exists for that ``(prediction_id, horizon_days)``.
+    Old pending/incomplete rows remain unchanged and are never retried.
 
     Date-only note: a date-only ``analysis_as_of`` therefore falls due at the
     START of the day ``horizon_days`` after it, which can nominate a
     candidate up to one session before the horizon close provably exists.
     That is safe because this list only nominates candidates — the outcome
-    writer verifies the endpoint data and records ``'pending'`` /
-    ``'incomplete'`` when it is not there yet. Calendar-day arithmetic on
+    writer verifies endpoint data and returns an in-memory ``pending`` when
+    temporarily unavailable. Calendar-day arithmetic on
     midnight-normalized timestamps is the documented approximation of the
     ladder's session-calendar days.
 
@@ -189,29 +200,52 @@ def pending_predictions(now_as_of: str) -> list[dict[str, Any]]:
     if not ledger_exists():
         return []
     now_dt = timestamp_as_utc(now_as_of)
+    connection = get_connection(readonly=True)
+    prediction_columns = {row["name"] for row in connection.execute("PRAGMA table_info(predictions)")}
+    timing_projection = "p.timing" if "timing" in prediction_columns else "NULL AS timing"
     rows = (
-        get_connection(readonly=True)
+        connection
         .execute(
             "SELECT p.prediction_id, p.run_id, p.analyst, p.instrument_id, "
             "p.prediction_scope, p.horizon_days, p.direction, p.prob_up, "
             "p.expected_return, p.target_price, p.target_currency, "
             "p.analysis_as_of, p.original_prediction_id, p.debate_revision, "
-            "p.regime_id, "
+            f"p.regime_id, {timing_projection}, "
             "r.ticker, r.asset_type, r.instrument_class "
             "FROM predictions p JOIN runs r ON r.run_id = p.run_id "
             "WHERE NOT EXISTS (SELECT 1 FROM outcomes o "
             "WHERE o.prediction_id = p.prediction_id "
-            "AND o.horizon_days = p.horizon_days AND o.status = 'complete') "
+            "AND o.horizon_days = p.horizon_days) "
             "ORDER BY p.analysis_as_of, p.prediction_id"
         )
         .fetchall()
     )
     pending: list[dict[str, Any]] = []
     for row in rows:
-        due_at = timestamp_as_utc(str(row["analysis_as_of"])) + timedelta(
-            days=int(row["horizon_days"])
-        )
-        if due_at > now_dt:
+        timing: dict[str, Any] | None = None
+        timing_error = None
+        due_at = None
+        if row["timing"] is not None:
+            try:
+                timing = json.loads(row["timing"])
+                if not isinstance(timing, dict):
+                    raise ValueError("timing must be a JSON object")
+                if timing.get("version") != OUTCOME_COMPUTE_VERSION:
+                    raise ValueError("unsupported prediction timing version")
+                formed = datetime.fromisoformat(timing["prediction_formed_at"])
+                if formed.tzinfo is None or formed.utcoffset() is None:
+                    raise ValueError("prediction_formed_at must be timezone-aware")
+                due_at = formed + timedelta(days=int(row["horizon_days"]))
+            except (ValueError, TypeError, KeyError) as exc:
+                # Nominate the invalid row for a terminal scorer diagnosis;
+                # never silently fall back to the legacy timestamp/window.
+                timing = timing if isinstance(timing, dict) else {}
+                timing_error = str(exc)
+        else:
+            due_at = timestamp_as_utc(str(row["analysis_as_of"])) + timedelta(
+                days=int(row["horizon_days"])
+            )
+        if due_at is not None and due_at > now_dt:
             continue
         pending.append(
             {
@@ -233,6 +267,8 @@ def pending_predictions(now_as_of: str) -> list[dict[str, Any]]:
                 "ticker": row["ticker"],
                 "asset_type": row["asset_type"],
                 "instrument_class": row["instrument_class"],
+                "timing": timing,
+                "timing_error": timing_error,
             }
         )
     return pending
@@ -245,10 +281,7 @@ def outcomes_for_prediction(prediction_id: str) -> list[OutcomeRecord]:
     rows = (
         get_connection(readonly=True)
         .execute(
-            "SELECT outcome_id, prediction_id, run_id, ticket_id, horizon_days, "
-            "status, contract_price_return, underlying_return, basis_return, "
-            "funding_pnl, fees, slippage, liquidation_loss, net_return, "
-            "legs_missing, outcome_available_at, computed_at, regime_id "
+            "SELECT * "
             "FROM outcomes WHERE prediction_id = ? ORDER BY horizon_days",
             (prediction_id,),
         )
@@ -264,10 +297,7 @@ def all_outcomes(limit: int = 500) -> list[OutcomeRecord]:
     rows = (
         get_connection(readonly=True)
         .execute(
-            "SELECT outcome_id, prediction_id, run_id, ticket_id, horizon_days, "
-            "status, contract_price_return, underlying_return, basis_return, "
-            "funding_pnl, fees, slippage, liquidation_loss, net_return, "
-            "legs_missing, outcome_available_at, computed_at, regime_id "
+            "SELECT * "
             "FROM outcomes ORDER BY computed_at DESC, outcome_id DESC LIMIT ?",
             (limit,),
         )
