@@ -164,6 +164,18 @@ def _denied(operation, *args, **kwargs):
         operation(*args, **kwargs)
 
 
+def _denied_spawn():
+    """The guard denies spawning external programs on any platform."""
+    spawn = getattr(os, "startfile", None) or getattr(os, "posix_spawn", None)
+    if spawn is None:  # pragma: no cover - main platforms always provide one
+        pytest.skip("no platform spawn entry point to deny")
+    with pytest.raises(GuardError):
+        if spawn is os.startfile:  # Windows
+            os.startfile(".")
+        else:  # POSIX
+            os.posix_spawn(sys.executable, [sys.executable], os.environ)
+
+
 def test_runtime_blocks_external_io_before_files_exist(tmp_path):
     root = tmp_path / "cohort"
     root.mkdir()
@@ -173,7 +185,7 @@ def test_runtime_blocks_external_io_before_files_exist(tmp_path):
         _denied_guard(sqlite3.connect, outside)
         _denied_guard(sqlite3.connect, f"file:{outside}?mode=ro", uri=True)
         _denied_guard((tmp_path / "new-directory").mkdir)
-        _denied_guard(os.startfile, str(root))
+        _denied_spawn()
         _denied((root / ".env.local").read_bytes)
         _denied((root / ".env.enterprise").write_bytes, b"bad")
     assert not outside.exists()
@@ -238,3 +250,17 @@ def test_existing_supplier_cache_is_rejected_without_io(tmp_path):
             isolated_runtime(root, "attempt"):
         pytest.fail("reused cache accepted")
     assert not (root / "ledger").exists()
+
+
+@pytest.mark.parametrize("platform,uri,expected", [
+    ("nt", "///C:/cohort/ledger/db.sqlite", "C:/cohort/ledger/db.sqlite"),
+    ("nt", "//C:/cohort/db.sqlite", "C:/cohort/db.sqlite"),
+    ("nt", "//server/share/db.sqlite", "//server/share/db.sqlite"),
+    ("posix", "///tmp/cohort/ledger/db.sqlite", "/tmp/cohort/ledger/db.sqlite"),
+    ("posix", "//server/share/db.sqlite", "//server/share/db.sqlite"),
+    ("posix", "/tmp/cohort/db.sqlite", "/tmp/cohort/db.sqlite"),
+])
+def test_sqlite_uri_normalization_is_platform_aware(platform, uri, expected):
+    from scripts.p0_shadow.guard import _normalize_sqlite_uri
+
+    assert _normalize_sqlite_uri(uri, platform) == expected
