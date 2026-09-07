@@ -36,7 +36,7 @@ from typer.testing import CliRunner
 
 from yialpha.cli.main import app
 from yialpha.ledger.evidence import register_run
-from yialpha.ledger.models import SCOPE_CONTRACT
+from yialpha.ledger.models import SCOPE_CONTRACT, SCOPE_POSITIONING, SCOPE_UNDERLYING
 from yialpha.ledger.outcomes import write_outcome
 from yialpha.ledger.predictions import submit_predictions
 from yialpha.ledger.scoreboard import (
@@ -44,6 +44,8 @@ from yialpha.ledger.scoreboard import (
     build_scoreboard,
     render_scoreboard_markdown,
 )
+from yialpha.ledger.sqlite import get_connection
+from yialpha.versions import LEGACY_OUTCOME_VERSION, OUTCOME_COMPUTE_VERSION
 
 runner = CliRunner()
 
@@ -235,3 +237,219 @@ def test_scoreboard_cli_smoke_writes_reports(tmp_path):
     assert "Outcomes: 0 considered" in result.output
     # no .tmp leftovers from the atomic write
     assert list(out_dir.glob("*.tmp")) == []
+
+
+def _seed_versioned(*, context_update=None, legs_update=None, scope=SCOPE_CONTRACT):
+    run_id = "versioned"
+    formed = "2026-09-03T12:00:00+00:00" if scope == SCOPE_UNDERLYING else "2026-09-05T12:00:00+00:00"
+    start = "2026-09-03T00:00:00+00:00" if scope == SCOPE_UNDERLYING else "2026-09-05T00:00:00+00:00"
+    end = "2026-09-04T00:00:00+00:00" if scope == SCOPE_UNDERLYING else "2026-09-06T00:00:00+00:00"
+    horizon = "2026-09-04T12:00:00+00:00" if scope == SCOPE_UNDERLYING else "2026-09-06T12:00:00+00:00"
+    positioning = scope == SCOPE_POSITIONING
+    timing = {
+        "version": OUTCOME_COMPUTE_VERSION, "prediction_formed_at": formed,
+        "reference_price": None if positioning else 100.0,
+        "reference_price_at": None if positioning else start,
+        "reference_available_at": None if positioning else start,
+        "reference_observed_at": None if positioning else formed,
+        "reference_source": None if positioning else ("yfinance:1d:close" if scope == SCOPE_UNDERLYING else "binance_perp:1d:last"),
+        "reference_error": None,
+    }
+    legacy = (context_update or {}).get("version") == LEGACY_OUTCOME_VERSION
+    register_run(run_id, "MUUSDT", "crypto_perp", "stock_perp", formed)
+    (prediction_id,) = submit_predictions(
+        run_id, "market", "MUUSDT", scope,
+        [{"horizon_days": 1, "direction": "up", "prob_up": 0.6}],
+        formed, timing=None if legacy else timing,
+    )
+    context = {
+        "version": OUTCOME_COMPUTE_VERSION,
+        "window_start": formed if positioning else start,
+        "window_end": horizon if positioning else end,
+        "horizon_end": horizon,
+        "prediction_formed_at": formed,
+        "reference_source": timing["reference_source"],
+        "reference_price": timing["reference_price"],
+        "reference_available_at": timing["reference_available_at"],
+        "reference_observed_at": timing["reference_observed_at"],
+    }
+    if scope == SCOPE_UNDERLYING:
+        context["reference_basis_check"] = "matched_frozen_close"
+    context.update(context_update or {})
+    legs = {
+        "contract_price_return": 0.05, "funding_pnl": -0.001,
+        "fees": 0.0008, "slippage": 0.0002, "net_return": 0.048,
+        "legs_missing": ["underlying"],
+        "outcome_available_at": horizon if positioning else end,
+    }
+    legs.update(legs_update or {})
+    write_outcome(prediction_id, run_id, 1, status="complete", scoring_context=context, **legs)
+
+
+@pytest.mark.unit
+def test_scoring_versions_are_disclosed_and_filterable(base_rows):
+    _seed_versioned()
+    board = build_scoreboard()
+    assert board["overall"]["n"] == 6
+    assert board["mixed_scoring_versions"] is True
+    assert board["by_scoring_version"][LEGACY_OUTCOME_VERSION]["n"] == 5
+    assert board["by_scoring_version"][OUTCOME_COMPUTE_VERSION]["n"] == 1
+    filtered = build_scoreboard(scoring_version=OUTCOME_COMPUTE_VERSION)
+    assert filtered["overall"]["n"] == 1
+    assert filtered["mixed_scoring_versions"] is False
+    assert filtered["scoring_version_filter"] == OUTCOME_COMPUTE_VERSION
+    assert "mixed versions: true" in render_scoreboard_markdown(board)
+    assert "## By scoring version" in render_scoreboard_markdown(board)
+    with pytest.raises(ValueError, match="unknown scoring version"):
+        build_scoreboard(scoring_version="future")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("context_update,legs_update", [
+    ({"version": "unknown"}, {}),
+    ({"window_start": "2026-09-06T00:00:00+00:00"}, {}),
+    ({"window_end": "2026-09-07T00:00:00+00:00"}, {}),
+    ({"horizon_end": "2026-09-05T23:59:59+00:00"}, {}),
+    ({"window_start": "2026-09-05"}, {}),
+    ({"prediction_formed_at": "2026-09-04T12:00:00+00:00"}, {}),
+    ({"prediction_formed_at": "2026-09-05T15:00:00+00:00"}, {}),
+    ({"prediction_formed_at": None}, {}),
+    ({"reference_source": None}, {}),
+    ({"reference_source": "unverifiable"}, {}),
+    ({"reference_price": 101.0}, {}),
+    ({"reference_available_at": "2026-09-05T01:00:00+00:00"}, {}),
+    ({"reference_observed_at": "2026-09-05T11:00:00+00:00"}, {}),
+    ({"window_start": "2026-09-04T00:00:00+00:00"}, {}),
+    ({"window_end": "2026-09-05T23:00:00+00:00"}, {}),
+    ({}, {"outcome_available_at": "2026-09-05T00:00:00+00:00"}),
+    ({}, {"outcome_available_at": None}),
+    ({}, {"contract_price_return": None}),
+    ({}, {"funding_pnl": None}),
+    ({}, {"fees": None}),
+    ({}, {"slippage": None}),
+    ({}, {"fees": float("inf")}),
+    ({}, {"net_return": float("inf")}),
+    ({}, {"net_return": 0.5}),
+    ({}, {"legs_missing": ["funding"]}),
+])
+def test_malformed_versioned_complete_never_enters_scoreboard(context_update, legs_update):
+    _seed_versioned(context_update=context_update, legs_update=legs_update)
+    assert build_scoreboard()["overall"]["n"] == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("net_return", [float("inf"), float("-inf"), float("nan")])
+def test_nonfinite_legacy_complete_never_enters_scoreboard(net_return):
+    _seed_row(run_id="nonfinite", analyst="market", direction="up", prob_up=0.6, net_return=net_return)
+    assert build_scoreboard()["overall"]["n"] == 0
+
+
+@pytest.mark.unit
+def test_positioning_and_underlying_do_not_require_price_contract_funding():
+    _seed_versioned(scope=SCOPE_POSITIONING, legs_update={
+        "contract_price_return": None, "fees": None, "slippage": None,
+        "net_return": 0.001, "funding_pnl": 0.001, "legs_missing": None,
+    })
+    assert build_scoreboard()["overall"]["n"] == 1
+
+
+@pytest.mark.unit
+def test_underlying_label_does_not_require_funding():
+    _seed_versioned(scope=SCOPE_UNDERLYING, legs_update={"funding_pnl": None, "net_return": 0.049})
+    assert build_scoreboard()["overall"]["n"] == 1
+
+
+@pytest.mark.unit
+def test_equity_complete_without_basis_verification_is_excluded():
+    _seed_versioned(
+        scope=SCOPE_UNDERLYING, context_update={"reference_basis_check": None},
+        legs_update={"funding_pnl": None, "net_return": 0.049},
+    )
+    assert build_scoreboard()["overall"]["n"] == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("context_update", [
+    {"window_start": "2026-09-05T00:00:00+00:00"},
+    {"window_end": "2026-09-06T00:00:00+00:00"},
+    {"prediction_formed_at": "2026-09-05T13:00:00+00:00", "horizon_end": "2026-09-06T13:00:00+00:00"},
+])
+def test_positioning_metadata_must_match_its_frozen_window(context_update):
+    _seed_versioned(scope=SCOPE_POSITIONING, context_update=context_update, legs_update={
+        "contract_price_return": None, "fees": None, "slippage": None,
+        "net_return": 0.001, "funding_pnl": 0.001, "legs_missing": None,
+    })
+    assert build_scoreboard()["overall"]["n"] == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("legacy_context", [None, {"version": LEGACY_OUTCOME_VERSION}])
+def test_new_prediction_cannot_bypass_qualification_through_legacy_metadata(legacy_context):
+    _seed_versioned()
+    raw = json.dumps(legacy_context) if legacy_context is not None else None
+    get_connection().execute("UPDATE outcomes SET scoring_context=? WHERE run_id='versioned'", (raw,))
+    assert build_scoreboard()["overall"]["n"] == 0
+
+
+@pytest.mark.unit
+def test_scoreboard_reads_old_schema_as_legacy_without_migration(base_rows):
+    connection = get_connection()
+    connection.execute("ALTER TABLE outcomes DROP COLUMN scoring_context")
+    connection.execute("ALTER TABLE predictions DROP COLUMN timing")
+    board = build_scoreboard()
+    assert board["overall"]["n"] == 5
+    assert board["scoring_versions"] == [LEGACY_OUTCOME_VERSION]
+    assert "scoring_context" not in {row["name"] for row in connection.execute("PRAGMA table_info(outcomes)")}
+
+
+@pytest.mark.unit
+def test_legacy_date_label_endpoint_is_preserved_in_its_own_version():
+    _seed_versioned(context_update={
+        "version": LEGACY_OUTCOME_VERSION,
+        "horizon_end": "2026-09-05T12:00:00+00:00",
+        "entry_precision": "date_label",
+    })
+    board = build_scoreboard()
+    assert board["overall"]["n"] == 1
+    assert board["scoring_versions"] == [LEGACY_OUTCOME_VERSION]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("raw", ["not JSON", "null", "[]", "{}"])
+def test_invalid_metadata_isolated_from_other_complete_rows(base_rows, raw):
+    _seed_versioned()
+    get_connection().execute("UPDATE outcomes SET scoring_context=? WHERE run_id='versioned'", (raw,))
+    board = build_scoreboard()
+    assert board["overall"]["n"] == 5
+    assert board["scoring_versions"] == [LEGACY_OUTCOME_VERSION]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("scope", [SCOPE_CONTRACT, SCOPE_UNDERLYING, SCOPE_POSITIONING])
+@pytest.mark.parametrize("late", [False, True])
+def test_new_availability_is_exact_window_end(scope, late):
+    legs = {}
+    if scope == SCOPE_UNDERLYING:
+        legs.update(funding_pnl=None, net_return=0.049)
+    elif scope == SCOPE_POSITIONING:
+        legs.update(
+            contract_price_return=None, fees=None, slippage=None,
+            funding_pnl=0.001, net_return=0.001, legs_missing=None,
+        )
+    if late:
+        legs["outcome_available_at"] = "2026-09-07T00:00:00+00:00"
+    _seed_versioned(scope=scope, legs_update=legs)
+    assert build_scoreboard()["overall"]["n"] == (0 if late else 1)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cost_key", ["fees", "slippage"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_new_negative_cost_is_excluded_without_changing_legacy(cost_key, legacy):
+    costs = {"fees": 0.0008, "slippage": 0.0002}
+    costs[cost_key] *= -1
+    _seed_versioned(
+        context_update={"version": LEGACY_OUTCOME_VERSION} if legacy else None,
+        legs_update={**costs, "net_return": 0.05 - 0.001 - costs["fees"] - costs["slippage"]},
+    )
+    assert build_scoreboard()["overall"]["n"] == (1 if legacy else 0)

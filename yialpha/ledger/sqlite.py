@@ -48,7 +48,7 @@ from pathlib import Path
 # Highest schema version this binary knows. Bump + add a migration block in
 # _migrate() whenever a ledger table is renamed/removed/redefined (additive
 # optional columns with defaults do not need a migration).
-_KNOWN_SCHEMA_VERSION = 3
+_KNOWN_SCHEMA_VERSION = 4
 
 _ledger_lock = threading.Lock()
 _local = threading.local()
@@ -343,6 +343,26 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 ("3",),
+            )
+
+
+    if version < 4:
+        # Nullable additive metadata: never backfill/reinterpret legacy facts.
+        for statement in (
+            "ALTER TABLE predictions ADD COLUMN timing TEXT",
+            "ALTER TABLE outcomes ADD COLUMN scoring_context TEXT",
+        ):
+            try:
+                with ledger_transaction(conn=conn) as cur:
+                    cur.execute(statement)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+        with ledger_transaction(conn=conn) as cur:
+            cur.execute(
+                "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("4",),
             )
 
 

@@ -425,10 +425,12 @@ class AnalystPrediction:
     debate_revision: int | None
     revision_reason: str | None
     regime_id: str | None = None
+    timing: dict[str, Any] | None = None
 
 
 def row_to_prediction(row: sqlite3.Row) -> AnalystPrediction:
     """Convert one ``predictions`` row into an :class:`AnalystPrediction`."""
+    columns = set(row.keys())  # sqlite3.Row membership checks values, not names
     return AnalystPrediction(
         prediction_id=row["prediction_id"],
         run_id=row["run_id"],
@@ -455,7 +457,8 @@ def row_to_prediction(row: sqlite3.Row) -> AnalystPrediction:
             else None
         ),
         revision_reason=row["revision_reason"],
-        regime_id=row["regime_id"],
+        regime_id=row["regime_id"] if "regime_id" in columns else None,
+        timing=json.loads(row["timing"]) if "timing" in columns and row["timing"] is not None else None,
     )
 
 
@@ -465,9 +468,11 @@ class OutcomeRecord:
 
     All return legs are signed fractions of notional (FEATURE_VERSION v2).
     ``legs_missing`` lists data legs the writer could not source; a row with
-    ``status='pending'``/``'incomplete'`` stays on the
-    :func:`yialpha.ledger.outcomes.pending_predictions` worklist.
+    any persisted status retires the prediction from automatic processing,
+    since an append-only outcome cannot be overwritten on retry.
     ``regime_id`` (V2.2) carries the scored prediction's regime through.
+    ``scoring_context`` is the versioned reference and holding-window audit;
+    NULL denotes the legacy daily-close convention.
     """
 
     outcome_id: str
@@ -488,10 +493,12 @@ class OutcomeRecord:
     outcome_available_at: str | None
     computed_at: str
     regime_id: str | None = None
+    scoring_context: dict[str, Any] | None = None
 
 
 def row_to_outcome(row: sqlite3.Row) -> OutcomeRecord:
     """Convert one ``outcomes`` row into an :class:`OutcomeRecord`."""
+    columns = set(row.keys())
     return OutcomeRecord(
         outcome_id=row["outcome_id"],
         prediction_id=row["prediction_id"],
@@ -511,6 +518,11 @@ def row_to_outcome(row: sqlite3.Row) -> OutcomeRecord:
         outcome_available_at=row["outcome_available_at"],
         computed_at=row["computed_at"],
         regime_id=row["regime_id"],
+        scoring_context=(
+            json.loads(row["scoring_context"])
+            if "scoring_context" in columns and row["scoring_context"] is not None
+            else None
+        ),
     )
 
 

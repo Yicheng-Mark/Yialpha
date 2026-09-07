@@ -8,6 +8,7 @@ date-vs-datetime ``analysis_as_of``, and the typed readers.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -21,6 +22,8 @@ from yialpha.ledger.outcomes import (
     write_outcome,
 )
 from yialpha.ledger.predictions import revise_prediction, submit_predictions
+from yialpha.ledger.sqlite import get_connection
+from yialpha.versions import OUTCOME_COMPUTE_VERSION
 
 _RUN_ID = "run-btc-2026-08-25"
 
@@ -165,7 +168,7 @@ def test_complete_outcome_excludes_prediction_from_pending():
     write_outcome(predictions[1], _RUN_ID, 1, status="complete", net_return=0.01)
     pending = pending_predictions("2026-09-03")
     assert {item["horizon_days"] for item in pending} == {5}
-    # a non-complete outcome keeps the prediction on the worklist for retry
+    # Any persisted outcome is immutable and leaves the automatic worklist.
     write_outcome(
         predictions[5],
         _RUN_ID,
@@ -173,7 +176,7 @@ def test_complete_outcome_excludes_prediction_from_pending():
         status="pending",
         legs_missing=["underlying_close"],
     )
-    assert {item["horizon_days"] for item in pending_predictions("2026-09-03")} == {5}
+    assert pending_predictions("2026-09-03") == []
 
 
 @pytest.mark.unit
@@ -230,3 +233,80 @@ def test_readers_on_absent_ledger_return_empty():
     assert outcomes_for_prediction("P" + "0" * 12) == []
     assert all_outcomes() == []
     assert pending_predictions("2026-09-03") == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", ["pending", "incomplete"])
+def test_append_only_noncomplete_outcomes_retire_from_automatic_worklist(status):
+    """An immutable result cannot remain eligible for a conflicting retry."""
+    predictions = _setup_run()
+    write_outcome(predictions[1], _RUN_ID, 1, status=status)
+    with pytest.raises(ValueError, match="is immutable"):
+        write_outcome(predictions[1], _RUN_ID, 1, status="complete", net_return=0.01)
+    assert predictions[1] not in {
+        item["prediction_id"] for item in pending_predictions("2026-09-20")
+    }
+    # Later horizons remain accessible despite the retired earliest row.
+    assert {item["horizon_days"] for item in pending_predictions("2026-09-20")} == {5, 21}
+
+
+@pytest.mark.unit
+def test_scoring_context_roundtrip_canonical_identity_and_conflict():
+    predictions = _setup_run()
+    context = {"version": OUTCOME_COMPUTE_VERSION, "reason": "no_new_trading_session"}
+    first = write_outcome(predictions[1], _RUN_ID, 1, status="incomplete", scoring_context=context)
+    assert write_outcome(
+        predictions[1], _RUN_ID, 1, status="incomplete",
+        scoring_context=dict(reversed(list(context.items()))),
+    ) == first
+    assert outcomes_for_prediction(predictions[1])[0].scoring_context == context
+    assert all_outcomes()[0].scoring_context == context
+    with pytest.raises(ValueError, match="immutable"):
+        write_outcome(
+            predictions[1], _RUN_ID, 1, status="incomplete",
+            scoring_context={**context, "reason": "rewritten"},
+        )
+
+
+@pytest.mark.unit
+def test_due_uses_prediction_formation_and_returns_parsed_timing():
+    predictions = _setup_run()
+    timing = {"version": OUTCOME_COMPUTE_VERSION, "prediction_formed_at": "2026-08-26T12:00:00+00:00"}
+    # Simulate a persisted timing contract independently of reference capture.
+    get_connection().execute("UPDATE predictions SET timing=? WHERE prediction_id=?", (json.dumps(timing), predictions[1]))
+    assert pending_predictions("2026-08-27T11:59:59+00:00") == []
+    (item,) = pending_predictions("2026-08-27T12:00:00+00:00")
+    assert item["prediction_id"] == predictions[1]
+    assert item["timing"] == timing
+    assert item["timing_error"] is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("raw", [
+    "not json", "null", "[]", "{}",
+    '{"version":"unknown","prediction_formed_at":"2026-08-25T12:00:00+00:00"}',
+    '{"version":"close_reference_v1","prediction_formed_at":"2026-08-25"}',
+])
+def test_invalid_timing_is_diagnosable_without_hiding_other_candidates(raw):
+    predictions = _setup_run()
+    get_connection().execute("UPDATE predictions SET timing=? WHERE prediction_id=?", (raw, predictions[1]))
+    rows = pending_predictions("2026-09-20")
+    assert {item["horizon_days"] for item in rows} == {1, 5, 21}
+    invalid = next(item for item in rows if item["prediction_id"] == predictions[1])
+    assert isinstance(invalid["timing"], dict)
+    assert invalid["timing_error"]
+
+
+@pytest.mark.unit
+def test_readers_accept_old_schema_without_mutation():
+    predictions = _setup_run()
+    write_outcome(predictions[1], _RUN_ID, 1, status="complete", net_return=0.01)
+    connection = get_connection()
+    connection.execute("ALTER TABLE predictions DROP COLUMN timing")
+    connection.execute("ALTER TABLE outcomes DROP COLUMN scoring_context")
+    before = connection.execute("SELECT sql FROM sqlite_master ORDER BY name").fetchall()
+    assert outcomes_for_prediction(predictions[1])[0].scoring_context is None
+    assert all_outcomes()[0].scoring_context is None
+    assert all(item["timing"] is None for item in pending_predictions("2026-09-20"))
+    after = connection.execute("SELECT sql FROM sqlite_master ORDER BY name").fetchall()
+    assert [tuple(row) for row in before] == [tuple(row) for row in after]

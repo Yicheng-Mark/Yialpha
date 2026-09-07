@@ -36,12 +36,21 @@ content for humans.
 
 from __future__ import annotations
 
+import json
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from yialpha.ledger.models import DIRECTION_FLAT, decode_json_list
+from yialpha.ledger.models import (
+    DIRECTION_FLAT,
+    SCOPE_CONTRACT,
+    SCOPE_POSITIONING,
+    SCOPE_UNDERLYING,
+    decode_json_list,
+)
 from yialpha.ledger.sqlite import get_connection, ledger_exists
+from yialpha.ledger.time_contract import aware_utc, expected_reference_date, validate_timing
+from yialpha.versions import LEGACY_OUTCOME_VERSION, OUTCOME_COMPUTE_VERSION
 
 #: V3 discipline: a calibration cell with fewer samples than this is display
 #: only — no weight is ever derived from it (no weighting logic exists here).
@@ -65,20 +74,156 @@ def _evidence_bucket(count: int) -> str:
     return "3+"
 
 
+def _finite(value: Any) -> bool:
+    try:
+        return value is not None and math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _scoring_version(row: Any) -> str | None:
+    """Eligible version, or None for a malformed/incomplete scored fact.
+
+    Historical NULL metadata retains its original complete/net semantics.
+    Versioned outcomes must prove a nonempty, closed holding window and all
+    mandatory attribution legs. Diagnostic underlying/basis misses do not
+    invalidate a contract calibration label.
+    """
+    if not _finite(row["net_return"]):
+        return None
+    raw = row["scoring_context"]
+    if raw is None:
+        return LEGACY_OUTCOME_VERSION if row["prediction_timing"] is None else None
+    try:
+        context = json.loads(raw)
+        if not isinstance(context, dict):
+            return None
+        version = context.get("version")
+        if version not in {LEGACY_OUTCOME_VERSION, OUTCOME_COMPUTE_VERSION}:
+            return None
+        if version == LEGACY_OUTCOME_VERSION and row["prediction_timing"] is not None:
+            return None
+        instants = [
+            datetime.fromisoformat(context[key])
+            for key in ("window_start", "window_end", "horizon_end")
+        ]
+        available = datetime.fromisoformat(row["outcome_available_at"])
+        if any(instant.tzinfo is None or instant.utcoffset() is None for instant in [*instants, available]):
+            return None
+        start, end, horizon = instants
+        if not start < end:
+            return None
+        if version == OUTCOME_COMPUTE_VERSION:
+            # This is the fixed window's availability boundary, not the
+            # later observation/computation time of the outcome row.
+            if available != end:
+                return None
+        elif row["prediction_scope"] == SCOPE_POSITIONING:
+            # Legacy funding labels exposed the final settlement instant,
+            # which may precede a non-grid deadline (e.g. 08:00 vs 10:00).
+            if not start < available <= end:
+                return None
+        elif available < end:
+            return None
+        # Legacy date labels admitted their named session close, even when
+        # it followed the midnight-normalized deadline. Keep that behavior
+        # visible in its own version; the new contract forbids overshoot.
+        if version == OUTCOME_COMPUTE_VERSION and end > horizon:
+            return None
+        if version == OUTCOME_COMPUTE_VERSION:
+            timing = validate_timing(json.loads(row["prediction_timing"]))
+            if timing is None:
+                return None
+            formed = aware_utc(context["prediction_formed_at"])
+            if formed != aware_utc(timing["prediction_formed_at"]):
+                return None
+            if int(row["horizon_days"]) != int(row["prediction_horizon_days"]):
+                return None
+            if horizon != formed + timedelta(days=int(row["horizon_days"])):
+                return None
+            if row["prediction_scope"] not in {SCOPE_CONTRACT, SCOPE_UNDERLYING, SCOPE_POSITIONING}:
+                return None
+            if row["prediction_scope"] == SCOPE_POSITIONING:
+                if start != formed or end != horizon:
+                    return None
+            else:
+                if timing["reference_price"] is None or timing["reference_error"] is not None:
+                    return None
+                if start != aware_utc(timing["reference_price_at"]):
+                    return None
+                if isinstance(context.get("reference_price"), bool):
+                    return None
+                if context.get("reference_price") != timing["reference_price"]:
+                    return None
+                if context.get("reference_source") != timing["reference_source"]:
+                    return None
+                for key in ("reference_available_at", "reference_observed_at"):
+                    if aware_utc(context[key]) != aware_utc(timing[key]):
+                        return None
+        missing = set(decode_json_list(row["legs_missing"]))
+        if row["prediction_scope"] == SCOPE_POSITIONING:
+            if missing or not _finite(row["funding_pnl"]):
+                return None
+            return version if math.isclose(float(row["net_return"]), float(row["funding_pnl"]), abs_tol=1e-12) else None
+        if version == OUTCOME_COMPUTE_VERSION:
+            is_perp = row["asset_type"] == "crypto_perp" or "perp" in str(row["instrument_class"] or "")
+            equity = not is_perp or (
+                row["prediction_scope"] == SCOPE_UNDERLYING and row["instrument_class"] == "stock_perp"
+            )
+            source = "yfinance:1d:close" if equity else "binance_perp:1d:last"
+            if context.get("reference_source") != source:
+                return None
+            if equity and context.get("reference_basis_check") != "matched_frozen_close":
+                return None
+            # The metadata must describe the same exact daily boundaries the
+            # scorer admits, not merely any ordered historical window.
+            for instant, cutoff in ((start, formed), (end, horizon)):
+                expected_day = expected_reference_date(cutoff, equity=equity)
+                expected = datetime.combine(expected_day + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+                if instant != expected:
+                    return None
+        if missing - {"underlying", "underlying_close", "underlying_price_return", "basis_return"}:
+            return None
+        if not all(_finite(row[key]) for key in ("contract_price_return", "fees", "slippage")):
+            return None
+        if version == OUTCOME_COMPUTE_VERSION and any(
+            float(row[key]) < 0 for key in ("fees", "slippage")
+        ):
+            return None
+        funding = 0.0
+        if row["prediction_scope"] == SCOPE_CONTRACT and (
+            row["asset_type"] == "crypto_perp" or "perp" in str(row["instrument_class"] or "")
+        ):
+            if not _finite(row["funding_pnl"]):
+                return None
+            funding = float(row["funding_pnl"])
+        expected_net = float(row["contract_price_return"]) + funding - float(row["fees"]) - float(row["slippage"])
+        return version if math.isclose(float(row["net_return"]), expected_net, rel_tol=1e-9, abs_tol=1e-12) else None
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
 def _scored_rows() -> list[dict[str, Any]]:
     """Complete outcome rows joined to their prediction and run (literal SQL).
 
-    Only ``status='complete'`` rows with a ``net_return`` are scoreable — an
-    incomplete attribution leg must never enter a calibration aggregate.
+    Only eligible ``status='complete'`` rows with finite returns enter an
+    aggregate. Versioned facts must also satisfy their attribution contract.
     """
     if not ledger_exists():
         return []
+    connection = get_connection(readonly=True)
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(outcomes)")}
+    context_projection = "o.scoring_context" if "scoring_context" in columns else "NULL AS scoring_context"
+    prediction_columns = {row["name"] for row in connection.execute("PRAGMA table_info(predictions)")}
+    timing_projection = "p.timing AS prediction_timing" if "timing" in prediction_columns else "NULL AS prediction_timing"
     rows = (
-        get_connection(readonly=True)
+        connection
         .execute(
-            "SELECT o.prediction_id, o.horizon_days, o.net_return, "
+            "SELECT o.prediction_id, o.horizon_days, o.net_return, o.contract_price_return, "
+            "o.funding_pnl, o.fees, o.slippage, o.legs_missing, o.outcome_available_at, "
+            f"{context_projection}, {timing_projection}, p.horizon_days AS prediction_horizon_days, "
             "p.analyst, p.direction, p.prob_up, p.evidence_ids, p.regime_id, "
-            "r.instrument_class "
+            "p.prediction_scope, r.instrument_class, r.asset_type "
             "FROM outcomes o "
             "JOIN predictions p ON p.prediction_id = o.prediction_id "
             "JOIN runs r ON r.run_id = p.run_id "
@@ -87,8 +232,12 @@ def _scored_rows() -> list[dict[str, Any]]:
         )
         .fetchall()
     )
-    return [
-        {
+    scored = []
+    for row in rows:
+        version = _scoring_version(row)
+        if version is None:
+            continue
+        scored.append({
             "prediction_id": str(row["prediction_id"]),
             "horizon_days": int(row["horizon_days"]),
             "net_return": float(row["net_return"]),
@@ -104,9 +253,9 @@ def _scored_rows() -> list[dict[str, Any]]:
             "regime_id": (
                 str(row["regime_id"]) if row["regime_id"] else "no_regime"
             ),
-        }
-        for row in rows
-    ]
+            "scoring_version": version,
+        })
+    return scored
 
 
 def _ece(rows: list[dict[str, Any]]) -> float | None:
@@ -195,19 +344,32 @@ def _slice(
     }
 
 
-def build_scoreboard(*, min_samples_display: int = 1) -> dict[str, Any]:
+def build_scoreboard(
+    *, min_samples_display: int = 1, scoring_version: str | None = None
+) -> dict[str, Any]:
     """Aggregate every complete outcome into the calibration scoreboard.
 
     ``min_samples_display`` drops ``by_*`` cells with fewer rows from the
     dict (the ``overall`` cell is always present); it is a display filter,
     never a scoring weight. Cells below :data:`V3_MIN_SAMPLES_PER_CELL` stay
     in the dict flagged ``below_v3_min_samples`` for the renderer to annotate.
+
+    ``scoring_version`` optionally selects one known convention. Unfiltered
+    mixed-version aggregates are explicitly labeled and split by version.
     """
+    if scoring_version not in {None, LEGACY_OUTCOME_VERSION, OUTCOME_COMPUTE_VERSION}:
+        raise ValueError(f"unknown scoring version {scoring_version!r}")
     rows = _scored_rows()
+    if scoring_version is not None:
+        rows = [row for row in rows if row["scoring_version"] == scoring_version]
+    versions = sorted({row["scoring_version"] for row in rows})
     return {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "v3_min_samples_per_cell": V3_MIN_SAMPLES_PER_CELL,
         "min_samples_display": min_samples_display,
+        "scoring_version_filter": scoring_version,
+        "scoring_versions": versions,
+        "mixed_scoring_versions": len(versions) > 1,
         "overall": _cell_metrics(rows),
         "by_analyst": _slice(rows, "analyst", min_samples_display),
         "by_instrument_class": _slice(rows, "instrument_class", min_samples_display),
@@ -215,6 +377,7 @@ def build_scoreboard(*, min_samples_display: int = 1) -> dict[str, Any]:
         "by_direction": _slice(rows, "direction", min_samples_display),
         "by_evidence_bucket": _slice(rows, "evidence_n", min_samples_display),
         "by_regime": _slice(rows, "regime_id", min_samples_display),
+        "by_scoring_version": _slice(rows, "scoring_version", min_samples_display),
     }
 
 
@@ -236,6 +399,9 @@ def render_scoreboard_markdown(scoreboard: dict[str, Any]) -> str:
         f"- Complete scored outcomes: {overall['n']} "
         f"(directional {overall['directional_n']}, flat {overall['flat_n']}, "
         f"missing prob_up {overall['missing_prob_up']})  ",
+        f"- Scoring versions: {', '.join(scoreboard.get('scoring_versions', [])) or 'none'}; "
+        f"mixed versions: {str(scoreboard.get('mixed_scoring_versions', False)).lower()}. "
+        "Use the version slices or scoring_version filter for one convention.",
         f"- V3 discipline: cells with n < {scoreboard['v3_min_samples_per_cell']} "
         "are display only — no weight adjustment.",
         "",
@@ -248,6 +414,7 @@ def render_scoreboard_markdown(scoreboard: dict[str, Any]) -> str:
         ("By direction", "direction", scoreboard["by_direction"]),
         ("By evidence coverage", "evidence bucket", scoreboard["by_evidence_bucket"]),
         ("By regime", "regime_id", scoreboard["by_regime"]),
+        ("By scoring version", "scoring_version", scoreboard.get("by_scoring_version", {})),
     ]
     for title, column, cells in sections:
         lines += [f"## {title}", ""]

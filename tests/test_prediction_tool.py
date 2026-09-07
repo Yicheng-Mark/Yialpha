@@ -599,3 +599,216 @@ def test_news_fallback_round_files_under_underlying_scope(monkeypatch):
     assert all(row.instrument_id == "MU" for row in rows)
     assert all(row.prediction_scope == SCOPE_UNDERLYING for row in rows)
     assert quality.snapshot_quality() == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("symbol", ["BTCUSDT", "ETHUSDT", "MUUSDT"])
+def test_all_horizons_freeze_submission_reference_before_later_market_and_flush(monkeypatch, symbol):
+    from datetime import datetime
+
+    import pandas as pd
+
+    from yialpha.ledger import time_contract as tc
+
+    _bind_perp_run()
+    instant = [datetime.fromisoformat("2026-09-05T12:00:00+00:00")]
+    bars = pd.DataFrame({"Close": [100.0, 999.0]}, index=pd.to_datetime(["2026-09-04", "2026-09-05"]))
+    monkeypatch.setattr(tc, "_now_utc", lambda: instant[0])
+    monkeypatch.setattr(tc, "binance_klines_frame", lambda *a, **k: bars)
+    pt.begin_prediction_capture("market", symbol, SCOPE_CONTRACT)
+    pt.submit_prediction.invoke({"predictions": _entries()})
+    bars.loc[:, "Close"] = [500.0, 1000.0]
+    instant[0] = datetime.fromisoformat("2026-09-06T18:00:00+00:00")
+    # An identical retry must keep the accepted snapshot and avoid a re-fetch.
+    pt.submit_prediction.invoke({"predictions": _entries()})
+    pt.flush_predictions()
+    rows = predictions_for_run(_RUN_ID)
+    assert [row.horizon_days for row in rows] == [1, 5, 21]
+    for row in rows:
+        assert row.timing["reference_price"] == 100.0
+        assert row.timing["prediction_formed_at"] == "2026-09-05T12:00:00+00:00"
+        assert row.analysis_as_of == _TODAY
+
+
+@pytest.mark.unit
+def test_separate_horizon_submissions_retain_distinct_formation_times(monkeypatch):
+    from datetime import datetime
+
+    import pandas as pd
+
+    from yialpha.ledger import time_contract as tc
+
+    _bind_perp_run()
+    instant = [datetime.fromisoformat("2026-09-05T12:00:00+00:00")]
+    monkeypatch.setattr(tc, "_now_utc", lambda: instant[0])
+    monkeypatch.setattr(tc, "binance_klines_frame", lambda *a, **k: pd.DataFrame(
+        {"Close": [100.0]}, index=pd.to_datetime(["2026-09-04"]),
+    ))
+    pt.begin_prediction_capture("market", "BTCUSDT", SCOPE_CONTRACT)
+    pt.submit_prediction.invoke({"predictions": _entries()[:1]})
+    instant[0] = datetime.fromisoformat("2026-09-05T13:00:00+00:00")
+    pt.submit_prediction.invoke({"predictions": _entries()[1:]})
+    pt.flush_predictions()
+    rows = predictions_for_run(_RUN_ID)
+    assert rows[0].timing["prediction_formed_at"] == "2026-09-05T12:00:00+00:00"
+    assert all(row.timing["prediction_formed_at"] == "2026-09-05T13:00:00+00:00" for row in rows[1:])
+
+
+@pytest.mark.unit
+def test_tool_rejects_conflicting_replay_and_retains_original():
+    _bind_perp_run()
+    pt.begin_prediction_capture("market", "BTCUSDT", SCOPE_CONTRACT)
+    pt.submit_prediction.invoke({"predictions": _entries()})
+    conflict = {**_entries()[0], "direction": "down"}
+    result = pt.submit_prediction.invoke({"predictions": [conflict]})
+    assert "immutable once accepted" in result
+    pt.flush_predictions()
+    rows = predictions_for_run(_RUN_ID)
+    assert rows[0].direction == "up"
+    # Default hermetic seams have no reference: new rows must never silently
+    # become legacy forecasts simply because acquisition failed.
+    assert all(row.timing["version"] == "close_reference_v1" for row in rows)
+    assert all(row.timing["reference_error"] for row in rows)
+
+
+class _ObservedCaptureLock:
+    """Expose contention so races are driven by events, never scheduling sleeps."""
+
+    def __init__(self, contended):
+        from threading import Lock
+
+        self._lock = Lock()
+        self._contended = contended
+
+    def __enter__(self):
+        if not self._lock.acquire(blocking=False):
+            self._contended.set()
+            assert self._lock.acquire(timeout=5), "capture lock was never released"
+        return self
+
+    def __exit__(self, *exc):
+        self._lock.release()
+
+
+def _concurrent_timing(price=100.0):
+    return {
+        "version": "close_reference_v1",
+        "prediction_formed_at": "2026-09-05T12:00:00+00:00",
+        "reference_price": price,
+        "reference_price_at": "2026-09-05T00:00:00+00:00",
+        "reference_available_at": "2026-09-05T00:00:00+00:00",
+        "reference_observed_at": "2026-09-05T12:00:00+00:00",
+        "reference_source": "binance_perp:1d:last",
+        "reference_error": None,
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conflicting", [False, True])
+def test_parallel_tool_replays_keep_first_acceptance(monkeypatch, conflicting):
+    from itertools import count
+    from threading import Event
+
+    _bind_perp_run()
+    pt.begin_prediction_capture("market", "BTCUSDT", SCOPE_CONTRACT)
+    overlap = Event()
+    capture = pt._active_capture()
+    capture._lock = _ObservedCaptureLock(overlap)
+    fetches = []
+    counter = count()
+
+    def fetch(*args):
+        number = next(counter)
+        fetches.append(number)
+        if number:
+            # Before the fix, the competing call reaches the vendor instead
+            # of contending on the capture lock. Release either interleaving.
+            overlap.set()
+        assert overlap.wait(timeout=5), "second ToolNode call did not overlap"
+        return _concurrent_timing(100.0 + number)
+
+    monkeypatch.setattr(pt, "capture_prediction_timing", fetch)
+    first = _entries()[0]
+    second = {**first, "direction": "down"} if conflicting else first
+    response = _invoke_tool_node(_graph_tool_nodes()["market"], AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "submit_prediction", "args": {"predictions": [entry]},
+             "id": f"parallel-{index}", "type": "tool_call"}
+            for index, entry in enumerate((first, second))
+        ],
+    ))
+    messages = [str(message.content) for message in response["messages"]]
+    assert len(capture.entries) == 1
+    assert fetches == [0]
+    assert sum("immutable once accepted" in message for message in messages) == int(conflicting)
+    assert sum("accepted horizons [1]" in message for message in messages) == 2 - int(conflicting)
+    accepted_index = next(index for index, message in enumerate(messages) if "accepted horizons" in message)
+    assert len(pt.flush_predictions()) == 1
+    rows = predictions_for_run(_RUN_ID)
+    assert len(rows) == 1
+    assert rows[0].direction == (first, second)[accepted_index]["direction"]
+    assert rows[0].timing == _concurrent_timing()
+    assert pt.flush_predictions() == []
+
+
+@pytest.mark.unit
+def test_flush_waits_for_acceptance_before_selecting_pending_capture(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextvars import copy_context
+    from threading import Event
+
+    _bind_perp_run()
+    pt.begin_prediction_capture("market", "BTCUSDT", SCOPE_CONTRACT)
+    overlap = Event()
+    capture = pt._active_capture()
+    capture._lock = _ObservedCaptureLock(overlap)
+    flushes = []
+
+    def flush():
+        try:
+            return pt.flush_predictions()
+        finally:
+            # The old implementation skips the empty, still-fetching capture.
+            overlap.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        def fetch(*args):
+            flushes.append(executor.submit(copy_context().run, flush))
+            assert overlap.wait(timeout=5), "flush neither waited nor completed"
+            return _concurrent_timing()
+
+        monkeypatch.setattr(pt, "capture_prediction_timing", fetch)
+        pt.submit_prediction.invoke({"predictions": _entries()[:1]})
+        assert len(flushes[0].result(timeout=5)) == 1
+    assert len(predictions_for_run(_RUN_ID)) == 1
+    assert pt.prediction_capture_pending() is False
+    assert "already been settled" in pt.submit_prediction.invoke({"predictions": _entries()[1:]})
+
+
+@pytest.mark.unit
+def test_capture_write_failure_can_retry_without_recapturing(monkeypatch):
+    _bind_perp_run()
+    pt.begin_prediction_capture("market", "BTCUSDT", SCOPE_CONTRACT)
+    fetches = []
+
+    def fetch(*args):
+        fetches.append(args)
+        return _concurrent_timing()
+
+    monkeypatch.setattr(pt, "capture_prediction_timing", fetch)
+    pt.submit_prediction.invoke({"predictions": _entries()})
+    original_submit = pt.submit_predictions
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("temporary ledger failure")
+
+    monkeypatch.setattr(pt, "submit_predictions", fail)
+    assert pt.flush_predictions() == []
+    assert pt.prediction_capture_pending() is True
+    monkeypatch.setattr(pt, "submit_predictions", original_submit)
+    pt.submit_prediction.invoke({"predictions": _entries()})
+    assert len(pt.flush_predictions()) == 3
+    assert len(fetches) == 1
+    assert all(row.timing == _concurrent_timing() for row in predictions_for_run(_RUN_ID))
+    assert pt.prediction_capture_pending() is False

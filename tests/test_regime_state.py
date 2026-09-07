@@ -351,9 +351,9 @@ def test_migration_v2_idempotent_and_duplicate_column_safe():
     row = conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    # v3 (V2.4 portfolio tables) rides along; the v2 regimes/regime_id work
+    # v4 (timing metadata) rides along; the v2 regimes/regime_id work
     # is verified by the table/column assertions below.
-    assert row[0] == "3"
+    assert row[0] == "4"
     # Re-running _migrate on the migrated DB must be a no-op, not an error.
     _migrate(conn)
     # The ALTER helpers must also swallow the duplicate-column error from a
@@ -386,7 +386,7 @@ def test_migration_upgrades_a_v1_database():
     row = conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
-    assert row[0] == "3"
+    assert row[0] == "4"
 
 
 # --------------------------------------------------------------------------- #
@@ -490,10 +490,11 @@ def test_outcome_row_carries_regime_id():
     # the pending worklist dict exposes regime_id for the outcome writer
     from yialpha.ledger.outcomes import pending_predictions
 
-    write_outcome(prediction_h1, "run-reg-1", 1, status="incomplete",
-                  legs_missing=["funding"], regime_id="G" + "a" * 12)
     pending = pending_predictions(_TODAY)
     assert pending and all(item["regime_id"] == "G" + "a" * 12 for item in pending)
+    write_outcome(prediction_h1, "run-reg-1", 1, status="incomplete",
+                  legs_missing=["funding"], regime_id="G" + "a" * 12)
+    assert pending_predictions(_TODAY) == []  # immutable incomplete is terminal
 # --------------------------------------------------------------------------- #
 # 6. Graph wiring: _run_graph binds regime_id; ticket linkage
 # --------------------------------------------------------------------------- #

@@ -339,3 +339,68 @@ def test_readers_on_absent_ledger_return_empty():
     assert predictions_for_run("run-none") == []
     assert prediction_by_id("P" + "0" * 12) is None
     assert revisions_of("P" + "0" * 12) == []
+
+
+def _timing():
+    return {
+        "version": "close_reference_v1",
+        "prediction_formed_at": "2026-09-05T12:00:00+00:00",
+        "reference_price": 100.0,
+        "reference_price_at": "2026-09-05T00:00:00+00:00",
+        "reference_available_at": "2026-09-05T00:00:00+00:00",
+        "reference_observed_at": "2026-09-05T11:59:59+00:00",
+        "reference_source": "binance_perp:1d:last",
+        "reference_error": None,
+    }
+
+
+@pytest.mark.unit
+def test_timing_roundtrip_is_canonical_immutable_content():
+    _setup_run()
+    args = (_RUN_ID, _ANALYST, _INSTRUMENT, SCOPE_CONTRACT, _entries(), "2026-08-25")
+    first = submit_predictions(*args, timing=_timing())
+    reversed_timing = dict(reversed(list(_timing().items())))
+    assert submit_predictions(*args, timing=reversed_timing) == first
+    assert prediction_by_id(first[0]).timing == _timing()
+    for field, value in (("reference_price", 101.0), ("prediction_formed_at", "2026-09-05T13:00:00+00:00")):
+        with pytest.raises(ValueError, match="immutable"):
+            submit_predictions(*args, timing={**_timing(), field: value})
+    assert len(predictions_for_run(_RUN_ID)) == 3
+
+
+@pytest.mark.unit
+def test_revision_requires_its_own_timing_and_never_inherits_snapshot():
+    _setup_run()
+    original = submit_predictions(
+        _RUN_ID, _ANALYST, _INSTRUMENT, SCOPE_CONTRACT, _entries(), "2026-08-25",
+        timing=_timing(),
+    )[0]
+    with pytest.raises(ValueError, match="requires its own timing"):
+        revise_prediction(original, _entries()[:1], "missing snapshot", "2026-09-06")
+    new_timing = {**_timing(), "prediction_formed_at": "2026-09-05T13:00:00+00:00"}
+    revised = revise_prediction(original, _entries()[:1], "new decision", "2026-09-06", timing=new_timing)
+    assert prediction_by_id(revised[0]).timing == new_timing
+    assert prediction_by_id(original).timing == _timing()
+
+
+@pytest.mark.unit
+def test_v3_readonly_rows_remain_readable_and_migration_preserves_facts():
+    from yialpha.ledger.sqlite import _migrate, get_connection
+
+    _setup_run()
+    ids = _submit()
+    conn = get_connection()
+    conn.execute("ALTER TABLE predictions DROP COLUMN timing")
+    conn.execute("ALTER TABLE outcomes DROP COLUMN scoring_context")
+    conn.execute("UPDATE schema_meta SET value = '3' WHERE key = 'schema_version'")
+    before = [tuple(row) for row in conn.execute("SELECT * FROM predictions ORDER BY prediction_id")]
+    assert prediction_by_id(ids[0]).timing is None
+    assert all(row.timing is None for row in predictions_for_run(_RUN_ID))
+    assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "3"
+    _migrate(conn)
+    _migrate(conn)
+    after = list(conn.execute("SELECT * FROM predictions ORDER BY prediction_id"))
+    assert [tuple(row)[:-1] for row in after] == before
+    assert all(row["timing"] is None for row in after)
+    assert conn.execute("SELECT scoring_context FROM outcomes").fetchall() == []
+    assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "4"
