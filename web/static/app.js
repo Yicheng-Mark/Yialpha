@@ -338,17 +338,25 @@
       ? drs.map((dr) => `<li><a class="date-pill" href="#/t/${encodeURIComponent(ticker)}/${encodeURIComponent(String(dr.date || ""))}">
             <span>${esc(dr.date)}</span>${dr.rating ? ratingBadge(dr.rating) : ""}</a></li>`).join("")
       : `<li class="muted">${t("detail_no_dates")}</li>`;
-    // Two-line report links: a human label plus the dir's wall-clock stamp —
-    // the raw <TICKER>_<stamp> dir name is machine bookkeeping, not UI copy.
-    // The link opens the in-app rendered report (#/r/<dir>); the raw .md
-    // download lives on that view as a button.
-    const repItems = reports.length
-      ? reports.map((r) =>
-          `<li><a class="rep-link" href="#/r/${encodeURIComponent(r.dir)}">
-             <span class="rl-main"><span aria-hidden="true">📜 </span>${t("detail_report_file")}${r.complete ? "" : esc(t("detail_rep_incomplete"))}</span>
-             <span class="rl-sub">${esc(fmtStamp(r.dir))}</span>
-           </a></li>`).join("")
-      : `<li class="muted">${t("detail_no_reports")}</li>`;
+    // Report rows live in the main column (the 260px sidebar cramped the old
+    // two-line links). Each row: status dot + label + wall-clock stamp + an
+    // in-app open action (#/r/<dir>) and a raw-.md download action.
+    const repRows = reports.length
+      ? `<ul class="rep-rows">${reports.map((r) => `
+          <li class="rep-row">
+            <span class="dot ${r.complete ? "dot-ok" : "dot-no"}" aria-hidden="true"></span>
+            <span class="sr-only">${r.complete ? "OK" : "FAIL"}:</span>
+            <span class="rr-main"><span aria-hidden="true">📜 </span>${t("detail_report_file")}${r.complete ? "" : esc(t("detail_rep_incomplete"))}</span>
+            <span class="rr-sub">${esc(fmtStamp(r.dir))}</span>
+            <a class="btn" href="#/r/${encodeURIComponent(r.dir)}">${t("rl_open")}</a>
+            <a class="btn" href="/reports/${encodeURIComponent(r.dir)}/complete_report.md" download="${esc(r.dir)}.md">${t("rl_download")}</a>
+          </li>`).join("")}</ul>`
+      : `<p class="muted">${t("detail_no_reports")}</p>`;
+    const repPanel = `
+      <div class="rep-list">
+        <div class="chart-head"><div class="subhead">${t("detail_reports")}</div><span class="total">${reports.length}</span></div>
+        ${repRows}
+      </div>`;
 
     // Text alternative for the trend canvas: first → last rating.
     const rated = drs.filter((dr) => dr.rating);
@@ -389,10 +397,11 @@
         <div class="side">
           <h3>${t("detail_dates")}</h3>
           <ul>${dateItems}</ul>
-          <h3>${t("detail_reports")}</h3>
-          <ul>${repItems}</ul>
         </div>
-        ${latestCard}
+        <div class="main-col">
+          ${latestCard}
+          ${repPanel}
+        </div>
       </div>`;
 
     // initialise the rating trend chart after DOM is ready

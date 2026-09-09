@@ -58,6 +58,10 @@
       rf_download: "下载 .md",
       rf_missing: "报告文件不存在或不可读",
 
+      // report list rows (detail main column)
+      rl_open: "打开",
+      rl_download: "下载",
+
       // report
       report_company: "标的",
       report_overlay: "量化风控叠加",
@@ -234,6 +238,10 @@
       rf_title: "Full analysis report",
       rf_download: "Download .md",
       rf_missing: "Report file missing or unreadable",
+
+      // report list rows (detail main column)
+      rl_open: "Open",
+      rl_download: "Download",
 
       report_company: "Ticker",
       report_overlay: "Quantitative Risk Overlay",
