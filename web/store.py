@@ -50,6 +50,11 @@ REPORTS_ROOT = LOGS_ROOT / "reports"
 # Subdirs under LOGS_ROOT that are not per-ticker result dirs.
 _NON_TICKER_DIRS = {"reports", "robust"}
 
+# How many recent ratings ``list_tickers`` exposes per ticker for the home
+# card's timeline dots — enough to read a trend at a glance, few enough that
+# the endpoint stays one small JSON even with months of daily runs.
+_HISTORY_CAP = 8
+
 _DATE_RE = re.compile(r"full_states_log_(\d{4}-\d{2}-\d{2})\.json$")
 
 # Alias kept for callers/tests that imported the local name; the marker,
@@ -112,6 +117,13 @@ def list_tickers() -> list[dict]:
                 "latest_date": dates[-1],  # _dates_for is ascending
                 "latest_rating": _latest_rating(d.name, dates[-1]),
                 "run_count": len(dates),
+                # Most recent ratings for the home card's timeline dots — same
+                # light per-date parse as ``list_runs``' date_ratings, capped
+                # to keep the payload (and disk reads) bounded.
+                "history": [
+                    {"date": date, "rating": _latest_rating(d.name, date)}
+                    for date in dates[-_HISTORY_CAP:]
+                ],
             }
         )
     return out

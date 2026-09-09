@@ -198,10 +198,7 @@
   function homeSkeleton() {
     const card = `<div class="sk-card"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>`;
     return `<div class="section-head"><h1 class="page-title">${t("home_title")}</h1></div>
-      <div class="home-layout">
-        <div class="sk-card home-sk-side"><div class="skeleton"></div><div class="skeleton"></div></div>
-        <div class="sk-grid">${card.repeat(8)}</div>
-      </div>`;
+      <div class="sk-grid">${card.repeat(8)}</div>`;
   }
 
   // Text summary of rating counts — the donut canvas's text alternative.
@@ -245,22 +242,30 @@
             <span class="sw" aria-hidden="true"></span>${esc(r)}
           </button>`).join("")}
       </div>
-      <div class="home-layout">
-        <aside class="home-side">
-          <div class="chart-panel">
-            <div class="chart-head"><div class="subhead">${t("chart_dist_title")}</div><span class="total" id="dist-total"></span></div>
-            <div id="chart-dist" class="chart-area chart-area-md" role="img"></div>
-          </div>
-        </aside>
-        <div class="grid" id="home-grid"></div>
-      </div>`;
+      <div class="grid" id="home-grid"></div>`;
 
     // ---- client-side filter: text substring + rating chips; re-renders the
     // grid and the donut from the same cached list (stats stay global). ----
+    // The donut lives in the grid as its first card so short ticker lists
+    // still read as one full row instead of a rail with dead space beside it.
+    // It is rebuilt on every filter pass together with the cards; charts.js
+    // disposes the previous canvas instance per container id.
     const gridEl = document.getElementById("home-grid");
-    const totalEl = document.getElementById("dist-total");
     const textEl = document.getElementById("filter-text");
-    const distEl = document.getElementById("chart-dist");
+
+    const distPanelHTML = () => `
+      <div class="chart-panel grid-dist">
+        <div class="chart-head"><div class="subhead">${t("chart_dist_title")}</div><span class="total" id="dist-total"></span></div>
+        <div id="chart-dist" class="chart-area chart-area-md" role="img"></div>
+      </div>`;
+
+    // One timeline dot per recent run, oldest → newest (store sends dates
+    // ascending); the newest gets a ring. Decorative — the detail page
+    // carries the same history as real text.
+    const histDot = (h, i, arr) => {
+      const label = h.rating ? `${h.date} · ${h.rating}` : `${h.date} · —`;
+      return `<i class="tdot ${h.rating ? cssRatingClass(h.rating) : "neutral"}${i === arr.length - 1 ? " latest" : ""}" title="${esc(label)}"></i>`;
+    };
 
     function filtered() {
       const q = (textEl.value || "").trim().toLowerCase();
@@ -271,15 +276,21 @@
 
     function applyFilter() {
       const cur = filtered();
-      gridEl.innerHTML = cur.length ? cur.map((x) => `
+      gridEl.innerHTML = cur.length
+        ? distPanelHTML() + cur.map((x) => `
           <a class="card ticker-card rc-${cssRatingClass(x.latest_rating)}" href="#/t/${encodeURIComponent(x.ticker)}">
             <div class="card-accent ${cssRatingClass(x.latest_rating)}"></div>
-            ${x.latest_rating ? ratingBadge(x.latest_rating) : ""}
             <div class="ticker">${esc(x.ticker)}</div>
-            <div class="meta">${t("home_latest")} ${esc(x.latest_date)} · ${esc(x.run_count)} ${t("home_runs")}</div>
+            <div class="ticker-foot">
+              ${x.latest_rating ? ratingBadge(x.latest_rating) : ""}
+              <div class="meta">${t("home_latest")} ${esc(x.latest_date)} · ${esc(x.run_count)} ${t("home_runs")}</div>
+            </div>
+            ${(x.history && x.history.length) ? `<div class="ticker-dots" aria-hidden="true">${x.history.map(histDot).join("")}</div>` : ""}
           </a>`).join("")
         : `<p class="filter-none">${t("home_filter_none")}</p>`;
-      totalEl.textContent = `${cur.length} ${t("dist_tickers")}`;
+      const distEl = document.getElementById("chart-dist");
+      if (!distEl) return; // empty filter result — the panel is intentionally absent
+      document.getElementById("dist-total").textContent = `${cur.length} ${t("dist_tickers")}`;
       distEl.setAttribute("aria-label", distAriaLabel(cur));
       if (window.YiCharts) YiCharts.drawRatingDist(distEl, cur);
     }
@@ -345,16 +356,19 @@
             <span>${esc(dr.date)}</span>${dr.rating ? ratingBadge(dr.rating) : ""}</a></li>`).join("")
       : `<li class="muted">${t("detail_no_dates")}</li>`;
     // Report rows live in the main column (the 260px sidebar cramped the old
-    // two-line links). Each row: status dot + label + wall-clock stamp + an
-    // in-app open action (#/r/<dir>) and a raw-.md download action.
+    // two-line links). Every row would repeat the same "full report" label,
+    // so the wall-clock stamp is the row's identity: the whole left block is
+    // one link into the in-app report view, and only the raw-.md download
+    // stays a separate button on the right.
     const repRows = reports.length
       ? `<ul class="rep-rows">${reports.map((r) => `
           <li class="rep-row">
-            <span class="dot ${r.complete ? "dot-ok" : "dot-no"}" aria-hidden="true"></span>
-            <span class="sr-only">${r.complete ? "OK" : "FAIL"}:</span>
-            <span class="rr-main"><span aria-hidden="true">📜 </span>${t("detail_report_file")}${r.complete ? "" : esc(t("detail_rep_incomplete"))}</span>
-            <span class="rr-sub">${esc(fmtStamp(r.dir))}</span>
-            <a class="btn" href="#/r/${encodeURIComponent(r.dir)}">${t("rl_open")}</a>
+            <a class="rr-open" href="#/r/${encodeURIComponent(r.dir)}" aria-label="${esc(t("rl_open"))} ${esc(fmtStamp(r.dir))}">
+              <span class="dot ${r.complete ? "dot-ok" : "dot-no"}" aria-hidden="true"></span>
+              <span class="sr-only">${r.complete ? "OK" : "FAIL"}:</span>
+              <span class="rr-stamp">${esc(fmtStamp(r.dir))}</span>
+              ${r.complete ? "" : `<span class="rr-warn">${esc(t("detail_rep_incomplete"))}</span>`}
+            </a>
             <a class="btn" href="/reports/${encodeURIComponent(r.dir)}/complete_report.md" download="${esc(r.dir)}.md">${t("rl_download")}</a>
           </li>`).join("")}</ul>`
       : `<p class="muted">${t("detail_no_reports")}</p>`;
