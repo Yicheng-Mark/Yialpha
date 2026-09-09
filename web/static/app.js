@@ -264,7 +264,7 @@
     function applyFilter() {
       const cur = filtered();
       gridEl.innerHTML = cur.length ? cur.map((x) => `
-          <a class="card ticker-card" href="#/t/${encodeURIComponent(x.ticker)}">
+          <a class="card ticker-card rc-${cssRatingClass(x.latest_rating)}" href="#/t/${encodeURIComponent(x.ticker)}">
             <div class="card-accent ${cssRatingClass(x.latest_rating)}"></div>
             ${x.latest_rating ? ratingBadge(x.latest_rating) : ""}
             <div class="ticker">${esc(x.ticker)}</div>
@@ -297,12 +297,13 @@
     const buys = tickers.filter((x) => x.latest_rating === "Buy" || x.latest_rating === "Overweight").length;
     const buyPct = total ? Math.round((buys / total) * 100) : 0;
     const latest = tickers.reduce((m, x) => (x.latest_date && x.latest_date > m ? x.latest_date : m), "");
-    const card = (icon, k, v, cls) =>
-      `<div class="stat-card"><div class="stat-icon" aria-hidden="true">${icon}</div><div class="stat-k">${esc(k)}</div><div class="stat-v${cls ? " " + cls : ""}">${esc(v)}</div></div>`;
+    // Icon sits in a tinted chip (chip class colors it) instead of a raw emoji.
+    const card = (icon, k, v, cls, chip) =>
+      `<div class="stat-card"><div class="stat-chip ${chip}" aria-hidden="true">${icon}</div><div class="stat-k">${esc(k)}</div><div class="stat-v${cls ? " " + cls : ""}">${esc(v)}</div></div>`;
     return `<div class="stat-row">
-      ${card("📁", t("home_stat_tickers"), total, "")}
-      ${card("📈", t("home_stat_buy"), buyPct + "%", "accent")}
-      ${card("🕐", t("home_stat_latest"), latest || "—", "")}
+      ${card("📁", t("home_stat_tickers"), total, "", "c1")}
+      ${card("📈", t("home_stat_buy"), buyPct + "%", "accent", "c2")}
+      ${card("🕐", t("home_stat_latest"), latest || "—", "", "c3")}
     </div>`;
   }
 
