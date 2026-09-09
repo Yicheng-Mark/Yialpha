@@ -521,7 +521,6 @@ a:hover { color: var(--ink-1); }
 @media (max-width: 760px) { .cols { grid-template-columns: 1fr; } }
 .side { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow); position: sticky; top: 84px; }
 .side h3 { margin: 0 0 10px; font-size: 11px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .6px; font-weight: 600; }
-.side h3 + h3 { margin-top: 18px; }
 .side ul { list-style: none; padding: 0; margin: 0; }
 .side li { padding: 3px 0; }
 .side li a { display: block; padding: 7px 11px; border-radius: var(--radius-sm); color: var(--ink-2); font-size: 13px; font-variant-numeric: tabular-nums; transition: background .12s, color .12s; }
@@ -530,10 +529,26 @@ a:hover { color: var(--ink-1); }
 .side li a.date-pill { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .side li a.date-pill .rating-badge { font-size: 10px; padding: 1px 7px; flex: 0 0 auto; }
 .side li a.date-pill .rating-badge::before { width: 4px; height: 4px; flex-basis: 4px; }
-/* two-line report download links: human label + wall-clock stamp */
-.side li a.rep-link { display: flex; flex-direction: column; gap: 2px; padding: 8px 11px; }
-.side .rep-link .rl-main { color: var(--ink-2); font-size: 13px; font-weight: 600; }
-.side .rep-link .rl-sub { color: var(--ink-4); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+/* ---------- report list (detail main column) ---------- */
+/* Sidebar keeps only the date nav; the run's downloadable reports render as
+   action rows here. The list scrolls inside a capped height so many report
+   dirs never stretch the page. */
+.main-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.rep-list {
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 18px 20px 12px; box-shadow: var(--shadow);
+}
+.rep-rows { list-style: none; padding: 0; margin: 6px 0 0; max-height: 320px; overflow-y: auto; }
+.rep-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 4px; border-bottom: 1px solid var(--grid);
+}
+.rep-row:last-child { border-bottom: none; }
+.rep-row .dot { flex: 0 0 10px; }
+.rep-row .rr-main { flex: 1 1 auto; min-width: 0; font-weight: 600; font-size: 13.5px; color: var(--ink-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rep-row .rr-sub { flex: 0 0 auto; color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.rep-row .btn { flex: 0 0 auto; padding: 5px 12px; font-size: 12px; }
 
 /* ---------- latest-run quick card (detail right column) ---------- */
 .latest-card { display: flex; flex-direction: column; align-items: flex-start; gap: 16px; padding: 22px 24px; }
