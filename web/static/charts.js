@@ -60,12 +60,14 @@
 
   // ---- shared axis / tooltip / legend builders ----
   function tooltipStyle(th) {
+    // Translucent fill + backdrop blur gives the chart tooltip the same glass
+    // language as the CSS .tooltip; padding rides in extraCssText.
     return {
-      backgroundColor: th.panel,
+      backgroundColor: hexA(th.panel, 0.88),
       borderColor: th.border,
       borderWidth: 1,
       textStyle: { color: th.ink1, fontFamily: th.font, fontSize: 12 },
-      extraCssText: "border-radius:8px;box-shadow:" + (cssVar("--shadow-float") || "0 8px 24px rgba(0,0,0,.4)") + ";"
+      extraCssText: "border-radius:10px;box-shadow:" + (cssVar("--shadow-float") || "0 8px 24px rgba(0,0,0,.4)") + ";backdrop-filter:blur(10px);padding:10px 12px;"
     };
   }
 
@@ -134,11 +136,11 @@
       }],
       graphic: [{
         type: "text", left: "38%", top: "50%",
-        style: { text: String(total), fill: th.ink1, fontSize: 26, fontWeight: "bold", textAlign: "center" },
+        style: { text: String(total), fill: th.ink1, fontSize: 26, fontWeight: "bold", fontFamily: th.font, textAlign: "center" },
         z: 10
       }, {
         type: "text", left: "38%", top: "60%",
-        style: { text: (window.t ? window.t("dist_tickers") : "tickers"), fill: th.ink3, fontSize: 11, textAlign: "center" },
+        style: { text: (window.t ? window.t("dist_tickers") : "tickers"), fill: th.ink3, fontSize: 11, fontFamily: th.font, textAlign: "center" },
         z: 10
       }]
     };
@@ -317,10 +319,10 @@
       }],
       graphic: [{
         type: "text", left: "12%", bottom: "6%",
-        style: { text: "Bear " + (100 - bullPct) + "%", fill: th.bear, fontSize: 12, textAlign: "center" }
+        style: { text: "Bear " + (100 - bullPct) + "%", fill: th.bear, fontSize: 12, fontFamily: th.font, textAlign: "center" }
       }, {
         type: "text", right: "12%", bottom: "6%",
-        style: { text: bullPct + "% Bull", fill: th.bull, fontSize: 12, textAlign: "center" }
+        style: { text: bullPct + "% Bull", fill: th.bull, fontSize: 12, fontFamily: th.font, textAlign: "center" }
       }]
     };
     chart.setOption(opt);
