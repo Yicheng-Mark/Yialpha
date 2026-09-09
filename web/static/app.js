@@ -197,7 +197,11 @@
 
   function homeSkeleton() {
     const card = `<div class="sk-card"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>`;
-    return `<div class="section-head"><h1 class="page-title">${t("home_title")}</h1></div><div class="sk-grid">${card.repeat(8)}</div>`;
+    return `<div class="section-head"><h1 class="page-title">${t("home_title")}</h1></div>
+      <div class="home-layout">
+        <div class="sk-card home-sk-side"><div class="skeleton"></div><div class="skeleton"></div></div>
+        <div class="sk-grid">${card.repeat(8)}</div>
+      </div>`;
   }
 
   // Text summary of rating counts — the donut canvas's text alternative.
@@ -241,13 +245,15 @@
             <span class="sw" aria-hidden="true"></span>${esc(r)}
           </button>`).join("")}
       </div>
-      <div class="dashboard-row">
-        <div class="chart-panel">
-          <div class="chart-head"><div class="subhead">${t("chart_dist_title")}</div><span class="total" id="dist-total"></span></div>
-          <div id="chart-dist" class="chart-area chart-area-md" role="img"></div>
-        </div>
-      </div>
-      <div class="grid" id="home-grid"></div>`;
+      <div class="home-layout">
+        <aside class="home-side">
+          <div class="chart-panel">
+            <div class="chart-head"><div class="subhead">${t("chart_dist_title")}</div><span class="total" id="dist-total"></span></div>
+            <div id="chart-dist" class="chart-area chart-area-md" role="img"></div>
+          </div>
+        </aside>
+        <div class="grid" id="home-grid"></div>
+      </div>`;
 
     // ---- client-side filter: text substring + rating chips; re-renders the
     // grid and the donut from the same cached list (stats stay global). ----

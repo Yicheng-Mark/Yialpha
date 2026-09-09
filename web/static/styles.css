@@ -332,6 +332,9 @@ a:hover { color: var(--ink-1); }
 }
 .sk-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
 .sk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+/* home: sidebar skeleton (title bar + chart block) beside the grid */
+.home-sk-side .skeleton:nth-child(1) { width: 42%; }
+.home-sk-side .skeleton:nth-child(2) { height: 170px; margin: 18px 0; }
 /* home: repeated ticker-card skeletons */
 .sk-grid .sk-card .skeleton:nth-child(1) { width: 38%; }
 .sk-grid .sk-card .skeleton:nth-child(2) { width: 72%; height: 20px; }
@@ -419,7 +422,13 @@ a:hover { color: var(--ink-1); }
   background: var(--accent); transition: width .16s ease;
 }
 .card:hover::before { width: 4px; }
-.card .ticker { font-size: 20px; font-weight: 800; color: var(--ink-1); letter-spacing: .2px; font-variant-numeric: tabular-nums; }
+/* the absolutely-positioned badge owns the top-right corner; a long ticker
+   (ETHUSDT) + a long label (Underweight) would collide, so reserve the
+   badge's row and ellipsize anything longer */
+.card .ticker {
+  font-size: 20px; font-weight: 800; color: var(--ink-1); letter-spacing: .2px; font-variant-numeric: tabular-nums;
+  max-width: calc(100% - 110px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .card .meta { color: var(--ink-3); font-size: 12px; margin-top: 10px; }
 .card .rating-badge { position: absolute; top: 18px; right: 18px; }
 /* hover wash tinted by the card's rating (class set by app.js alongside
@@ -735,7 +744,18 @@ details.section > summary .num {
    ECharts containers — themed panels wrapping canvas charts
    =================================================================== */
 
-.dashboard-row { display: grid; grid-template-columns: 1fr; gap: 16px; margin-bottom: 20px; }
+/* home two-pane layout: sticky rating-dist rail beside the ticker grid.
+   The donut canvas is ~300px wide here — it previously sat in a full-width
+   panel whose empty flanks pushed the grid below the fold. */
+.home-layout {
+  display: grid; grid-template-columns: 340px minmax(0, 1fr);
+  gap: 22px; align-items: start; margin-bottom: 20px;
+}
+.home-side { position: sticky; top: 84px; }
+@media (max-width: 900px) {
+  .home-layout { grid-template-columns: 1fr; }
+  .home-side { position: static; }
+}
 
 /* chart panel — glass wrapper matching .card aesthetic */
 .chart-panel {

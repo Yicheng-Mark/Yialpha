@@ -122,24 +122,24 @@
         formatter: function (p) { return p.name + " · " + p.value + " (" + p.percent + "%)"; }
       }),
       legend: {
-        orient: "vertical", right: 10, top: "center",
-        textStyle: { color: th.ink2, fontSize: 12 },
-        itemWidth: 10, itemHeight: 10, itemGap: 10
+        orient: "vertical", right: 6, top: "center",
+        textStyle: { color: th.ink2, fontSize: 11 },
+        itemWidth: 9, itemHeight: 9, itemGap: 9
       },
       series: [{
-        type: "pie", radius: ["48%", "78%"], center: ["38%", "50%"],
+        type: "pie", radius: ["44%", "70%"], center: ["35%", "50%"],
         avoidLabelOverlap: true, padAngle: 2,
         itemStyle: { borderRadius: 6, borderColor: th.panel, borderWidth: 2 },
         label: { show: false },
-        emphasis: { scale: true, scaleSize: 6, label: { show: true, fontSize: 14, fontWeight: "bold", color: th.ink1, formatter: "{b}\n{c}" } },
+        emphasis: { scale: true, scaleSize: 5, label: { show: true, fontSize: 13, fontWeight: "bold", color: th.ink1, formatter: "{b}\n{c}" } },
         data: data
       }],
       graphic: [{
-        type: "text", left: "38%", top: "50%",
-        style: { text: String(total), fill: th.ink1, fontSize: 26, fontWeight: "bold", fontFamily: th.font, textAlign: "center" },
+        type: "text", left: "35%", top: "46%",
+        style: { text: String(total), fill: th.ink1, fontSize: 24, fontWeight: "bold", fontFamily: th.font, textAlign: "center" },
         z: 10
       }, {
-        type: "text", left: "38%", top: "60%",
+        type: "text", left: "35%", top: "58%",
         style: { text: (window.t ? window.t("dist_tickers") : "tickers"), fill: th.ink3, fontSize: 11, fontFamily: th.font, textAlign: "center" },
         z: 10
       }]
