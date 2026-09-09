@@ -53,6 +53,11 @@
       detail_rep_incomplete: "（不完整）",
       detail_view_report: "查看完整报告 →",
 
+      // report file (in-app rendered complete_report.md)
+      rf_title: "完整分析报告",
+      rf_download: "下载 .md",
+      rf_missing: "报告文件不存在或不可读",
+
       // report
       report_company: "标的",
       report_overlay: "量化风控叠加",
@@ -224,6 +229,11 @@
       detail_report_file: "Full report",
       detail_rep_incomplete: " (incomplete)",
       detail_view_report: "View full report →",
+
+      // report file (in-app rendered complete_report.md)
+      rf_title: "Full analysis report",
+      rf_download: "Download .md",
+      rf_missing: "Report file missing or unreadable",
 
       report_company: "Ticker",
       report_overlay: "Quantitative Risk Overlay",

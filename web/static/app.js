@@ -4,6 +4,7 @@
 //   #/                       ticker list (home, with client-side filter)
 //   #/t/<ticker>             ticker detail (dates + report download)
 //   #/t/<ticker>/<date>      full report view
+//   #/r/<report-dir>         in-app rendered complete_report.md (raw .md download)
 //   #/new                    new-analysis form → task monitor
 //   #/task/<id>              task monitor (polls /api/tasks/<id> every 4s)
 //   #/compare                multi-ticker rating comparison (chart + matrix)
@@ -177,6 +178,7 @@
     if (parts[0] === "compare") return renderCompare();
     if (parts[0] === "accuracy") return renderAccuracy();
     if (parts[0] === "task" && parts[1]) return renderTask(decodeURIComponent(parts[1]));
+    if (parts[0] === "r" && parts[1]) return renderReportFile(decodeURIComponent(parts[1]));
     if (parts[0] === "t" && parts[1]) {
       const ticker = decodeURIComponent(parts[1]);
       if (parts[2]) return renderReport(ticker, decodeURIComponent(parts[2]));
@@ -336,11 +338,13 @@
       ? drs.map((dr) => `<li><a class="date-pill" href="#/t/${encodeURIComponent(ticker)}/${encodeURIComponent(String(dr.date || ""))}">
             <span>${esc(dr.date)}</span>${dr.rating ? ratingBadge(dr.rating) : ""}</a></li>`).join("")
       : `<li class="muted">${t("detail_no_dates")}</li>`;
-    // Two-line download links: a human label plus the dir's wall-clock stamp —
+    // Two-line report links: a human label plus the dir's wall-clock stamp —
     // the raw <TICKER>_<stamp> dir name is machine bookkeeping, not UI copy.
+    // The link opens the in-app rendered report (#/r/<dir>); the raw .md
+    // download lives on that view as a button.
     const repItems = reports.length
       ? reports.map((r) =>
-          `<li><a class="rep-link" href="/reports/${encodeURIComponent(r.dir)}/complete_report.md" target="_blank" rel="noopener">
+          `<li><a class="rep-link" href="#/r/${encodeURIComponent(r.dir)}">
              <span class="rl-main"><span aria-hidden="true">📜 </span>${t("detail_report_file")}${r.complete ? "" : esc(t("detail_rep_incomplete"))}</span>
              <span class="rl-sub">${esc(fmtStamp(r.dir))}</span>
            </a></li>`).join("")
@@ -653,6 +657,40 @@
     if (debEl) YiCharts.drawDebateBalance(debEl, deb);
     var riskEl = document.getElementById("chart-risk");
     if (riskEl) YiCharts.drawRiskRadar(riskEl, risk);
+  }
+
+  // ----------------------------- report file -------------------------------
+
+  // In-app viewer for a run's complete_report.md (the dir list links here).
+  // The markdown travels the same marked + DOMPurify allowlist as agent
+  // sections; a raw .md download button rides along for archiving.
+  async function renderReportFile(dir) {
+    // Report dirs are <TICKER>_<YYYYMMDD>_<HHMMSS>: charset-validate the whole
+    // name (no separators, no dot segments) so the fetch stays inside /reports.
+    if (!/^[A-Za-z0-9_-]+$/.test(dir)) { renderError("not found"); return; }
+    view().innerHTML = `<div class="sk-card sk-report"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>`;
+    let text;
+    try {
+      const r = await fetch(`/reports/${encodeURIComponent(dir)}/complete_report.md`);
+      if (!r.ok) throw new Error(`${r.status}: ${t("rf_missing")}`);
+      text = await r.text();
+    } catch (e) { renderError(e); return; }
+
+    const ticker = dir.split("_")[0];
+    const rawURL = `/reports/${encodeURIComponent(dir)}/complete_report.md`;
+    view().innerHTML = `
+      <p><a href="#/t/${encodeURIComponent(ticker)}" class="muted">${t("common_back")} ${esc(ticker)}</a></p>
+      <div class="report-head">
+        <div>
+          <div class="ticker-big">${esc(ticker)}</div>
+          <div class="company">${t("rf_title")}</div>
+        </div>
+        <span class="date-tag">${esc(fmtStamp(dir))}</span>
+        <a class="btn" href="${esc(rawURL)}" download="${esc(dir)}.md">${t("rf_download")}</a>
+      </div>
+      <details class="section" open><summary><span class="caret" aria-hidden="true"></span><span class="num" aria-hidden="true">📜</span>${t("detail_report_file")}</summary>
+        <div class="section-body"><div class="md">${md(text)}</div></div>
+      </details>`;
   }
 
   // ----------------------------- compare ----------------------------------
