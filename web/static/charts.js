@@ -117,30 +117,32 @@
     });
 
     var chart = echarts.init(el, null, { renderer: "canvas" });
+    // Geometry for the ~250x160 in-grid card: donut on the left ~30% column,
+    // compact vertical legend on the right, total centered in the ring.
     var opt = {
       tooltip: Object.assign(triggerItem(tooltipStyle(th)), {
         formatter: function (p) { return p.name + " · " + p.value + " (" + p.percent + "%)"; }
       }),
       legend: {
-        orient: "vertical", right: 6, top: "center",
-        textStyle: { color: th.ink2, fontSize: 11 },
-        itemWidth: 9, itemHeight: 9, itemGap: 9
+        orient: "vertical", right: 4, top: "center",
+        textStyle: { color: th.ink2, fontSize: 10.5 },
+        itemWidth: 8, itemHeight: 8, itemGap: 7
       },
       series: [{
-        type: "pie", radius: ["44%", "70%"], center: ["35%", "50%"],
+        type: "pie", radius: ["46%", "70%"], center: ["30%", "50%"],
         avoidLabelOverlap: true, padAngle: 2,
         itemStyle: { borderRadius: 6, borderColor: th.panel, borderWidth: 2 },
         label: { show: false },
-        emphasis: { scale: true, scaleSize: 5, label: { show: true, fontSize: 13, fontWeight: "bold", color: th.ink1, formatter: "{b}\n{c}" } },
+        emphasis: { scale: true, scaleSize: 5, label: { show: true, fontSize: 12, fontWeight: "bold", color: th.ink1, formatter: "{b}\n{c}" } },
         data: data
       }],
       graphic: [{
-        type: "text", left: "35%", top: "46%",
-        style: { text: String(total), fill: th.ink1, fontSize: 24, fontWeight: "bold", fontFamily: th.font, textAlign: "center" },
+        type: "text", left: "30%", top: "43%",
+        style: { text: String(total), fill: th.ink1, fontSize: 20, fontWeight: "bold", fontFamily: th.font, textAlign: "center" },
         z: 10
       }, {
-        type: "text", left: "35%", top: "58%",
-        style: { text: (window.t ? window.t("dist_tickers") : "tickers"), fill: th.ink3, fontSize: 11, fontFamily: th.font, textAlign: "center" },
+        type: "text", left: "30%", top: "58%",
+        style: { text: (window.t ? window.t("dist_tickers") : "tickers"), fill: th.ink3, fontSize: 10, fontFamily: th.font, textAlign: "center" },
         z: 10
       }]
     };

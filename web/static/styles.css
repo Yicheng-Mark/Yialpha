@@ -332,9 +332,6 @@ a:hover { color: var(--ink-1); }
 }
 .sk-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
 .sk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
-/* home: sidebar skeleton (title bar + chart block) beside the grid */
-.home-sk-side .skeleton:nth-child(1) { width: 42%; }
-.home-sk-side .skeleton:nth-child(2) { height: 170px; margin: 18px 0; }
 /* home: repeated ticker-card skeletons */
 .sk-grid .sk-card .skeleton:nth-child(1) { width: 38%; }
 .sk-grid .sk-card .skeleton:nth-child(2) { width: 72%; height: 20px; }
@@ -408,7 +405,7 @@ a:hover { color: var(--ink-1); }
 .filter-none { text-align: center; color: var(--ink-3); padding: 40px 0; grid-column: 1 / -1; }
 
 /* ---------- ticker grid (home) ---------- */
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
 .card {
   position: relative;
   display: block;
@@ -422,15 +419,37 @@ a:hover { color: var(--ink-1); }
   background: var(--accent); transition: width .16s ease;
 }
 .card:hover::before { width: 4px; }
-/* the absolutely-positioned badge owns the top-right corner; a long ticker
-   (ETHUSDT) + a long label (Underweight) would collide, so reserve the
-   badge's row and ellipsize anything longer */
+/* the rating badge + "latest · N runs" line share a second row, so the
+   ticker name above keeps the full card width (a long name + a long label
+   used to collide with an absolutely-positioned badge and ellipsize) */
 .card .ticker {
   font-size: 20px; font-weight: 800; color: var(--ink-1); letter-spacing: .2px; font-variant-numeric: tabular-nums;
-  max-width: calc(100% - 110px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.card .meta { color: var(--ink-3); font-size: 12px; margin-top: 10px; }
-.card .rating-badge { position: absolute; top: 18px; right: 18px; }
+.card .meta { color: var(--ink-3); font-size: 12px; }
+/* badge and meta stack on fixed lines — a width-dependent wrap would line
+   short labels (Hold) up inline while long ones (Underweight) dropped below,
+   giving cards in the same row different rhythms */
+.ticker-foot { margin-top: 12px; }
+.ticker-foot .meta { margin-top: 6px; }
+/* the only card whose badge still owns the top-right corner (detail page) */
+.latest-card .rating-badge { position: absolute; top: 18px; right: 18px; }
+
+/* rating timeline — one dot per recent run, oldest → newest, the newest
+   wearing a ring; same --r-* ramp as the badges. Pinned to the card's
+   bottom edge (ticker-card is a flex column) so stretched rows read as
+   deliberate space, not leftover height. */
+.ticker-dots { display: flex; align-items: center; gap: 6px; margin-top: auto; padding-top: 14px; }
+.ticker-dots .tdot {
+  width: 10px; height: 10px; border-radius: 50%; flex: 0 0 10px;
+  background: var(--td, var(--neutral)); opacity: .8;
+}
+.ticker-dots .tdot.latest { opacity: 1; box-shadow: 0 0 0 3px color-mix(in srgb, var(--td, var(--neutral)) 25%, transparent); }
+.tdot.buy   { --td: var(--r-buy); }
+.tdot.over  { --td: var(--r-over); }
+.tdot.hold  { --td: var(--r-hold); }
+.tdot.under { --td: var(--r-under); }
+.tdot.sell  { --td: var(--r-sell); }
 /* hover wash tinted by the card's rating (class set by app.js alongside
    the accent bar) — 6% of the ramp color over the glass panel */
 .ticker-card.rc-buy:hover         { background: color-mix(in srgb, var(--r-buy) 6%, var(--panel)); }
@@ -550,13 +569,22 @@ a:hover { color: var(--ink-1); }
 }
 .rep-rows { list-style: none; padding: 0; margin: 6px 0 0; max-height: 320px; overflow-y: auto; }
 .rep-row {
-  display: flex; align-items: center; gap: 12px;
-  padding: 10px 4px; border-bottom: 1px solid var(--grid);
+  display: flex; align-items: center; gap: 10px;
+  padding: 3px 0; border-bottom: 1px solid var(--grid);
 }
 .rep-row:last-child { border-bottom: none; }
+/* the wall-clock stamp is the row's identity (a label would repeat on every
+   line), so the whole left block is the in-app "open" link */
+.rep-row .rr-open {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 12px; border-radius: var(--radius-sm);
+  transition: background .12s;
+}
+.rep-row .rr-open:hover { background: var(--accent-dim); text-decoration: none; }
 .rep-row .dot { flex: 0 0 10px; }
-.rep-row .rr-main { flex: 1 1 auto; min-width: 0; font-weight: 600; font-size: 13.5px; color: var(--ink-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rep-row .rr-sub { flex: 0 0 auto; color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.rep-row .rr-stamp { font-weight: 700; font-size: 13.5px; color: var(--ink-1); font-variant-numeric: tabular-nums; letter-spacing: .2px; white-space: nowrap; }
+.rep-row .rr-warn { color: var(--st-warn); font-size: 12px; font-weight: 600; }
 .rep-row .btn { flex: 0 0 auto; padding: 5px 12px; font-size: 12px; }
 
 /* ---------- latest-run quick card (detail right column) ---------- */
@@ -744,18 +772,13 @@ details.section > summary .num {
    ECharts containers — themed panels wrapping canvas charts
    =================================================================== */
 
-/* home two-pane layout: sticky rating-dist rail beside the ticker grid.
-   The donut canvas is ~300px wide here — it previously sat in a full-width
-   panel whose empty flanks pushed the grid below the fold. */
-.home-layout {
-  display: grid; grid-template-columns: 340px minmax(0, 1fr);
-  gap: 22px; align-items: start; margin-bottom: 20px;
-}
-.home-side { position: sticky; top: 84px; }
-@media (max-width: 900px) {
-  .home-layout { grid-template-columns: 1fr; }
-  .home-side { position: static; }
-}
+/* home ticker grid: the rating-dist donut is the grid's first card (same
+   auto-fill flow as the ticker cards), so short ticker lists still fill the
+   row instead of stranding dead space beside a sticky rail. The canvas area
+   flexes to whatever the row height settles at. */
+.grid-dist { display: flex; flex-direction: column; }
+.grid-dist .chart-head { margin-bottom: 6px; }
+.grid-dist .chart-area { flex: 1 1 auto; min-height: 150px; }
 
 /* chart panel — glass wrapper matching .card aesthetic */
 .chart-panel {
@@ -773,9 +796,6 @@ details.section > summary .num {
 /* chart area — the div ECharts mounts into; fixed heights per chart type */
 .chart-area { width: 100%; position: relative; }
 
-/* donut on home */
-.chart-area-md { height: 260px; }
-
 /* rating trend step-line on detail */
 .chart-area-trend { height: 240px; }
 
@@ -792,7 +812,6 @@ details.section > summary .num {
 .chart-area-compare { height: 380px; }
 
 @media (max-width: 600px) {
-  .chart-area-md { height: 200px; }
   .chart-area-trend { height: 200px; }
   .chart-area-perf { height: 260px; }
   .chart-area-gauge { height: 180px; }
@@ -801,7 +820,7 @@ details.section > summary .num {
 }
 
 /* ---- ticker card accent bar (left edge colored by rating) ---- */
-.ticker-card { padding-left: 22px; }
+.ticker-card { padding-left: 22px; display: flex; flex-direction: column; }
 .card-accent {
   position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
   border-radius: 0 3px 3px 0; opacity: .85;
