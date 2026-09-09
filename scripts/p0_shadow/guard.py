@@ -3,11 +3,23 @@
 This is an application guard for the runner's narrow Python entry points, not
 an OS sandbox for hostile native extensions. Importing this module uses only
 the standard library and does not import yialpha or inspect dotenv files.
+
+``network_mode="offline"`` denies all egress. ``network_mode="allowlist"``
+(B1/B2 process validation) permits DNS, TCP and HTTP only toward an explicit
+public market-data vendor host set, checked at four layers: the ``requests``
+and ``curl_cffi`` session dispatch, Python socket DNS/connect, native libcurl
+``perform``, and the process audit hook. Proxy environment variables are kept
+(exactly as configured) and each configured proxy endpoint becomes the only
+permitted non-vendor connect target: on hosts where direct Binance egress is
+geo-blocked the local proxy is the transport, while the destination host
+allowlist above still gates every request. Redirect hops are verified after
+the fact and violations abort.
 """
 
 from __future__ import annotations
 
 import importlib
+import ipaddress
 import json
 import os
 import re
@@ -20,7 +32,7 @@ from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 
 class GuardError(RuntimeError):
@@ -33,6 +45,20 @@ _ACTIVE: dict[str, Any] | None = None
 _HOOK_INSTALLED = False
 _DENY_DOTENV = False
 _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+
+# B1/B2 process validation only needs public market data: Binance USDT-M
+# futures REST and Yahoo quote hosts (yfinance chart endpoints plus the
+# fc.yahoo.com cookie hop). Exact hostnames, no wildcards, no spot venue.
+VENDOR_ALLOWED_HOSTS = frozenset({
+    "fapi.binance.com",
+    "query1.finance.yahoo.com",
+    "query2.finance.yahoo.com",
+    "fc.yahoo.com",
+})
+_PROXY_ENV_VARS = (
+    "http_proxy", "https_proxy", "all_proxy",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+)
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -268,7 +294,9 @@ def _audit(event: str, args: tuple[Any, ...]) -> None:
             # Local host-name lookup used by platform.uname() at pandas import;
             # performs no network I/O.
             return
-        _ACTIVE["network_attempts"] += 1
+        if _ACTIVE.get("network_mode") == "allowlist" and _allowlist_socket_event(event, args):
+            return
+        _count_denied()
         raise GuardError("network and DNS are disabled for B0")
     elif event in ("subprocess.Popen", "os.system", "os.posix_spawn", "os.spawn",
                    "os.exec", "os.fork", "os.forkpty", "os.startfile", "os.startfile/2"):
@@ -298,9 +326,215 @@ def disable_dotenv() -> None:
 
 
 def _blocked_network(*_args: Any, **_kwargs: Any) -> Any:
+    _count_denied()
+    raise GuardError("network and native curl are disabled for B0")
+
+
+def _url_host(value: object) -> str | None:
+    """Lowercased hostname of an absolute HTTP(S) URL, or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        host = urlsplit(value).hostname
+    except ValueError:
+        return None
+    return host.lower() if host else None
+
+
+def _address_host(address: object) -> str | None:
+    if isinstance(address, tuple) and address and isinstance(address[0], str):
+        return address[0]
+    return None
+
+
+def _record_resolved(host: str, port: Any) -> None:
+    """Record one resolved (ip, port) pair; connects must match both."""
+    assert _ACTIVE is not None
+    try:
+        ip = ipaddress.ip_address(host).compressed
+        resolved_port = int(port)
+    except (ValueError, TypeError):
+        return
+    _ACTIVE["resolved_endpoints"].add((ip, resolved_port))
+
+
+def _proxy_endpoints() -> dict[str, set[int]]:
+    """Snapshot configured proxy transport endpoints (host -> ports).
+
+    The values come verbatim from the environment the caller configured; no
+    proxy variable is added, removed or rewritten here. These endpoints are
+    transport only — request destinations stay gated by the vendor allowlist.
+    """
+    endpoints: dict[str, set[int]] = {}
+    for name in _PROXY_ENV_VARS:
+        value = os.environ.get(name)
+        if not value:
+            continue
+        target = value if "//" in value else f"//{value}"
+        try:
+            parsed = urlsplit(target)
+            host, port = parsed.hostname, parsed.port
+        except ValueError:
+            continue
+        if not host:
+            continue
+        if port is None:
+            port = 443 if parsed.scheme == "https" else 80
+        endpoints.setdefault(host.lower(), set()).add(port)
+    return endpoints
+
+
+def _host_allowed(host: str) -> bool:
+    """Resolve-time rule: vendor hostnames and configured proxy hosts only."""
+    assert _ACTIVE is not None
+    return host.lower() in VENDOR_ALLOWED_HOSTS or host.lower() in _ACTIVE["proxy_endpoints"]
+
+
+def _endpoint_allowed(host: str, port: Any) -> bool:
+    """Connect-time rule: hostname, proxy (host, port) or resolved (ip, port)."""
+    assert _ACTIVE is not None
+    name = host.lower()
+    if name in VENDOR_ALLOWED_HOSTS:
+        return True
+    try:
+        target_port = int(port)
+    except (TypeError, ValueError):
+        return False
+    if name in _ACTIVE["proxy_endpoints"] and target_port in _ACTIVE["proxy_endpoints"][name]:
+        return True
+    try:
+        return (ipaddress.ip_address(host).compressed, target_port) in _ACTIVE["resolved_endpoints"]
+    except ValueError:
+        return False
+
+
+def _count_allowed() -> None:
+    if _ACTIVE is not None:
+        _ACTIVE["allowed_calls"] += 1
+        summary = _ACTIVE.get("summary")
+        if summary is not None:
+            summary["allowed_calls"] = _ACTIVE["allowed_calls"]
+
+
+def _count_denied() -> None:
     if _ACTIVE is not None:
         _ACTIVE["network_attempts"] += 1
-    raise GuardError("network and native curl are disabled for B0")
+        summary = _ACTIVE.get("summary")
+        if summary is not None:
+            summary["network_attempts"] = _ACTIVE["network_attempts"]
+
+
+def _deny_egress() -> GuardError:
+    _count_denied()
+    return GuardError("network egress outside the P0 vendor allowlist is forbidden")
+
+
+def _allowlist_socket_event(event: str, args: tuple[Any, ...]) -> bool:
+    """Audit-hook second opinion: non-egress socket events may pass in allowlist mode."""
+    assert _ACTIVE is not None
+    if event == "socket.__new__":
+        # Object construction is not egress; DNS, connect and sendto layers
+        # still gate every actual outbound path.
+        return True
+    if event == "socket.bind":
+        # urllib3's import-time IPv6 capability probe binds ::1; loopback
+        # binds only, never an externally reachable interface.
+        host = _address_host(args[1] if len(args) > 1 else None)
+        return host is not None and (
+            host == "::1" or host == "localhost" or host.startswith("127."))
+    if event == "socket.getaddrinfo":
+        return bool(args) and isinstance(args[0], str) and _host_allowed(args[0])
+    if event == "socket.connect":
+        address = args[1] if len(args) > 1 else None
+        host = _address_host(address)
+        if host is None or not isinstance(address, tuple) or len(address) < 2:
+            return False
+        return _endpoint_allowed(host, address[1])
+    return False
+
+
+def _make_allowlist_getaddrinfo(original: Any) -> Any:
+    def getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
+        if not isinstance(host, str) or not _host_allowed(host):
+            raise _deny_egress()
+        result = original(host, port, *args, **kwargs)
+        assert _ACTIVE is not None
+        for item in result:
+            sockaddr = item[-1] if isinstance(item, tuple) and item else None
+            if sockaddr and isinstance(sockaddr[0], str) and len(sockaddr) >= 2:
+                _record_resolved(sockaddr[0], sockaddr[1])
+        _count_allowed()
+        return result
+
+    return getaddrinfo
+
+
+def _make_allowlist_connect(original: Any) -> Any:
+    def connect(self: Any, address: Any) -> Any:
+        host = _address_host(address)
+        if host is None or not isinstance(address, tuple) or len(address) < 2 \
+                or not _endpoint_allowed(host, address[1]):
+            raise _deny_egress()
+        result = original(self, address)
+        assert _ACTIVE is not None
+        _count_allowed()
+        return result
+
+    return connect
+
+
+def _make_allowlist_create_connection(original: Any) -> Any:
+    def create_connection(address: Any, *args: Any, **kwargs: Any) -> Any:
+        host = _address_host(address)
+        if host is None or not isinstance(address, tuple) or len(address) < 2 \
+                or not _endpoint_allowed(host, address[1]):
+            raise _deny_egress()
+        result = original(address, *args, **kwargs)
+        assert _ACTIVE is not None
+        _count_allowed()
+        return result
+
+    return create_connection
+
+
+def _make_allowlist_session_request(original: Any) -> Any:
+    """Pre-flight hostname gate for requests and curl_cffi session dispatch."""
+
+    def request(self: Any, method: Any, url: Any = None, *args: Any, **kwargs: Any) -> Any:
+        if url is None:
+            url = kwargs.pop("url", None)
+        host = _url_host(url)
+        if host is None or host not in VENDOR_ALLOWED_HOSTS:
+            raise _deny_egress()
+        response = original(self, method, url, *args, **kwargs)
+        for hop in (response, *(getattr(response, "history", None) or ())):
+            hop_host = _url_host(getattr(hop, "url", None))
+            if hop_host is not None and hop_host not in VENDOR_ALLOWED_HOSTS:
+                # Post-hoc: the request already left; abort and count it.
+                raise _deny_egress()
+        assert _ACTIVE is not None
+        _count_allowed()
+        return response
+
+    return request
+
+
+def _make_allowlist_curl_perform(original: Any) -> Any:
+    from curl_cffi import CurlInfo
+
+    def perform(self: Any, *args: Any, **kwargs: Any) -> Any:
+        host = _url_host(self.getinfo(CurlInfo.EFFECTIVE_URL))
+        if host is None or host not in VENDOR_ALLOWED_HOSTS:
+            raise _deny_egress()
+        result = original(self, *args, **kwargs)
+        final = _url_host(self.getinfo(CurlInfo.EFFECTIVE_URL))
+        if final is None or final not in VENDOR_ALLOWED_HOSTS:
+            raise _deny_egress()
+        assert _ACTIVE is not None
+        _count_allowed()
+        return result
+
+    return perform
 
 
 def _blocked_execution(*_args: Any, **_kwargs: Any) -> Any:
@@ -321,15 +555,15 @@ def _profile(frame: Any, event: str, arg: Any) -> None:
 def isolated_runtime(
     root: str | os.PathLike[str], attempt_id: str, *, network_mode: str = "offline"
 ) -> Iterator[dict[str, Any]]:
-    """Configure the actual project inside a scoped, offline write allowlist.
+    """Configure the actual project inside a scoped, write-allowlisted runtime.
 
     The caller creates/verifies its cohort manifest first. Each CLI attempt
     must use a fresh process; sequential contexts exist only for offline tests.
     No supplier call or SQL is made during configuration verification.
     """
     global _ACTIVE
-    if network_mode != "offline":
-        raise GuardError("B0 only supports network_mode='offline'")
+    if network_mode not in {"offline", "allowlist"}:
+        raise GuardError("network_mode must be 'offline' or 'allowlist'")
     if _ACTIVE is not None:
         raise GuardError("nested isolated runtimes are forbidden")
     if not isinstance(attempt_id, str) or not _SAFE_COMPONENT.fullmatch(attempt_id):
@@ -351,7 +585,8 @@ def isolated_runtime(
     disable_dotenv()
     state: dict[str, Any] = {
         "guard": guard, "ready": False, "thread_id": threading.get_ident(),
-        "connections": [], "network_attempts": 0,
+        "connections": [], "network_attempts": 0, "network_mode": network_mode,
+        "resolved_endpoints": set(), "allowed_calls": 0, "proxy_endpoints": _proxy_endpoints(),
     }
     _ACTIVE = state
     old_profile = sys.getprofile()
@@ -359,11 +594,28 @@ def isolated_runtime(
         with ExitStack() as stack:
             import socket
 
-            for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr",
-                         "create_connection"):
-                stack.enter_context(patch.object(socket, name, _blocked_network))
-            for name in ("connect", "connect_ex", "sendto", "send", "sendall"):
-                stack.enter_context(patch.object(socket.socket, name, _blocked_network))
+            if network_mode == "offline":
+                for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr",
+                             "create_connection"):
+                    stack.enter_context(patch.object(socket, name, _blocked_network))
+                for name in ("connect", "connect_ex", "sendto", "send", "sendall"):
+                    stack.enter_context(patch.object(socket.socket, name, _blocked_network))
+            else:
+                # Keep proxy env verbatim: configured proxy endpoints become
+                # the only permitted non-vendor connect targets (snapshotted
+                # in state above); destinations stay gated at the HTTP layer.
+                stack.enter_context(patch.object(
+                    socket, "getaddrinfo", _make_allowlist_getaddrinfo(socket.getaddrinfo)))
+                for name in ("gethostbyname", "gethostbyname_ex", "gethostbyaddr"):
+                    stack.enter_context(patch.object(socket, name, _blocked_network))
+                stack.enter_context(patch.object(
+                    socket, "create_connection",
+                    _make_allowlist_create_connection(socket.create_connection)))
+                stack.enter_context(patch.object(
+                    socket.socket, "connect", _make_allowlist_connect(socket.socket.connect)))
+                stack.enter_context(patch.object(
+                    socket.socket, "connect_ex", _make_allowlist_connect(socket.socket.connect_ex)))
+                stack.enter_context(patch.object(socket.socket, "sendto", _blocked_network))
             stack.enter_context(patch.object(threading.Thread, "start", _blocked_execution))
 
             def guarded_connect(*args: Any, _connect: Any = sqlite3.connect,
@@ -383,11 +635,28 @@ def isolated_runtime(
             # curl_cffi uses native libcurl and bypasses Python socket.connect.
             # Patch both sync perform and the asynchronous multi-handle seam.
             curl = importlib.import_module("curl_cffi")
-            stack.enter_context(patch.object(curl.Curl, "perform", _blocked_network))
-            stack.enter_context(patch.object(curl.AsyncCurl, "add_handle", _blocked_network))
             curl_requests = importlib.import_module("curl_cffi.requests")
-            stack.enter_context(patch.object(curl_requests.Session, "request", _blocked_network))
-            stack.enter_context(patch.object(curl_requests.AsyncSession, "request", _blocked_network))
+            stack.enter_context(patch.object(
+                curl.AsyncCurl, "add_handle", _blocked_network))
+            if network_mode == "offline":
+                stack.enter_context(patch.object(curl.Curl, "perform", _blocked_network))
+                stack.enter_context(patch.object(
+                    curl_requests.Session, "request", _blocked_network))
+            else:
+                stack.enter_context(patch.object(
+                    curl.Curl, "perform",
+                    _make_allowlist_curl_perform(curl.Curl.perform)))
+                stack.enter_context(patch.object(
+                    curl_requests.Session, "request",
+                    _make_allowlist_session_request(curl_requests.Session.request)))
+            stack.enter_context(patch.object(
+                curl_requests.AsyncSession, "request", _blocked_network))
+            if network_mode == "allowlist":
+                # Plain requests transports (Binance REST) share this dispatch.
+                requests_module = importlib.import_module("requests")
+                stack.enter_context(patch.object(
+                    requests_module.Session, "request",
+                    _make_allowlist_session_request(requests_module.Session.request)))
 
             cfg_module = importlib.import_module("yialpha.dataflows.config")
             isolated = dict(paths, analysis_only=True, live_execution_enabled=False,
@@ -431,11 +700,14 @@ def isolated_runtime(
             state["ready"] = True
             sys.setprofile(_profile)
             summary = dict(isolated, yfinance_internal_cache=str(yf_path),
-                           network_mode="offline", network_attempts=0)
+                           network_mode=network_mode, network_attempts=0, allowed_calls=0,
+                           proxy_endpoint_hosts=sorted(state["proxy_endpoints"]))
+            state["summary"] = summary
             try:
                 yield summary
             finally:
                 summary["network_attempts"] = state["network_attempts"]
+                summary["allowed_calls"] = state["allowed_calls"]
                 state["ready"] = False
                 sys.setprofile(old_profile)
                 for connection in state["connections"]:

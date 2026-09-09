@@ -1,7 +1,44 @@
 # P0 独立 shadow 真实验证方案
 
-准备日期：2026-09-06。状态：**A 阶段方案交付；B0 离线准备已于 2026-09-07 实现并通过离线验证；B1/B2/B3 尚未执行**。
+准备日期：2026-09-06。状态：**A 阶段方案交付；B0 于 2026-09-07 完成；B1 于 2026-09-09 经用户明确授权后启动（C-\* 三组 9 条已真实形成）；B2/B3 由用户授权的每日定时检查推进中**。
 本文件依据本地代码静态审阅编写；没有访问供应商、创建真实预测、评分真实样本或运行 LLM。
+
+**B1 启动与自动化授权记录（2026-09-09）**：用户明确授权 (1) B1 真实形成时快照，(2) 用 ZCode 定时任务执行 B2 到期检查与周末组形成。
+第 1、2、4 节中"不建立自动化或后台轮询 / 只在人工启动时运行"的原约束，其本意是禁止未经授权的静默后台任务；
+本次授权后，第 2 节 B2 的"手动运行评分"由每日 09:30（本地）的 ZCode 自动化执行等价命令，其余边界（无 LLM、无交易、
+不动保护目录、不提交推送）全部不变。本段即为该变更的记录，原文保留于下文未删改。
+
+**B1/B2 实现与首跑记录（2026-09-09）**：
+- `scripts/p0_shadow/guard.py` 新增 `network_mode="allowlist"`：仅放行 `fapi.binance.com`、`query1.finance.yahoo.com`、`query2.finance.yahoo.com`、`fc.yahoo.com`，
+  四层拦截（requests/curl_cffi 会话分发预检、socket DNS 与 (IP,端口) 连接、原生 curl perform、audit hook），
+  重定向事后核验；本机代理 `127.0.0.1:8086` 按环境原样保留为传输端点（Binance 直连被地理封锁，目的地仍受白名单把关）。
+- CLI 新增 `capture`（B1 真实形成：登记 run → 固定输入 submit → 冻结参考价 → 重复 submit 幂等核验 → 快照/证据落盘）
+  与 `score`（B2 真实 UTC 时钟评分 + 独立 scoreboard + 行级审计 + 账本备份）；`audit` 的 `sample_kind`/`data_mode` 参数化。
+- 离线测试新增 `tests/test_p0_shadow_b1.py` 13 项；P0 相关 11 文件回归 **289 passed** / 1 环境跳过；Ruff 与 5 模块 mypy 通过。
+- **cohort**：`analysis_output/p0-shadow-validation-20260909-1300-b1b2`（cohort-id `p0-b1b2-20260909`，`sample_kind=process_validation_fixed_input`）。
+  2026-09-09 13:01 UTC 真实形成 C-BTC/C-ETH/C-MU × 1/5/21d 共 **9 条**，冻结参考价 BTC 78425.6 / ETH 2483.87 / MU(perp) 1001.6
+  （来源 `binance_perp:1d:last`，2026-09-08 日线，`reference_error` 全空）；幂等重跑与 score 冒烟（零到期、零外联、审计+备份落盘）均通过。
+- **已知披露**：首次 capture 的 `attempts/capture-63f18e77…/capture.json` 内 `network.allowed_calls` 记为 0，
+  系计数器快照同步缺陷（当日已修复：guard 计数改为实时同步）；该次真实放行调用数为 9（进程 stdout JSON），证据不受影响。
+  同日起第二次 attempt 起计数正确。
+- **U-MU-WE（周末组）**：按方案必须真实 UTC 周六/周日形成，代码在工作日拒绝（`capture` 周中运行 `--groups U-MU-WE` 直接 GuardError）。
+  委托自动化在 09-12（周六）09:30 形成，09-13（周日）自动重试兜底；两天都失败则顺延 09-19/20 并在检查点会话中说明。
+
+**到期日程（自动化每日 09:30 覆盖；时间为 UTC 形成时刻起算）**：
+
+| 日期 | 事件 | 预期 |
+|---|---|---|
+| 09-10（四） | C-\* 1d×3 到期 | complete |
+| 09-12（六） | U-MU-WE 形成（自动化） | 3 条周末快照 |
+| 09-13（日） | U-MU-WE 1d 到期 | incomplete / no_new_trading_session（同根终态） |
+| 09-14（一） | C-\* 5d×3 到期 | complete |
+| 09-17（四） | U-MU-WE 5d 到期 | complete（股票终点+复权一致） |
+| 09-30（三） | C-\* 21d×3 到期 | complete |
+| 10-03（六） | U-MU-WE 21d 到期 | complete |
+| 缺数时 | pending → +7d 截止 → incomplete | C-\* 21d 截止 10-07；U-MU-WE 21d 截止 10-10 |
+
+人工检查点：09-15 前后（1d/5d+周末组）、10-04 前后（21d 全终态，正常关账）、10-11（最坏关账：补数截止后终态核对、
+完整审计、独立报告、删除自动化）。自动化错过触发可自愈（score 幂等补做）。
 
 **B0 完成记录（2026-09-07）**：第 2、3 节"待实现"的 runner、路径 guard、原始响应 recorder、manifest 和逐行审计
 已实现于 `scripts/p0_shadow/`（guard.py / artifacts.py / audit.py / runner.py）及 CLI 入口 `scripts/p0_shadow_validation.py`
@@ -10,7 +47,6 @@
 missing-funding 场景 → 8 complete + 4 incomplete（BTC 三期限 7d 截止终态 + 周末同根）。
 本轮修复了 B0 实现中的 6 处缺陷（见 P0_TIME_CONTRACT.md 2026-09-07 补充）。
 20 个测试文件离线回归 **381 passed**，网络拦截计数 0；Ruff 与 4 个 B0 模块限定 mypy 通过。
-B0 完成不自动启动 B1；B1 开始前仍须用户明确授权。
 适用契约见 [P0_TIME_CONTRACT.md](P0_TIME_CONTRACT.md)，阶段授权边界见
 [P0_NEXT_SESSION_PLAN.md](P0_NEXT_SESSION_PLAN.md)。此前 316 项、本轮 338 项离线通过记录均不能替代本方案的真实证据。
 

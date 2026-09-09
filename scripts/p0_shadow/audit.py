@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 _NEW = "close_reference_v1"
 _LEGACY = "legacy_daily_v1"
+_SAMPLE_KINDS = frozenset({"offline_fixture", "process_validation_fixed_input"})
 _DIAGNOSTIC_LEGS = {"underlying", "underlying_close", "underlying_price_return", "basis_return"}
 _NUMERIC_LEGS = ("contract_price_return", "funding_pnl", "fees", "slippage", "net_return")
 
@@ -249,17 +250,23 @@ def _prediction_schedule(prediction: dict[str, Any], observed: datetime) -> dict
         }
 
 
-def build_audit(ledger_path: Path, *, cohort_id: str, observed_at: str) -> dict:
+def build_audit(
+    ledger_path: Path, *, cohort_id: str, observed_at: str,
+    sample_kind: str = "offline_fixture",
+) -> dict:
     """Read one consistent SQLite transaction; never migrate or compute outcomes.
 
-    Call inside ``guard.isolated_runtime``. This B0 report labels all evidence
-    as offline fixtures. A runner must attach its SQLite backup fingerprint;
-    the logical-row hash here is not a hash of a live main database file.
+    Call inside ``guard.isolated_runtime``. ``sample_kind`` labels the data
+    mode: offline fixtures or B1/B2 process validation with real vendor calls.
+    A runner must attach its SQLite backup fingerprint; the logical-row hash
+    here is not a hash of a live main database file.
     """
     from .guard import require_runtime
 
     if not cohort_id or not isinstance(cohort_id, str):
         raise ValueError("cohort_id must be a nonempty string")
+    if sample_kind not in _SAMPLE_KINDS:
+        raise ValueError("unsupported sample_kind")
     ledger_path = Path(ledger_path)
     if not ledger_path.is_absolute():
         raise ValueError("ledger_path must be absolute")
@@ -391,7 +398,8 @@ def build_audit(ledger_path: Path, *, cohort_id: str, observed_at: str) -> dict:
     return _safe({
         "audit_version": "p0_shadow_audit_v1", "cohort_id": cohort_id,
         "title": "固定输入流程验证，非预测能力评估",
-        "sample_kind": "process_validation_fixed_input", "data_mode": "offline_fixture",
+        "sample_kind": sample_kind,
+        "data_mode": "offline_fixture" if sample_kind == "offline_fixture" else "real_vendor_calls",
         "llm_used": False, "predictive_ability_evidence": False,
         "observed_at": observed.isoformat(), "source_ledger_path": str(ledger_path),
         "sqlite_schema_version": schema,
