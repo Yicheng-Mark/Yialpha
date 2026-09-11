@@ -488,6 +488,70 @@
     return register(el, chart, function () { drawRatingCompare(el, series, onClick); });
   }
 
+  /**
+   * Reliability diagram for the calibration page: per-bin mean predicted
+   * P(up) vs realized accuracy against the y=x perfect-calibration diagonal.
+   * @param {HTMLElement} el
+   * @param {Array} bins - [{bin_low, bin_high, n, mean_prob_up, accuracy}]
+   */
+  function drawReliability(el, bins) {
+    if (!el || !window.echarts) return null;
+    var th = theme();
+    var data = (bins || []).filter(function (b) {
+      return b && isFinite(+b.mean_prob_up) && isFinite(+b.accuracy);
+    });
+    if (!data.length) { el.innerHTML = ""; return null; }
+    var maxN = Math.max.apply(null, data.map(function (b) { return +b.n || 0; }));
+    var points = data.map(function (b) { return [+b.mean_prob_up, +b.accuracy]; });
+    var t_ = window.t || function (k) { return k; };
+
+    var chart = echarts.init(el, null, { renderer: "canvas" });
+    var opt = {
+      tooltip: Object.assign(triggerItem(tooltipStyle(th)), {
+        formatter: function (p) {
+          var b = data[p.dataIndex];
+          if (!b) return "";
+          var gap = b.accuracy - b.mean_prob_up;
+          return "[" + (+b.bin_low).toFixed(1) + ", " + (+b.bin_high).toFixed(1) + ") · n=" + (+b.n || 0)
+            + "<br/>" + t_("calibration_axis_prob") + " " + (+b.mean_prob_up).toFixed(4)
+            + "<br/>" + t_("calibration_axis_acc") + " " + (100 * b.accuracy).toFixed(1) + "%"
+            + "<br/>gap " + (gap >= 0 ? "+" : "") + gap.toFixed(4);
+        }
+      }),
+      grid: { left: 48, right: 20, top: 24, bottom: 40 },
+      xAxis: {
+        type: "value", min: 0, max: 1,
+        name: t_("calibration_axis_prob"), nameLocation: "middle", nameGap: 26,
+        nameTextStyle: { color: th.ink3, fontSize: 11 },
+        axisLine: axisLine(th), axisTick: { show: false },
+        axisLabel: { color: th.ink3, fontSize: 11, formatter: function (v) { return (100 * v) + "%"; } },
+        splitLine: { show: false }
+      },
+      yAxis: {
+        type: "value", min: 0, max: 1,
+        name: t_("calibration_axis_acc"), nameGap: 16,
+        nameTextStyle: { color: th.ink3, fontSize: 11 },
+        axisLine: { show: false }, axisTick: { show: false },
+        splitLine: splitLine(th),
+        axisLabel: { color: th.ink3, fontSize: 11, formatter: function (v) { return (100 * v) + "%"; } }
+      },
+      series: [{
+        type: "line", data: [[0, 0], [1, 1]], symbol: "none", silent: true, z: 1,
+        tooltip: { show: false },
+        lineStyle: { color: th.ink4, type: "dashed", width: 1 }
+      }, {
+        type: "line", data: points, symbol: "circle", z: 3,
+        lineStyle: { color: hexA(th.accent, 0.55), width: 1.5 },
+        itemStyle: { color: th.accent, borderColor: th.panel, borderWidth: 1 },
+        symbolSize: function (_val, params) {
+          return 7 + 13 * ((+data[params.dataIndex].n || 0) / (maxN || 1));
+        }
+      }]
+    };
+    chart.setOption(opt);
+    return register(el, chart, function () { drawReliability(el, bins); });
+  }
+
   // ---- lifecycle: resize, theme switch, route change ----
 
   function resizeAll() {
@@ -542,6 +606,7 @@
     drawDebateBalance: drawDebateBalance,
     drawRiskRadar: drawRiskRadar,
     drawRatingCompare: drawRatingCompare,
+    drawReliability: drawReliability,
     resizeAll: resizeAll,
     redrawAll: redrawAll,
     disposeAll: disposeAll

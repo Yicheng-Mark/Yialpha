@@ -847,6 +847,20 @@
           Object.entries(cells || {}).map(([k, c]) => row(k, c)).join("")
         }</tbody></table>
       </div>`;
+    // Reliability diagram rides on the overall cell's per-bin data (backend
+    // contract: overall.reliability_bins = [{bin_low, bin_high, n,
+    // mean_prob_up, accuracy}]). No bins (or no echarts) → one-line note,
+    // never an empty canvas.
+    const bins = (cal.overall && cal.overall.reliability_bins) || [];
+    const reliabilityPanel = `
+      <div class="cmp-table-wrap">
+        <div class="subhead">${t("calibration_reliability_title")}</div>
+        ${
+          bins.length
+            ? `<div id="reliability-chart" class="chart-area chart-area-trend" role="img"></div>`
+            : `<p class="muted">${t("calibration_reliability_empty")}</p>`
+        }
+      </div>`;
     return `
       <h1 class="page-title">${t("calibration_title")}</h1>
       <p class="page-sub">${t("calibration_sub")}</p>
@@ -854,9 +868,19 @@
         <div class="subhead">${t("calibration_overall")}</div>
         <table class="cmp-table"><thead>${header}</thead><tbody>${row("overall", cal.overall)}</tbody></table>
       </div>
+      ${reliabilityPanel}
       ${sliceTable("calibration_by_analyst", cal.by_analyst)}
       ${sliceTable("calibration_by_horizon", cal.by_horizon_days)}
       <p class="muted">${t("calibration_below_note").replace("{n}", cal.v3_min_samples_per_cell ?? 30)}</p>`;
+  }
+
+  // Draw the reliability diagram after calibrationSection's HTML has been
+  // placed in the view (echarts needs a live element).
+  function mountReliabilityChart(cal) {
+    const el = document.getElementById("reliability-chart");
+    if (el && window.YiCharts) {
+      YiCharts.drawReliability(el, (cal && cal.overall && cal.overall.reliability_bins) || []);
+    }
   }
 
   async function renderAccuracy() {
@@ -879,6 +903,7 @@
           <p><code>yialpha verify-history</code></p>
         </div>
         ${calibrationSection(cal)}`;
+      mountReliabilityChart(cal);
       return;
     }
 
@@ -930,6 +955,7 @@
         <table class="cmp-table"><thead>${header}</thead><tbody>${tickerRows}</tbody></table>
       </div>
       ${calibrationSection(cal)}`;
+    mountReliabilityChart(cal);
   }
 
   // ----------------------------- new analysis -----------------------------

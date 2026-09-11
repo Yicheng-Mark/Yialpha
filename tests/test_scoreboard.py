@@ -208,16 +208,71 @@ def test_markdown_renders_tables_and_v3_note(base_rows: None):
     assert "below V3 sample threshold — display only, no weight adjustment" in markdown
 
 
+# --------------------------------------------------------------------------- #
+# Reliability bins (per-bin data behind the ECE)
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_overall_reliability_bins_pinned(base_rows: None):
+    """r1-r3 each land alone in their 0.1-wide bin; non-empty bins only."""
+    bins = build_scoreboard()["overall"]["reliability_bins"]
+    assert [
+        (b["bin_low"], b["bin_high"], b["n"], b["mean_prob_up"], b["accuracy"])
+        for b in bins
+    ] == [
+        (0.6, 0.7, 1, 0.6, 0.0),  # r2: up, net<0 -> miss
+        (0.8, 0.9, 1, 0.8, 1.0),  # r1: up, net>0 -> hit
+        (0.9, 1.0, 1, 0.9, 1.0),  # r3: up, net>0 -> hit
+    ]
+
+
+@pytest.mark.unit
+def test_reliability_bins_row_set(base_rows: None):
+    """Flat r4 and no-prob r5 never enter a bin; slice cells carry the key."""
+    overall = build_scoreboard()["overall"]
+    bins = overall["reliability_bins"]
+    assert sum(b["n"] for b in bins) == overall["directional_n"] - overall["missing_prob_up"]
+    assert sum(b["n"] for b in bins) == 3
+    cell = build_scoreboard()["by_analyst"]["fundamentals"]
+    assert [b["n"] for b in cell["reliability_bins"]] == [1, 1, 1]
+
+
+@pytest.mark.unit
+def test_reliability_bins_consistent_with_ece(base_rows: None):
+    """ECE is exactly the n-weighted |accuracy - mean_prob| over the bins."""
+    overall = build_scoreboard()["overall"]
+    bins = overall["reliability_bins"]
+    total = sum(b["n"] for b in bins)
+    weighted = sum(b["n"] / total * abs(b["accuracy"] - b["mean_prob_up"]) for b in bins)
+    assert weighted == pytest.approx(overall["calibration_error"])
+    assert weighted == pytest.approx(0.3)  # (0.6 + 0.2 + 0.1) / 3
+    # Disjoint ordered ranges of width 0.1 covering up to 1.0.
+    for left, right in zip(bins, bins[1:]):
+        assert left["bin_high"] <= right["bin_low"]
+    assert all(b["bin_high"] - b["bin_low"] == pytest.approx(0.1) for b in bins)
+    assert 0.0 <= bins[0]["bin_low"] and bins[-1]["bin_high"] == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+def test_markdown_reliability_section(base_rows: None):
+    markdown = render_scoreboard_markdown(build_scoreboard())
+    assert "## Reliability" in markdown
+    assert "| prob bin | n | mean prob_up | realized accuracy | gap |" in markdown
+    # r2's bin is the only miss: accuracy 0% vs mean prob 0.6 -> gap -0.6000
+    assert "| [0.6, 0.7) | 1 | 0.6000 | 0.0% | -0.6000 |" in markdown
+
+
 @pytest.mark.unit
 def test_empty_ledger_renders_empty_sections():
     board = build_scoreboard()
     assert board["overall"]["n"] == 0
     assert board["overall"]["directional_accuracy"] is None
+    assert board["overall"]["reliability_bins"] == []
     for key in ("by_analyst", "by_direction"):
         assert board[key] == {}
     markdown = render_scoreboard_markdown(board)
     assert "## By analyst" in markdown
     assert "_(no rows)_" in markdown
+    assert "_(no probability rows to bin)_" in markdown
 
 
 # --------------------------------------------------------------------------- #
