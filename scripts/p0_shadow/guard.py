@@ -47,13 +47,17 @@ _DENY_DOTENV = False
 _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
 
 # B1/B2 process validation only needs public market data: Binance USDT-M
-# futures REST and Yahoo quote hosts (yfinance chart endpoints plus the
-# fc.yahoo.com cookie hop). Exact hostnames, no wildcards, no spot venue.
+# futures REST and Yahoo quote hosts (yfinance chart endpoints, the
+# fc.yahoo.com cookie hop, and the guce/consent.yahoo.com consent pages its
+# session init may require or redirect through). Exact hostnames, no
+# wildcards, no spot venue.
 VENDOR_ALLOWED_HOSTS = frozenset({
     "fapi.binance.com",
     "query1.finance.yahoo.com",
     "query2.finance.yahoo.com",
     "fc.yahoo.com",
+    "guce.yahoo.com",
+    "consent.yahoo.com",
 })
 _PROXY_ENV_VARS = (
     "http_proxy", "https_proxy", "all_proxy",
@@ -331,7 +335,14 @@ def _blocked_network(*_args: Any, **_kwargs: Any) -> Any:
 
 
 def _url_host(value: object) -> str | None:
-    """Lowercased hostname of an absolute HTTP(S) URL, or None."""
+    """Lowercased hostname of an absolute HTTP(S) URL, or None.
+
+    curl_cffi's ``getinfo(CURLINFO_EFFECTIVE_URL)`` yields ``bytes``; both
+    ``str`` and ``bytes`` forms are accepted here.
+    """
+    if isinstance(value, bytes):
+        with suppress(UnicodeDecodeError):
+            value = value.decode("utf-8")
     if not isinstance(value, str) or not value.strip():
         return None
     try:
