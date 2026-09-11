@@ -15,7 +15,11 @@ prediction (direction / ``prob_up`` / evidence chain) and its run
   probability clipped to ``[1e-6, 1 - 1e-6]`` so a confident wrong call is
   punished, not made infinite;
 * ``calibration_error`` — ECE over 10 equal-width probability bins:
-  ``sum(|bin| / n * |accuracy(bin) - confidence(bin)|)``.
+  ``sum(|bin| / n * |accuracy(bin) - confidence(bin)|)``;
+* ``reliability_bins`` — the per-bin data behind that ECE (non-empty bins
+  only: ``bin_low`` / ``bin_high`` / ``n`` / ``mean_prob_up`` /
+  ``accuracy``). Like every cell here these are display diagnostics shown
+  with their sample size — a thin bin never becomes a weight.
 
 Slices: overall, by analyst, by ``instrument_class`` (run row), by
 ``horizon_days``, by direction, by evidence-coverage bucket
@@ -258,23 +262,42 @@ def _scored_rows() -> list[dict[str, Any]]:
     return scored
 
 
-def _ece(rows: list[dict[str, Any]]) -> float | None:
-    """Expected calibration error over 10 equal-width probability bins."""
+def _reliability_bins(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per-bin reliability data for one cell; non-empty bins only.
+
+    Same row set as the ECE (:func:`_prob_rows` — directional rows that
+    carry a ``prob_up``), so the bins and the scalar always tell one story.
+    """
     scored = _prob_rows(rows)
     if not scored:
-        return None
+        return []
     bins: list[list[dict[str, Any]]] = [[] for _ in range(_ECE_BINS)]
     for row in scored:
         bins[min(int(row["prob_up"] * _ECE_BINS), _ECE_BINS - 1)].append(row)
-    total = len(scored)
-    error = 0.0
-    for bucket in bins:
+    out: list[dict[str, Any]] = []
+    for index, bucket in enumerate(bins):
         if not bucket:
             continue
-        accuracy = sum(_realized(row) for row in bucket) / len(bucket)
-        confidence = sum(row["prob_up"] for row in bucket) / len(bucket)
-        error += len(bucket) / total * abs(accuracy - confidence)
-    return error
+        out.append({
+            "bin_low": index / _ECE_BINS,
+            "bin_high": (index + 1) / _ECE_BINS,
+            "n": len(bucket),
+            "mean_prob_up": sum(row["prob_up"] for row in bucket) / len(bucket),
+            "accuracy": sum(_realized(row) for row in bucket) / len(bucket),
+        })
+    return out
+
+
+def _ece(rows: list[dict[str, Any]]) -> float | None:
+    """Expected calibration error, derived from :func:`_reliability_bins`."""
+    bins = _reliability_bins(rows)
+    total = sum(bucket["n"] for bucket in bins)
+    if not total:
+        return None
+    return sum(
+        bucket["n"] / total * abs(bucket["accuracy"] - bucket["mean_prob_up"])
+        for bucket in bins
+    )
 
 
 def _realized(row: dict[str, Any]) -> float:
@@ -323,6 +346,7 @@ def _cell_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "brier_score": brier,
         "log_loss": log_loss,
         "calibration_error": _ece(rows),
+        "reliability_bins": _reliability_bins(rows),
         "flat_n": len(rows) - len(directional),
         "missing_prob_up": len(directional) - len(scored),
         "below_v3_min_samples": len(rows) < V3_MIN_SAMPLES_PER_CELL,
@@ -389,6 +413,26 @@ def _fmt(value: float | None, spec: str) -> str:
 _V3_NOTE = "below V3 sample threshold — display only, no weight adjustment"
 
 
+def _reliability_lines(bins: list[dict[str, Any]]) -> list[str]:
+    """Markdown reliability table — the bins behind the overall ECE."""
+    if not bins:
+        return ["## Reliability", "", "_(no probability rows to bin)_", ""]
+    lines = [
+        "## Reliability",
+        "",
+        "| prob bin | n | mean prob_up | realized accuracy | gap |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for bucket in bins:
+        gap = bucket["accuracy"] - bucket["mean_prob_up"]
+        lines.append(
+            f"| [{bucket['bin_low']:.1f}, {bucket['bin_high']:.1f}) "
+            f"| {bucket['n']} | {bucket['mean_prob_up']:.4f} "
+            f"| {bucket['accuracy']:.1%} | {gap:+.4f} |"
+        )
+    return [*lines, ""]
+
+
 def render_scoreboard_markdown(scoreboard: dict[str, Any]) -> str:
     """Human-facing scoreboard: one table per slice, sample sizes everywhere."""
     overall = scoreboard["overall"]
@@ -435,4 +479,6 @@ def render_scoreboard_markdown(scoreboard: dict[str, Any]) -> str:
                 f"| {_fmt(cell['calibration_error'], '.4f')} | {note} |"
             )
         lines.append("")
+        if title == "Overall":
+            lines += _reliability_lines(overall.get("reliability_bins") or [])
     return "\n".join(lines) + "\n"

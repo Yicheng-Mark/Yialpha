@@ -178,6 +178,10 @@
       calibration_col_logloss: "对数损失",
       calibration_col_ece: "ECE",
       calibration_below_note: "⚠ 样本数低于 V3 门槛（{n}）的切片仅展示，不参与任何权重调整。",
+      calibration_reliability_title: "可靠性图（总体）",
+      calibration_axis_prob: "预测 P(up)",
+      calibration_axis_acc: "实际命中率",
+      calibration_reliability_empty: "暂无可分桶的概率行（需要方向性预测携带 prob_up）。",
 
       // health
       health_title: "环境自检",
@@ -356,6 +360,10 @@
       calibration_col_logloss: "log loss",
       calibration_col_ece: "ECE",
       calibration_below_note: "⚠ Cells below the V3 sample threshold ({n}) are display-only — no weight adjustment.",
+      calibration_reliability_title: "Reliability (overall)",
+      calibration_axis_prob: "predicted P(up)",
+      calibration_axis_acc: "realized accuracy",
+      calibration_reliability_empty: "No probability rows to bin yet (directional predictions need a prob_up).",
 
       health_title: "Environment Check",
       health_sub: "Replicates the 5 preflight checks (deps / key / proxy / yfinance / DeepSeek). Network probes take a few seconds.",
