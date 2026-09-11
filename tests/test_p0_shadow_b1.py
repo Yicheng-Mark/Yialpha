@@ -130,6 +130,27 @@ def test_allowlist_denies_unconfigured_and_redirecting_curl(tmp_path):
         curl_cffi.requests.Session().request("GET", "https://fapi.binance.com/x")
 
 
+def test_allowlist_curl_perform_accepts_bytes_effective_url(tmp_path):
+    """curl_cffi getinfo returns bytes; the perform gate must decode them.
+
+    Regression: yfinance's first fc.yahoo.com request was denied because the
+    pre-perform host check saw bytes as an unknown host (2026-09-11).
+    """
+    import curl_cffi
+
+    root = tmp_path / "cohort"
+    root.mkdir()
+    chart = b"https://query1.finance.yahoo.com/v8/finance/chart"
+    with (patch.object(curl_cffi.Curl, "getinfo", lambda self, info: chart),
+          patch.object(curl_cffi.Curl, "perform", lambda self, *a, **k: None),
+          isolated_runtime(root, "bytes", network_mode="allowlist") as summary):
+        curl = curl_cffi.Curl()
+        curl.perform()
+        curl.close()
+    assert summary["allowed_calls"] >= 1
+    assert {"guce.yahoo.com", "consent.yahoo.com"} <= VENDOR_ALLOWED_HOSTS
+
+
 def test_allowlist_keeps_configured_proxy_as_transport_only(tmp_path, monkeypatch):
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
                  "http_proxy", "https_proxy", "all_proxy"):

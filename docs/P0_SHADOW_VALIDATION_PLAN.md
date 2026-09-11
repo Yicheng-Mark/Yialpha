@@ -26,6 +26,14 @@
 
 **到期日程（自动化每日 09:30 覆盖；时间为 UTC 形成时刻起算）**：
 
+**B2 首批结果与 allowlist 修复（2026-09-11，用户授权修复）**：09-10 到期的 C-BTC/C-ETH/C-MU 三条 1d 合约在 09-11 晨检中
+全部评分 **complete**（首批真实自然到期结果）。同次运行暴露 guard 两处缺陷并当日修复：
+(1) curl_cffi 的 `getinfo(EFFECTIVE_URL)` 返回 **bytes**，`_url_host` 只认 str → perform 层把一切 curl_cffi 请求当未知主机拒绝
+   （yfinance 会话初始化的 fc.yahoo.com 首请求被拦、重试一次共 2 次拒绝；后果=股票底层诊断腿缺失，outcome 本身 complete 不受影响）；
+   修复=接受并解码 bytes，新增 bytes 回归测试，实测修复后 MU 日线在 guard 内 8 次放行/0 拒绝正常拉取。
+(2) 白名单补充 `guce.yahoo.com`/`consent.yahoo.com`（yfinance 会话初始化的同意流程主机；fc 基础策略失败时的回退路径）。
+   两条均属 Yahoo 公开行情服务族。09-11 已落账的 3 条 outcome 按只增原则不改写，其缺失的诊断腿保持原样。
+
 | 日期 | 事件 | 预期 |
 |---|---|---|
 | 09-10（四） | C-\* 1d×3 到期 | complete |
