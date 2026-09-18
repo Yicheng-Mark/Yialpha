@@ -178,7 +178,7 @@ def cached_or_fetch(
     filename: str,
     fetch: Callable[[], bytes],
     *,
-    ttl_days: float,
+    ttl_days: float | Callable[[bytes | None], float],
     vendor: str,
     fail_open: bool = False,
     stale_cap_days: float | None = None,
@@ -198,7 +198,15 @@ def cached_or_fetch(
     * the cache write after a successful fetch is best-effort (an unwritable
       cache directory must never fail a data call that already succeeded).
 
-    ``ttl_days`` may be fractional (e.g. ``1/24`` for one hour).
+    ``ttl_days`` may be fractional (e.g. ``1/24`` for one hour). It may also
+    be a CALLABLE over the cached bytes (``bytes | None``, evaluated once per
+    call after the cache read and before the freshness check) returning the
+    effective TTL — content-aware TTL: a vendor whose payload proves the
+    series is already final (e.g. BaoStock's daily bar for the analysis date
+    is present, and daily bars are published post-close only) can extend the
+    TTL based on what is cached instead of a blind wall-clock age. A plain
+    float behaves exactly as before (byte-compatible for every existing
+    caller).
     ``stale_cap_days`` optionally tightens the stale-serve ceiling for THIS
     caller below the global ``data_cache_max_stale_days`` — minute-scale
     data (social feeds) must not be served days old even though the global
@@ -219,9 +227,10 @@ def cached_or_fetch(
     except OSError:
         stale = None
 
+    ttl = ttl_days(stale) if callable(ttl_days) else ttl_days
     if stale is not None and stale_mtime is not None and (
         time.time() - stale_mtime
-    ) < ttl_days * 86_400.0:
+    ) < ttl * 86_400.0:
         return stale
 
     try:

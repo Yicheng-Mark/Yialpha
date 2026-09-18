@@ -16,6 +16,7 @@ Pure mock-LLM, zero network, zero LLM cost.
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import date
 
@@ -183,6 +184,123 @@ def test_daily_cache_ttl_same_day_refresh():
     assert live_ttl == pytest.approx(bsv._SAME_DAY_REFRESH_S / 86_400.0)
     assert hist_ttl == pytest.approx(bsv._CACHE_TTL_S / 86_400.0)
     assert today_ttl < hist_ttl  # same-day refreshes strictly faster
+
+
+@pytest.mark.unit
+def test_daily_cache_ttl_final_gate_today_bar_cached():
+    """Same-day analysis + the cached series already carries TODAY's bar ->
+    BaoStock publishes daily bars post-close only, so the series is final for
+    today: the entry reverts to the historical 1-day TTL instead of the 900s
+    refresh loop. A post-close evening run then serves one deterministic
+    snapshot all session (robust retries and the LLM response cache see
+    identical bytes instead of a fresh/stale flip on a flaky socket)."""
+    today = date.today().isoformat()
+    with_bar = json.dumps([{"date": today, "close": "5.92"}]).encode()
+    without_bar = json.dumps([{"date": "2024-01-02", "close": "1.00"}]).encode()
+
+    assert bsv._daily_cache_ttl_days(today, with_bar) == pytest.approx(
+        bsv._CACHE_TTL_S / 86_400.0)
+    assert bsv._daily_cache_ttl_days(None, with_bar) == pytest.approx(
+        bsv._CACHE_TTL_S / 86_400.0)  # live mode honours the finality gate too
+    # Bar absent -> unchanged 900s refresh contract (pre-close / not yet published).
+    assert bsv._daily_cache_ttl_days(today, without_bar) == pytest.approx(
+        bsv._SAME_DAY_REFRESH_S / 86_400.0)
+    assert bsv._daily_cache_ttl_days(today, None) == pytest.approx(
+        bsv._SAME_DAY_REFRESH_S / 86_400.0)
+    # A corrupt cache payload must not crash TTL math -> keep the short TTL.
+    assert bsv._daily_cache_ttl_days(today, b"not-json") == pytest.approx(
+        bsv._SAME_DAY_REFRESH_S / 86_400.0)
+
+
+@pytest.mark.unit
+def test_cached_daily_final_bar_skips_network(monkeypatch, tmp_path):
+    """End-to-end finality gate: an on-disk daily cache carrying today's bar
+    (fresh mtime) is served for a same-day analysis WITHOUT opening a BaoStock
+    session."""
+    monkeypatch.setattr(bsv, "_cache_dir", lambda: str(tmp_path))
+    today = date.today().isoformat()
+    rows = [{"date": today, "close": "5.92"}]
+    (tmp_path / "daily_sz_000725.json").write_bytes(json.dumps(rows).encode())
+
+    def _no_session():
+        raise AssertionError("network session must not open: cache is final")
+
+    monkeypatch.setattr(bsv, "_BaostockSession", _no_session)
+    assert bsv._cached_daily("sz.000725", today) == rows
+
+
+# --------------------------------------------------------------------------- #
+# A9 — transient-failure retry for session-scoped fetches
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_transient_retry_recovers_on_fresh_session(monkeypatch):
+    """BS_TRANSIENT_RETRIES > 0: a corrupted TCP stream (UnicodeDecodeError)
+    heals on a fresh session; every retry re-runs the whole fetch."""
+    monkeypatch.setattr(bsv, "BS_TRANSIENT_RETRIES", 2)
+    monkeypatch.setattr(bsv.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise UnicodeDecodeError("utf-8", b"\xa2", 0, 1, "invalid start byte")
+        return "ok"
+
+    assert bsv._with_transient_retry(flaky, "daily sz.000725") == "ok"
+    assert calls["n"] == 3
+
+
+@pytest.mark.unit
+def test_transient_retry_exhausted_propagates_last(monkeypatch):
+    monkeypatch.setattr(bsv, "BS_TRANSIENT_RETRIES", 1)
+    monkeypatch.setattr(bsv.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def always_dead():
+        calls["n"] += 1
+        raise TimeoutError("timed out")
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        bsv._with_transient_retry(always_dead, "daily sz.000725")
+    assert calls["n"] == 2  # 1 initial + 1 retry
+
+
+@pytest.mark.unit
+def test_transient_retry_default_off_single_attempt(monkeypatch):
+    """Module default 0 = byte-equivalent: exactly one attempt, the failure
+    propagates unchanged (incl. session-scoped NoMarketDataError)."""
+    monkeypatch.setattr(bsv, "BS_TRANSIENT_RETRIES", 0)
+    monkeypatch.setattr(bsv.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def refused():
+        calls["n"] += 1
+        raise NoMarketDataError(
+            "sz.000725", detail="login failed: 接收数据异常，请稍后再试。")
+
+    with pytest.raises(NoMarketDataError):
+        bsv._with_transient_retry(refused, "login")
+    assert calls["n"] == 1
+
+
+@pytest.mark.unit
+def test_transient_retry_session_scoped_nmd_retried(monkeypatch):
+    """A session-scoped NoMarketDataError (login/query refused server-side)
+    is an observed transient form: with retries on, one refused login is
+    retried, not surrendered to the sentinel path."""
+    monkeypatch.setattr(bsv, "BS_TRANSIENT_RETRIES", 1)
+    monkeypatch.setattr(bsv.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def refused_then_ok():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise NoMarketDataError(
+                "sz.000725", detail="query failed: 接收数据异常，请稍后再试。")
+        return b"rows"
+
+    assert bsv._with_transient_retry(refused_then_ok, "daily sz.000725") == b"rows"
+    assert calls["n"] == 2
 
 
 @pytest.mark.unit

@@ -27,12 +27,12 @@ AI 多智能体量化投资框架（前身 TradingAgents v0.3.0 fork，已于 20
 
 ## 模型偏好
 
-GLM 两档分工（2026-09-03 从 DeepSeek 切到 GLM Coding Plan，BigModel 国内 coding 端点 + 三 key 池轮换；两档哲学不变）：
+GLM 两档分工（2026-09-03 从 DeepSeek 切到 GLM Coding Plan，BigModel 国内 coding 端点 + key 池轮换；两档哲学不变）：
 
 - **deep 通道（Research Manager / Portfolio Manager）用 `glm-5.3`** —— 重裁决，推理深度决定质量。
 - **quick 通道（4 分析师 / Trader / 反思 / 信号提取）+ 辩论层（Bull-Bear / 风控三方辩论，`YIALPHA_DEBATE_LLM`）用 `glm-5.3-flash`** —— 轻量多轮，速度优先；coding plan 按套餐限额（并发/每 5h 提示数），flash 层不占旗舰并发额度。
 
-**Key 池**（`yialpha/llm_clients/key_pool.py`）：`ZHIPU_CN_API_KEYS` 三把 key，**每个请求轮流取下一把活 key**（401/403 该 key 本进程内踢出；429 冷却 `YIALPHA_LLM_KEY_COOLDOWN_S` 秒默认 120 后回归）。coding plan 端点 `ZHIPU_CN_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4/` 与按量端点不通用。单 key（仅 `ZHIPU_CN_API_KEY`）时池不启用，行为与旧版字节等价。
+**Key 池**（`yialpha/llm_clients/key_pool.py`）：`ZHIPU_CN_API_KEYS` 四把 key（2026-09-19 扩容；多项目共用，单 key 的 5h 窗口可能被其他项目耗尽——429 冷却轮换正是为此设计），**每个请求轮流取下一把活 key**（401/403 该 key 本进程内踢出；429 冷却 `YIALPHA_LLM_KEY_COOLDOWN_S` 秒默认 120 后回归）。coding plan 端点 `ZHIPU_CN_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4/` 与按量端点不通用。单 key（仅 `ZHIPU_CN_API_KEY`）时池不启用，行为与旧版字节等价。**Tavily 同款池**（`TAVILY_API_KEYS` + `TAVILY_API_KEY` 合并去重轮换，现 5 把）。
 
 切回 DeepSeek 需在 `.env` 重配 provider/模型并重新填 key（旧 key 已于 2026-09-03 删除）。`capabilities.py` 仍登记 deepseek pro/flash 两模型，不要误删。
 
@@ -46,7 +46,7 @@ GLM 两档分工（2026-09-03 从 DeepSeek 切到 GLM Coding Plan，BigModel 国
 
 | 开关（env） | 默认 | 作用 | 备注 / 产物 |
 |---|---|---|---|
-| `YIALPHA_LLM_TIMEOUT_S` | off（未设；生产建议 120） | 单次 LLM 读超时；半开连接 → `APITimeoutError` → SDK 内置重试恢复 | `openai_client.py` 在线读；消除偶发 30min 卡死。默认 OFF 会在首次调用时发出一次性警告 |
+| `YIALPHA_LLM_TIMEOUT_S` | off（未设；生产建议 120） | 单次 LLM 读超时；半开连接 → `APITimeoutError` → SDK 内置重试恢复 | `openai_client.py` 在线读；消除偶发 30min 卡死。默认 OFF 会在首次调用时发出一次性警告。**`run_robust.py` 为子进程 setdefault 120**（2026-09-19：hang-recovery 语义，与 LLM 缓存 setdefault 同一先例——半开挂死从「等看门狗杀整个 attempt」变「120s 超时 → SDK 重试秒级恢复」；用户显式导出的值含 0 优先） |
 | `YIALPHA_HTTP_KEEPALIVE` | true（已设） | 进程级共享 `httpx.Client`，复用 TLS/SOCKS5 连接 | 仅 OpenAI 兼容 provider；key 池生效时由池的轮换 client 接管（同样是共享 keepalive，见「模型偏好」） |
 | `YIALPHA_LLM_MAX_RETRIES` | 2（= langchain 默认，等价） | 单调用重试次数；抖动期可调低 | 默认值与历史字节一致；外层靠 `run_robust` 看门狗兜底 |
 | `YIALPHA_LLM_CACHE` | false | per-call LLM 响应磁盘缓存（langchain 全局 `set_llm_cache` + `llm_clients/response_cache.py` `DiskLLMCache`）：相同 (model+prompt+temperature+绑定 tools/结构化 schema) 回放缓存的 `ChatGeneration` 而非重调模型 | 默认关=无缓存无 I/O（字节等价）；迭代重跑同一 smoke/单次分析省中间 ~11 个 agent 调用计费；产物 `~/.yialpha/cache/llm_responses/`。**勿与 `run_analyst_parallel_ab.py` / `run_baseline --full` DSR 同用**——会压扁温度>0 多 run 分布；回测整图重跑已由 `backtest/cache.py` DecisionCache 覆盖。**`run_robust.py` 默认为自己的运行开**（`setdefault` 尊重 env 显式值）：重跑回放已完成节点的 LLM 生成、卡死节点重跑 = hang 恢复语义，省整图重计费；run_robust 是 live 单配置分析、不触达上述分布 caveat；`--no-llm-cache` 关 |
@@ -57,6 +57,7 @@ GLM 两档分工（2026-09-03 从 DeepSeek 切到 GLM Coding Plan，BigModel 国
 | `YIALPHA_BINANCE_SPOT_MIRROR` | false | crypto_spot 现货行情走免 key 镜像 `data-api.binance.vision`（默认 `api.binance.com`） | 仅改现货 host，不改数据；现货为新代码、无既有输出可扰；现货限流独立预算 `get_binance_weight_limiter("spot")` |
 | `YIALPHA_BINANCE_HTTP_KEEPALIVE` | false | 进程级共享 `requests.Session`，跨调用复用 TLS/SOCKS5 连接（仿 LLM 客户端 `YIALPHA_HTTP_KEEPALIVE`） | 仅传输层（同 URL/params/头 → 同响应字节）；`dataflows/binance_http.py` 单例；urllib3 PoolManager 并发只读线程安全 |
 | `YIALPHA_BINANCE_HTTP_RETRIES` | 0 | 瞬时传输错误（DNS/超时/TLS）+ 5xx 指数退避重试（仿 `yf_retry`，base 2s） | `0`=原样抛（字节等价）；耗尽→`NoMarketDataError`（router 降级）；**不**重试 429/418（仍走反应式 `VendorRateLimitError`） |
+| `YIALPHA_BAOSTOCK_RETRIES` | 0 | BaoStock 会话级瞬时故障重试（TCP 流损坏 `UnicodeDecodeError` / socket 超时重置 / `接收数据异常` 拒答；每次重试**换新 session 重新 login**，线性退避 2s/4s） | 仿 `YIALPHA_BINANCE_HTTP_RETRIES` 契约，`0`=单次尝试原样抛（字节等价）；非 A 股 / 未装包的确定性 `NoMarketDataError` 在 session 开启前抛出、永不进重试环。**`run_robust.py` 为子进程 setdefault 2**（2026-09-19：公共 baostock.com 服务当晚高发解码错/超时，单次抖动不应把 `a_share_native` 类目打成哨兵再整图重跑兜底）。实现 `baostock_vendor.py:_with_transient_retry` |
 | `YIALPHA_BINANCE_HONOR_RETRY_AFTER` | false | 429/418 读 `Retry-After` 头，≤60s 则 sleep 后再抛（让 IP 禁令窗口过期） | 默认关=立即抛（字节等价）；>60s 的长禁令不内联 sleep，交给 `run_robust` 重跑 |
 | `YIALPHA_SEC_OWNERSHIP` | false | optional category `sec_ownership`：Form4 内幕交易 + FTD + 13F 机构持仓三工具暴露给 fundamentals 分析师 | 默认关=工具列表/prompt/能力字节等价（同 `valuation_tools` 契约）；复用 `sec_edgar.py` 基建（CIK/`_sec_get`/`_cached_or_fetch`/`_fetch_company_facts`/缓存/限流，**不改 sec_edgar 一行**）；美股专属（Form4/13F 需 CIK，非美股→`NO_DATA_AVAILABLE`；FTD 按 ticker，非美股自然无行）；PIT（Form4 `filingDate` / FTD `cutoff+发布滞后` / 13F 数据集 `period-end+发布滞后`）；新 category 默认配置不引用=未 opt-in 零触达。13F（B2.1）走 SEC 批量 Form 13F Data Sets（每季一 ZIP，COVER+HOLDING TSV，本地按 CUSIP 反向聚合，1 请求/季）；CUSIP 单源 companyfacts `dei:EntityCusip`（缺失降级）；45 天发布窗口内诚实"未发布"，不做 EFTS |
 | `YIALPHA_FTD_PUB_LAG_DAYS` | 10 | FTD 半月度文件 PIT 发布滞后：`cutoff + lag ≤ curr_date` 才可见 | 默认 10 天保守值（SEC 在 cutoff 后数天才发布）；防回测偷看尚未发布的文件 |
@@ -110,6 +111,7 @@ IC 剪枝结论的**真实落地路径**（此前 `prune_indicators_cli.py --sug
 - **`record_success(method)`**（同 record_sentinel 契约，永不抛异常）：router 成功返回且类目非 OPTIONAL 时记录；`summarize_quality` 新增 `core_ok_count` / `core_error_count` / `degraded_count`（= core 哨兵 + stale-cache，仅报告用，真空判定仍只看核心证据）/ `data_vacuum` 布尔。
 - **默认多源链**（T0-3）：`data_vendors` 四个核心类目默认 `yfinance,alpha_vantage`（fundamentals 另加 `sec_edgar`）；**yfinance 永远在链首**（无 key 无限流），AV 免费档限流只作链尾；`config-check` 对"链含 AV 但 key 缺失"打 ⚠。
 - **超时默认开**：`YIALPHA_HTTP_TIMEOUT_S` 默认 30s（原 opt-in；`0` 显式关闭）；BaoStock 裸 TCP 新增 `YIALPHA_BAOSTOCK_TIMEOUT_S`（默认 30s，`_BaostockSession` 生命周期内 save/restore `socket.setdefaulttimeout`，requests 层 shim 够不到裸 socket）。
+- **同日定稿门控（2026-09-19，无开关）**：BaoStock 日线缓存的 same-day 900s 刷新 TTL 只在**当日 bar 尚未入缓存**时生效；一旦缓存序列已含当日 bar（BaoStock 仅盘后发布日线，永不盘中部分更新），序列即定稿、TTL 回 1 天——盘后晚间分析整个会话只服务同一份确定性快照，不再每 15 分钟重打抖动的公共 socket（robust 重试 + LLM 响应缓存跨 attempt 看到相同字节，而非 fresh/stale 翻转）。实现 `baostock_vendor.py:_daily_cache_ttl_days` 内容门控 + `disk_cache.cached_or_fetch` 的 callable `ttl_days`（对缓存字节求值，float 形态对所有既有调用方字节兼容）。
 - **决策时价格入档**（T0-5）：`full_states_log` 新增 `price_at_decision` / `price_at_decision_basis` / `asset_type`（`_apply_risk_overlay` 结尾挂 `decision.entry_price`；overlay 未跑时 `_log_state` 兜底直调记忆化的 `_latest_close_and_atr`）；旧日志缺字段向后兼容，Web 的 overlay 正则回捞保留。这是评级↔结果验证闭环（verify-history / /api/accuracy）的锚点。
 
 ### 评级↔结果验证闭环 + memory-resolve（2026-08-16 T2 批）
@@ -160,7 +162,7 @@ IC 剪枝结论的**真实落地路径**（此前 `prune_indicators_cli.py --sug
 
 ## 环境（已验证可用，别再重复诊断）
 
-- GLM Coding Plan 三把 key 有效（2026-09-03 实测），**走直连**：`.env` 里 `NO_PROXY=open.bigmodel.cn`。端点 `ZHIPU_CN_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4/`（coding plan 专用）。可用模型 `glm-5.3` / `glm-5.3-flash`。
+- GLM Coding Plan 四把 key 有效（2026-09-19 扩容实测），**走直连**：`.env` 里 `NO_PROXY=open.bigmodel.cn`。端点 `ZHIPU_CN_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4/`（coding plan 专用）。可用模型 `glm-5.3` / `glm-5.3-flash`。
 - yfinance / 行情 / 财报必须经 `socks5h://127.0.0.1:1080`（SOCKS5 代理，FLASH-CAT VPN）。代理一断 → 数据抓取永久挂起。
 - **Windows 控制台是 GBK(cp936)**，打印 ✅/❌ 会 `UnicodeEncodeError`；入口脚本顶部须 `sys.stdout.reconfigure(utf-8)`，兜底用 `PYTHONUTF8=1`。
 - Reddit RSS 429、`FRED_API_KEY not set` 是**非致命降级**，不影响评级输出，不用装 FRED key。

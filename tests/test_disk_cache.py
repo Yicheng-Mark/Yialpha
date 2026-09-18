@@ -77,6 +77,59 @@ def test_expired_cache_refetches(tmp_path):
     assert calls["n"] == 1
 
 
+# --------------------------------------------------------------------------- #
+# content-aware TTL (callable ttl_days over the cached bytes)
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_callable_ttl_extends_freshness_from_content(tmp_path):
+    """A callable ttl_days inspects the cached bytes: content that proves
+    itself final earns a long TTL, so an old-mtime entry is served WITHOUT a
+    fetch even though a plain short float would have expired it."""
+    fetch, calls = _fetch_ok(b"fresh-bytes")
+    path = tmp_path / "f.json"
+    path.write_bytes(b'{"final": true}')
+    old_mtime = time.time() - 3 * 86_400  # 3 days old
+    os.utime(path, (old_mtime, old_mtime))
+    seen: list = []
+
+    def ttl(stale):
+        seen.append(stale)
+        return 30.0 if stale == b'{"final": true}' else 0.001
+
+    out = dc.cached_or_fetch(str(tmp_path), "f.json", fetch, ttl_days=ttl, vendor="t")
+    assert out == b'{"final": true}'
+    assert calls["n"] == 0
+    assert seen == [b'{"final": true}']  # callable saw the cached bytes once
+
+
+@pytest.mark.unit
+def test_callable_ttl_short_still_refetches(tmp_path):
+    fetch, calls = _fetch_ok(b"new")
+    path = tmp_path / "f.json"
+    path.write_bytes(b"not-final")
+    old_mtime = time.time() - 3 * 86_400
+    os.utime(path, (old_mtime, old_mtime))
+    out = dc.cached_or_fetch(
+        str(tmp_path), "f.json", fetch, ttl_days=lambda stale: 0.001, vendor="t"
+    )
+    assert out == b"new"
+    assert calls["n"] == 1
+
+
+@pytest.mark.unit
+def test_callable_ttl_receives_none_when_no_cache(tmp_path):
+    fetch, calls = _fetch_ok(b"first")
+    seen: list = []
+
+    def ttl(stale):
+        seen.append(stale)
+        return 1.0
+
+    out = dc.cached_or_fetch(str(tmp_path), "f.json", fetch, ttl_days=ttl, vendor="t")
+    assert out == b"first"
+    assert seen == [None]  # no cache file -> the callable decides on None
+
+
 @pytest.mark.unit
 def test_stale_served_when_fetch_fails(tmp_path, caplog):
     path = tmp_path / "f.json"

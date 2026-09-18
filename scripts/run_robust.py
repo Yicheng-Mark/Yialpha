@@ -364,6 +364,16 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         )
         child_env.setdefault("YIALPHA_URLOPEN_HARD_TIMEOUT_S", "20")
         child_env.setdefault("YIALPHA_FAULT_DUMP_S", "0")
+        # Hang-recovery，与 _apply_robust_llm_cache 同一动机：半开 LLM 连接默认
+        # 无限空转，只能等 OS 级看门狗把整个 attempt 杀掉重来；120s 读超时把它
+        # 变成 APITimeoutError → SDK 内置重试秒级恢复。健康网络下永不触发 =
+        # 字节等价，只改失败路径的恢复速度。setdefault — 用户显式导出的
+        # YIALPHA_LLM_TIMEOUT_S（含 0=显式关闭）优先。
+        child_env.setdefault("YIALPHA_LLM_TIMEOUT_S", "120")
+        # 同理：BaoStock TCP 会话的瞬时故障（解码错/超时/连接重置）vendor 层
+        # 默认 0 次（字节等价）；robust 子进程给 2 次退避重试，避免单次抖动
+        # 把 a_share_native 类目打成哨兵、再由整个 attempt 重跑兜底。
+        child_env.setdefault("YIALPHA_BAOSTOCK_RETRIES", "2")
         # --allow-degraded opts the child's data-vacuum gate down to warn as
         # well: without this the child would still raise DataVacuumError at the
         # trader node and never produce the degraded report the operator asked
