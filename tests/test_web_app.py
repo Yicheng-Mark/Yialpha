@@ -206,3 +206,23 @@ def test_extra_allowed_hosts_via_env(client, monkeypatch):
     monkeypatch.delenv("YIALPHA_WEB_ALLOWED_HOSTS")
     # Env read per request: removing it closes the hole again immediately.
     assert client.get("/", headers={"Host": "lan.example.com"}).status_code == 403
+
+
+def test_validate_date_accepts_venue_suffixed_keys():
+    """Round-5 venue split: store yields date keys like 2026-09-19_perp; the
+    path validator must accept them (the plain %Y-%m-%d strptime rejected
+    them and every perp/spot history click 404'd)."""
+    import pytest as _pytest
+    from fastapi import HTTPException
+
+    from web.app import _validate_date
+
+    assert _validate_date("2026-09-19") == "2026-09-19"
+    assert _validate_date("2026-09-19_perp") == "2026-09-19_perp"
+    assert _validate_date("2026-09-19_spot") == "2026-09-19_spot"
+    with _pytest.raises(HTTPException) as bad:
+        _validate_date("2026-09-19_spotx")
+    assert bad.value.status_code == 404
+    with _pytest.raises(HTTPException) as bad2:
+        _validate_date("not-a-date")
+    assert bad2.value.status_code == 404

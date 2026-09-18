@@ -77,6 +77,11 @@ def prepare_batch_run(
     from yialpha.cli.utils import detect_asset_type, is_valid_ticker_input
     from yialpha.default_config import DEFAULT_CONFIG
 
+    if not tickers:
+        # Both frontends require >=1 ticker (argparse nargs="+" / typer),
+        # but a programmatic caller must hit the exit-2 contract, not a
+        # bare IndexError from the detect_asset_type(tickers[0]) below.
+        raise BatchInputError("No tickers given")
     bad = [t for t in tickers if not is_valid_ticker_input(t)]
     if bad:
         raise BatchInputError(f"Invalid ticker(s): {bad} (letters/digits and ._-^=)")

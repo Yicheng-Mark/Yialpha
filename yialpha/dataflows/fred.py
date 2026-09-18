@@ -210,6 +210,14 @@ def get_macro_data(
     frequency = info.get("frequency", "")
     seasonal = info.get("seasonal_adjustment_short", "")
 
+    # PIT clamp: ``curr_date`` comes from the LLM; the pinned analysis date
+    # (set_analysis_date ContextVar) is the authority a historical replay
+    # must not see past — the same guard the sibling news vendors carry
+    # (yfinance_news / alpha_vantage_news). Without it, a model echoing a
+    # post-analysis date pulls post-decision macro rows into a replay.
+    from .utils import current_pit_end
+
+    curr_date = str(current_pit_end(curr_date) or curr_date)
     observations = _request(
         "series/observations",
         {

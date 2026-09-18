@@ -2,11 +2,13 @@
 
 The single source of truth for a completed run is::
 
-    ~/.yialpha/logs/<TICKER>/YiAlphaStrategy_logs/full_states_log_<date>.json
+    ~/.yialpha/logs/<TICKER>/YiAlphaStrategy_logs/full_states_log_<date>[_perp|_spot].json
 
 written atomically by ``yialpha.graph.trading_graph._log_state``. A same-date
-re-run atomically overwrites (``os.replace``), so one file == one analysis date
-and the date in the filename is the analysis date (not the run wall-clock).
+re-run of the SAME venue atomically overwrites (``os.replace``); crypto venue
+runs carry a ``_perp``/``_spot`` suffix so a same-date perp AND spot pair are
+two first-class files (the date keys served below are the filename stems).
+The date in the filename is the analysis date (not the run wall-clock).
 
 Report directories ``~/.yialpha/logs/reports/<TICKER>_<stamp>/`` carry a
 wall-clock stamp, NOT the analysis date, and may be multiple per date; they are
@@ -55,7 +57,13 @@ _NON_TICKER_DIRS = {"reports", "robust"}
 # the endpoint stays one small JSON even with months of daily runs.
 _HISTORY_CAP = 8
 
-_DATE_RE = re.compile(r"full_states_log_(\d{4}-\d{2}-\d{2})\.json$")
+# Venue-suffixed states logs (2026-09-19): a same-date perp AND spot run of
+# one ticker are two first-class files — full_states_log_<date>_perp.json /
+# _spot.json beside the legacy unsuffixed name. The captured group IS the
+# filename stem, so every exact-name constructor downstream
+# (_latest_rating / load_run / load_node_perf) keeps working with the
+# suffixed key unchanged.
+_DATE_RE = re.compile(r"full_states_log_(\d{4}-\d{2}-\d{2}(?:_perp|_spot)?)\.json$")
 
 # Alias kept for callers/tests that imported the local name; the marker,
 # field map and parser are owned by yialpha.graph.overlay_fields (the

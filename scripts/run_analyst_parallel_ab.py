@@ -107,9 +107,17 @@ RATING_CATEGORIES: tuple[str, ...] = (
 # Marker the risk overlay appends to ``final_trade_decision``; see
 # ``yialpha/graph/trading_graph.py:_apply_risk_overlay`` (around line 332).
 _RISK_OVERLAY_MARKER = "## Quantitative Risk Overlay"
+# Exponent-aware numeric class for the two price bullets: the overlay
+# renders Stop Loss / Entry Reference with %.6g, which emits exponent form
+# below 1e-4 (PEPEUSDT-class stops, "1.14e-05"). The old [\-0-9.]+ class
+# truncated at the "e" and parsed 1.14 — feeding the run dicts and the
+# risk_overlay_determinism compare values five orders of magnitude off
+# (two different stops could even false-PASS the determinism criterion by
+# both truncating to the same mantissa). Mirrors overlay_fields._NUM.
+_EXPNUM = r"([\-0-9.]+(?:[eE][-+]?[0-9]+)?)"
 _TARGET_WEIGHT_RE = re.compile(r"\*\*Target Weight\*\*:\s*([\-0-9.]+)%")
-_STOP_LOSS_RE = re.compile(r"\*\*Stop Loss\*\*:\s*\$?([\-0-9.]+)")
-_ENTRY_REF_RE = re.compile(r"\*\*Entry Reference\*\*:\s*\$?([\-0-9.]+)")
+_STOP_LOSS_RE = re.compile(rf"\*\*Stop Loss\*\*:\s*\$?{_EXPNUM}")
+_ENTRY_REF_RE = re.compile(rf"\*\*Entry Reference\*\*:\s*\$?{_EXPNUM}")
 
 # Gate thresholds (mirrors the task spec).
 _RATING_P_THRESHOLD = 0.05

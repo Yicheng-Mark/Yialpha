@@ -216,16 +216,25 @@ def _print_perf_table(tracker) -> None:
           f"{t['tokens_in']:9d} {t['tokens_out']:9d} {t['tokens_reasoning']:11d}")
 
 
-def smoke(ticker: str, date: str, profile: bool = False) -> int:
+def smoke(ticker: str, date: str, profile: bool = False, asset_type: str = "stock") -> int:
     """档 0：跑一次 propagate，确认链路通。
 
     ``profile`` 开启节点级耗时遥测（零影响：只观测，不改 agent 输入/深度），
-    propagate 后打印「节点→墙钟占比」表，定位真实瓶颈。
+    propagate 后打印「节点→墙钟占比」表，定位真实瓶颈。``asset_type``
+    threads through to propagate — the perp smoke route
+    (``--smoke --asset-type crypto_perp``) is the documented way to verify
+    the perp pipeline, and it used to silently run the stock pipeline
+    against a perp symbol (propagate's default) while the assembled
+    perp_kwargs sat unused: exactly the wrong-venue analysis the flag
+    exists to prevent.
     """
-    print(f"\n=== 冒烟测试：{ticker} @ {date}{(' + --profile') if profile else ''} ===")
+    print(
+        f"\n=== 冒烟测试：{ticker} @ {date}"
+        f"{(' + --profile') if profile else ''} [{asset_type}] ==="
+    )
     try:
         ta = _build_graph(debug=False, node_perf_telemetry=profile)
-        final_state, rating = ta.propagate(ticker, date)
+        final_state, rating = ta.propagate(ticker, date, asset_type=asset_type)
         print(f"评级: {rating}")
         decision = (final_state or {}).get("final_trade_decision", "")
         print(f"决策摘要（前 400 字）:\n{(decision or '')[:400]}")
@@ -408,8 +417,9 @@ def main():
     p.add_argument("--cost-bps", type=float, default=5.0)
     p.add_argument("--runs", type=int, default=2)
     p.add_argument("--asset-type", default="stock",
-                   choices=["stock", "crypto", "crypto_perp"],
-                   help="crypto_perp：Binance 永续自身 K 线计价 + 资金费拖累（覆盖缺口 fail-closed）")
+                   choices=["stock", "crypto", "crypto_spot", "crypto_perp"],
+                   help="crypto_perp：Binance 永续自身 K 线计价 + 资金费拖累（覆盖缺口 fail-closed）；"
+                        "crypto_spot 亦可冒烟/回测（现货轨道）")
     p.add_argument("--leverage", type=float, default=1.0,
                    help="永续杠杆（>1 启用 isolated 保证金/强平建模；仅 crypto_perp）")
     p.add_argument("--allow-short", action="store_true",
@@ -457,9 +467,18 @@ def main():
               f"强平口径={args.liq_price_type}")
 
     if args.preflight:
+        if args.asset_type != "stock":
+            print(
+                f"⚠ --preflight 不区分 asset-type（{args.asset_type} 仅对 "
+                "--smoke/--baseline/--full 生效）",
+                file=sys.stderr,
+            )
         sys.exit(preflight(args.ticker))
     elif args.smoke:
-        sys.exit(smoke(args.ticker, args.date, profile=args.profile))
+        sys.exit(
+            smoke(args.ticker, args.date, profile=args.profile,
+                  asset_type=args.asset_type)
+        )
     elif args.baseline:
         ok = baseline_backtest(args.tickers, start, end, args.step, args.rebalance,
                                args.holding_days, args.cost_bps, args.runs, args.out,

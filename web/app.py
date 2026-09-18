@@ -206,11 +206,18 @@ def _validate_path_ticker(ticker: str) -> str:
 
 
 def _validate_date(date: str) -> str:
-    """Validate a path-parameter date; raise 404 on a malformed value."""
-    try:
-        datetime.strptime(date, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(status_code=404, detail=f"bad date: {date!r}") from None
+    """Validate a path-parameter date; raise 404 on a malformed value.
+
+    Accepts the venue-suffixed date keys the store yields since the
+    perp/spot file split (``2026-09-19_perp`` / ``_spot``) — the plain
+    ``%Y-%m-%d`` parse rejected them and every history click on a crypto
+    venue run 404'd ("unconverted data remains: _perp"). The suffix
+    vocabulary mirrors ``web/store._DATE_RE`` exactly.
+    """
+    import re
+
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:_perp|_spot)?", date):
+        raise HTTPException(status_code=404, detail=f"bad date: {date!r}")
     return date
 
 
@@ -383,8 +390,20 @@ async def api_task(task_id: str):
         "max_attempts": st.max_attempts,
         "report_dir": st.report_dir,
         # On success the rendered report lives at the analysis date's JSON,
-        # which is exactly what run_robust just (re)wrote.
-        "report_url": f"#/t/{st.ticker}/{st.date}" if st.status == "done" else None,
+        # which is exactly what run_robust just (re)wrote. Crypto venue
+        # runs write the venue-suffixed file (…_<date>_perp|_spot) — carry
+        # the suffix so the link resolves to the run just produced instead
+        # of a 404 on the unsuffixed name that venue never writes.
+        "report_url": (
+            f"#/t/{st.ticker}/{st.date}"
+            + (
+                {"crypto_perp": "_perp", "crypto_spot": "_spot"}.get(
+                    str(st.asset_type or ""), ""
+                )
+            )
+            if st.status == "done"
+            else None
+        ),
         "log_tail": list(st.log_tail[-20:]),
         "error": st.error,
     }

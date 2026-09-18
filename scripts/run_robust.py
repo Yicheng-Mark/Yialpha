@@ -57,8 +57,13 @@ IS_WINDOWS = os.name == "nt"
 # tree root so /T reliably reaches every descendant (grandchild datafetch etc.).
 _CREATE_FLAGS = subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0
 
-# Default shim location auto-loads sitecustomize at interpreter startup (urllib
-# hard timeout + socket backstop). Override with YIALPHA_TIMEOUT_SHIM_DIR.
+# OPTIONAL operator-installed shim: if a sitecustomize.py with a urllib hard
+# timeout + socket backstop was manually placed here, prepending it to the
+# child PYTHONPATH auto-loads it at interpreter startup. The repo ships no
+# shim and no package code reads these env vars — without a hand-installed
+# file this is a harmless no-op, and hang recovery today is
+# YIALPHA_LLM_TIMEOUT_S / SDK retries + the watchdog below. Override the
+# location with YIALPHA_TIMEOUT_SHIM_DIR.
 _DEFAULT_SHIM_DIR = os.environ.get(
     "YIALPHA_TIMEOUT_SHIM_DIR",
     str(Path(os.environ.get("TEMP", str(Path.home()))) / "yialpha_timeout_shim"),
@@ -139,7 +144,15 @@ def _parse_args() -> argparse.Namespace:
     # Quality gate is ON by default now: the only way back to the old
     # "accept a degraded report" semantics is the explicit --allow-degraded
     # escape hatch. (--require-data-quality stays accepted as a no-op for
-    # compat with existing invocations/docs.)
+    # compat with existing invocations/docs.) Passing BOTH flags is a
+    # contradiction — resolve loudly (allow-degraded wins, matching the
+    # historical explicit-flag-beats-default rule) rather than silently.
+    if opts.require_data_quality and opts.allow_degraded:
+        print(
+            "⚠ 同时给了 --require-data-quality 与 --allow-degraded：按 "
+            "--allow-degraded（显式逃生口）执行",
+            file=sys.stderr, flush=True,
+        )
     opts.require_data_quality = not opts.allow_degraded
     return opts
 
@@ -183,18 +196,26 @@ def _find_new_report(reports_root: Path, ticker: str, pre_mtime: float) -> Path 
 def _core_sentinel_count(reports_root: Path, ticker: str, date: str) -> int | None:
     """Read the finished run's data_quality block; None when unavailable.
 
-    ``full_states_log_<date>.json`` (written atomically by the graph before
-    complete_report.md) carries ``data_quality.core_sentinel_count`` — how
-    many CORE categories degraded to NO_DATA_AVAILABLE during the run. This
-    distinguishes a fully-fed report from a data-vacuum HOLD: a brand-new
-    complete_report.md alone no longer proves the run actually had data.
-    Returns None when the log is missing/unreadable or predates the
-    data_quality field (older runs) — unknown, not zero.
+    ``full_states_log_<date>[_perp|_spot].json`` (written atomically by the
+    graph before complete_report.md) carries
+    ``data_quality.core_sentinel_count`` — how many CORE categories degraded
+    to NO_DATA_AVAILABLE during the run. This distinguishes a fully-fed
+    report from a data-vacuum HOLD: a brand-new complete_report.md alone no
+    longer proves the run actually had data. The filename carries a venue
+    suffix for crypto runs (perp/spot are separate files now), so resolve
+    by glob and take the NEWEST match for the date instead of constructing
+    the exact name. Returns None when no log is found/unreadable or predates
+    the data_quality field (older runs) — unknown, not zero.
     """
-    log = (
-        reports_root.parent / ticker / "YiAlphaStrategy_logs"
-        / f"full_states_log_{date}.json"
+    candidates = sorted(
+        (reports_root.parent / ticker / "YiAlphaStrategy_logs").glob(
+            f"full_states_log_{date}*.json"
+        ),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
     )
+    if not candidates:
+        return None
+    log = candidates[-1]
     try:
         data = json.loads(log.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -642,14 +663,27 @@ def main() -> int:
     results.sort(key=lambda r: opts.tickers.index(r["ticker"]))
     ok = sum(1 for r in results if r["ok"])
 
-    print(f"\n=== 健壮编排完成：{ok}/{len(results)} 成功 ===")
+    # Exit code vs the REQUESTED ticker set, not the completed subset: after
+    # a Ctrl+C abort the futures that never finished have no entry in
+    # `results` at all, so `ok == len(results)` compared a half-finished
+    # batch against itself and reported the abort as success (exit 0). A
+    # CI wrapper reads only this code — it must see the missing tickers.
+    missing = len(opts.tickers) - len(results)
+    if missing > 0:
+        not_run = [t for t in opts.tickers if t not in {r["ticker"] for r in results}]
+        print(
+            f"\n⚠ {missing} 个 ticker 未完成（中断/编排失败，未运行）: "
+            f"{', '.join(not_run)}",
+            file=sys.stderr, flush=True,
+        )
+    print(f"\n=== 健壮编排完成：{ok}/{len(opts.tickers)} 成功 ===")
     print(f"{'ticker':<10} {'状态':<6} {'尝试':>4}  {'报告/原因'}")
     for r in results:
         status = "✅" if r["ok"] else "❌"
         detail = str(r["report_path"]) if r["ok"] else f"{r['reason']} (log={r['log_path']})"
         print(f"{r['ticker']:<10} {status:<6} {r['attempts']:>4}  {detail}")
 
-    return 0 if ok == len(results) else 1
+    return 0 if ok == len(opts.tickers) else 1
 
 
 if __name__ == "__main__":

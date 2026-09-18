@@ -99,17 +99,35 @@ def find_report(ticker: str | None = None, report_dir: str | None = None) -> Pat
 
 
 def detect_asset_type(ticker: str) -> str:
-    """从 ticker 后缀推断资产类型（与报告 state.asset_type 一致）。"""
+    """从 ticker 后缀推断资产类型（与报告 state.asset_type 一致）。
+
+    加密后缀一律先给 ``crypto_perp``（tick 级判别在 build_ticket 里用 overlay
+    的永续专属 bullet 修正为 crypto_spot）——报告目录名不带 venue 维度。
+    """
     t = ticker.upper()
     if t.endswith("USDT") or t.endswith("USDC") or t.endswith("BUSD"):
-        # 现货 vs 永续：YiAlpha 的加密报告目录一律 *USDT，含 perp / spot；
-        # 杠杆语义下两者都按 perp 处理（spot 无杠杆会被 HARD_CEILING 兜住）
         return "crypto_perp"
     if t.endswith(".SS") or t.endswith(".SZ"):
         return "cn_stock"
     if t.endswith(".HK"):
         return "hk_stock"
     return "us_stock"
+
+
+def _overlay_present(parsed_pm: dict) -> bool:
+    """decision.md 里是否解析出了量化风控覆盖层的任一字段。
+
+    判别 crypto_spot 的前提是「覆盖层确实渲染过但没有永续专属 bullet」；
+    没有覆盖层的报告（risk_enabled 关 / 旧报告）不能当 spot 的证据——
+    维持 perp 默认（杠杆语义由 HARD_CEILING 兜底的历史行为）。
+    """
+    return any(
+        parsed_pm.get(k) is not None
+        for k in (
+            "ovl_action", "ovl_target_weight", "ovl_stop",
+            "ovl_entry_ref", "ovl_drawdown_regime",
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -306,12 +324,26 @@ def build_ticket(report_dir: Path, capital: float, profile: str) -> dict:
     parsed_pm = parse_pm_decision(pm_md)
     parsed_market = parse_market(market_md)
 
-    # ticker 从目录名取
-    ticker = report_dir.name.split("_2")[0] if "_2" in report_dir.name else report_dir.name
-    # 更稳妥：剥掉末尾 _YYYYMMDD_HHMMSS
+    # ticker 从目录名取：剥掉末尾 _YYYYMMDD_HHMMSS 时间戳
     ticker = re.sub(r"_\d{8}_\d{6}$", "", report_dir.name)
 
     asset_type = detect_asset_type(ticker)
+    # 现货/永续判别（2026-09-19 known-issue 拍板落地）：overlay 只在
+    # crypto_perp 运行渲染 Suggested Leverage / Est. Liquidation Price，
+    # 现货 overlay 没有。但「无永续 bullet」单凭存在性不是现货铁证——
+    # 退化的 perp 运行（close/ATR 拿不到 → perp 票据段整段为空）长一个样。
+    # 只在覆盖层**健康**（entry 与 stop 都在）时才判现货：健康的 perp
+    # 覆盖层必有永续 bullet，而缺价位的 perp 覆盖层缺 entry/stop——留在
+    # perp 默认，票据随后走 missing_levels 诚实不出单，而不是出一张
+    # 语义错误的现货单。无覆盖层的报告同样维持 perp 默认。
+    if (
+        asset_type == "crypto_perp"
+        and _overlay_present(parsed_pm)
+        and not parsed_pm["ovl_is_perp"]
+        and parsed_pm["ovl_entry_ref"] is not None
+        and parsed_pm["ovl_stop"] is not None
+    ):
+        asset_type = "crypto_spot"
     rating = parsed_pm["rating"]
     action = parsed_trader["action"]
     direction, dir_reason = decide_direction(rating, action)
@@ -348,6 +380,12 @@ def build_ticket(report_dir: Path, capital: float, profile: str) -> dict:
     if direction == "hold" or blocked or entry is None or stop is None:
         ticket["status"] = ("no_trade_breaker" if blocked else
                             "no_trade_hold" if direction == "hold" else "missing_levels")
+        return ticket
+    # 退化位价防护（与 render 路径的突破空序列防护同一缺陷类）：止损 = 入场
+    # → stop_dist = 0 → 名义仓位除零掀翻整张单；入场 ≤ 0 是无效价（解析出
+    # 的 0 / 负数）。都如实降级为不可出单，而不是崩或给无穷仓位。
+    if entry <= 0 or stop == entry:
+        ticket["status"] = "degenerate_levels"
         return ticket
 
     # ---- 计算仓位 / 杠杆 / TP ----
@@ -432,12 +470,19 @@ def render_ticket(t: dict) -> str:
     lines.append("")
 
     # ---- 不进场情形 ----
-    if t["status"] in ("no_trade_hold", "no_trade_breaker", "missing_levels"):
+    if t["status"] in (
+        "no_trade_hold", "no_trade_breaker", "missing_levels", "degenerate_levels",
+    ):
         if t["status"] == "no_trade_breaker":
             lines.append("## ⛔ 不建议进场 —— 风控熔断器触发")
             lines.append(f"回撤体制 = **{t['drawdown_regime']}**（no_new/hard_stop）。"
                          "框架的 Kelly×Breaker×CVaR 层已主动拒绝部署新资金。"
                          "此时硬上杠杆等于在回撤中接刀，应空仓等体制回到 normal/caution。")
+        elif t["status"] == "degenerate_levels":
+            lines.append("## ⚠️ 无法生成交易单 —— 价位退化")
+            lines.append(f"入场 {_money(t['entry'])} / 止损 {_money(t['stop'])}："
+                         "止损距离为零（或入场价非正）。报告位价数据退化，"
+                         "无法据此定尺；请核对 trader.md / decision.md 的位价来源。")
         elif t["status"] == "no_trade_hold":
             lines.append("## ⚪ 本笔观望，不建议进场")
             lines.append(f"{t['direction_reason']}。")
@@ -560,7 +605,9 @@ def _execution_plan(t):
             + ("价格回到成本下方" if d == "long" else "价格回到成本上方")
             + " 的移动止损（或跌破/突破 10 周线）离场。"
         )
-    if t["asset_type"].startswith("crypto"):
+    if t["asset_type"] == "crypto_perp":
+        # 永续专属提示：现货无资金费率（spot 判别落地前，现货单也会收到
+        # 这条永续合约提示——错误的执行语义）。
         parts.append("永续合约：留意资金费率（多头为正时持续扣费），隔夜成本会侵蚀收益；"
                      "设止损时给盘口噪音留 0.3–0.5% 缓冲，避免插针打穿。")
     if t["asset_type"] == "cn_stock" and d == "short":

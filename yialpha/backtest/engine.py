@@ -471,7 +471,11 @@ def _apply_corporate_actions(
     nothing). Splits adjust MULTIPLICATIVELY (close bars strictly before the
     ``event_date`` divide by the split ratio) and dividends ADDITIVELY (prior
     bars subtract the per-share ``details["amount"]``); the ``event_date``
-    bar itself is the ex bar and stays unadjusted. Records apply in
+    bar itself is the ex bar and stays unadjusted. A record whose ex-date
+    postdates the window's LAST BAR is skipped entirely (not yet effective
+    anywhere in the window — applying it would book a future dividend into
+    past closes; PIT-by-publication stays the caller's contract via
+    ``record.available_at``). Records apply in
     chronological order so chained actions compose on the running adjusted
     series, and the adjusted series feeds the mark-to-market, the
     buy-and-hold benchmark and the asset-return windows alike (funding and
@@ -486,10 +490,20 @@ def _apply_corporate_actions(
     from yialpha.instruments.corporate_actions import validate_corporate_action
 
     universe = _action_symbol_universe(ticker)
+    # PIT window guard (2026-09-19): a record whose ex-date postdates the
+    # LAST BAR has not taken effect anywhere in this window — but its
+    # ``prior`` mask below would select EVERY bar (all indices are strictly
+    # before a future date). A uniform split rescale happens to preserve
+    # returns, yet a future-dated DIVIDEND would subtract its amount from
+    # every close, booking a not-yet-ex dividend into past levels and
+    # distorting within-window returns. Skip records not yet effective;
+    # ``record.available_at`` (publication PIT) stays the caller's contract.
+    window_end = str(prices.index[-1]) if len(prices) else ""
     matching = [
         record
         for record in records
         if str(record.symbol).strip().upper().replace("-", "") in universe
+        and str(record.event_date) <= window_end
     ]
     adjusted = prices
     applied = 0
@@ -1791,7 +1805,7 @@ def _resolve_decision(
       which is the honest measurement.
     """
     if cache is not None:
-        cached = cache.get(ticker, trade_date, run_tag)
+        cached = cache.get(ticker, trade_date, run_tag, asset_type=asset_type)
         if cached is not None:
             return cached.rating, cached.final_decision, True, False
 
@@ -1809,7 +1823,10 @@ def _resolve_decision(
         decision_md = str(final_state.get("final_trade_decision", ""))
 
     if cache is not None and not propagate_failed:
-        cache.remember(ticker, trade_date, rating, decision_md, run_tag)
+        cache.remember(
+            ticker, trade_date, rating, decision_md, run_tag,
+            asset_type=asset_type,
+        )
     return rating, decision_md, False, was_degraded
 
 

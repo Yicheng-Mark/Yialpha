@@ -84,11 +84,25 @@ def _fetch_etf_fund_data(ticker: str, curr_date: str) -> dict[str, Any]:
             "status": STATUS_SKIPPED_LIVE_ONLY,
             "reason": "fund snapshot is a today-only page (no as-of boundary)",
         }
+    from . import quality
     from .etf_fund_data import get_etf_fund_data
 
     try:
         payload = get_etf_fund_data(ticker, curr_date)
     except Exception as exc:  # noqa: BLE001 — enrichment, never a veto
+        # Direct-connect vendor (bypasses the router): the failure must land
+        # in the data-quality ledger too, not only in the in-band footer
+        # (T0 ledger blind spot). Recorded as OPTIONAL-unavailable — the
+        # advisory tier: disclosed in optional_sentinel_count and the run
+        # log, never a DEGRADED_CRITICAL veto (upgrading it to core for ETF
+        # runs — where this snapshot is the substantive fundamentals
+        # evidence — is a product decision left open in the round-5
+        # known-issues).
+        quality.record_sentinel(
+            "get_etf_fund_data",
+            quality.KIND_OPTIONAL_UNAVAILABLE,
+            f"{ticker}: fund snapshot unavailable: {type(exc).__name__}: {exc}",
+        )
         return {
             "status": STATUS_UNAVAILABLE,
             "reason": f"{type(exc).__name__}: {exc}",

@@ -2052,13 +2052,53 @@ def stock_perp_underlying(ticker: str) -> str | None:
     base set (warmed snapshot or seed — never a fetch). The cheap syntactic
     pre-check short-circuits anything without a USDT/USDC quote before the
     set is even consulted.
+
+    With the ``instrument_registry`` flag ON, the persisted registry gets
+    the SAME precedence :func:`yialpha.graph.routing.instrument_class` gives
+    it: a latest ``binance_exchangeinfo`` row is authoritative in BOTH
+    directions — it can promote a base the warm/seed set missed (the
+    fresh-subprocess divergence: registry said stock_perp, every remap said
+    pure-crypto, fail-soft DEGRADED) and demote a stale warm/seed positive
+    the exchange no longer lists as EQUITY. With no registry evidence
+    (``registry_empty``) the warm/seed answer stands, and flag OFF is
+    byte-identical to the legacy matcher. ``classify_perp`` is memoized per
+    symbol, so the repeated hot-path calls stay cheap after the first.
     """
     if not isinstance(ticker, str):
         return None
     compact = ticker.strip().upper().replace("-", "")
     if not compact.endswith(("USDT", "USDC")):
         return None
-    return tokenized_stock_perp_underlying(ticker, equity_perp_bases())
+    warm = tokenized_stock_perp_underlying(ticker, equity_perp_bases())
+    if not get_config().get("instrument_registry"):
+        return warm
+    try:
+        from yialpha.instruments.registry import (
+            SOURCE_EXCHANGEINFO,
+            classify_perp,
+        )
+
+        record = classify_perp(ticker)
+        if record.classification_source != SOURCE_EXCHANGEINFO:
+            # No persisted evidence: the warm/seed answer stands (positive
+            # classifications never regress for seed/historical symbols).
+            return warm
+        if record.instrument_class != "stock_perp":
+            return None
+        base = record.underlying_symbol
+        if not base and len(compact) > 4:
+            base = compact[: -4]  # derive from the quote suffix, as persisted
+        if not base:
+            return warm
+        from .symbol_utils import yahoo_equity_symbol
+
+        return yahoo_equity_symbol(base)
+    except Exception:  # noqa: BLE001 — the registry must never break the hot path
+        logger.warning(
+            "stock_perp_underlying: registry consult failed for %s; "
+            "serving the warm/seed answer", ticker, exc_info=True,
+        )
+        return warm
 
 
 # ---------------------------------------------------------------------------

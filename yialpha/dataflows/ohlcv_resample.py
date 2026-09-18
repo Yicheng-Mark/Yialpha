@@ -66,6 +66,23 @@ def resample_weekly(daily: pd.DataFrame, curr_date: str | None = None) -> pd.Dat
             # Drop the still-open week: its Friday label is in the future
             # relative to the analysis date, so the bin is incomplete.
             weekly = weekly[weekly.index <= cutoff]
+            # …unless the label has ARRIVED but the bin is still forming: on
+            # a live run dated the bin's own Friday, the label == cutoff so
+            # the comparison above keeps it, yet the day's bar is still
+            # intraday (load_ohlcv deliberately includes the current day).
+            # A bin is complete only when a daily row exists BEYOND its
+            # label (a Saturday row lands in the NEXT bin); historical
+            # replays skip the check — their bars are closed by PIT.
+            from .utils import is_historical_date
+
+            cutoff_str = str(curr_date)[:10]
+            if (
+                not is_historical_date(cutoff_str)
+                and len(weekly) > 0
+                and len(df) > 0
+                and weekly.index[-1] >= df["Date"].max()
+            ):
+                weekly = weekly.iloc[:-1]
         else:
             # Fail-visible: an unparseable curr_date must not silently keep
             # the trailing incomplete week (a look-ahead-style weekly close).
