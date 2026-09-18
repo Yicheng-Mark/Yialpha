@@ -246,10 +246,10 @@ def test_reliability_bins_consistent_with_ece(base_rows: None):
     assert weighted == pytest.approx(overall["calibration_error"])
     assert weighted == pytest.approx(0.3)  # (0.6 + 0.2 + 0.1) / 3
     # Disjoint ordered ranges of width 0.1 covering up to 1.0.
-    for left, right in zip(bins, bins[1:]):
+    for left, right in zip(bins, bins[1:], strict=False):
         assert left["bin_high"] <= right["bin_low"]
     assert all(b["bin_high"] - b["bin_low"] == pytest.approx(0.1) for b in bins)
-    assert 0.0 <= bins[0]["bin_low"] and bins[-1]["bin_high"] == pytest.approx(1.0)
+    assert bins[0]["bin_low"] >= 0.0 and bins[-1]["bin_high"] == pytest.approx(1.0)
 
 
 @pytest.mark.unit
