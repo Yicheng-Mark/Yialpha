@@ -1070,6 +1070,19 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
     # the flag preserves YIALPHA_CHECKPOINT_ENABLED / the default (#976).
     if checkpoint is not None:
         config["checkpoint_enabled"] = checkpoint
+        if checkpoint:
+            # The interactive streamed path (below) bypasses _run_graph: no
+            # checkpointer is compiled into the streamed graph and no
+            # thread_id is injected, so --checkpoint CANNOT resume here —
+            # saying so beats letting the flag's help text imply it can.
+            # finalize_streamed_run still clears a leftover crashed
+            # checkpoint on success so interactive runs don't strand stale
+            # resume state for a later checkpointed batch run.
+            console.print(
+                "[yellow]--checkpoint applies to batch/propagate runs; the "
+                "interactive streamed path runs uncheckpointed (a crashed "
+                "interactive run restarts from scratch).[/yellow]"
+            )
     return config
 
 
@@ -1451,11 +1464,12 @@ def run_analysis(checkpoint: bool | None = None, asset_type: str = "auto"):
             final_state, ledger_run_id, regime_run_id,
         )
         # Land the same on-disk evidence a propagate() run produces
-        # (full_states_log_<date>.json + the data_quality block on the state)
-        # so the CLI run shows up in the web history and its reports can
-        # render the DEGRADED banner.
+        # (venue-suffixed full_states_log_<date>.json + the data_quality
+        # block on the state) so the CLI run shows up in the web history and
+        # its reports can render the DEGRADED banner.
         final_state = graph.finalize_streamed_run(
-            selections["ticker"], selections["analysis_date"], final_state
+            selections["ticker"], selections["analysis_date"], final_state,
+            asset_type=selections["asset_type"],
         )
         graph.curr_state = final_state
         _store_cli_decision(

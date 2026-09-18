@@ -529,7 +529,7 @@ def _make_graph_shell(tmp_path, **config_over):
         get_graph_args=lambda: {},
     )
     g._invoke_or_stream = lambda state, args: dict(state)
-    g._log_state = lambda d, fs: {}
+    g._log_state = lambda d, fs, asset_type="stock": {}
     g.process_signal = lambda md: "BUY"
     return g
 

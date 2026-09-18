@@ -91,7 +91,7 @@ def _stub_pipeline(g) -> None:
     )
     g._invoke_or_stream = lambda state, args: dict(state)
     g._apply_risk_overlay = lambda company, date, fs, ps, asset_type="stock": fs
-    g._log_state = lambda date, fs: {}
+    g._log_state = lambda date, fs, asset_type="stock": {}
     g.process_signal = lambda md: "BUY"
 
 

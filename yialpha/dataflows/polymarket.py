@@ -88,7 +88,14 @@ def _is_forward_looking(market: dict, now: datetime) -> bool:
     end_date = market.get("endDate")
     if end_date:
         try:
-            if datetime.fromisoformat(end_date.replace("Z", "+00:00")) < now:
+            parsed_end = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            if parsed_end.tzinfo is None:
+                # A date-only endDate ("2026-12-31") parses naive; comparing
+                # it against the tz-aware `now` raises TypeError (which the
+                # ValueError-only guard below used to let escape, degrading
+                # the WHOLE optional category for one market's date form).
+                parsed_end = parsed_end.replace(tzinfo=UTC)
+            if parsed_end < now:
                 return False
         except ValueError:
             # Kept as forward-looking (docstring contract), but observable: a

@@ -236,6 +236,231 @@ Breaking changes within the 0.x line are called out explicitly.
     position value where advisory dollar shocks expect book equity
     (advisory-only, shadow/enforced).
 
+- **Round 5 (2026-09-19, same day): known-issues resolved + five review
+  shards (execution / orchestration-cache / batch-reporting / edge vendors
+  / checkpoint) + the six test-gap files filled.** All fixes carry pins in
+  `tests/test_round5_regressions.py` / the new dedicated test files.
+  - **trade_ticket spot/perp discrimination landed** (round-4 deferred
+    item a): a crypto report whose overlay is present but carries NO
+    perp-only bullet (Suggested Leverage / Est. Liquidation Price) is a
+    crypto_spot report — the ticket now renders spot semantics (leverage
+    hard-capped at 1.0, no liquidation row, no 永续 funding note) instead
+    of perp leverage advice on a spot position. Reports with no overlay at
+    all keep the perp default (the discriminator has no evidence).
+  - **States log gained the venue dimension** (round-3 known issue 1):
+    crypto runs write `full_states_log_<date>_perp.json` / `_spot.json`;
+    equities and the legacy `crypto` umbrella keep the unsuffixed name —
+    a same-date perp AND spot run of one ticker no longer overwrite each
+    other. Readers updated: web/store keys runs by the filename stem
+    (venue-suffixed date keys list BOTH runs), run_robust resolves the
+    quality block by newest-mtime glob, accuracy already read venue from
+    the JSON content. node_perf telemetry carries the same suffix.
+  - **SHORT funding gate is sign-aware** (round-4 item b): the V2.4
+    transitional short heuristic now dampens at the same disclosed
+    warn/hard thresholds when annualized funding runs AGAINST the short
+    (funding ≤ −0.30 halves, ≤ −0.60 quarters); favourable carry never
+    boosts (symmetric with the long gate). Damping is disclosed in the
+    shadow render line and recorded (`short_sizing:
+    heuristic_funding_damped` + the carry and multiplier read).
+  - **Portfolio-control snapshot equity uses BOOK equity** (round-4
+    item c): the old `position_value or equity` chain fed advisory dollar
+    shocks an account 1/weight the size of the real book; equity now comes
+    from the injected portfolio_state (1.0 stays the honest degenerate
+    floor for single-instrument runs).
+  - **Registry/warm divergence closed at the resolver** (round-3 known
+    issue 2): `stock_perp_underlying` consults the persisted instrument
+    registry with the SAME precedence routing gives it — a latest
+    exchangeInfo row promotes a base the warm/seed set missed AND demotes
+    a stale positive the exchange no longer lists as EQUITY; registry-empty
+    keeps the warm/seed answer; flag OFF is byte-identical. All 15+
+    hot-path consumers (analysts, tools, bundle, regime) and
+    `instrument_class` now agree by construction.
+  - **Checkpoint resume actually resumes (P1)**: `_run_graph` passed the
+    full fresh init-state dict on every invocation — langgraph treats any
+    non-None input as a NEW turn from `__start__`, so a checkpointed
+    "resume" silently re-billed the whole graph while logging "Resuming
+    from step N". A detected checkpoint now threads `graph_input = None`
+    through invoke/stream (debug + telemetry paths), resuming at the first
+    node after the last checkpoint.
+  - **Checkpoint run-signature folds input-affecting config**: the shape
+    signature gains a sorted-JSON `config=` segment (model tiers,
+    sec_ownership / a_share_native / valuation_tools / indicator_battery /
+    indicator_ic_context / market_regime / data_vendors) — restoring a
+    checkpoint across a toolset flip no longer replays stale analyst
+    reports made by the old tools. Interactive `--checkpoint` now says it
+    runs uncheckpointed (streamed path), and a successful interactive run
+    clears a leftover crashed checkpoint for its ticker+date+signature.
+  - **Orchestration fixes**: run_robust exits non-zero when tickers are
+    MISSING after a Ctrl+C abort (the old code compared success against
+    the completed subset only — "1/1 成功", exit 0 on a half-finished
+    batch); contradictory `--require-data-quality --allow-degraded`
+    resolves loudly; the timeout-shim comment stops claiming protection
+    the repo does not ship. run_baseline `--smoke` threads
+    `--asset-type` into propagate (a perp smoke used to silently run the
+    stock pipeline against a perp symbol).
+  - **DecisionCache keys the venue** (schema v3): the key folds
+    asset_type; a crypto vs perp vs stock backtest of the same
+    ticker+date+run_tag no longer replays the other venue's realized
+    decision. v2-era entries at the legacy path are removed on sight.
+  - **Edge-vendor sweep** (seven files, same depth as the bundle side):
+    price-structure + weekly-indicator renders use magnitude-aware price
+    formatting (PEPEUSDT-class levels no longer render "0.00" — the
+    mandated-citation evidence was destroyed at the render seam while the
+    math was correct); fred + the five TA tools clamp the LLM-supplied
+    curr_date to the pinned analysis date (the news vendors' guard, now
+    at every direct OHLCV/facts entry); ohlcv_resample drops a live
+    Friday bin that is still forming (a daily row beyond the label, or a
+    historical date, proves completeness); the ETF fund-data failure now
+    lands in the quality ledger (direct-connect blind spot — for an ETF
+    run that snapshot IS the core evidence); polymarket accepts date-only
+    (naive) endDate without degrading the whole category.
+  - **Cross-cutting**: run_analyst_parallel_ab's Stop Loss / Entry regexes
+    accept exponent notation (the A/B determinism gate could false-PASS on
+    micro-price stops by truncating two different values to the same
+    mantissa); overlay_fields' target_weight regex keeps a negative sign;
+    the report tree (decision.md / complete_report.md) writes atomically
+    (same tmp+os.replace discipline as the states log — a watchdog kill
+    mid-write used to leave truncated reports that parse as garbage
+    levels).
+  - **Round-5 self-review (adversarial, on this same diff).** The green
+    suite could not see three of the batch's own defects; verified and
+    fixed with pins:
+    - **Web UI 404'd on every crypto-venue history click** — the store
+      now serves venue-suffixed date keys, but `web/app.py:_validate_date`
+      still parsed a plain `%Y-%m-%d` ("unconverted data remains: _perp")
+      and the post-run `report_url` carried the unsuffixed date; both
+      accept/carry the suffix now (auto-detected runs resolve to the
+      `crypto` umbrella and keep the unsuffixed file, so both link shapes
+      resolve).
+    - **The ticket spot discriminator misread DEGENERATE perp reports as
+      spot** — a perp run whose price legs failed renders an overlay with
+      no perp bullets (the exact signature the flip keyed on). The flip
+      now requires a HEALTHY overlay (entry + stop present, which a
+      healthy perp overlay always accompanies with its perp bullets); a
+      degraded perp report keeps perp semantics and exits
+      missing_levels instead of rendering a wrong spot ticket.
+    - **True checkpoint resume loses the crashed attempt's quality-ledger
+      evidence** — the resumed process rebuilds the accumulator fresh, so
+      sentinel events from nodes that never re-ran are gone and
+      core_sentinel_count reads 0. The log now carries a
+      presence-gated `checkpoint_resumed: true` key so a consumer never
+      reads the partial count as "fully evidenced" (re-hydrating evidence
+      across processes is not possible — the events died with the crash;
+      recorded below as the known limitation).
+    - Also: `--asset-type crypto_spot` added to run_baseline's choices
+      (the smoke path threads it but the choices list pre-dated spot);
+      comment corrections (the SHORT-gate comment wrongly claimed the
+      ticket cost leg was sign-blind — it never was; the ETF sentinel
+      comment now states its optional tier honestly); web/store's module
+      docstring documents the suffixed filename layout.
+  - **Test gaps closed** (new files): test_trade_ticket.py (direction
+    matrix, level priority, parser suite, end-to-end spot/perp
+    discriminator), test_rank_signals.py (score weights / grouping /
+    mixed-venue comparability), test_onchain_flows.py (span label,
+    structural-gap sentinel, per-chart sentinel, oldest fetched_at),
+    test_kelly.py / test_cvar.py (negative-edge clamp, Sell band, tail
+    breach), test_corporate_actions.py (split direction, dividend sign,
+    PIT), test_batch_runner.py (per-ticker error isolation taxonomy).
+    The test-writing pass itself surfaced two more fixed defects:
+    trade_ticket's compute path divided by a zero stop distance when
+    trader Entry == overlay Stop (degenerate_levels status now, was a
+    ZeroDivisionError that killed the whole ticket), and
+    `_apply_corporate_actions` applied records whose ex-date postdates the
+    window's last bar (a future-dated dividend subtracted from every
+    close — unreachable in production via corporate_actions=None, but the
+    window guard is unconditional now). `prepare_batch_run([])` raises
+    BatchInputError instead of a bare IndexError.
+
+- **Known issues recorded by round 5 (reviewed, deliberately not changed
+  here)**:
+  - **Execution layer (Track B, default-off/unwired — findings recorded
+    for the execution-track project, per the standing agreement not to
+    touch it in data-layer batches)**: P1 — hedge-mode CLOSE maps
+    `position_side` from the order's direction instead of the opposite of
+    the trade side, so the bridge's SHORT+CLOSE risk exit would try to
+    close a short that does not exist (REJECTED exactly when
+    breaker_close_only makes closes the only allowed orders); P2s —
+    free-text `reference` doubles as the Binance client-order-id
+    idempotency key (a non-unique tag can REJECTED-spurious or recover a
+    PHANTOM fill of an older order after an ambiguous submit);
+    one-way-mode positions lose long/short sign in query_position
+    (Direction.NET + abs); the kill-switch network edge runs AFTER the
+    leverage POST and checks only KillSwitch (not the live-execution
+    policy); unknown Binance status maps to SUBMITTING (an active state)
+    instead of a fail-closed marker. P3s — stale line-number/"nothing
+    calls it" comments, audit gate label always weight_cap, duplicate
+    close-offset sets in two modules, browser-broker NaN equity slips the
+    notional cap, LIMIT price=0 gap at the bridge, env-false cannot
+    override a constructor mainnet=True, isolation-guard regex gaps,
+    "buyed/selled" grammar, DRY_RUN_PREVIEW→SUBMITTING sketch in
+    gateway.py, and CLAUDE.md's "方向判定逐字对齐" overstates the bridge's
+    deliberate bearish gating (doc drift, not code).
+  - Checkpoint P3s (accepted): each attempt registers a fresh ledger run
+    row (duplicate rows after crash+resume, hygiene); a corrupt checkpoint
+    DB fails loudly per-ticker until --clear-checkpoints (fail-closed with
+    an escape hatch); has_checkpoint is test-only dead code; a resumed
+    run's data_quality covers only the resumed segment (disclosed via
+    checkpoint_resumed; cross-process re-hydration is impossible by
+    construction); a crash in the report-writing window (between graph
+    END and checkpoint clear) leaves an END checkpoint whose rerun resumes
+    with zero executed nodes — graceful on the default invoke path, but
+    the telemetry stream's zero-chunks guard would raise (stream
+    telemetry is default-off).
+  - Web display drift from the venue split (display-only): run_count and
+    the home timeline dots count venue files (a same-date perp+spot pair
+    shows as 2 runs), and within one date the lexicographic key order
+    picks `_spot` as "latest" (arbitrary venue preference).
+  - The weekly forming-bar guard drops the latest COMPLETED Friday bin on
+    weekend/pre-market live EQUITY runs (equity vendors never publish a
+    Saturday row, so "a daily row beyond the label" can never prove
+    completeness there — stale-by-one-week direction, crypto unaffected).
+    The ETF fund-data sentinel stays optional-tier (advisory, never a
+    DEGRADED veto); upgrading it to core for ETF runs — where the
+    snapshot is the substantive fundamentals evidence — is an open
+    product decision.
+  - Yahoo-fed live runs still read the forming daily bar in the four
+    OHLCV-fed TA modules (current information, not lookahead; closing the
+    seam means changing load_ohlcv semantics shared by stockstats — needs
+    its own pass); daily-pivot reference session wobbles when Yahoo has
+    not yet listed today's row; three-soldiers/crows gap tolerance is
+    asymmetric between the mirrors (pattern-definition choice).
+  - run_robust --reports-root pointing at a custom root derives the
+    states-log path from it while the child keeps writing under the real
+    results_dir (opt-in footgun; loud failure); a watchdog-killed attempt
+    that already wrote complete_report.md is never credited (conservative
+    direction); web/reporting render a MISSING quality block as clean for
+    pre-feature logs (run_robust, the strict consumer, already treats
+    missing as unknown).
+  - kelly / cvar observations (test-suite review, reported only): the
+    conviction-band FLOOR overrides the negative-edge clamp for
+    Buy/Overweight (a negative-expectancy Buy still sizes at the 0.05 tier
+    minimum — documented "regardless of what raw Kelly spits out"
+    behaviour, but it contradicts a naive reading of the clamp);
+    historical_cvar's tail depth `ceil(n × (1 − confidence))` picks 6 at
+    n=100 / 4 at n=60 for confidence=0.95 (float 1−0.95 >
+    0.05 — conservative direction, pinned); its tail_count > size clamp is
+    unreachable dead code.
+  - rank_signals / onchain observations (test-suite review, reported only):
+    `render_rank`'s ``tickers`` parameter is dead; ranking sorts on the
+    ROUNDED conviction score (78.4 vs 77.6 can tie at 78 and fall back to
+    input order, and banker's rounding can make displayed rank contradict
+    the displayed score); `--since` silently keeps report dirs without a
+    `_YYYYMMDD_HHMMSS` stamp; onchain's oldest-`fetched_at` pick is a
+    lexicographic string min (correct for the module's own uniform ISO
+    stamps, theoretical for a hand-edited legacy cache in another ISO
+    shape); `_points` would raise AttributeError on a non-dict payload
+(currently saved by the caller's broad except).
+  - trade_ticket residual observations (test-suite review, reported only):
+    resolve_levels' truthiness chains treat a parsed 0.0 level as
+    "missing" and fall through to the next source (a zero price is
+    unreachable through real reports but would silently substitute the
+    fallback source); a spot ticket's execution plan still says
+    "开 1.0× 杠杆头寸 / 保证金"（numerically right at L=1, wording is
+    perp-shaped）; decide_direction silently treats an unknown rating
+    string as missing (safe while parsers gate to the 5 tiers). The
+    stop==entry ZeroDivisionError and the dead ticker-split line from the
+    same review ARE fixed this round (degenerate_levels status + pin).
+
 ### Changed
 
 - **Project renamed: YiAgents → YiAlpha（弈·Alpha）.** Full rename across the
@@ -320,8 +545,6 @@ Breaking changes within the 0.x line are called out explicitly.
   over `ic_data/*.prune.json` — the runtime consumer of the pruning evidence,
   and the first reader of the `.prune.json` format. Off = prompt
   byte-equivalent to the A/B baseline.
-
-
 
 - **Default multi-vendor fallback chains.** The four core categories chain
   `yfinance,alpha_vantage` (fundamentals additionally `sec_edgar`), with

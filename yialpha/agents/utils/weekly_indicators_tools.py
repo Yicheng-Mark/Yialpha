@@ -10,6 +10,7 @@ hallucination contract extended to the higher timeframe.
 
 from __future__ import annotations
 
+import math
 from typing import Annotated
 
 import pandas as pd
@@ -19,6 +20,31 @@ from stockstats import wrap
 from yialpha.dataflows import quality
 from yialpha.dataflows.ohlcv_resample import weekly_ohlcv
 from yialpha.dataflows.stockstats_utils import compute_indicator
+
+
+def _fmt_num(value) -> str:
+    """Magnitude-aware number rendering for the weekly table.
+
+    Close and MACD are PRICE-scale quantities — on the crypto_spot track a
+    PEPEUSDT-class symbol resolves to ~1e-5, where ``.2f`` renders "0.00"
+    (same render-seam bug class as the sibling price-structure tools).
+    RSI values (0-100) are unchanged by the tiering.
+    """
+    try:
+        if value is None or pd.isna(value):
+            return "N/A"
+        x = float(value)
+        if not math.isfinite(x):
+            return "N/A"
+    except (TypeError, ValueError):
+        return "N/A"
+    a = abs(x)
+    if a >= 1000:
+        return f"{x:,.2f}"
+    if a >= 1e-3:
+        stripped = f"{x:.4f}".rstrip("0").rstrip(".")
+        return stripped if stripped not in ("", "-") else "0"
+    return f"{x:.4g}"
 
 #: The fixed weekly battery: enough to state the weekly trend direction,
 #: momentum, and trend-vs-momentum conflict without re-opening the whole
@@ -58,6 +84,11 @@ def get_indicators_weekly(
         str: Weekly indicator table (one row per week, columns = indicators)
         plus the latest-row summary.
     """
+    # PIT clamp: curr_date comes from the LLM; the pinned analysis date is
+    # the authority (same guard as the news vendors / price-structure _load).
+    from yialpha.dataflows.utils import current_pit_end
+
+    curr_date = str(current_pit_end(curr_date) or curr_date)
     try:
         weekly = weekly_ohlcv(symbol, curr_date)
     except Exception as exc:  # noqa: BLE001 — typed degrade, never crash the node
@@ -111,15 +142,16 @@ def get_indicators_weekly(
         "|---|---:|" + "---:|" * (2 + len(columns)),
     ]
     for _, row in frame.iterrows():
-        cells = [row["Date"], f"{row['Close']:.2f}"]
+        cells = [row["Date"], _fmt_num(row["Close"])]
         for name in columns:
             value = row.get(name)
-            cells.append("N/A" if pd.isna(value) else f"{value:.2f}")
+            cells.append("N/A" if pd.isna(value) else _fmt_num(value))
         lines.append("| " + " | ".join(cells) + " |")
 
     last = frame.iloc[-1]
     summary = ", ".join(
-        f"{_WEEKLY_DESCRIPTIONS[n]}={('N/A' if pd.isna(last.get(n)) else f'{last.get(n):.2f}')}"
+        f"{_WEEKLY_DESCRIPTIONS[n]}="
+        f"{('N/A' if pd.isna(last.get(n)) else _fmt_num(last.get(n)))}"
         for n in columns
     )
     lines += [

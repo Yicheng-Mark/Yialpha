@@ -38,7 +38,7 @@ _NUM = r"(-?[0-9.]+(?:[eE][-+]?[0-9]+)?)"
 #: stock/spot overlays).
 OVERLAY_FIELDS: dict[str, str] = {
     "action": r"\*\*Action\*\*:\s*(.+)",
-    "target_weight": r"\*\*Target Weight\*\*:\s*([0-9.]+%)",
+    "target_weight": r"\*\*Target Weight\*\*:\s*(-?[0-9.]+%)",
     "position_value": r"\*\*Target Weight\*\*:.*?\(([-0-9,]+)\)",
     "stop_loss": rf"\*\*Stop Loss\*\*:\s*{_NUM}",
     "entry": rf"\*\*Entry Reference\*\*:\s*{_NUM}",

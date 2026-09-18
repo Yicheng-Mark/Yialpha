@@ -28,10 +28,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Version 2 invalidates decisions produced before the historical-source and
-# next-bar point-in-time fixes. Replaying those files would silently reintroduce
-# present-day social/positioning data into an otherwise corrected backtest.
-DECISION_CACHE_SCHEMA_VERSION = 2
+# Version 2 invalidated decisions produced before the historical-source and
+# next-bar point-in-time fixes. Version 3 folds asset_type into the key:
+# a crypto vs crypto_perp (or stock) backtest of the same ticker+date+run_tag
+# used to replay the OTHER venue's realized decision — the same venue-
+# blindness the states log carried. Old entries fail the version check and
+# are honestly recomputed.
+DECISION_CACHE_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,7 @@ class CachedDecision:
     run_tag: str
     rating: str
     final_decision: str
+    asset_type: str = "stock"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -52,6 +56,7 @@ class CachedDecision:
             "run_tag": self.run_tag,
             "rating": self.rating,
             "final_decision": self.final_decision,
+            "asset_type": self.asset_type,
         }
 
     @classmethod
@@ -67,6 +72,7 @@ class CachedDecision:
             run_tag=d.get("run_tag", "default"),
             rating=d["rating"],
             final_decision=d["final_decision"],
+            asset_type=d.get("asset_type", "stock"),
         )
 
 
@@ -101,31 +107,58 @@ class DecisionCache:
         base = Path(config.get("data_cache_dir", ".")) / "backtest_decisions"
         return cls(base, enabled=enabled)
 
-    def _key_path(self, ticker: str, date: str, run_tag: str) -> Path | None:
+    def _key_path(
+        self, ticker: str, date: str, run_tag: str, asset_type: str = "stock",
+    ) -> Path | None:
         if self.cache_dir is None:
             return None
-        name = f"{_safe_component(ticker)}_{_safe_component(date)}_{_safe_component(run_tag)}.json"
+        name = (
+            f"{_safe_component(ticker)}_{_safe_component(date)}_"
+            f"{_safe_component(run_tag)}_{_safe_component(asset_type)}.json"
+        )
         return self.cache_dir / name
 
-    def get(self, ticker: str, date: str, run_tag: str = "default") -> CachedDecision | None:
+    def get(
+        self, ticker: str, date: str, run_tag: str = "default",
+        asset_type: str = "stock",
+    ) -> CachedDecision | None:
         if not self.enabled:
             return None
-        path = self._key_path(ticker, date, run_tag)
-        if path is None or not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                return CachedDecision.from_dict(json.load(fh))
-        except (OSError, ValueError, KeyError) as exc:
-            logger.warning("Corrupt backtest cache entry %s (%s); removing", path, exc)
+        path = self._key_path(ticker, date, run_tag, asset_type)
+        if path is not None and path.exists():
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    cached = CachedDecision.from_dict(json.load(fh))
+                if cached.asset_type != asset_type:
+                    # Venue-mismatched entry (pre-v3 filename collision):
+                    # treat as a miss — replaying the other venue's decision
+                    # is exactly the bug the key change exists to prevent.
+                    return None
+                return cached
+            except (OSError, ValueError, KeyError) as exc:
+                logger.warning(
+                    "Corrupt backtest cache entry %s (%s); removing", path, exc
+                )
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)
+                return None
+        # v2-era path (no asset_type component): remove it so the stale
+        # entry cannot shadow the correctly-keyed v3 entry later.
+        legacy = self.cache_dir / (
+            f"{_safe_component(ticker)}_{_safe_component(date)}_"
+            f"{_safe_component(run_tag)}.json"
+        )
+        if legacy.exists():
             with contextlib.suppress(OSError):
-                path.unlink(missing_ok=True)
-            return None
+                legacy.unlink(missing_ok=True)
+        return None
 
     def put(self, decision: CachedDecision) -> None:
         if not self.enabled:
             return
-        path = self._key_path(decision.ticker, decision.date, decision.run_tag)
+        path = self._key_path(
+            decision.ticker, decision.date, decision.run_tag, decision.asset_type
+        )
         if path is None:
             return
         tmp = path.with_suffix(".tmp")
@@ -143,6 +176,7 @@ class DecisionCache:
         rating: str,
         final_decision: str,
         run_tag: str = "default",
+        asset_type: str = "stock",
     ) -> CachedDecision:
         """Store a realized decision and return the cached record."""
         decision = CachedDecision(
@@ -151,6 +185,7 @@ class DecisionCache:
             run_tag=run_tag,
             rating=rating,
             final_decision=final_decision,
+            asset_type=asset_type,
         )
         self.put(decision)
         return decision

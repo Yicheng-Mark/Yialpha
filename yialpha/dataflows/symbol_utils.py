@@ -147,9 +147,21 @@ def tokenized_stock_perp_underlying(
             base = compact[: -len(quote)]
             bases = _EQUITY_PERP_SEED_BASES if equity_perp_bases is None else equity_perp_bases
             if base in bases:
-                return _EQUITY_BASE_YAHOO_ALIASES.get(base, base)
+                return yahoo_equity_symbol(base)
             return None
     return None
+
+
+def yahoo_equity_symbol(base: str) -> str:
+    """Yahoo-ready symbol for a Binance equity perp base (``BRKB`` → ``BRK-B``).
+
+    The single alias seam so every path that learns a stock-perp base — the
+    warm/seed matcher above AND the instrument-registry resolver in
+    :func:`yialpha.dataflows.binance.stock_perp_underlying` (whose rows carry
+    the raw exchangeInfo ``baseAsset``) — maps to the identical Yahoo symbol.
+    """
+    b = str(base).strip().upper()
+    return _EQUITY_BASE_YAHOO_ALIASES.get(b, b)
 
 
 def _normalize_crypto(s: str) -> str | None:

@@ -92,6 +92,25 @@ from .signal_processing import SignalProcessor
 
 logger = logging.getLogger(__name__)
 
+#: Config keys folded into the checkpoint run-signature's ``config=`` segment:
+#: each changes node INPUTS (tool bindings, indicator vocabulary, prompt
+#: context, model tier, vendor chains) without changing compiled topology —
+#: restoring a checkpoint across a flip of any of these would serve stale
+#: analyst reports made by the old configuration. Keep sorted-JSON stable;
+#: add new input-affecting flags here (see ``_run_signature``).
+_SIGNATURE_CONFIG_KEYS = (
+    "quick_think_llm",
+    "deep_think_llm",
+    "debate_llm",
+    "sec_ownership",
+    "a_share_native",
+    "valuation_tools",
+    "indicator_battery",
+    "indicator_ic_context",
+    "market_regime",
+    "data_vendors",
+)
+
 # Stale-pending observability for the memory log lives in
 # yialpha.graph.memory_resolution (extracted with the resolution core so the
 # graph and the `yialpha memory-resolve` CLI share one implementation).
@@ -838,9 +857,14 @@ class YiAlphaGraph:
             )
             control_block = self._apply_portfolio_control(
                 ticket, decision, final_state, ticker, str(trade_date), asset_type,
-                equity=float(getattr(decision, "position_value", 0.0) or 0.0)
-                or float(state.equity or 0.0)
-                or 1.0,
+                # BOOK equity, not position value: position_value is
+                # weight × equity, so the old `position_value or equity`
+                # chain fed the snapshot an account 1/weight the size of the
+                # real book — every advisory dollar shock rendered weight×
+                # too big. Equity is the denominator advisory_metrics
+                # expects; 1.0 stays the honest degenerate floor when no
+                # portfolio_state was injected (single-instrument runs).
+                equity=float(state.equity or 0.0) or 1.0,
                 reference_price=close,
                 atr=atr,
                 funding_annualized=funding_annualized,
@@ -1244,6 +1268,7 @@ class YiAlphaGraph:
                 else 0.0
             )
             short_sizing_heuristic = False
+            short_funding_damp = 1.0
             if proposed <= 0.0 and explicit_side == "SHORT":
                 # Legacy sizing is rating-tied — a bearish rating sizes to
                 # zero, which would make an EXPLICIT short dead on arrival.
@@ -1257,6 +1282,30 @@ class YiAlphaGraph:
                     self.config.get("max_single_position", 0.2) or 0.2
                 )
                 short_sizing_heuristic = True
+                # Sign-aware funding gate, mirroring RiskManager.decide 5b
+                # for the SHORT side (2026-09-19 known-issue fix): a SHORT
+                # PAYS NEGATIVE funding, so adverse carry is
+                # funding_annualized <= -warn. The legacy 5b gate keys on
+                # `>= warn` with long-side weights only — sign-blind here,
+                # it let a short's adverse carry pass undamped. (The ticket
+                # COST leg was never sign-blind — estimate_round_trip_cost
+                # has always credited positive funding to shorts; this gate
+                # is about the SIZING layer.) Same thresholds, same
+                # halve/quarter ladder, disclosed; favourable carry never
+                # boosts (symmetric with the long gate's no-boost rule).
+                if funding_annualized is not None:
+                    risk_manager = getattr(self, "risk_manager", None)
+                    warn_thr = float(
+                        getattr(risk_manager, "funding_warn_annual", 0.30) or 0.30
+                    )
+                    hard_thr = float(
+                        getattr(risk_manager, "funding_hard_annual", 0.60) or 0.60
+                    )
+                    if funding_annualized <= -hard_thr:
+                        short_funding_damp = 0.25
+                    elif funding_annualized <= -warn_thr:
+                        short_funding_damp = 0.5
+                    proposed *= short_funding_damp
             # R1 — the Candidate ticket is AUTHORITATIVE: sync it to the
             # side/size this stage actually evaluates BEFORE the constraints
             # run. The ticket was built from the legacy rating/target_weight
@@ -1389,10 +1438,29 @@ class YiAlphaGraph:
                         "portfolio_control_mode": "shadow",
                     },
                     "short_sizing": (
-                        "heuristic" if short_sizing_heuristic else "legacy_weight"
+                        (
+                            "heuristic_funding_damped"
+                            if short_funding_damp < 1.0
+                            else "heuristic"
+                        )
+                        if short_sizing_heuristic
+                        else "legacy_weight"
                     )
                     if side == "SHORT"
                     else "n/a",
+                    # P2 completeness: the carry the sign-aware gate read and
+                    # the damping it applied — without these the record
+                    # cannot recompute the damped proposed_size.
+                    "short_funding_annualized": (
+                        funding_annualized
+                        if side == "SHORT" and short_sizing_heuristic
+                        else None
+                    ),
+                    "short_funding_damp": (
+                        short_funding_damp
+                        if side == "SHORT" and short_sizing_heuristic
+                        else None
+                    ),
                     "snapshot_id": snapshot_id,
                 }
                 eligibility_lines = (
@@ -1404,6 +1472,13 @@ class YiAlphaGraph:
                 short_line = (
                     "- **Short sizing**: TRANSITIONAL HEURISTIC "
                     "(kelly_fraction × max_single_position), not signed-Kelly\n"
+                    + (
+                        f"- **Funding gate (short-side, sign-aware)**: carry "
+                        f"{funding_annualized:+.0%}/yr against the short → "
+                        f"size ×{short_funding_damp:.2f}\n"
+                        if short_funding_damp < 1.0
+                        else ""
+                    )
                     if short_sizing_heuristic
                     else ""
                 )
@@ -1488,7 +1563,13 @@ class YiAlphaGraph:
                 "closed_existing_position": close_existing,
                 "eligibility_reasons": list(eligibility_reasons),
                 "short_sizing": (
-                    "heuristic" if short_sizing_heuristic else "legacy_weight"
+                    (
+                        "heuristic_funding_damped"
+                        if short_funding_damp < 1.0
+                        else "heuristic"
+                    )
+                    if short_sizing_heuristic
+                    else "legacy_weight"
                 )
                 if side == "SHORT"
                 else "n/a",
@@ -1851,6 +1932,15 @@ class YiAlphaGraph:
         shape. ``analyst_parallel`` is read from config (YiAlpha-only; the
         fan-out changes the graph topology, so it must be part of the
         signature even though the upstream contract doesn't carry it).
+
+        The ``config=`` segment folds the tool-binding / semantic flags that
+        change node INPUTS without changing compiled topology
+        (:data:`_SIGNATURE_CONFIG_KEYS`) — a checkpoint restored under a
+        different toolset would serve stale analyst reports produced by the
+        old tools. Serialized as sorted JSON so key order never churns the
+        signature; unknown values degrade to ``str()``. Any new
+        input-affecting flag must be added to the tuple (the pit=vN bump is
+        the escape hatch for systemic changes).
         """
         return "|".join([
             # Invalidate checkpoints produced before live-only data sources
@@ -1861,6 +1951,10 @@ class YiAlphaGraph:
             f"risk={self.config['max_risk_discuss_rounds']}",
             f"asset={asset_type}",
             f"parallel={self.config.get('analyst_parallel', False)}",
+            "config=" + json.dumps(
+                {k: self.config.get(k) for k in _SIGNATURE_CONFIG_KEYS},
+                sort_keys=True, default=str,
+            ),
         ])
 
     def propagate(self, company_name, trade_date, asset_type: str = "stock", portfolio_state=None):
@@ -1923,6 +2017,7 @@ class YiAlphaGraph:
                 return self._run_graph(
                     company_name, trade_date, asset_type=asset_type,
                     portfolio_state=portfolio_state,
+                    _resuming=step is not None,
                 )
             finally:
                 if self._checkpointer_ctx is not None:
@@ -2168,7 +2263,10 @@ class YiAlphaGraph:
                     regime_run_id = None
         return ledger_run_id, regime_run_id
 
-    def _run_graph(self, company_name, trade_date, asset_type: str = "stock", portfolio_state=None):
+    def _run_graph(
+        self, company_name, trade_date, asset_type: str = "stock",
+        portfolio_state=None, _resuming: bool = False,
+    ):
         """Execute the graph and write the resulting state to disk and memory log."""
         # Reset per-node perf telemetry so this run's node_perf_<date>.json
         # reflects only this run (graph instances are reused across tickers in
@@ -2248,10 +2346,25 @@ class YiAlphaGraph:
                 tid = thread_id(company_name, str(trade_date), self._run_signature(asset_type))
                 args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
 
+            # RESUME INPUT (2026-09-19 P1): langgraph re-executes the whole
+            # graph from __start__ whenever a non-None input dict is passed —
+            # even on a thread with checkpoints. A checkpointed "resume" that
+            # feeds the fresh init state therefore re-bills every
+            # analyst/debate/risk/PM call while the log says "Resuming from
+            # step N". Passing None is the actual resume: execution picks up
+            # at the first node after the last checkpointed one. Only when
+            # propagate's pre-run probe found a checkpoint for this exact
+            # thread (_resuming); every other path keeps the init state.
+            graph_input = (
+                None
+                if (_resuming and self.config.get("checkpoint_enabled"))
+                else init_agent_state
+            )
+
             if self.debug:
                 trace = []
                 last_printed = None
-                for chunk in self.graph.stream(init_agent_state, **args):
+                for chunk in self.graph.stream(graph_input, **args):
                     if chunk["messages"]:
                         msg = chunk["messages"][-1]
                         # Nodes after the trader don't append to messages, so the
@@ -2268,7 +2381,18 @@ class YiAlphaGraph:
                 for chunk in trace:
                     final_state.update(chunk)
             else:
-                final_state = self._invoke_or_stream(init_agent_state, args)
+                final_state = self._invoke_or_stream(graph_input, args)
+
+            if graph_input is None:
+                # Resume disclosure: the quality accumulator was rebuilt
+                # fresh in THIS process — sentinel events recorded by nodes
+                # that completed in the crashed attempt died with it, so
+                # the data_quality block below covers only the RESUMED
+                # segment. Keyed onto the log (presence-gated) so a zero
+                # sentinel count is never read as "fully evidenced" by a
+                # consumer that doesn't know this run resumed (run_robust's
+                # DEGRADED verdict reads that count).
+                final_state["checkpoint_resumed"] = True
 
             # Phase 1: deterministically override size / stop / exposure (LLM kept
             # the direction). No-op when risk_enabled is off. asset_type routes
@@ -2291,12 +2415,14 @@ class YiAlphaGraph:
             # Log state to disk. The returned quality block rides on
             # final_state so report writers / the web UI can render the
             # degraded-run banner from the same evidence the JSON log has.
-            final_state["data_quality"] = self._log_state(trade_date, final_state)
+            final_state["data_quality"] = self._log_state(
+                trade_date, final_state, asset_type
+            )
 
             # T0: dump per-node perf telemetry next to full_states_log. No-op when
             # telemetry is off (perf_tracker is None).
             if self.perf_tracker is not None:
-                self._dump_perf(trade_date)
+                self._dump_perf(trade_date, asset_type)
 
             # Store decision for deferred reflection on the next same-ticker
             # run. Every other field read here uses .get(); this was the one
@@ -2347,7 +2473,22 @@ class YiAlphaGraph:
 
             _run_scope_final.reset_run_scope()
 
-    def _log_state(self, trade_date, final_state):
+    @staticmethod
+    def _states_log_stem(trade_date, asset_type) -> str:
+        """Filename stem for a run's states log: date + venue suffix.
+
+        crypto_perp → ``<date>_perp``, crypto_spot → ``<date>_spot``; every
+        other venue keeps the legacy unsuffixed name (equities never had
+        the same-ticker-same-date venue collision). The suffix is the FILE
+        LAYOUT for the venue split — readers that construct exact names
+        must go through this mapping (or glob, like accuracy/robust do).
+        """
+        suffix = {"crypto_perp": "_perp", "crypto_spot": "_spot"}.get(
+            str(asset_type or "stock"), ""
+        )
+        return f"full_states_log_{trade_date}{suffix}"
+
+    def _log_state(self, trade_date, final_state, asset_type: str = "stock"):
         """Log the final state to a JSON file.
 
         Includes the structured evidence block the self-improvement loop
@@ -2357,6 +2498,15 @@ class YiAlphaGraph:
         machine-distinguishable from a fully-fed one), and
         ``web_search_usage`` (per-scope Tavily call counts). All are
         additive — older readers ignore unknown keys.
+
+        ``asset_type`` keys the FILENAME's venue suffix: a same-date perp
+        AND spot run of one ticker are two first-class runs, and the old
+        ticker+date-only name silently overwrote one with the other
+        (crypto_perp → ``<date>_perp``, crypto_spot → ``<date>_spot``,
+        everything else keeps the legacy unsuffixed name — equities never
+        had the collision). Readers glob the ``full_states_log_*`` pattern
+        (accuracy scans every match; web/store keys runs by the filename
+        stem) or resolve newest-by-mtime (run_robust).
         """
         from yialpha.dataflows import quality
         from yialpha.dataflows import tavily as tavily_vendor  # isort: skip
@@ -2457,6 +2607,11 @@ class YiAlphaGraph:
         # flag-off logs byte-identical to the pre-V2.1 shape.
         if final_state.get("run_id"):
             entry["run_id"] = final_state["run_id"]
+        # Checkpoint resume disclosure — the quality ledger covers only the
+        # resumed segment (see _run_graph); consumers reading
+        # data_quality.core_sentinel_count must know the count is partial.
+        if final_state.get("checkpoint_resumed"):
+            entry["checkpoint_resumed"] = True
         # V2.4 shadow acceptance item 3: the portfolio-control record
         # (shadow reconciliation dict / enforced outcome) persists into the
         # run log — presence-gated, so legacy runs stay byte-identical.
@@ -2481,13 +2636,13 @@ class YiAlphaGraph:
         directory = Path(self.config["results_dir"]) / safe_ticker / "YiAlphaStrategy_logs"
         directory.mkdir(parents=True, exist_ok=True)
 
-        log_path = directory / f"full_states_log_{trade_date}.json"
+        log_path = directory / f"{self._states_log_stem(trade_date, asset_type)}.json"
         # Atomic write: dump to a sibling temp file then os.replace() onto the
         # final path (same-volume rename is atomic on both Windows and POSIX).
         # A kill mid-write (run_robust's taskkill /F /T) would otherwise leave a
         # half-truncated JSON that masquerades as the "run complete" signal this
         # file is used as. Mirrors the atomic pattern in memory.py.
-        tmp_path = directory / f".full_states_log_{trade_date}.json.tmp"
+        tmp_path = directory / f".{self._states_log_stem(trade_date, asset_type)}.json.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(entry, f, indent=4)
         os.replace(tmp_path, log_path)
@@ -2498,7 +2653,11 @@ class YiAlphaGraph:
         return quality_block
 
     def finalize_streamed_run(
-        self, ticker: str, trade_date: str, final_state: dict[str, Any]
+        self,
+        ticker: str,
+        trade_date: str,
+        final_state: dict[str, Any],
+        asset_type: str = "stock",
     ) -> dict[str, Any]:
         """Apply the ``_run_graph`` evidence contract to a caller-streamed run.
 
@@ -2510,28 +2669,48 @@ class YiAlphaGraph:
         This method reuses ``_log_state`` unchanged so both entry points land
         the identical on-disk evidence. The caller owns the pre-stream
         ``quality.ensure_run_context()`` call (it must run before the first
-        node executes, not after streaming ends).
+        node executes, not after streaming ends). ``asset_type`` keys the
+        venue-suffixed log filename (same as ``_run_graph`` passes down) and
+        clears a leftover crashed checkpoint for this ticker+date+signature
+        when checkpointing is enabled — the streamed path runs uncheckpointed
+        (no checkpointer compiled, no thread_id injected), so without this a
+        successful interactive run would leave its own pre-run crash state
+        for a later checkpointed batch run to resume.
 
         Returns ``final_state`` with the consumed ``data_quality`` block
         attached (same shape ``_run_graph`` returns).
         """
         self.ticker = ticker
-        final_state["data_quality"] = self._log_state(trade_date, final_state)
+        final_state["data_quality"] = self._log_state(
+            trade_date, final_state, asset_type
+        )
+        if self.config.get("checkpoint_enabled"):
+            from yialpha.graph.checkpointer import clear_checkpoint
+
+            clear_checkpoint(
+                self.config["data_cache_dir"], ticker, str(trade_date),
+                self._run_signature(asset_type),
+            )
         return final_state
 
-    def _dump_perf(self, trade_date):
+    def _dump_perf(self, trade_date, asset_type: str = "stock"):
         """Write per-node perf telemetry to node_perf_<trade_date>.json.
 
         Sits beside ``full_states_log_<trade_date>.json`` in the same per-ticker
-        ``YiAlphaStrategy_logs`` directory. Callers gate on
-        ``self.perf_tracker is not None``; this method assumes a live tracker.
+        ``YiAlphaStrategy_logs`` directory (same venue suffix, so a same-date
+        perp+spot pair keeps two telemetry files like it keeps two logs).
+        Callers gate on ``self.perf_tracker is not None``; this method assumes
+        a live tracker.
         """
         from yialpha.graph.perf_telemetry import dump_perf_report
 
         safe_ticker = safe_ticker_component(self.ticker)
         directory = Path(self.config["results_dir"]) / safe_ticker / "YiAlphaStrategy_logs"
         directory.mkdir(parents=True, exist_ok=True)
-        dump_perf_report(self.perf_tracker, directory / f"node_perf_{trade_date}.json")
+        stem = self._states_log_stem(trade_date, asset_type).replace(
+            "full_states_log_", "node_perf_"
+        )
+        dump_perf_report(self.perf_tracker, directory / f"{stem}.json")
 
     def process_signal(self, full_signal):
         """Process a signal to extract the core decision."""

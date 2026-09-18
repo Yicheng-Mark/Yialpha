@@ -43,6 +43,35 @@ def _fmt(value: float | int | None, digits: int = 2) -> str:
         return "N/A"
 
 
+def _fmt_price(value: float | int | None) -> str:
+    """Magnitude-aware PRICE rendering (not for percentages/counts).
+
+    These tools are bound on the crypto_spot track, where PEPEUSDT-class
+    symbols resolve to ~1e-5 prices — ``.2f`` rendered every level as
+    "0.00" and destroyed the mandated-citation evidence at the render seam
+    while the math was correct. Three tiers mirror ``trade_ticket._money``:
+    thousands with separators, normal range to 4 decimals (trailing zeros
+    stripped), micro prices in ``%.4g`` significant digits.
+    """
+    import math
+
+    try:
+        if value is None or pd.isna(value):
+            return "N/A"
+        x = float(value)
+        if not math.isfinite(x):
+            return "N/A"
+    except (TypeError, ValueError):
+        return "N/A"
+    a = abs(x)
+    if a >= 1000:
+        return f"{x:,.2f}"
+    if a >= 1e-3:
+        stripped = f"{x:.4f}".rstrip("0").rstrip(".")
+        return stripped if stripped not in ("", "-") else "0"
+    return f"{x:.4g}"
+
+
 def _load(symbol: str, curr_date: str) -> pd.DataFrame | str:
     """Shared OHLCV loader for the price-structure tools.
 
@@ -50,6 +79,14 @@ def _load(symbol: str, curr_date: str) -> pd.DataFrame | str:
     records the degrade in the run's data_quality ledger — these tools bypass
     the vendor router, so without this the evidence chain has a blind spot.
     """
+    # PIT clamp: curr_date comes from the LLM; the pinned analysis date
+    # (set_analysis_date ContextVar) is the authority a historical replay
+    # must not see past — the same guard the news vendors carry
+    # (yfinance_news / alpha_vantage_news). get_stock_data clamps inside
+    # y_finance; these TA tools feed load_ohlcv directly, so clamp here.
+    from yialpha.dataflows.utils import current_pit_end
+
+    curr_date = str(current_pit_end(curr_date) or curr_date)
     try:
         data = load_ohlcv(symbol, curr_date)
     except Exception as exc:  # noqa: BLE001 — typed degrade, never crash the node
@@ -95,7 +132,7 @@ def get_support_resistance(
 
     lines = [
         f"## Support/Resistance levels for {symbol.upper()} (as of {curr_date})",
-        f"Latest close: {_fmt(levels['latest_close'])} on {levels['latest_date']}",
+        f"Latest close: {_fmt_price(levels['latest_close'])} on {levels['latest_date']}",
         "",
     ]
 
@@ -108,9 +145,9 @@ def get_support_resistance(
             lines.append("_Not enough history._")
         else:
             lines.append(
-                f"R2 {_fmt(pivots['R2'])} | R1 {_fmt(pivots['R1'])} | "
-                f"P {_fmt(pivots['P'])} | S1 {_fmt(pivots['S1'])} | "
-                f"S2 {_fmt(pivots['S2'])}"
+                f"R2 {_fmt_price(pivots['R2'])} | R1 {_fmt_price(pivots['R1'])} | "
+                f"P {_fmt_price(pivots['P'])} | S1 {_fmt_price(pivots['S1'])} | "
+                f"S2 {_fmt_price(pivots['S2'])}"
             )
         lines.append("")
 
@@ -121,8 +158,8 @@ def get_support_resistance(
         lines.append("|---|---:|---:|---:|---:|")
         for window, lv in sorted(rolling.items()):
             lines.append(
-                f"| {window}d | {_fmt(lv['high'])} | {_fmt(lv['high_dist_pct'])}% | "
-                f"{_fmt(lv['low'])} | {_fmt(lv['low_dist_pct'])}% |"
+                f"| {window}d | {_fmt_price(lv['high'])} | {_fmt(lv['high_dist_pct'])}% | "
+                f"{_fmt_price(lv['low'])} | {_fmt(lv['low_dist_pct'])}% |"
             )
     else:
         lines.append("_Not enough history._")
@@ -134,9 +171,9 @@ def get_support_resistance(
         lines.append("_Not enough history._")
     else:
         lines.append(
-            f"Point of control (highest-volume price): {_fmt(vp['poc'])} | "
-            f"70% value area: {_fmt(vp['value_area_low'])} – "
-            f"{_fmt(vp['value_area_high'])}"
+            f"Point of control (highest-volume price): {_fmt_price(vp['poc'])} | "
+            f"70% value area: {_fmt_price(vp['value_area_low'])} – "
+            f"{_fmt_price(vp['value_area_high'])}"
         )
     lines.append("")
     lines.append(
@@ -187,7 +224,7 @@ def get_volume_features(
         f"- OBV (latest): {_fmt(obv_series.iloc[-1] if len(obv_series) else None, 0)}",
         f"- OBV 10-session change: {_fmt(obv_slope, 0)} "
         f"({'rising' if obv_slope and obv_slope > 0 else 'falling' if obv_slope and obv_slope < 0 else 'flat' if obv_slope == 0 else 'n/a'})",
-        f"- Price 10-session change: {_fmt(price_slope)}",
+        f"- Price 10-session change: {_fmt_price(price_slope)}",
         f"- Relative volume (today vs prior 20 sessions): {_fmt(rel.iloc[-1] if len(rel) else None)}x",
         f"- Volume Ratio (vr, 26-session): {_fmt(vr_value)}",
         "",
@@ -207,8 +244,8 @@ def get_volume_features(
         )
         lines.append(f"Divergence check (20 sessions): **{verdict}**.")
         lines.append(
-            f"Price window high/low: {_fmt(divergence['price_window_high'])} / "
-            f"{_fmt(divergence['price_window_low'])}; OBV window high/low: "
+            f"Price window high/low: {_fmt_price(divergence['price_window_high'])} / "
+            f"{_fmt_price(divergence['price_window_low'])}; OBV window high/low: "
             f"{_fmt(divergence['obv_window_high'], 0)} / {_fmt(divergence['obv_window_low'], 0)}."
         )
     lines.append("")
@@ -261,7 +298,7 @@ def get_candlestick_patterns(
             lines.append(
                 f"- **{shape['pattern']}** ({shape['direction']}): pivots "
                 f"{shape['first_pivot_date']} & {shape['second_pivot_date']} near "
-                f"{_fmt(shape['level'])}; neckline {_fmt(shape['neckline'])} — {confirm}."
+                f"{_fmt_price(shape['level'])}; neckline {_fmt_price(shape['neckline'])} — {confirm}."
             )
     else:
         lines.append("No double-top/bottom shape among recent swing pivots (120 bars).")
@@ -335,6 +372,14 @@ def get_relative_strength(
     window, and whether the 3-month RS trend is improving or fading. Cite
     THIS tool for any outperformance / underperformance claim.
     """
+    # PIT clamp: curr_date comes from the LLM; the pinned analysis date
+    # (set_analysis_date ContextVar) is the authority a historical replay
+    # must not see past — the same guard the news vendors carry
+    # (yfinance_news / alpha_vantage_news). get_stock_data clamps inside
+    # y_finance; these TA tools feed load_ohlcv directly, so clamp here.
+    from yialpha.dataflows.utils import current_pit_end
+
+    curr_date = str(current_pit_end(curr_date) or curr_date)
     try:
         data = load_ohlcv(symbol, curr_date)
     except Exception as exc:  # noqa: BLE001
