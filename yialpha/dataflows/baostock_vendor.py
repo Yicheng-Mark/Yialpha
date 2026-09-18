@@ -53,9 +53,11 @@ import json
 import logging
 import os
 import socket
+import time
+from collections.abc import Callable
 from datetime import date, timedelta
 from functools import lru_cache
-from typing import NamedTuple
+from typing import NamedTuple, TypeVar
 
 from .baostock_fields import (
     BALANCE_COLUMNS,
@@ -100,9 +102,69 @@ _CACHE_TTL_S = 86_400.0  # 1 day (historical analysis dates)
 # mode), the series gains the day's bar after the post-close publication, so a
 # cache entry written earlier today must not be served all day. Mirrors
 # stockstats_utils._needs_same_day_refresh (OHLCV_CACHE_TTL_SECONDS = 900):
-# historical dates are immutable and keep the 1-day TTL.
+# historical dates are immutable and keep the 1-day TTL. Once the cached
+# series already carries today's bar (BaoStock publishes the daily bar
+# post-close only, never intraday) the series is FINAL for today's analysis
+# and the entry reverts to the 1-day TTL — see _daily_cache_ttl_days.
 _SAME_DAY_REFRESH_S = 900.0
 _login_throttle = MinIntervalThrottle(0.5)
+
+# Transient-failure retries for the session-scoped fetches (login + query +
+# row iteration), mirrored on YIALPHA_BINANCE_HTTP_RETRIES' contract: 0 = the
+# historical single attempt, failures propagate unchanged (byte-equivalent);
+# each retry costs a fresh login (throttled) plus a linear 2s/4s backoff. The
+# public baostock.com service intermittently corrupts the TCP byte stream
+# (UnicodeDecodeError), times out mid-read, or refuses a query with
+# 接收数据异常 — all observed to heal on an immediate re-login.
+_BS_RETRIES_ENV = os.environ.get("YIALPHA_BAOSTOCK_RETRIES")
+BS_TRANSIENT_RETRIES = 0
+if _BS_RETRIES_ENV is not None and _BS_RETRIES_ENV != "":
+    try:
+        _parsed_retries = int(_BS_RETRIES_ENV)
+        if _parsed_retries >= 0:
+            BS_TRANSIENT_RETRIES = _parsed_retries
+        else:
+            logger.warning(
+                "YIALPHA_BAOSTOCK_RETRIES=%r is negative; using 0 (no retry)",
+                _BS_RETRIES_ENV,
+            )
+    except ValueError:
+        logger.warning(
+            "YIALPHA_BAOSTOCK_RETRIES=%r is not an integer; using 0 (no retry)",
+            _BS_RETRIES_ENV,
+        )
+
+_T = TypeVar("_T")
+
+
+def _with_transient_retry(fetch: Callable[[], _T], what: str) -> _T:
+    """Run a session-scoped BaoStock fetch, retrying transient failures.
+
+    Retries on the observed transient forms only: transport corruption
+    (``UnicodeDecodeError`` from the raw TCP stream), socket errors (timeout /
+    reset / refused — the ``OSError`` family), and session-scoped
+    :class:`NoMarketDataError` (login refused / query answered with a server
+    error such as 接收数据异常). The DETERMINISTIC NoMarketDataErrors —
+    non-A-share ticker, package not installed — are raised before any session
+    opens, so they can never enter this loop. Each retry opens a FRESH
+    session: one that died mid-stream cannot be trusted to yield consistent
+    rows. ``run_robust`` opts its children into 2 retries via env setdefault;
+    bare runs keep the module default 0 (byte-equivalent).
+    """
+    last: BaseException | None = None
+    for attempt in range(BS_TRANSIENT_RETRIES + 1):
+        try:
+            return fetch()
+        except (OSError, UnicodeDecodeError, NoMarketDataError) as exc:
+            last = exc
+            if attempt < BS_TRANSIENT_RETRIES:
+                logger.warning(
+                    "baostock: transient failure (%s: %r); retrying (%d/%d)",
+                    what, exc, attempt + 1, BS_TRANSIENT_RETRIES,
+                )
+                time.sleep(2.0 * (attempt + 1))
+    assert last is not None  # only reachable when fetch raised at least once
+    raise last
 
 # Valuation/OHLC fields requested in one ``query_history_k_data_plus`` call so
 # both the OHLC and fundamentals views are served from a single fetch. adjustflag
@@ -235,7 +297,9 @@ def _query_daily(bs, code: str) -> list[dict]:
     return rows
 
 
-def _daily_cache_ttl_days(curr_date: str | None) -> float:
+def _daily_cache_ttl_days(
+    curr_date: str | None, stale_bytes: bytes | None = None
+) -> float:
     """TTL for the per-ticker daily cache, in (fractional) days.
 
     Historical analysis dates are immutable -> the normal 1-day TTL. When the
@@ -244,6 +308,16 @@ def _daily_cache_ttl_days(curr_date: str | None) -> float:
     valid for :data:`_SAME_DAY_REFRESH_S` seconds — a run started pre-close
     must not pin the pre-close snapshot for the rest of the day (same contract
     as stockstats_utils' same-day refresh).
+
+    Same-day FINALITY gate (``stale_bytes``): BaoStock publishes the daily
+    bar post-close only, never intraday, so once the cached series already
+    carries a bar dated today the series cannot change again today — the
+    entry reverts to the 1-day historical TTL instead of re-hitting the
+    socket every 15 minutes for bytes that are already final. A post-close
+    evening analysis therefore serves one deterministic snapshot for the
+    whole session: robust retries (and the LLM response cache keyed on the
+    rendered prompt) see identical data across attempts instead of a
+    fresh/stale flip whenever the public service is flaky.
     """
     upper = (curr_date or "")[:10]
     try:
@@ -251,8 +325,27 @@ def _daily_cache_ttl_days(curr_date: str | None) -> float:
     except ValueError:
         is_today = False  # malformed date: let the caller's validation handle it
     if is_today:
+        if stale_bytes is not None and _cache_has_bar(stale_bytes, date.today()):
+            return _CACHE_TTL_S / 86_400.0
         return _SAME_DAY_REFRESH_S / 86_400.0
     return _CACHE_TTL_S / 86_400.0
+
+
+def _cache_has_bar(raw: bytes, target: date) -> bool:
+    """Whether a cached daily-series payload already contains ``target``'s bar.
+
+    Tolerates any decode/parse failure (corrupt or non-daily payload) by
+    answering False — the caller then keeps the short same-day TTL and
+    refetches, which is the pre-gate behaviour.
+    """
+    try:
+        rows = json.loads(raw)
+    except Exception:  # noqa: BLE001 -- a corrupt cache must not crash TTL math
+        return False
+    tgt = target.strftime("%Y-%m-%d")
+    return any(
+        isinstance(r, dict) and (r.get("date") or "")[:10] == tgt for r in rows
+    )
 
 
 def _cached_daily(code: str, curr_date: str | None = None) -> list[dict]:
@@ -260,12 +353,18 @@ def _cached_daily(code: str, curr_date: str | None = None) -> list[dict]:
 
     ``curr_date`` selects the cache TTL (:func:`_daily_cache_ttl_days`): a
     same-day/live analysis refreshes at most every 15 minutes so the day's
-    post-close bar is picked up; a historical analysis keeps the 1-day TTL.
+    post-close bar is picked up — but once today's bar is already cached the
+    series is final and the 1-day TTL applies; a historical analysis keeps
+    the 1-day TTL throughout. The TTL is handed to the shared helper as a
+    CALLABLE over the cached bytes so the finality gate can inspect the
+    payload (content-aware TTL; a plain float remains supported).
 
-    Thin adapter over the shared :func:`disk_cache.cached_or_fetch` (bytes on
-    disk; the row dicts round-trip through JSON). Falls back to a stale cache
-    on a fetch failure (a slightly-old daily series beats no data), matching
-    every other read-only vendor's stale-on-failure contract.
+    The fetch itself is wrapped in :func:`_with_transient_retry`: a corrupted
+    stream / timed-out socket / refused query re-logins and retries up to
+    ``YIALPHA_BAOSTOCK_RETRIES`` times before the stale-on-failure fallback
+    (a slightly-old daily series beats no data) kicks in — matching every
+    other read-only vendor's contract, but without surrendering to the first
+    packet hiccup.
 
     .. warning:: Stale-on-failure is a deliberate fail-open trade-off. For
         read-only market data this is reasonable, but a backtest may see a
@@ -277,14 +376,18 @@ def _cached_daily(code: str, curr_date: str | None = None) -> list[dict]:
     """
 
     def _fetch() -> bytes:
-        with _BaostockSession() as bs:
-            rows = _query_daily(bs, code)
-        return json.dumps(rows, ensure_ascii=False).encode("utf-8")
+        def _session_fetch() -> bytes:
+            with _BaostockSession() as bs:
+                rows = _query_daily(bs, code)
+            return json.dumps(rows, ensure_ascii=False).encode("utf-8")
+
+        return _with_transient_retry(_session_fetch, f"daily {code}")
 
     filename = f"daily_{code.replace('.', '_')}.json"
     raw = cached_or_fetch(
         _cache_dir(), filename, _fetch,
-        ttl_days=_daily_cache_ttl_days(curr_date), vendor="baostock",
+        ttl_days=lambda stale: _daily_cache_ttl_days(curr_date, stale),
+        vendor="baostock",
     )
     assert raw is not None  # fail_open is never set: fetch errors re-raise
     return json.loads(raw)
@@ -545,8 +648,17 @@ def _statement_rows_cached(code: str, query_fn_name: str,
     not be mutated by callers — renderers only read.
     """
     try:
-        with _BaostockSession() as bs:
-            return _query_statement(bs, code, query_fn_name, anchor)
+        # Session-scoped fetch wrapped for transient failures (corrupted
+        # stream / socket timeout / 接收数据异常): a fresh login often heals
+        # the public service; per-quarter gaps are already tolerated in-band
+        # by _query_statement, so this only fires when the whole fetch —
+        # including the fail-closed latest quarter — raised.
+        def _session_fetch() -> StatementFetch:
+            with _BaostockSession() as bs:
+                return _query_statement(bs, code, query_fn_name, anchor)
+
+        return _with_transient_retry(
+            _session_fetch, f"{query_fn_name} {code}")
     except NoMarketDataError:
         raise
 
