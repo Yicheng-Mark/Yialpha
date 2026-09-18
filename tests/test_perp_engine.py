@@ -76,8 +76,8 @@ def test_perp_default_price_provider_is_binance_klines(monkeypatch):
     calls: list[tuple[str, str, str]] = []
 
     def fake_frame(symbol, start, end, interval="1d", venue="binance_perp",
-                   price_type="last"):
-        calls.append((symbol, start, end, venue, price_type))
+                   price_type="last", closed_as_of=None):
+        calls.append((symbol, start, end, venue, price_type, closed_as_of))
         idx = pd.bdate_range(start, end)
         df = pd.DataFrame(
             {"Close": [100.0 + i for i in range(len(idx))],
@@ -102,6 +102,11 @@ def test_perp_default_price_provider_is_binance_klines(monkeypatch):
     assert all(c[3] == "binance_perp" for c in calls)
     # Marked on the perp series (100, 101, ...) not a Yahoo fallback.
     assert res.equity[-1] > 100_000.0
+    # Providers pin to CLOSED bars: a window touching today must not mark
+    # equity or fill a decision on the intraday forming candle.
+    assert all(c[4] is not None for c in calls), (
+        "provider must pass closed_as_of (closed-bars-only seam)"
+    )
 
     # The swap must only happen for the DEFAULT provider sentinel.
     sentinel = eng._yfinance_price_provider
@@ -404,7 +409,7 @@ def _mark_vs_last_frames(monkeypatch, mark_low_on_day: int, last_low: float = 99
     level (90.4) while the last-price book never does."""
 
     def fake_frame(symbol, start, end, interval="1d", venue="binance_perp",
-                   price_type="last"):
+                   price_type="last", closed_as_of=None):
         idx = pd.bdate_range(start, end)
         n = len(idx)
         calm_low = last_low
@@ -474,7 +479,7 @@ def test_mark_unavailable_falls_back_loudly(monkeypatch):
     real_frame_calls: list[str] = []
 
     def fake_frame(symbol, start, end, interval="1d", venue="binance_perp",
-                   price_type="last"):
+                   price_type="last", closed_as_of=None):
         real_frame_calls.append(price_type)
         if price_type == "mark":
             raise RuntimeError("mark endpoint down")

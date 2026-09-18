@@ -198,11 +198,12 @@ def test_price_target_currency_normalizes_and_rejects():
         rating="Buy", executive_summary="s", investment_thesis="t",
         price_target_currency="Usd",
     ).price_target_currency == "USD"
-    with pytest.raises(ValueError, match="price_target_currency"):
-        PortfolioDecision(
-            rating="Buy", executive_summary="s", investment_thesis="t",
-            price_target_currency="EUR",
-        )
+    # Out-of-vocab coerces to None (never raises): a junk qualifier must
+    # not veto the whole structured decision (#1058 semantics, round 3).
+    assert PortfolioDecision(
+        rating="Buy", executive_summary="s", investment_thesis="t",
+        price_target_currency="EUR",
+    ).price_target_currency is None
 
 
 @pytest.mark.unit
@@ -213,11 +214,10 @@ def test_underlying_currency_is_usd_only():
     )
     assert d.underlying_target_currency == "USD"
     assert d.underlying_price_target == 210.0
-    with pytest.raises(ValueError, match="underlying_target_currency"):
-        PortfolioDecision(
-            rating="Buy", executive_summary="s", investment_thesis="t",
-            underlying_target_currency="USDT",  # the bridge accepts USD only
-        )
+    assert PortfolioDecision(  # the bridge accepts USD only
+        rating="Buy", executive_summary="s", investment_thesis="t",
+        underlying_target_currency="USDT",
+    ).underlying_target_currency is None
 
 
 @pytest.mark.unit
@@ -228,11 +228,10 @@ def test_decision_basis_and_nullish_fields():
     )
     assert d.price_target_basis == "last"
     assert d.underlying_price_target is None  # same #1058 placeholder coercion
-    with pytest.raises(ValueError, match="price_target_basis"):
-        PortfolioDecision(
-            rating="Buy", executive_summary="s", investment_thesis="t",
-            price_target_basis="open",
-        )
+    assert PortfolioDecision(
+        rating="Buy", executive_summary="s", investment_thesis="t",
+        price_target_basis="open",
+    ).price_target_basis is None
 
 
 def _legacy_decision() -> PortfolioDecision:

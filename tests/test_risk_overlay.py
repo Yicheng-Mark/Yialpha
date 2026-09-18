@@ -487,9 +487,24 @@ def test_perp_price_book_failure_records_core_sentinel(monkeypatch):
 
     assert "Stop-loss not set" in md
     core = [e for e in events if e["method"] == "get_binance_klines"]
-    assert core and core[0]["kind"] == quality.KIND_OPTIONAL_UNAVAILABLE
+    # KIND_CORE_ERROR (2026-09-19): the overlay's price book is core, and
+    # summarize_quality's core_sentinel_count — run_robust's DEGRADED
+    # verdict — only counts the core kinds.
+    assert core and core[0]["kind"] == quality.KIND_CORE_ERROR
     # The veto lands on the ticket rendered into the same decision markdown.
-    assert "NO_TRADE (critical_data_missing)" in md
+    # The REAL-RUN interplay (round-2 fix): the analysts' qualified router
+    # successes ("get_binance_klines[last]") must NOT recover the overlay's
+    # unqualified decision-time sentinel — recovery never crosses bases or
+    # call sites, so the ticket grades DEGRADED_CRITICAL and vetoes. With
+    # zero successes the vacuum belt-and-suspenders grades INVALID instead
+    # (still NO_TRADE, different reason string).
+    from yialpha.dataflows.quality import classify_quality
+
+    assert classify_quality(events, set())["tier"] == "INVALID"
+    assert classify_quality(
+        core, {"get_binance_klines[last]"}
+    )["tier"] == "DEGRADED_CRITICAL"
+    assert "NO_TRADE" in md
 
 
 @pytest.mark.unit

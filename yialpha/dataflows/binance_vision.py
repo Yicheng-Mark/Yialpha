@@ -476,9 +476,13 @@ def _enforce_output_cap(
     return shaped
 
 
-def _coverage_notes(report, qa: dict) -> str:
+def _coverage_notes(report, qa: dict, start_dt=None, end_dt=None) -> str:
     """Header notes from the sync report + semantic QA — every absence is
-    disclosed: interior holes, budget-unsynced days, low-row days."""
+    disclosed: interior holes, budget-unsynced days, low-row days, and a
+    missing EDGE day (the requested start/end day itself not yet published
+    — reachable for the end day in the ~06:30 UTC pre-publication window
+    where ``_resolve_window``'s "exceeds available archives" note does not
+    fire because the day is not past the publication cap, only 404ing)."""
     notes = ""
     interior = qa.get("interior_missing_days") or []
     if interior:
@@ -486,6 +490,19 @@ def _coverage_notes(report, qa: dict) -> str:
             f"# ⚠ {len(interior)} archive day(s) missing inside the window "
             "(pre-listing / unpublished days)\n"
         )
+    if report is not None and getattr(report, "missing_days", None):
+        missing = set(report.missing_days)
+        edges = []
+        if start_dt is not None and start_dt.strftime("%Y-%m-%d") in missing:
+            edges.append(f"start {start_dt.date()}")
+        if end_dt is not None and end_dt.strftime("%Y-%m-%d") in missing:
+            edges.append(f"end {end_dt.date()}")
+        if edges:
+            notes += (
+                f"# ⚠ window {' and '.join(edges)} day(s) not published yet "
+                "(archive publication lags ~1 day; the REST tools cover the "
+                "present)\n"
+            )
     if report is not None and getattr(report, "unsynced", 0) > 0:
         notes += (
             f"# ⚠ store covers {report.synced_days_count} of "
@@ -679,7 +696,7 @@ def get_binance_vision_metrics(
         raise NoMarketDataError(
             symbol, canonical, f"data.binance.vision metrics unavailable: {exc}",
         ) from exc
-    note += _coverage_notes(report, qa)
+    note += _coverage_notes(report, qa, start_dt, end_dt)
     if shaped.empty:
         raise NoMarketDataError(
             symbol, canonical,
@@ -695,7 +712,8 @@ def get_binance_vision_metrics(
             f"# Total records summarized: {len(shaped)} daily rows "
             f"({qa.get('first_day')} → {qa.get('last_day')} synced)\n"
             "# summary mode: distribution over the full window + recent "
-            "tail; pass summary=false for the raw daily CSV\n"
+            "tail (config binance_vision_summary=false serves the raw "
+            "daily CSV)\n"
         )
     else:
         shaped = _enforce_output_cap(shaped, symbol, canonical)
@@ -760,7 +778,7 @@ def get_binance_vision_book_depth(
         raise NoMarketDataError(
             symbol, canonical, f"data.binance.vision bookDepth unavailable: {exc}",
         ) from exc
-    note += _coverage_notes(report, qa)
+    note += _coverage_notes(report, qa, start_dt, end_dt)
     if shaped.empty:
         raise NoMarketDataError(
             symbol, canonical,
@@ -776,7 +794,8 @@ def get_binance_vision_book_depth(
             f"# Total records summarized: {len(shaped)} daily band rows "
             f"({qa.get('first_day')} → {qa.get('last_day')} synced)\n"
             "# summary mode: per-band distribution + liquidity streak + "
-            "recent tail; pass summary=false for the raw per-band CSV\n"
+            "recent tail (config binance_vision_summary=false serves the "
+            "raw per-band CSV)\n"
         )
     else:
         shaped = _enforce_output_cap(shaped, symbol, canonical)

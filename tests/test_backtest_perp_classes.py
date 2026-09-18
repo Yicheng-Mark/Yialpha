@@ -472,7 +472,7 @@ def test_stop_fires_on_last_wick_while_mark_stays_calm(monkeypatch):
     it while the mark book (and the 10x liquidation level) is never pierced."""
 
     def fake_frame(symbol, start, end, interval="1d", venue="binance_perp",
-                   price_type="last"):
+                   price_type="last", closed_as_of=None):
         idx = pd.bdate_range(start, end)
         n = len(idx)
         # LAST book: a wick to 94 on bar 3; MARK book: calm all window.

@@ -101,7 +101,10 @@ def test_scan_extracts_records(history):
 @pytest.mark.unit
 def test_asset_type_routing_rules():
     assert accuracy._resolve_asset_type("BTCUSDT", "crypto_perp") == ("crypto_perp", "logged")
-    assert accuracy._resolve_asset_type("X", "crypto") == ("crypto_perp", "logged")
+    # Round 3: the umbrella maps to crypto_spot — the venue the LIVE
+    # pipeline priced those decisions on (routing maps crypto →
+    # crypto_spot); perp klines would fold basis into the outcome.
+    assert accuracy._resolve_asset_type("X", "crypto") == ("crypto_spot", "logged")
     assert accuracy._resolve_asset_type("AAPL", "stock") == ("stock", "logged")
     # Legacy log (no asset_type): USDT suffix inferred as perp, and marked.
     assert accuracy._resolve_asset_type("BTCUSDT", None) == ("crypto_perp", "inferred")

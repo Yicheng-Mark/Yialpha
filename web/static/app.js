@@ -961,7 +961,16 @@
   // ----------------------------- new analysis -----------------------------
 
   function renderNew() {
-    const today = new Date().toISOString().slice(0, 10);
+    // HOST-LOCAL date, not toISOString (UTC): on a host ahead of UTC the
+    // UTC slice is local YESTERDAY between midnight and the UTC rollover,
+    // and a UTC "max" then blocks submitting local today even though the
+    // server's future-check (host-local) would accept it.
+    const now = new Date();
+    const today = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0"),
+    ].join("-");
     view().innerHTML = `
       <p><a href="#/" class="muted">${t("common_back")}</a></p>
       <h1 class="page-title">${t("new_title")}</h1>

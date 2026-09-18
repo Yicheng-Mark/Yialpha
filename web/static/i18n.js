@@ -156,7 +156,7 @@
       accuracy_hold: "Hold 条目：n={n}，平均前向收益 {ret}（机会成本视角，不计方向）",
       accuracy_by_rating: "分评级",
       accuracy_by_ticker: "分标的",
-      accuracy_scanned: "扫描 {total} 次运行｜已评分 {scored}｜未到期 {pending}｜horizon {days} 个交易日",
+      accuracy_scanned: "扫描 {total} 次运行｜已评分 {scored}｜未到期 {pending}｜horizon {days} 天",
       accuracy_col_rating: "评级 / 标的",
       accuracy_col_n: "样本数",
       accuracy_col_mean: "平均前向收益",

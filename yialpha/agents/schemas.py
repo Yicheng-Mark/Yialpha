@@ -389,44 +389,40 @@ class PortfolioDecision(BaseModel):
     @field_validator("price_target_currency")
     @classmethod
     def _price_target_currency_upper(cls, v: str | None) -> str | None:
-        """Normalize case; only USD / USDT (case-insensitive) are accepted."""
+        """Normalize case; out-of-vocab values coerce to None, never raise.
+
+        These qualifier fields are OPTIONAL and the json_schema carries no
+        enum (only description prose), so the model can legitimately emit a
+        placeholder ("EUR", "USDT (Binance)"). A strict raise here discards
+        the WHOLE structured decision — the rating degrades to regex
+        fallback AND the fair-value bridge loses the target it was about to
+        convert — the exact #1058 failure mode ``_coerce_optional_float``
+        was fixed for. An unusable qualifier degrades to "not provided"
+        instead of vetoing the primary output."""
         if v is None:
             return v
         normalized = v.strip().upper()
-        if normalized not in ("USD", "USDT"):
-            raise ValueError(
-                f"price_target_currency must be one of USD, USDT "
-                f"(case-insensitive), got {v!r}"
-            )
-        return normalized
+        return normalized if normalized in ("USD", "USDT") else None
 
     @field_validator("underlying_target_currency")
     @classmethod
     def _underlying_target_currency_upper(cls, v: str | None) -> str | None:
-        """Normalize case; the underlying target leg is USD-denominated only."""
+        """Normalize case; the underlying leg is USD-only, out-of-vocab → None
+        (same coerce-not-raise contract as ``price_target_currency``)."""
         if v is None:
             return v
         normalized = v.strip().upper()
-        if normalized != "USD":
-            raise ValueError(
-                f"underlying_target_currency must be USD (case-insensitive), "
-                f"got {v!r}"
-            )
-        return normalized
+        return normalized if normalized == "USD" else None
 
     @field_validator("price_target_basis")
     @classmethod
     def _price_target_basis_lower(cls, v: str | None) -> str | None:
-        """Normalize case; only last / mark (case-insensitive) are accepted."""
+        """Normalize case; out-of-vocab bases coerce to None (the downstream
+        consumers already treat a missing basis as the disclosed default)."""
         if v is None:
             return v
         normalized = v.strip().lower()
-        if normalized not in ("last", "mark"):
-            raise ValueError(
-                f"price_target_basis must be 'last' or 'mark' "
-                f"(case-insensitive), got {v!r}"
-            )
-        return normalized
+        return normalized if normalized in ("last", "mark") else None
 
 
 def render_pm_decision(decision: PortfolioDecision) -> str:

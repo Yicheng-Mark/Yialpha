@@ -49,7 +49,11 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from yialpha.dataflows.binance import binance_klines_frame, get_binance_funding_rate
+from yialpha.dataflows.binance import (
+    _now_ms,
+    binance_klines_frame,
+    get_binance_funding_rate,
+)
 from yialpha.dataflows.perp_bundle import (
     STATUS_OK,
     _fetch_depth_bands,
@@ -334,8 +338,12 @@ def compute_regime_state(
     overnight_gap_bps: float | None = None
     closes: list[float] = []
     try:
+        # closed bars only: this frame freezes into the run's RegimeState
+        # record — a forming bar would bake an intraday partial close into
+        # realized_vol/trend/overnight_gap for the rest of the day.
         frame = binance_klines_frame(
             ticker, _window_start(end_date, _KLINE_LOOKBACK_DAYS), end_date, "1d",
+            closed_as_of=_now_ms(),
         )
         # Row-aligned drop: dropping each column independently would misalign
         # the two lists when one column holds an isolated NaN, pairing an
@@ -435,7 +443,8 @@ def compute_regime_state(
         if closes and closes[-1] > 0:
             try:
                 spot = binance_klines_frame(
-                    ticker, _window_start(end_date, 8), end_date, "1d", "binance_spot",
+                    ticker, _window_start(end_date, 8), end_date, "1d",
+                    "binance_spot", closed_as_of=_now_ms(),
                 )
                 spot_close = float(spot["Close"].dropna().iloc[-1])
                 if spot_close > 0:
@@ -511,7 +520,7 @@ def compute_regime_state(
             try:
                 index_frame = binance_klines_frame(
                     ticker, _window_start(end_date, 35), end_date, "1d",
-                    "binance_perp", "index",
+                    "binance_perp", "index", closed_as_of=_now_ms(),
                 )
                 index_close = float(index_frame["Close"].dropna().iloc[-1])
                 if index_close > 0:

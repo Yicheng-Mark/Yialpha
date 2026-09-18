@@ -385,12 +385,21 @@ def test_core_price_failure_records_quality_sentinel(monkeypatch):
     assert bundle["prices"]["core_complete"] is False
     core = [e for e in events if e["method"] == "get_binance_klines"]
     assert core, "a core price failure must reach the quality chain"
-    assert core[0]["kind"] == quality.KIND_OPTIONAL_UNAVAILABLE
-    # ...and per PR1's method-level matrix that sentinel is CRITICAL, i.e.
-    # classify_quality lands on DEGRADED_CRITICAL (ticket NO_TRADE).
+    # KIND_CORE_ERROR (2026-09-19 round 2): same outage, same kind as the
+    # overlay's price failures — run_robust's DEGRADED counter (which only
+    # counts the core kinds) must see the bundle's miss too.
+    assert core[0]["kind"] == quality.KIND_CORE_ERROR
+    # ...and per PR1's method-level matrix that sentinel is CRITICAL. With
+    # ZERO successes the vacuum belt-and-suspenders grades INVALID (the
+    # default reject policy refuses such runs anyway); with a qualified
+    # router success present the unqualified bundle sentinel stays
+    # unrecovered → DEGRADED_CRITICAL (ticket NO_TRADE).
     from yialpha.dataflows.quality import classify_quality
 
-    assert classify_quality(events, set())["tier"] == "DEGRADED_CRITICAL"
+    assert classify_quality(events, set())["tier"] == "INVALID"
+    assert classify_quality(events, {"get_binance_klines[last]"})["tier"] == (
+        "DEGRADED_CRITICAL"
+    )
 
 
 @pytest.mark.unit

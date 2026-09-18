@@ -225,6 +225,9 @@ def _m(x):
         return "—"
     if abs(x) >= 1000:
         return f"{x:,.0f}"
+    if abs(x) < 1e-3:
+        # 微价合约（PEPEUSDT 级）：.2f 会显示成 "0"
+        return f"{x:.4g}"
     return f"{x:,.2f}".rstrip("0").rstrip(".")
 
 

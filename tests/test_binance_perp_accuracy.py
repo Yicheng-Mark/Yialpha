@@ -161,15 +161,19 @@ class FundingCadenceTests(unittest.TestCase):
             out = bn.get_binance_funding_rate("BTCUSDT", "2026-08-01", "2026-08-10")
         self.assertIn("~8h", out)
 
-    def test_fundinginfo_interval_wins_over_spacing(self):
-        """The authoritative /fapi/v1/fundingInfo interval beats inference.
+    def test_in_window_spacing_wins_over_current_fundinginfo(self):
+        """The window's own settlement spacing beats the CURRENT fundingInfo
+        interval when they disagree (2026-09-19 round 3).
 
-        A 4h-spaced series with fundingInfo declaring 4h and a mismatched
-        spacing must resolve to the DECLARED value, and the header must say
-        where the number came from.
+        /fapi/v1/fundingInfo states the contract's interval AS OF NOW; on a
+        cadence-changed contract the in-window rows settled at the OLD
+        cadence, and annualising THIS CSV's mean rate with the new-cadence
+        multiplier would misstate it 2x. The header must use the window's
+        spacing and disclose the disagreement.
         """
         base = int(datetime(2026, 8, 1, tzinfo=UTC).timestamp() * 1000)
-        # Spacing says 8h, fundingInfo says 4h — the endpoint is authoritative.
+        # Spacing says 8h (the rows really settled 8h apart), fundingInfo
+        # says 4h (the contract switched at some later point).
         rows = [
             {"fundingTime": base + i * 8 * 3_600_000, "fundingRate": "0.0001",
              "symbol": "XYZUSDT"}
@@ -183,8 +187,10 @@ class FundingCadenceTests(unittest.TestCase):
 
         with mock.patch.object(bn, "_http_get", fake_get):
             out = bn.get_binance_funding_rate("XYZUSDT", "2026-08-01", "2026-08-10")
-        self.assertIn("~4h", out)
-        self.assertIn("fundingInfo endpoint", out)
+        self.assertIn("~8h", out)
+        self.assertIn("inferred from settlement spacing", out)
+        self.assertIn("differs", out)
+        self.assertIn("(4h)", out)
 
     def test_fundinginfo_failure_falls_back_to_inference(self):
         base = int(datetime(2026, 8, 1, tzinfo=UTC).timestamp() * 1000)

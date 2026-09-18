@@ -132,6 +132,7 @@ def test_store_cli_decision_uses_get_and_warns_when_missing(tmp_path, caplog):
         "ticker": "NVDA",
         "trade_date": "2026-06-10",
         "final_trade_decision": "",
+        "asset_type": None,
     }]
     assert any("no final_trade_decision" in r.message for r in caplog.records)
 

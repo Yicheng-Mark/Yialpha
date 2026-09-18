@@ -21,6 +21,7 @@ The ticket discloses both assumptions.
 """
 from __future__ import annotations
 
+from ..dataflows.binance import _sig_digits
 from ..dataflows.binance_brackets import (
     DEFAULT_USDT_M_BRACKETS,
     mmr_for_notional,
@@ -137,7 +138,11 @@ def take_profits(
     """R 倍数止盈（R = |entry−stop|）：TP1 = 1.5R, TP2 = 3R, TP3 = 5R。
 
     纯 R 倍数，结构位另作参考，不硬钳 —— 突破阻力后常有 runner，硬钳到
-    阻力位会把三档止盈压成同一个值，反而失去分批意义。
+    阻力位会把三档止盈压成同一个值，反而失去分批意义。舍入用**有效数字**
+    （数据层 ``_sig_digits`` 约定、位数放宽到 8）而非小数位：USDT-M 上有
+    ~1e-5 价位的合约（PEPEUSDT 等），``round(x, 6)`` 会把 1.3e-5 档位削到
+    只剩一位有效数字；8 位在 1e5 价位（BTC）仍保留到分级价位（0.1 价步），
+    两端都不损失。
     """
     if entry is None or stop is None:
         return []
@@ -147,7 +152,7 @@ def take_profits(
     out = []
     for mult in (1.5, 3.0, 5.0):
         tp = entry + mult * R if direction == "long" else entry - mult * R
-        out.append(round(tp, 6))
+        out.append(_sig_digits(tp, digits=8))
     return out
 
 

@@ -84,7 +84,11 @@ class TradingMemoryLog:
         with self._lock:
             # Idempotency guard: fast raw-text scan instead of full parse. The
             # scan + append must be atomic, else two workers both pass the
-            # check and double-append the same pending decision.
+            # check and double-append the same pending decision. The guard
+            # keys on (date, ticker, ASSET): a same-day perp AND spot run of
+            # the same ticker are two first-class decisions — keying on
+            # (date, ticker) alone silently dropped the second venue's
+            # entry, defeating the asset= tag's stated purpose.
             if self._log_path.exists():
                 raw = self._log_path.read_text(encoding="utf-8")
                 for line in raw.splitlines():
@@ -92,7 +96,10 @@ class TradingMemoryLog:
                         continue
                     if line.startswith("[") and line.endswith("]"):
                         fields = [f.strip() for f in line[1:-1].split("|")]
-                        if self._is_pending(fields):
+                        if not self._is_pending(fields):
+                            continue
+                        entry_asset = self._tag_keyed_fields(fields).get("asset")
+                        if entry_asset == (asset_type or None):
                             return
             rating = parse_rating(final_trade_decision)
             tag = f"[{trade_date} | {ticker} | {rating} | pending"
@@ -218,12 +225,17 @@ class TradingMemoryLog:
         holding_days: int,
         reflection: str,
         available_date: str | None = None,
+        asset_type: str | None = None,
     ) -> None:
         """Replace pending tag and append REFLECTION section using atomic write.
 
         Finds the first pending entry matching (trade_date, ticker), updates
-        its tag with return figures, and appends a REFLECTION section.  Uses
-        a temp-file + os.replace() so a crash mid-write never corrupts the log.
+        its tag with return figures, and appends a REFLECTION section. Uses
+        a temp-file + os.replace() so a crash mid-write never corrupts the
+        log. ``asset_type`` (optional) narrows the match to one venue's
+        entry — same-day perp AND spot entries on one ticker are both legal
+        now, and the outcome must land on the venue it was priced for;
+        ``None`` keeps the legacy first-pending-match for legacy callers.
         """
         if not self._log_path or not self._log_path.exists():
             return
@@ -256,6 +268,10 @@ class TradingMemoryLog:
                     not updated
                     and tag_line.startswith(pending_prefix)
                     and self._is_pending(fields)
+                    and (
+                        asset_type is None
+                        or self._tag_keyed_fields(fields).get("asset") == asset_type
+                    )
                 ):
                     # Parse rating from the existing pending tag; keep any
                     # keyed fields (asset=...) so resolution never strips the
@@ -302,7 +318,10 @@ class TradingMemoryLog:
             text = self._log_path.read_text(encoding="utf-8")
             blocks = text.split(self._SEPARATOR)
 
-            # Build lookup keyed by (trade_date, ticker) for O(1) dispatch
+            # Build lookup keyed by (trade_date, ticker) for O(1) dispatch.
+            # An update carrying asset_type narrows to that venue's entry
+            # (same-day perp+spot entries are both legal); None keeps the
+            # legacy first-pending-match.
             update_map = {(u["trade_date"], u["ticker"]): u for u in updates}
 
             new_blocks = []
@@ -323,7 +342,15 @@ class TradingMemoryLog:
                         if tag_line.startswith("[") and tag_line.endswith("]")
                         else []
                     )
-                    if tag_line.startswith(pending_prefix) and self._is_pending(fields):
+                    if (
+                        tag_line.startswith(pending_prefix)
+                        and self._is_pending(fields)
+                        and (
+                            upd.get("asset_type") is None
+                            or self._tag_keyed_fields(fields).get("asset")
+                            == upd["asset_type"]
+                        )
+                    ):
                         positional = [f for f in fields if "=" not in f]
                         rating = positional[2] if len(positional) > 2 else ""
                         keyed = self._tag_keyed_fields(fields)
@@ -367,6 +394,12 @@ class TradingMemoryLog:
             return blocks
 
         # Tag each block with (kept, is_resolved) by parsing tag-line markers.
+        # Pending detection goes through _is_pending (field-parse), NOT the
+        # old endswith("| pending]") suffix test: since the asset= tag, a
+        # pending tag ends with a keyed field (… | pending | asset=crypto_perp]),
+        # so the suffix test misread every asset-tagged pending entry as
+        # resolved — making droppable the exact "unprocessed work" this
+        # rotation promises to keep.
         decisions = []
         for block in blocks:
             stripped = block.strip()
@@ -374,11 +407,10 @@ class TradingMemoryLog:
                 decisions.append((block, False))
                 continue
             tag_line = stripped.splitlines()[0].strip()
-            is_resolved = (
-                tag_line.startswith("[")
-                and tag_line.endswith("]")
-                and not tag_line.endswith("| pending]")
-            )
+            is_resolved = True
+            if tag_line.startswith("[") and tag_line.endswith("]"):
+                fields = [f.strip() for f in tag_line[1:-1].split("|")]
+                is_resolved = not self._is_pending(fields)
             decisions.append((block, is_resolved))
 
         resolved_count = sum(1 for _, r in decisions if r)

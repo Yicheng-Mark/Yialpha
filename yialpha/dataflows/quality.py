@@ -115,19 +115,50 @@ def record_sentinel(
         pass
 
 
-def record_success(method: str) -> None:
+def _success_key(method: str, qualifier: str = "") -> str:
+    """Composite success-set key: ``method[qualifier]`` when qualified.
+
+    Recovery must not cross price bases: an INDEX-klines success must not
+    forgive a LAST-book outage (and a qualified router success must not
+    forgive the overlay's unqualified decision-time sentinel), so successes
+    are keyed at the same (method, qualifier) granularity as sentinels.
+    """
+    m, q = str(method), str(qualifier or "")
+    return f"{m}[{q}]" if q else m
+
+
+def _is_recovered(event: dict[str, Any], core_successes: set[str]) -> bool:
+    """True when the SAME method AND qualifier served data this run.
+
+    An event with a qualifier matches only a qualified success of that exact
+    basis; an unqualified event matches a bare-method success. This is what
+    keeps the overlay's decision-time sentinels (unqualified, never retried)
+    critical even while the analysts' qualified router calls succeeded.
+    """
+    method = str(event.get("method", ""))
+    qualifier = str(event.get("qualifier", "") or "")
+    if qualifier:
+        return _success_key(method, qualifier) in core_successes
+    return method in core_successes
+
+
+def record_success(method: str, qualifier: str = "") -> None:
     """Record that a CORE-category router call returned data this run.
 
     The success side of the vacuum verdict: a run is a *data vacuum* only when
-    core calls were attempted (sentinels exist) yet none succeeded. Never
-    raises — same contract as :func:`record_sentinel`.
+    core calls were attempted (sentinels exist) yet none succeeded. Any
+    recorded success also un-vacuums. ``qualifier`` (the sentinel side's
+    severity-bearing parameter, e.g. a klines call's ``price_type``) keys the
+    success at the same granularity as the sentinel it may forgive — see
+    :func:`_is_recovered`. Never raises — same contract as
+    :func:`record_sentinel`.
     """
     try:
         methods = _success_var.get()
         if methods is None:
             methods = set()
             _success_var.set(methods)
-        methods.add(str(method))
+        methods.add(_success_key(method, qualifier))
     except Exception:  # noqa: BLE001 -- evidence must never break the run
         pass
 
@@ -182,15 +213,24 @@ def summarize_quality(
     """
     events = events or []
     core_successes = core_successes or set()
+    # Recovery-aware: a core-kind sentinel whose own (method, qualifier)
+    # later served data is "(recovered)" in classify_quality — the run's
+    # FINAL data state has that basis, so run_robust's DEGRADED verdict
+    # must not re-run a completed run over it either (the two consumers of
+    # the same evidence cannot disagree about the same event).
     core_sentinel_count = sum(
-        1 for e in events if e.get("kind") in _CORE_SENTINEL_KINDS
+        1 for e in events
+        if e.get("kind") in _CORE_SENTINEL_KINDS
+        and not _is_recovered(e, core_successes)
     )
     stale_cache_count = sum(1 for e in events if e.get("kind") == KIND_STALE_CACHE)
     return {
         "sentinels": events,
         "core_sentinel_count": core_sentinel_count,
         "core_error_count": sum(
-            1 for e in events if e.get("kind") == KIND_CORE_ERROR
+            1 for e in events
+            if e.get("kind") == KIND_CORE_ERROR
+            and not _is_recovered(e, core_successes)
         ),
         "core_ok_count": len(core_successes),
         "optional_sentinel_count": sum(
@@ -198,7 +238,12 @@ def summarize_quality(
         ),
         "stale_cache_count": stale_cache_count,
         "degraded_count": core_sentinel_count + stale_cache_count,
-        "data_vacuum": core_sentinel_count > 0 and not core_successes,
+        # The vacuum verdict itself stays on raw evidence: "attempted and
+        # zero successes" (any recorded success un-vacuums).
+        "data_vacuum": (
+            any(e.get("kind") in _CORE_SENTINEL_KINDS for e in events)
+            and not core_successes
+        ),
     }
 
 
@@ -330,6 +375,20 @@ def _is_critical_failure(method: str, category: str, qualifier: str = "") -> boo
     return category in CRITICAL_CATEGORIES
 
 
+def is_perp_core_method(method: str) -> bool:
+    """True when ``method`` is one of the perp price-book core engines.
+
+    The Binance price categories are OPTIONAL as categories (their enrichment
+    tools degrade fail-soft), yet the klines/indicator engines are the CORE
+    price book of a perp run. Router call sites use this to record the
+    SUCCESS side of those methods even when served from an optional category,
+    so :func:`classify_quality` can tell a hard outage (sentinel, no later
+    success) from a recoverable one (bad arg / transient throttle → sentinel
+    → the model retried and got data).
+    """
+    return method in _PERP_CORE_METHODS
+
+
 def classify_quality(
     events: list[dict[str, Any]] | None,
     core_successes: set[str] | None = None,
@@ -345,8 +404,16 @@ def classify_quality(
     - ``DEGRADED_CRITICAL`` — at least one sentinel in a critical category
       (price/indicators/fundamentals; in the Binance price categories only
       the klines/indicator core methods count — see
-      :data:`_PERP_CORE_METHODS`). The tradeability gate turns this into
-      NO_TRADE.
+      :data:`_PERP_CORE_METHODS`) from a method+qualifier that never served
+      data this run. A sentinel whose own method AND qualifier later
+      succeeded is downgraded to a "(recovered)" auxiliary line: the model
+      hit an instructive sentinel (bad argument, transient throttle),
+      retried the SAME basis, and got the data — the price book exists, so
+      the attempt is disclosed but must not veto. Recovery never crosses
+      bases (an index-klines success does not forgive a last-book outage)
+      and never forgives the overlay's unqualified decision-time sentinels
+      (no router success carries a bare-method key for them to match).
+      The tradeability gate turns this tier into NO_TRADE.
     - ``DEGRADED_AUXILIARY`` — only auxiliary degradation (news/macro/social
       absent or stale-cache serves). Confidence penalty + disclosure, never a
       veto.
@@ -357,6 +424,7 @@ def classify_quality(
     shows what actually happened.
     """
     events = events or []
+    core_successes = core_successes or set()
     if is_data_vacuum(events, core_successes):
         return {
             "tier": TIER_INVALID,
@@ -381,7 +449,11 @@ def classify_quality(
             label = f"{method}[{qualifier}]({kind})" if qualifier else (
                 f"{method}({kind})" if kind else method
             )
-            if _is_critical_failure(method, category, qualifier):
+            if _is_recovered(e, core_successes):
+                # Same method AND qualifier served data later in the run —
+                # disclosed as auxiliary, never a veto.
+                auxiliary.append(f"{label} (recovered)")
+            elif _is_critical_failure(method, category, qualifier):
                 critical_missing.append(label)
             else:
                 auxiliary.append(label)

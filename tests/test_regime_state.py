@@ -94,7 +94,7 @@ def _klines_recorder(calls: list[tuple[str, str]]):
 
     def fake_klines(
         symbol, start_date, end_date, interval="1d", venue="binance_perp",
-        price_type="last",
+        price_type="last", closed_as_of=None,
     ):
         calls.append((venue, price_type))
         if venue == "binance_spot":
@@ -920,7 +920,7 @@ def test_overnight_gap_survives_isolated_open_nan(monkeypatch):
     frame = _frame(closes, opens=opens)
 
     def fake_klines(symbol, start_date, end_date, interval="1d",
-                    venue="binance_perp", price_type="last"):
+                    venue="binance_perp", price_type="last", closed_as_of=None):
         return frame
 
     monkeypatch.setattr(rc, "binance_klines_frame", fake_klines)
