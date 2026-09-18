@@ -185,12 +185,28 @@ def _qevent(method: str, kind: str, qualifier: str) -> dict:
 def test_index_kline_failure_is_auxiliary():
     out = classify_quality(
         [_qevent("get_binance_klines", quality.KIND_OPTIONAL_UNAVAILABLE, "index")],
-        {"get_binance_klines"},
+        {"get_binance_klines[index]"},
     )
     assert out["tier"] == TIER_DEGRADED_AUXILIARY
     assert out["critical_missing"] == []
+    # "(recovered)" (2026-09-19): recovery keys on method AND qualifier —
+    # an INDEX-basis success recovers the INDEX-basis sentinel only.
     assert out["auxiliary_degraded"] == [
-        "get_binance_klines[index](optional_unavailable)",
+        "get_binance_klines[index](optional_unavailable) (recovered)",
+    ]
+
+
+@pytest.mark.unit
+def test_qualified_success_does_not_recover_other_basis():
+    # Round-2 fix pin: an index-klines success (auxiliary basis) must NOT
+    # recover a last/mark book outage of the same method name.
+    out = classify_quality(
+        [_qevent("get_binance_klines", quality.KIND_OPTIONAL_UNAVAILABLE, "last")],
+        {"get_binance_klines[index]"},
+    )
+    assert out["tier"] == TIER_DEGRADED_CRITICAL
+    assert out["critical_missing"] == [
+        "get_binance_klines[last](optional_unavailable)",
     ]
 
 

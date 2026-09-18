@@ -50,7 +50,7 @@ from .symbol_utils import (
     normalize_symbol_for_venue,
     tokenized_stock_perp_underlying,
 )
-from .utils import current_pit_end, proxy_map
+from .utils import current_pit_end, is_historical_date, proxy_map
 
 logger = logging.getLogger(__name__)
 
@@ -800,14 +800,29 @@ def get_binance_funding_rate(
             symbol, canonical, f"no funding rates between {start_date} and {end_date}"
         )
 
-    # Authoritative cadence first: /fapi/v1/fundingInfo states the contract's
-    # own interval for non-default (1h/4h) settlers; spacing inference is the
-    # fallback for unlisted symbols / transport failures.
-    cadence_h = _funding_interval_hours_authoritative(canonical)
-    cadence_src = "fundingInfo endpoint"
-    if cadence_h is None:
-        cadence_h = _funding_cadence_hours(rows)
+    # Cadence for the annualisation hint. The in-window modal settlement
+    # spacing is GROUND TRUTH for when these settlements actually happened;
+    # /fapi/v1/fundingInfo states the contract's interval AS OF NOW, so on a
+    # cadence-changed contract it would stamp a 2x-wrong multiplier on rows
+    # settled at the old cadence. Prefer the window's own spacing whenever
+    # it is measurable (≥2 settlements to diff), keep fundingInfo for tiny
+    # windows, and disclose the disagreement when both exist.
+    authoritative_h = _funding_interval_hours_authoritative(canonical)
+    inferred_h = _funding_cadence_hours(rows)
+    cadence_note = ""
+    if inferred_h is not None:
+        cadence_h = inferred_h
         cadence_src = "inferred from settlement spacing"
+        if authoritative_h is not None and authoritative_h != inferred_h:
+            cadence_note = (
+                f"# ⚠ in-window settlement spacing ({inferred_h}h) differs "
+                f"from the fundingInfo cadence as of now "
+                f"({authoritative_h}h) — the contract's funding interval "
+                f"changed; annualisation uses the window's own spacing\n"
+            )
+    else:
+        cadence_h = authoritative_h
+        cadence_src = "fundingInfo endpoint"
 
     records = [
         {
@@ -836,6 +851,7 @@ def get_binance_funding_rate(
             f"({cadence_src}; annualised carry = mean rate x "
             f"{24 / cadence_h:.1f} x 365)\n"
         )
+    header += cadence_note
     header += f"# Total records: {len(df)}\n"
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     return header + df.to_csv(index=False)
@@ -1084,12 +1100,35 @@ def _futures_data_window(
                 f"day(s) dropped from the head; get_binance_vision_metrics "
                 f"serves the full window\n"
             )
+    # The server REJECTS a startTime older than the retention horizon with
+    # HTTP 400 -1130 — it does NOT silently truncate (live probe 2026-09-19;
+    # derivatives_stress_series records the same observation). Clamp the
+    # head into the retained tail so a wide window (an LLM echoing a 90-day
+    # start_date, or the >500-row end-anchor above putting it ~500 days
+    # back) serves the retained days with a disclosure instead of degrading
+    # the whole call to a sentinel.
+    retention_start_ms = _now_ms() - _FUTURES_DATA_RETENTION_DAYS * 86_400_000
+    if start_ms < retention_start_ms:
+        clamped_start = datetime.fromtimestamp(retention_start_ms / 1000, tz=UTC)
+        dropped_retention = max(0, (clamped_start.date() - start_dt.date()).days)
+        start_ms = retention_start_ms
+        coverage_note += (
+            f"# ⚠ /futures/data retains only the last "
+            f"{_FUTURES_DATA_RETENTION_DAYS} days: coverage starts "
+            f"{clamped_start.strftime('%Y-%m-%d')}, {dropped_retention} day(s) "
+            f"dropped from the head; get_binance_vision_metrics serves the "
+            f"full window\n"
+        )
     extra = {
         "startTime": start_ms,
         "endTime": end_ms,
         "limit": min(rows, _FUTURES_DATA_LIMIT_CAP),
     }
-    reaches_now = end_dt.date() >= datetime.now(UTC).date()
+    # The shared dual-anchor live predicate — ONE implementation of "is
+    # this label live" (the inline >= comparison drifted from it on future
+    # labels, appending the live snapshot row to a future-dated window that
+    # is_historical_date deliberately classifies as historical).
+    reaches_now = not is_historical_date(end_dt.strftime("%Y-%m-%d"))
     return extra, end_dt.strftime("%Y-%m-%d"), reaches_now, end_ms, coverage_note
 
 

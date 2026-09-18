@@ -802,6 +802,9 @@ class TestDeferredReflection:
             benchmark="SPY",
             holding_days=5,
             as_of_date="2020-01-15",
+            # untagged legacy entry → the shared _resolve_asset_type mapping
+            # (same one verify-history uses) normalizes to the equity venue.
+            asset_type="stock",
         )
         entries = log.load_entries()
         assert entries[0]["available_date"] == "2020-01-15"
@@ -1016,6 +1019,11 @@ class TestLegacyRemoval:
         # the actual write path instead of the auto-MagicMock.
         mock_graph._run_graph = functools.partial(
             YiAlphaGraph._run_graph, mock_graph
+        )
+        # Same for the record-stage seam _run_graph delegates to (an
+        # auto-MagicMock return does not unpack into (run_id, regime_id)).
+        mock_graph._bind_run_record_stage = functools.partial(
+            YiAlphaGraph._bind_run_record_stage, mock_graph
         )
         YiAlphaGraph.propagate(mock_graph, "NVDA", "2026-01-10")
         entries = mock_graph.memory_log.load_entries()

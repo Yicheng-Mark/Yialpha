@@ -42,7 +42,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import requests
@@ -127,21 +127,32 @@ class OnchainFlows:
     """The assembled on-chain context block inputs.
 
     ``series`` maps chart name -> (latest_point_instant, latest_value,
-    mean_over_window) with ``None`` for charts that failed (their disclosure
-    rides the render). ``available_at`` is the latest point instant used
-    (the PIT anchor for the evidence row); ``fetched_at`` travels with the
-    cache bytes; ``replayability`` is always ``PIT_REPLAYABLE``.
+    mean_over_window, window_days) with ``None`` for charts that failed
+    (their disclosure rides the render). ``window_days`` is the span the
+    mean was actually computed over — the vendor serves a trailing
+    ``30days`` window anchored at fetch-time NOW, so a PIT-filtered replay
+    may see fewer days than the label suggests. ``available_at`` is the
+    latest point instant used (the PIT anchor for the evidence row);
+    ``fetched_at`` travels with the cache bytes (the OLDEST ingredient's
+    timestamp — a merged block never claims to be fresher than its oldest
+    chart); ``replayability`` is ``PIT_REPLAYABLE`` only within the
+    vendor's trailing window (see :func:`fetch_onchain_flows`).
     """
 
-    series: dict[str, tuple[datetime, float, float] | None]
+    series: dict[str, tuple[datetime, float, float, int] | None]
     available_at: str
     fetched_at: str
     source: str = ONCHAIN_SOURCE
     replayability: str = PIT_REPLAYABLE
 
 
-def _fetch_chart_cached(chart: str) -> dict[str, Any] | None:
-    """One chart through the shared disk cache (fail-open to None)."""
+def _fetch_chart_cached(chart: str) -> tuple[Any, str] | None:
+    """One chart through the shared disk cache as ``(payload, fetched_at)``.
+
+    The wrapper's stored ``fetched_at`` travels out with the payload so a
+    cache hit can never masquerade as a fresh fetch (regenerating it at
+    assembly time claimed NOW for up-to-6h-old bytes).
+    """
     raw = cached_or_fetch(
         vendor_cache_dir(_VENDOR),
         f"{chart}_{_TIMESPAN}.json",
@@ -161,7 +172,12 @@ def _fetch_chart_cached(chart: str) -> dict[str, Any] | None:
         wrapper = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         return None
-    return wrapper.get("payload") if isinstance(wrapper, dict) else None
+    if not isinstance(wrapper, dict):
+        return None
+    return (
+        wrapper.get("payload"),
+        str(wrapper.get("fetched_at") or ""),
+    )
 
 
 def fetch_onchain_flows(as_of: str) -> OnchainFlows | None:
@@ -171,33 +187,61 @@ def fetch_onchain_flows(as_of: str) -> OnchainFlows | None:
     historical replay sees exactly the chart that existed then. Returns
     ``None`` only when BOTH charts fail — one surviving chart still yields a
     block (the missing one is disclosed in the render).
+
+    Structural caveat: the vendor serves only a trailing ~30-day window
+    anchored at fetch-time NOW, so a replay dated more than ~30 days back
+    keeps zero points for BOTH charts — that case returns ``None`` too, but
+    records a ledger sentinel describing the structural gap (not a vendor
+    outage) so the run's data_quality block cannot mistake one for the
+    other.
     """
+    from . import quality
+
     cutoff = datetime.strptime(as_of, "%Y-%m-%d").replace(
         hour=23, minute=59, second=59, tzinfo=UTC
     )
-    fetched_at = datetime.now(UTC).isoformat(timespec="seconds")
-    series: dict[str, tuple[datetime, float, float] | None] = {}
+    # The trailing window starts ~30 days before NOW; an as_of whose whole
+    # day predates it can keep no points regardless of vendor health.
+    window_start = datetime.now(UTC) - timedelta(days=30)
+    structural = cutoff < window_start
+    series: dict[str, tuple[datetime, float, float, int] | None] = {}
     latest_used: datetime | None = None
+    oldest_fetched: str = ""
     for chart in CHARTS:
         try:
-            points = [p for p in _points(_fetch_chart_cached(chart)) if p[0] <= cutoff]
+            cached = _fetch_chart_cached(chart)
+            points = [p for p in _points(cached[0]) if p[0] <= cutoff] if cached else []
         except Exception:  # noqa: BLE001 — advisory vendor, never blocks
             logger.warning("onchain chart %s failed; skipping", chart, exc_info=True)
             points = []
+            cached = None
         if not points:
             series[chart] = None
+            quality.record_sentinel(
+                "fetch_onchain_flows",
+                quality.KIND_OPTIONAL_UNAVAILABLE,
+                (
+                    f"{chart}: as_of {as_of} predates the vendor's trailing "
+                    f"30-day window (structural, not an outage)"
+                    if structural
+                    else f"{chart}: no usable points (vendor/parse failure)"
+                ),
+            )
             continue
         values = [value for _instant, value in points]
-        series[chart] = (points[-1][0], points[-1][1], sum(values) / len(values))
+        span_days = max(1, (points[-1][0] - points[0][0]).days)
+        series[chart] = (points[-1][0], points[-1][1], sum(values) / len(values), span_days)
         latest_used = (
             points[-1][0] if latest_used is None else max(latest_used, points[-1][0])
         )
+        if cached and cached[1]:
+            oldest_fetched = min(oldest_fetched, cached[1]) if oldest_fetched else cached[1]
     if latest_used is None:
         return None
     return OnchainFlows(
         series=series,
         available_at=latest_used.isoformat(timespec="seconds"),
-        fetched_at=fetched_at,
+        fetched_at=oldest_fetched or datetime.now(UTC).isoformat(timespec="seconds"),
     )
 
 
@@ -211,7 +255,8 @@ def render_onchain_block(data: OnchainFlows | None) -> str:
     if data is None:
         return (
             "- **On-chain flows**: capability absent — the blockchain.info "
-            "charts vendor returned no usable points (network/parse failure); "
+            "charts vendor returned no usable points (vendor unreachable, or "
+            "the replay date predates the vendor's trailing 30-day window); "
             "no on-chain context is available for this run."
         )
     parts: list[str] = []
@@ -221,10 +266,13 @@ def render_onchain_block(data: OnchainFlows | None) -> str:
         if entry is None:
             parts.append(f"{label}: unavailable ({note})")
             continue
-        instant, value, mean = entry
+        instant, value, mean, span_days = entry
+        # The ACTUAL span the mean covered — the vendor's window is anchored
+        # at fetch-time NOW, so a PIT-filtered replay sees fewer days than
+        # the nominal "30d" and must not mislabel the statistic.
         parts.append(
             f"{label}: {value:,.0f} latest ({instant.strftime('%Y-%m-%d')}; "
-            f"30d mean {mean:,.0f}; {note})"
+            f"{span_days}d mean {mean:,.0f}; {note})"
         )
     header = (
         f"- **On-chain flows** ({data.source}, PIT chart points; as of "

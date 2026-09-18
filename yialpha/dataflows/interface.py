@@ -550,9 +550,12 @@ def route_to_vendor(method: str, *args: Any, _qualifier: str = "", **kwargs: Any
         # A core-category call returned data — the success side of the data
         # vacuum verdict (router successes only; direct-connect tools do not
         # participate). Data served from a vendor's stale disk cache also
-        # lands here: the data exists, so it is not a vacuum.
-        if category not in OPTIONAL_CATEGORIES:
-            quality.record_success(method)
+        # lands here: the data exists, so it is not a vacuum. Perp price-book
+        # engines count as core even inside optional categories
+        # (quality.is_perp_core_method); _qualifier keys the success at the
+        # same granularity as the sentinel it may forgive.
+        if category not in OPTIONAL_CATEGORIES or quality.is_perp_core_method(method):
+            quality.record_success(method, qualifier=_qualifier)
         return result
 
     # If any vendor reported "no data", the symbol is genuinely unavailable.

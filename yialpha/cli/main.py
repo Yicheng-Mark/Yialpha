@@ -1089,7 +1089,11 @@ def _apply_batch_worker_override(config: dict, workers: int | None) -> dict:
 
 
 def _store_cli_decision(
-    graph: YiAlphaGraph, ticker: str, trade_date: str, final_state: dict
+    graph: YiAlphaGraph,
+    ticker: str,
+    trade_date: str,
+    final_state: dict,
+    asset_type: str | None = None,
 ) -> None:
     """Persist the streamed run's decision for deferred reflection.
 
@@ -1098,6 +1102,9 @@ def _store_cli_decision(
     KeyError right before the report is displayed, crashing the UI at the
     finish line. An absent/empty decision still gets stored (keeps the
     memory-log contract) but is logged at WARNING so the gap is observable.
+    ``asset_type`` tags the entry (``asset=crypto_perp``) so perp and spot
+    lessons on the SAME ticker stay separated — and so deferred resolution
+    prices the outcome on the venue the decision actually traded.
     """
     decision = final_state.get("final_trade_decision") or ""
     if not decision:
@@ -1108,7 +1115,10 @@ def _store_cli_decision(
             trade_date,
         )
     graph.memory_log.store_decision(
-        ticker=ticker, trade_date=trade_date, final_trade_decision=decision
+        ticker=ticker,
+        trade_date=trade_date,
+        final_trade_decision=decision,
+        asset_type=asset_type,
     )
 
 
@@ -1268,12 +1278,25 @@ def run_analysis(checkpoint: bool | None = None, asset_type: str = "auto"):
         from yialpha.dataflows import run_scope
 
         run_scope.ensure_run_scope()
+        # And the V2.1/V2.2 record stage (ledger run-context bind + run-row
+        # registration + regime compute). Without this mirror, prediction
+        # capture no-ops, submit_prediction returns "no active capture"
+        # noise into the tool loop, and the overlay's ticket linkage finds
+        # no run context — an interactive perp run recorded nothing while
+        # its config flags said it should. Bound BEFORE streaming:
+        # predictions are captured during analyst execution.
+        ledger_run_id, regime_run_id = graph._bind_run_record_stage(  # noqa: SLF001 -- mirror _run_graph's run contract
+            selections["ticker"],
+            selections["analysis_date"],
+            selections["asset_type"],
+        )
         # Resolve the instrument identity once here so all agents anchor to
         # the real company (#814); the CLI builds state directly rather than
         # going through propagate(), so this must happen on the CLI path too.
         graph._resolve_pending_entries(  # noqa: SLF001 -- mirror propagate's run contract
             selections["ticker"],
             as_of_date=str(selections["analysis_date"]),
+            asset_type=selections["asset_type"],
         )
         past_context = graph.memory_log.get_past_context(
             selections["ticker"],
@@ -1410,12 +1433,22 @@ def run_analysis(checkpoint: bool | None = None, asset_type: str = "auto"):
 
         # The interactive path streams the graph directly for live UI updates,
         # so apply the same post-processing contract as YiAlphaGraph.propagate
-        # before updating, displaying, or saving report sections.
+        # before updating, displaying, or saving report sections. asset_type
+        # routes the overlay's price source AND gates the perp machinery
+        # (ticket / leverage / funding gate / fair-value bridge): the default
+        # "stock" used to silently void all of it on interactive perp runs.
         final_state = graph._apply_risk_overlay(  # noqa: SLF001
             selections["ticker"],
             selections["analysis_date"],
             final_state,
             portfolio_state=None,
+            asset_type=selections["asset_type"],
+        )
+        # Key-presence is the "this run was recorded" signal downstream —
+        # the shared stamping half of the record-stage contract
+        # (_run_graph stamps through the same method after its own overlay).
+        graph._stamp_run_record_ids(  # noqa: SLF001 -- shared seam
+            final_state, ledger_run_id, regime_run_id,
         )
         # Land the same on-disk evidence a propagate() run produces
         # (full_states_log_<date>.json + the data_quality block on the state)
@@ -1426,7 +1459,8 @@ def run_analysis(checkpoint: bool | None = None, asset_type: str = "auto"):
         )
         graph.curr_state = final_state
         _store_cli_decision(
-            graph, selections["ticker"], selections["analysis_date"], final_state
+            graph, selections["ticker"], selections["analysis_date"], final_state,
+            asset_type=selections["asset_type"],
         )
 
         # Update all agent statuses to completed

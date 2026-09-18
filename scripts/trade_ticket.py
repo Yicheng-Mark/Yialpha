@@ -117,13 +117,16 @@ def detect_asset_type(ticker: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _fnum(s) -> float | None:
-    """从字符串里抠出第一个数字（含千分位/逗号/负号/小数）。"""
+    """从字符串里抠出第一个数字（含千分位/逗号/负号/小数/科学计数法）。"""
     if s is None:
         return None
     s = str(s)
     # 先抓"数字串（允许内嵌逗号）"，再去掉逗号转 float。
     # 用 [\d,]* 兼容 "1,234.56" / "65,000.0" / "65000.0"，且不会因 {1,3} 截断无逗号大数。
-    m = re.search(r"-?\d[\d,]*\.?\d*", s)
+    # (?:[eE][-+]?\d+)? 兼容科学计数法：overlay 用 %g 渲染价格，低于 1e-4
+    # 时输出 "1.14e-05"（PEPEUSDT 级微价合约的止损/入场），旧字符类在 e 处
+    # 截断会把止损解析成 1.14——名义本金/TP/爆仓价全部差 5 个数量级。
+    m = re.search(r"-?\d[\d,]*\.?\d*(?:[eE][-+]?\d+)?", s)
     if not m:
         return None
     try:
@@ -192,6 +195,12 @@ def parse_pm_decision(md: str) -> dict:
         out["ovl_target_weight"] = _fnum(tw)  # 百分比数值
     out["ovl_stop"] = _fnum(ovl(r"Stop Loss")) if ovl(r"Stop Loss") else None
     out["ovl_entry_ref"] = _fnum(ovl(r"Entry Reference")) if ovl(r"Entry Reference") else None
+    # 永续专属 bullet：overlay 只在 crypto_perp 运行渲染建议杠杆/爆仓价，
+    # 现货 overlay 没有——这是现货报告拿到 perp 杠杆建议误诊的判别器。
+    out["ovl_is_perp"] = (
+        ovl(r"Suggested Leverage") is not None
+        or ovl(r"Est\. Liquidation Price") is not None
+    )
     dr = ovl(r"Drawdown Regime")
     if dr:
         mm = re.search(r"(normal|caution|no_new|hard_stop)", dr, re.I)
@@ -391,7 +400,15 @@ def build_ticket(report_dir: Path, capital: float, profile: str) -> dict:
 def _money(x, unit=""):
     if x is None:
         return "—"
-    s = f"{x:,.2f}" if abs(x) >= 1000 else f"{x:,.4f}".rstrip("0").rstrip(".")
+    # %g 语义（有效数字），三档适配：大数千分位两位、常规 4 位小数、
+    # 微价（<1e-3，PEPEUSDT 级合约）用科学计数法——.2f/.4f 会把 1.14e-5
+    # 显示成 "$0"。
+    if abs(x) >= 1000:
+        s = f"{x:,.2f}"
+    elif abs(x) >= 1e-3:
+        s = f"{x:,.4f}".rstrip("0").rstrip(".")
+    else:
+        s = f"{x:.4g}"
     return f"{unit}{s}"
 
 
@@ -453,13 +470,19 @@ def render_ticket(t: dict) -> str:
     for i, tp in enumerate(t["take_profits"], 1):
         tag = ["1.5R（首笔）", "3R（主仓）", "5R（尾仓）"][i - 1] if i <= 3 else ""
         lines.append(f"| 止盈 TP{i} | **{_money(tp)}** | {tag} |")
-    # 结构位参考（不钳 TP，只提示可能的遇阻/支撑）
+    # 结构位参考（不钳 TP，只提示可能的遇阻/支撑）。空生成器防护：
+    # 突破叙事下可能所有已解析阻力都低于入场价（或支撑都高于入场价），
+    # min()/max() 会抛 ValueError 掀翻整张单——此时如实跳过参考行。
     if d == "long" and t["resistances"]:
-        r = min(v for v in t["resistances"] if v > t["entry"])
-        lines.append(f"| 结构参考·最近阻力 | {_money(r)} | 注意 TP 可能在此之前遇阻（突破则看下一档） |")
+        above = [v for v in t["resistances"] if v > t["entry"]]
+        if above:
+            r = min(above)
+            lines.append(f"| 结构参考·最近阻力 | {_money(r)} | 注意 TP 可能在此之前遇阻（突破则看下一档） |")
     if d == "short" and t["supports"]:
-        s = max(v for v in t["supports"] if v < t["entry"])
-        lines.append(f"| 结构参考·最近支撑 | {_money(s)} | 注意 TP 可能在此之前企稳（跌破则看下一档） |")
+        below = [v for v in t["supports"] if v < t["entry"]]
+        if below:
+            s = max(below)
+            lines.append(f"| 结构参考·最近支撑 | {_money(s)} | 注意 TP 可能在此之前企稳（跌破则看下一档） |")
     if t["price_target_pm"]:
         lines.append(f"| PM 目标价 | {_money(t['price_target_pm'])} | 组合经理给的参考 |")
     if t["liquidation_price"] is not None:

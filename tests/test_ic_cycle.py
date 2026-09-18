@@ -136,7 +136,7 @@ def test_export_crypto_perp_uses_binance_venue_and_suffix(tmp_path, monkeypatch)
     calls: list[dict] = []
 
     def fake_frame(symbol, start, end, interval="1d", venue="binance_perp",
-                   price_type="last"):
+                   price_type="last", closed_as_of=None):
         calls.append({"symbol": symbol, "start": start, "end": end,
                       "venue": venue})
         return _binance_frame()

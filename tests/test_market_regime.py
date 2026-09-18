@@ -145,7 +145,8 @@ class TestAssetAwareRegimeVenue:
         seen: dict = {}
 
         def fake_klines(symbol, start, end, interval="1d",
-                        venue="binance_perp", price_type="last"):
+                        venue="binance_perp", price_type="last",
+                        closed_as_of=None):
             seen["venue"] = venue
             return _perp_frame()
 
@@ -168,7 +169,8 @@ class TestAssetAwareRegimeVenue:
         seen: dict = {}
 
         def fake_klines(symbol, start, end, interval="1d",
-                        venue="binance_spot", price_type="last"):
+                        venue="binance_spot", price_type="last",
+                        closed_as_of=None):
             seen["venue"] = venue
             return _perp_frame()
 

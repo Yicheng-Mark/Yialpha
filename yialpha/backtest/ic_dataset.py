@@ -74,14 +74,18 @@ def build_ic_frame(
         else None
     )
     if crypto_venue is not None:
-        from yialpha.dataflows.binance import binance_klines_frame
+        from yialpha.dataflows.binance import _now_ms, binance_klines_frame
         from yialpha.dataflows.vol_estimators import CRYPTO_TRADING_DAYS_PER_YEAR
 
         # Wide lookback so SMA-200 (and the rolling windows behind derived
-        # features) are warm at the first scored row.
+        # features) are warm at the first scored row. closed bars only: the
+        # exported forward returns feed the prune verdict — a forming bar
+        # scores the boundary rows against a price that keeps moving until
+        # 23:59:59Z (same seam accuracy/engine use).
         start = (pd.Timestamp(as_of) - pd.Timedelta(days=1100)).strftime("%Y-%m-%d")
         raw = binance_klines_frame(
             ticker, start, as_of, interval="1d", venue=crypto_venue,
+            closed_as_of=_now_ms(),
         )
         data = raw.reset_index()  # restore the "Date" column shape
         derived_kwargs = {"periods_per_year": CRYPTO_TRADING_DAYS_PER_YEAR}

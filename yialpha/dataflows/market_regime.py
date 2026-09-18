@@ -99,12 +99,18 @@ def _load_regime_ohlcv(
         return load_ohlcv(symbol, curr_date)
     from datetime import datetime, timedelta
 
-    from .binance import binance_klines_frame
+    from .binance import _now_ms, binance_klines_frame
 
     lookback = (
         datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=500)
     ).strftime("%Y-%m-%d")
-    frame = binance_klines_frame(symbol, lookback, curr_date, "1d", venue, "last")
+    # closed bars only: the turbulence reading is advisory evidence in the
+    # risk debate — a forming bar would feed an intraday partial close into
+    # the 252d rolling-z computation (same seam the regime stage uses).
+    frame = binance_klines_frame(
+        symbol, lookback, curr_date, "1d", venue, "last",
+        closed_as_of=_now_ms(),
+    )
     # binance_klines_frame is Date-INDEXED; load_ohlcv returns Date as a
     # COLUMN — the regime components (sort_values("Date"), stockstats wrap)
     # consume the Yahoo shape, so normalise here rather than at every

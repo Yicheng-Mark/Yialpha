@@ -615,11 +615,14 @@ class YiAlphaGraph:
                 # absence must reach the quality chain — DEGRADED_CRITICAL →
                 # ticket NO_TRADE — instead of vanishing into a "Stop-loss
                 # not set" warning on an otherwise-tradable-looking report.
+                # KIND_CORE_ERROR (not optional-unavailable) so
+                # summarize_quality's core_sentinel_count sees it too —
+                # run_robust's DEGRADED verdict reads that counter.
                 from yialpha.dataflows import quality as _quality
 
                 _quality.record_sentinel(
                     "get_binance_klines",
-                    _quality.KIND_OPTIONAL_UNAVAILABLE,
+                    _quality.KIND_CORE_ERROR,
                     f"{ticker}: overlay price/ATR unavailable for {trade_date}: "
                     f"{type(exc).__name__}: {exc}",
                 )
@@ -631,6 +634,9 @@ class YiAlphaGraph:
         Mark is a CORE price leg on a perp run (liquidations trigger on it):
         a fetch failure records the same core sentinel the bundle's price
         legs do, so a decision without its mark basis cannot pass as clean.
+        KIND_CORE_ERROR keeps summarize_quality's core_sentinel_count honest
+        (run_robust's DEGRADED verdict reads it), matching the classify tier
+        the method name already produces.
         """
         try:
             return _memoized_mark_close(ticker, str(trade_date))
@@ -641,7 +647,7 @@ class YiAlphaGraph:
 
             _quality.record_sentinel(
                 "get_binance_klines",
-                _quality.KIND_OPTIONAL_UNAVAILABLE,
+                _quality.KIND_CORE_ERROR,
                 f"{ticker}: overlay mark-price close unavailable for {trade_date}: "
                 f"{type(exc).__name__}: {exc}",
             )
@@ -767,10 +773,14 @@ class YiAlphaGraph:
                 " (live forming candle; ATR on completed bars only)"
             )
         if decision.stop_loss is not None:
-            overlay += f"- **Stop Loss**: {decision.stop_loss:.2f}\n"
+            # %g (significant digits), not .2f: USDT-M carries ~1e-5-price
+            # contracts where .2f renders the two most safety-relevant
+            # numbers on the report as "0.00" (same magnitude class the
+            # take_profits fix in this batch addressed).
+            overlay += f"- **Stop Loss**: {decision.stop_loss:.6g}\n"
         if decision.entry_price is not None:
             overlay += (
-                f"- **Entry Reference**: {decision.entry_price:.2f}"
+                f"- **Entry Reference**: {decision.entry_price:.6g}"
                 f"{forming_price_note}\n"
             )
         # A sized position with no stop-loss is the silent-degradation signal:
@@ -1714,7 +1724,11 @@ class YiAlphaGraph:
         try:
             from yialpha.backtest.engine import _binance_funding_provider
 
-            start = (dt - timedelta(days=7)).strftime("%Y-%m-%d")
+            # 7 days END-INCLUSIVE (start 6 back): dt-7 spanned 8 calendar
+            # days (24 settlements at 8h) and inflated the /7*365 annualized
+            # funding the risk gate and ticket cost model read by ~14% —
+            # same off-by-one the perp bundle's _fetch_funding carried.
+            start = (dt - timedelta(days=6)).strftime("%Y-%m-%d")
             series = _binance_funding_provider(ticker, start, trade_date)
             if series is None or series.empty:
                 return None
@@ -1748,6 +1762,7 @@ class YiAlphaGraph:
         self, ticker: str, trade_date: str, holding_days: int = 5,
         benchmark: str = "SPY",
         as_of_date: str | None = None,
+        asset_type: str | None = None,
     ) -> tuple[float | None, float | None, int | None]:
         """Fetch raw and alpha return for ticker over holding_days from trade_date.
 
@@ -1760,18 +1775,22 @@ class YiAlphaGraph:
         standalone ``memory-resolve`` CLI runs the same resolution without a
         graph instance, so the implementation lives where both callers share
         it (extracted verbatim; the graph's tests pin the semantics).
+        ``asset_type`` routes the asset leg to its own venue (crypto_perp /
+        crypto_spot price on Binance klines, not the Yahoo spot proxy).
         """
         from yialpha.accuracy import fetch_returns_yf
 
         return fetch_returns_yf(
             ticker, trade_date,
             benchmark=benchmark, holding_days=holding_days, as_of_date=as_of_date,
+            asset_type=asset_type,
         )
 
     def _resolve_pending_entries(
         self,
         ticker: str,
         as_of_date: str | None = None,
+        asset_type: str | None = None,
     ) -> None:
         """Resolve pending log entries for ticker at the start of a new run.
 
@@ -1781,7 +1800,9 @@ class YiAlphaGraph:
 
         Trade-off: only same-ticker entries are resolved per run.  Entries for
         other tickers accumulate until that ticker is run again — or until
-        ``yialpha memory-resolve`` sweeps them.
+        ``yialpha memory-resolve`` sweeps them. ``asset_type`` is only the
+        FALLBACK pricing venue for legacy untagged entries — an entry's own
+        ``asset=`` tag (perp vs spot) always outranks it.
         """
         from yialpha.graph.memory_resolution import resolve_pending_entries
 
@@ -1791,6 +1812,7 @@ class YiAlphaGraph:
             ticker,
             benchmark=self._resolve_benchmark(ticker),
             as_of_date=as_of_date,
+            asset_type=asset_type,
         )
 
     def resolve_instrument_context(
@@ -1867,7 +1889,11 @@ class YiAlphaGraph:
             warm_equity_perp_bases()
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
-        self._resolve_pending_entries(company_name, as_of_date=str(trade_date))
+        # asset_type is the fallback venue for legacy untagged entries — a
+        # tagged perp entry routes on its own asset= tag either way.
+        self._resolve_pending_entries(
+            company_name, as_of_date=str(trade_date), asset_type=asset_type,
+        )
 
         # Recompile with a checkpointer if the user opted in.
         if self.config.get("checkpoint_enabled"):
@@ -1980,50 +2006,43 @@ class YiAlphaGraph:
             logger.info("%s", tracker.format_summary())
         return final_state
 
-    def _run_graph(self, company_name, trade_date, asset_type: str = "stock", portfolio_state=None):
-        """Execute the graph and write the resulting state to disk and memory log."""
-        # Reset per-node perf telemetry so this run's node_perf_<date>.json
-        # reflects only this run (graph instances are reused across tickers in
-        # batch mode). No-op when telemetry is off.
-        if self.perf_tracker is not None:
-            self.perf_tracker.reset()
+    @staticmethod
+    def _stamp_run_record_ids(
+        final_state: dict, ledger_run_id: str | None, regime_run_id: str | None,
+    ) -> None:
+        """Stamp the record-stage ids onto the final state (shared seam).
 
-        # Pin the analysis date for the PIT clamp in the data vendor layer
-        # (get_stock_data / get_binance_klines clamp their fetch window to it so
-        # a backtest never sees rows after the analysis date). The batch runner
-        # copies the context into each worker via submit_with_context, so this
-        # crosses the ThreadPoolExecutor boundary correctly. Live runs (no
-        # explicit date) leave it unset = no-op pass-through.
-        set_analysis_date(str(trade_date)) if str(trade_date) else set_analysis_date(None)
+        The finalize half of the record-stage contract: key PRESENCE (not a
+        null value) is the downstream "this run was recorded" signal. Both
+        entrances (``_run_graph`` after its overlay, the CLI streamed path
+        after its own) stamp through this one method so the contract has a
+        single implementation — hand-mirrored copies of it are exactly how
+        the interactive path's record stage rotted before.
+        """
+        if ledger_run_id:
+            final_state["run_id"] = ledger_run_id
+        if regime_run_id:
+            final_state["regime_id"] = regime_run_id
 
-        # Bind the data-quality event accumulator in THIS (parent) context
-        # before the graph runs: langgraph executes node tasks inside copied
-        # contexts, so a list first created inside a node (via record_sentinel)
-        # would never be visible to _log_state afterwards. Bound here, every
-        # node context inherits the same list object and appends to it. Fresh
-        # per run — a crashed prior run in the same context cannot leak events.
-        from yialpha.dataflows import quality
+    def _bind_run_record_stage(
+        self, company_name: str, trade_date, asset_type: str,
+    ) -> tuple[str | None, str | None]:
+        """V2.1/V2.2 record stage: bind ledger context, register run, regime.
 
-        quality.ensure_run_context()
-        # Fresh per-run Tavily search budget (same ContextVar semantics as the
-        # quality ledger above): a worker process serving many runs must not
-        # carry one run's spent web-search calls into the next.
-        from yialpha.dataflows import tavily as tavily_vendor
-
-        tavily_vendor.reset_run_budget()
-        # Fresh per-run bundle/news prefetch scope: the LLM tool loop re-enters
-        # analyst nodes, and the deterministic prefetches must fetch exactly
-        # ONCE per run — not once per tool-call round, and never one run's
-        # live snapshot carried into the next (same ContextVar contract as
-        # the quality ledger and the Tavily budget).
-        from yialpha.dataflows import run_scope
-
-        # Start COLD: a prior run that ended abnormally (or whose _log_state
-        # was replaced by a stub) could leave a scope bound; ensure alone
-        # would keep serving that stale snapshot.
-        run_scope.reset_run_scope()
-        run_scope.ensure_run_scope()
-
+        Extracted verbatim from ``_run_graph`` so the interactive CLI's
+        streamed path (which bypasses ``_run_graph`` and streams
+        ``graph.stream`` directly for its live UI) binds the SAME run
+        contract: without it, ``begin_prediction_capture`` no-ops, every
+        ``submit_prediction`` call returns "no active capture" noise into
+        the tool loop, and ``_link_ticket_to_ledger`` finds no run context —
+        an interactive perp run recorded nothing while its config flags
+        said it should. Returns ``(ledger_run_id, regime_run_id)``; both
+        None when the record stage is off or failed (fail-soft — recording
+        must never break the run it describes). Call BEFORE the graph runs
+        (predictions are captured during analyst execution) and stamp the
+        ids onto the final state afterwards (key-presence is the downstream
+        "this run was recorded" signal).
+        """
         # V2.1 record stage: bind the ledger run context (one run_id for the
         # whole run, inherited by every node task) and register the run row.
         # Flag-gated — off means the entire ledger pipeline (evidence rows,
@@ -2147,6 +2166,60 @@ class YiAlphaGraph:
                         exc_info=True,
                     )
                     regime_run_id = None
+        return ledger_run_id, regime_run_id
+
+    def _run_graph(self, company_name, trade_date, asset_type: str = "stock", portfolio_state=None):
+        """Execute the graph and write the resulting state to disk and memory log."""
+        # Reset per-node perf telemetry so this run's node_perf_<date>.json
+        # reflects only this run (graph instances are reused across tickers in
+        # batch mode). No-op when telemetry is off.
+        if self.perf_tracker is not None:
+            self.perf_tracker.reset()
+
+        # Pin the analysis date for the PIT clamp in the data vendor layer
+        # (get_stock_data / get_binance_klines clamp their fetch window to it so
+        # a backtest never sees rows after the analysis date). The batch runner
+        # copies the context into each worker via submit_with_context, so this
+        # crosses the ThreadPoolExecutor boundary correctly. Live runs (no
+        # explicit date) leave it unset = no-op pass-through.
+        set_analysis_date(str(trade_date)) if str(trade_date) else set_analysis_date(None)
+
+        # Bind the data-quality event accumulator in THIS (parent) context
+        # before the graph runs: langgraph executes node tasks inside copied
+        # contexts, so a list first created inside a node (via record_sentinel)
+        # would never be visible to _log_state afterwards. Bound here, every
+        # node context inherits the same list object and appends to it. Fresh
+        # per run — a crashed prior run in the same context cannot leak events.
+        from yialpha.dataflows import quality
+
+        quality.ensure_run_context()
+        # Fresh per-run Tavily search budget (same ContextVar semantics as the
+        # quality ledger above): a worker process serving many runs must not
+        # carry one run's spent web-search calls into the next.
+        from yialpha.dataflows import tavily as tavily_vendor
+
+        tavily_vendor.reset_run_budget()
+        # Fresh per-run bundle/news prefetch scope: the LLM tool loop re-enters
+        # analyst nodes, and the deterministic prefetches must fetch exactly
+        # ONCE per run — not once per tool-call round, and never one run's
+        # live snapshot carried into the next (same ContextVar contract as
+        # the quality ledger and the Tavily budget).
+        from yialpha.dataflows import run_scope
+
+        # Start COLD: a prior run that ended abnormally (or whose _log_state
+        # was replaced by a stub) could leave a scope bound; ensure alone
+        # would keep serving that stale snapshot.
+        run_scope.reset_run_scope()
+        run_scope.ensure_run_scope()
+
+        # V2.1/V2.2 record stage: ledger run-context binding + run-row
+        # registration + regime compute, shared verbatim with the interactive
+        # CLI's streamed path (which streams graph.stream directly instead of
+        # going through _run_graph — without this call its predictions would
+        # never record and its tickets would never mirror).
+        ledger_run_id, regime_run_id = self._bind_run_record_stage(
+            company_name, trade_date, asset_type,
+        )
 
         try:
             # Initialize state — inject memory log context for PM and the
@@ -2206,14 +2279,11 @@ class YiAlphaGraph:
                 asset_type=asset_type,
             )
 
-            # V2.1: the ledger run id rides on state — key presence (not a
-            # null value) is the "this run was recorded" signal downstream.
-            if ledger_run_id:
-                final_state["run_id"] = ledger_run_id
-            # V2.2: same key-presence contract for the regime id (present
-            # only when the regime stage computed and stored a state).
-            if regime_run_id:
-                final_state["regime_id"] = regime_run_id
+            # V2.1/V2.2: the record-stage ids ride on state — key presence
+            # (not a null value) is the "this run was recorded" signal
+            # downstream; the CLI streamed path stamps through the same
+            # shared seam after its own overlay.
+            self._stamp_run_record_ids(final_state, ledger_run_id, regime_run_id)
 
             # Store current state for reflection.
             self.curr_state = final_state

@@ -179,15 +179,20 @@ def _binance_perp_price_provider(price_type: str = "last"):
     (BTC-USD) — wrong instrument, wrong basis. This provider prices and marks
     on the contract the strategy actually trades, via the shared PIT-clamped
     data layer; ``price_type="mark"`` serves the mark-price klines Binance
-    liquidates against.
+    liquidates against. ``closed_as_of`` drops the current UTC day's forming
+    bar: a backtest whose buffered end date touches today would otherwise
+    mark the final equity point (and possibly fill a decision) on an
+    intraday partial close — same seam outcome_compute._perp_close_series
+    and accuracy._dated_close use.
     """
 
     def provider(ticker: str, start: str, end: str) -> pd.Series:
-        from ..dataflows.binance import binance_klines_frame
+        from ..dataflows.binance import _now_ms, binance_klines_frame
 
         df = binance_klines_frame(
             ticker, start, end, interval="1d", venue="binance_perp",
             price_type=price_type,
+            closed_as_of=_now_ms(),
         )
         s = df["Close"].dropna()
         s.index = s.index.strftime("%Y-%m-%d")
@@ -209,11 +214,12 @@ def _binance_perp_extremes_provider(price_type: str = "last"):
     """
 
     def provider(ticker: str, start: str, end: str) -> tuple[pd.Series, pd.Series]:
-        from ..dataflows.binance import binance_klines_frame
+        from ..dataflows.binance import _now_ms, binance_klines_frame
 
         df = binance_klines_frame(
             ticker, start, end, interval="1d", venue="binance_perp",
             price_type=price_type,
+            closed_as_of=_now_ms(),
         )
         lows = df["Low"].dropna()
         highs = df["High"].dropna()

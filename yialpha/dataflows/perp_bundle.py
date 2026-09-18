@@ -45,6 +45,7 @@ from .binance import (
     binance_klines_frame,
     stock_perp_underlying,
 )
+from .config import submit_with_context
 from .utils import is_historical_date
 
 logger = logging.getLogger(__name__)
@@ -196,7 +197,11 @@ def _fetch_funding(symbol: str, end_date: str) -> dict[str, Any]:
     from .symbol_utils import normalize_symbol_for_venue
 
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
-    start, end, start_ms, end_ms = _window(7, end_date)
+    # Exactly 7 calendar days END-INCLUSIVE (start 6 days back): the old
+    # ``_window(7, ...)`` spanned 8 days (24 settlements at the 8h cadence)
+    # and ``sum / 7`` overstated both ``sum_7d`` and the annualized carry by
+    # a fixed ~14%. The render fixture's 21-settlement semantics pin this.
+    start, end, start_ms, end_ms = _window(6, end_date)
     try:
         rows = _http_get(
             "/fapi/v1/fundingRate",
@@ -578,7 +583,12 @@ def fetch_perp_market_bundle(symbol: str, end_date: str) -> dict[str, Any]:
         "live_run": live,
     }
     with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {key: pool.submit(fn) for key, fn in jobs}
+        # submit_with_context copies this (parent) context into each worker:
+        # get_config()'s transport flags / get_analysis_date() would otherwise
+        # re-initialize from defaults inside the bundle legs (the contract
+        # every sibling fan-out — fundamentals_bundle, analyst_fanout, news —
+        # already follows).
+        futures = {key: submit_with_context(pool, fn) for key, fn in jobs}
         for key, future in futures.items():
             try:
                 bundle[key] = future.result(timeout=60)
@@ -588,14 +598,26 @@ def fetch_perp_market_bundle(symbol: str, end_date: str) -> dict[str, Any]:
                     "reason": f"{type(exc).__name__}: {exc}",
                 }
 
+    def _leg_ok(prices: dict[str, Any], leg: str) -> bool:
+        comp = prices.get(leg)
+        return isinstance(comp, dict) and comp.get("status") == STATUS_OK
+
     prices = bundle.get("prices") or {}
     if prices.get("core_complete") is not True:
+        # Leg status, not key presence: a FAILED leg also writes its key
+        # (with STATUS_UNAVAILABLE), and the old ``'last' in prices`` /
+        # ``prices.get('mark')`` truthiness reported failed legs as "ok" —
+        # a self-contradictory evidence string in full_states_log.
+        # KIND_CORE_ERROR (not optional-unavailable) so the run_robust
+        # DEGRADED counter sees the bundle's price-leg failure exactly as
+        # it sees the overlay's — same outage, same kind, whichever call
+        # site caught it.
         quality.record_sentinel(
             "get_binance_klines",
-            quality.KIND_OPTIONAL_UNAVAILABLE,
+            quality.KIND_CORE_ERROR,
             f"{symbol}: perp bundle core price legs incomplete: "
-            f"last={'ok' if 'last' in prices else 'missing'}, "
-            f"mark={'ok' if prices.get('mark') else 'missing'}",
+            f"last={'ok' if _leg_ok(prices, 'last') else 'missing'}, "
+            f"mark={'ok' if _leg_ok(prices, 'mark') else 'missing'}",
         )
     # Auxiliary components enter the ledger too (as optional-unavailable —
     # auxiliary by the per-method matrix, never a veto): before this, a run

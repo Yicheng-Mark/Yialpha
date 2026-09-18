@@ -62,6 +62,7 @@ def resolve_pending_entries(
     benchmark: str = "SPY",
     as_of_date: str | None = None,
     holding_days: int = 5,
+    asset_type: str | None = None,
 ) -> int:
     """Resolve pending entries for ``ticker``; returns how many were resolved.
 
@@ -70,6 +71,11 @@ def resolve_pending_entries(
     writes all updates in a single atomic batch write. Entries whose price
     data is not yet available (too recent or delisted) are skipped — and
     logged at WARNING when old enough to look permanently stuck.
+
+    Pricing routes on the ENTRY's own ``asset=`` tag (perp vs spot lessons on
+    the same ticker stay on their own venue); ``asset_type`` is the fallback
+    for legacy untagged entries (the current run's type when the caller knows
+    it, else the equity default).
     """
     from yialpha.accuracy import fetch_returns_yf
 
@@ -95,12 +101,23 @@ def resolve_pending_entries(
 
     updates = []
     for entry in pending:
+        # The entry's own venue tag outranks the run's asset type (a BTCUSDT
+        # perp decision resolves on the perp's klines even when a later spot
+        # run of the same ticker triggers the sweep), normalized through the
+        # SAME mapping verify-history uses — the legacy ``crypto`` umbrella
+        # prices as perp and a hand-edited/garbage tag degrades via ticker
+        # inference (USDT suffix → perp) instead of silently falling to the
+        # Yahoo spot leg.
+        from yialpha.accuracy import _resolve_asset_type
+
+        venue, _source = _resolve_asset_type(ticker, entry.get("asset") or asset_type)
         raw, alpha, days = fetch_returns_yf(
             ticker,
             entry["date"],
             benchmark=benchmark,
             holding_days=holding_days,
             as_of_date=cutoff_str,
+            asset_type=venue,
         )
         if raw is None:
             # Price not available yet — but if this entry is old, flag it so
@@ -121,6 +138,9 @@ def resolve_pending_entries(
             "holding_days": days,
             "reflection": reflection,
             "available_date": cutoff_str,
+            # Same-day perp AND spot entries are both legal on one ticker —
+            # the outcome must attach to the venue entry it was priced for.
+            "asset_type": entry.get("asset"),
         })
 
     if updates:

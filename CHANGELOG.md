@@ -10,6 +10,232 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Perp bug-fix sweep (2026-09-19, 14 fixes; crypto_perp focus).** Four
+  parallel code reviews + runtime smokes across the perp data / risk /
+  accuracy / CLI layers; every fix carries a regression pin in
+  `tests/test_perp_bugfix_regressions.py`.
+  - **P1 — interactive perp runs ran the risk overlay as `asset_type="stock"`**
+    (`cli/main.py` never forwarded `selections["asset_type"]`): the entire
+    perp machinery (ticket / leverage / liquidation / funding gate /
+    fair-value bridge / forming-candle note) was silently void on the only
+    entrance that can reach a perp run interactively, and
+    `price_at_decision` anchored on the Yahoo spot series.
+  - **P1 — one recoverable klines failure permanently vetoed the ticket
+    NO_TRADE.** A model typo (`interval="4H"` → instructive sentinel →
+    retry `"4h"` → data) left an append-only core sentinel that
+    `classify_quality` read as DEGRADED_CRITICAL regardless of the later
+    success (the router never recorded successes for the optional Binance
+    categories). The router now records perp price-book engine successes
+    (`quality.is_perp_core_method`), and a sentinel whose own method later
+    served data classifies as auxiliary "(recovered)" — disclosed, never
+    vetoing a run whose price book exists.
+  - **Funding `sum_7d` spanned 8 days** (`_window(7)` = D−7..D inclusive →
+    24 settlements at 8h, not 21) — `sum_7d` and the annualized carry were
+    overstated ~14%; the perp bundle now requests exactly 7 days
+    end-inclusive.
+  - **Memory resolution priced perp outcomes on the Yahoo spot venue**
+    (`fetch_returns_yf` had no asset routing: BTCUSDT → BTC-USD spot, and
+    tokenized-stock perps like MUUSDT never resolved at all). Routing now
+    keys on the entry's own `asset=` tag (venue identity), falling back to
+    the run's asset type; the crypto leg fetches the venue it traded with
+    the closed-bars seam.
+  - **Boundary-day scoring on the still-forming daily bar**: accuracy's
+    `_dated_close` / `forward_outcome` and the backtest engine's perp
+    price/extremes providers now pass `closed_as_of` (same seam
+    `outcome_compute._perp_close_series` already used), so an intraday
+    verify-history keeps the horizon `pending` and a backtest window
+    touching today never marks equity on a partial candle.
+  - **`take_profits` rounded to 6 decimals**, destroying the R-multiple
+    grid on micro-price USDT-M contracts (PEPEUSDT-class ~1e-5, where the
+    grid is ~9% of price) — significant-digit rounding (`_sig_digits`)
+    keeps six digits at every magnitude.
+  - **Interactive streamed path never bound the ledger run context**:
+    prediction capture no-oped ("no active capture" noise into the tool
+    loop), no run row / evidence / ticket mirror / regime id. The
+    V2.1/V2.2 record stage is extracted as
+    `YiAlphaGraph._bind_run_record_stage` and called by both `_run_graph`
+    and the CLI streamed path.
+  - **Interactive decisions stored without the venue tag** — perp/spot
+    lesson separation on the same ticker was silently void for interactive
+    runs; `_store_cli_decision` forwards `asset_type` now.
+  - **`reaches_now` used a single UTC anchor** (missed by the dual-anchor
+    fix db79063): on hosts behind UTC the live OI snapshot row was dropped
+    from runs every other gate classified live. Now keyed on the earlier
+    of `live_anchor_dates()`.
+  - **Perp bundle core-sentinel detail reported failed price legs as
+    "ok"** (key-presence instead of status check) — a self-contradictory
+    evidence string in `full_states_log`.
+  - **Perp bundle's ThreadPoolExecutor dropped the parent contextvars**
+    (bare `pool.submit`): workers re-initialized config/analysis-date from
+    defaults — latent divergence; now `submit_with_context` like every
+    sibling fan-out.
+  - **Overlay price/mark failures recorded `optional_unavailable`** while
+    their own docstrings (and run_robust's DEGRADED counter, which reads
+    `core_sentinel_count`) claim core — now `KIND_CORE_ERROR`.
+  - **Vision summary headers instructed `summary=false`** — a parameter
+    the bound tools do not expose (unexecutable instruction to the model);
+    reworded to name the config toggle.
+  - Two pre-existing test stubs widened (`fake_frame` accepts
+    `closed_as_of`), `test_memory_log` / `test_cli_quality_chain` updated
+    to pin the new call contracts.
+
+- **Round-2 self-review of the same diff (adversarial, 10 finder angles).**
+  The sweep's own fixes carried defects the green suite could not see;
+  all verified against the working tree and fixed with pins:
+  - **The bare-method "(recovered)" rule collided with the overlay's core
+    sentinels** — perp runs ALWAYS carry qualified router klines successes
+    by decision time, so the overlay's own (never-retried, unqualified)
+    price/mark failures were being downgraded to auxiliary, voiding the
+    exact NO_TRADE veto the kind upgrade claimed to preserve; an
+    index-klines success could likewise forgive a last/mark outage.
+    Recovery now keys on (method, qualifier): successes record the router's
+    `_qualifier`, an event recovers only on an exact basis match, and
+    unqualified decision-time sentinels are never matched by qualified
+    successes. `summarize_quality.core_sentinel_count` is recovery-aware
+    too, so the ticket gate and run_robust's DEGRADED verdict can no longer
+    disagree about the same event.
+  - **`_trailing_funding_total` (the risk gate's annualized-funding input)
+    had the same 8-day window** as the bundle's `_fetch_funding` — fixed to
+    7 days end-inclusive; the funding-note bullet and ticket cost model
+    read a true 7-day sum now.
+  - **The crypto cutoff clamp in `fetch_returns_yf` computed epoch-ms from
+    a naive datetime** (host-local midnight vs UTC bar closes) — extracted
+    into `_crypto_daily_frame` (UTC-everywhere, `binance._now_ms` seam)
+    shared by `_dated_close` and `fetch_returns_yf`.
+  - **The CLI streamed path's hand-mirror had already drifted within the
+    same diff**: `_resolve_pending_entries` without the new `asset_type`
+    fallback (legacy untagged perp entries priced on Yahoo), and the
+    run_id/regime_id stamping copy-pasted — the stamping half is now the
+    shared `YiAlphaGraph._stamp_run_record_ids` seam.
+  - **Memory entries' `asset=` tag forwarded raw** — legacy `crypto`
+    umbrella / hand-edited variants silently fell to the Yahoo leg; the tag
+    now normalizes through the same `_resolve_asset_type` mapping
+    verify-history uses (incl. USDT-suffix ticker inference for untagged
+    entries).
+  - **`reaches_now` re-implemented the dual-anchor predicate inline** and
+    disagreed with `is_historical_date` on future labels (live snapshot row
+    appended to a future-dated window) — now delegates to the one shared
+    predicate.
+  - **Five more live-run consumers baked the forming bar into frozen
+    state**: `regime/compute.py` (trend/realized-vol/overnight-gap +
+    spot/index basis legs of the persisted RegimeState), `market_regime.py`
+    (turbulence line), `backtest/ic_dataset.py` (exported forward returns)
+    — all on the `closed_as_of` closed-bars seam now.
+  - **Bundle core-price sentinel upgraded to `KIND_CORE_ERROR`** (same
+    outage, same kind as the overlay's — run_robust's counter no longer
+    depends on which call site caught the failure).
+  - `take_profits` significant digits widened 6 → 8 (BTC-scale TPs keep
+    sub-dollar precision instead of quantizing to whole dollars); test
+    stubs widened; the PR3 veto pin restored to a strong assertion with a
+    true comment.
+
+- **Round 3: the last deferred data-layer findings closed with live
+  evidence.**
+  - **`/futures/data` retention clamp** — live probe confirmed the server
+    REJECTS a `startTime` older than the 30-day horizon (HTTP 400 -1130),
+    no silent truncation: a wide window (an LLM echoing a 90-day start, or
+    the >500-row end-anchor putting the start ~500 days back) degraded the
+    whole OI/LSR/taker/basis call to a sentinel. `_futures_data_window` now
+    clamps the head into the retained tail with a disclosure note (the
+    same clamp its `derivatives_stress_series` sibling already carried).
+  - **Vision edge-day 404 undisclosed** — in the ~06:30 UTC
+    pre-publication window (end == yesterday, file not landed),
+    `_resolve_window`'s "exceeds available archives" note does not fire and
+    the 404ing edge day reached none of `_coverage_notes`' disclosed
+    categories: the newest, decision-adjacent day was silently absent while
+    the header named the full window. Missing START/END edge days are
+    disclosed now.
+  - **Funding cadence header inverted** — `/fapi/v1/fundingInfo` states the
+    contract's interval AS OF NOW and used to override the (ground-truth)
+    in-window settlement spacing: on a cadence-changed contract the
+    annualisation hint stamped a 2x-wrong multiplier on rows settled at the
+    old cadence. The window's own modal spacing wins whenever measurable,
+    fundingInfo remains the fallback for tiny windows, and a disagreement
+    is disclosed.
+  - **Web/overlay micro-price parsing** — the overlay bullet regexes'
+    numeric class stopped at the exponent sign, so a PEPEUSDT-class
+    liquidation price rendered as `1.07e-05` parsed as `1.07` on the web
+    KPI tile (five orders of magnitude off); the overlay's own Stop Loss /
+    Entry Reference rendered `:.2f` → "0.00" on ~1e-5 contracts. Regexes
+    accept exponent notation now and the renderer uses `%.6g`.
+  - **PM optional-qualifier validators coerced, not strict** — a junk
+    `price_target_currency` ("EUR", "USDT (Binance)") used to raise, discard
+    the WHOLE structured decision (rating → regex fallback) and silently
+    drop the fair-value bridge's target; out-of-vocab qualifiers now coerce
+    to None (#1058 semantics).
+  - **Umbrella `asset_type="crypto"` aligned with routing** — accuracy
+    scored those decisions on Binance PERP klines while the live pipeline
+    prices the umbrella on the spot series; the venue mapping now resolves
+    it as crypto_spot.
+  - **onchain_flows**: the "30d mean" label now states the span actually
+    covered (the vendor window anchors at fetch-time NOW, so replays see
+    fewer days); a replay older than the trailing window records a ledger
+    sentinel naming the STRUCTURAL gap instead of rendering "network/parse
+    failure"; per-chart failures record optional-unavailable sentinels (the
+    fifth direct-connect vendor the T0 ledger sweep missed);
+    `fetched_at` travels with the cache bytes (oldest ingredient wins)
+    instead of regenerating NOW at assembly time.
+  - Web "new analysis" form defaults/max to the HOST-LOCAL date (UTC slice
+    made local-today un-submittable ahead of UTC); zh accuracy label says
+    "天" not "交易日" (crypto horizons are calendar days); the bear
+    researcher's prompt no longer says "stock" on crypto runs.
+
+- **Known issues left open by design (round-3 review, need a layout or
+  product decision before changing)**: (1) `full_states_log_<date>.json`
+  is keyed only by ticker+date, so same-date perp AND spot runs on one
+  ticker silently overwrite each other (memory log got the `asset=` tag
+  for exactly this; the states log would need a venue-suffixed layout with
+  reader updates across web history + accuracy scanning); (2) a persisted
+  instrument-registry row can classify a run `stock_perp` while the
+  in-process `stock_perp_underlying()` resolves None (registry says
+  stock-perp, every remap/context says crypto-perp — fail-soft DEGRADED,
+  reachable when a fresh subprocess's warm fetch fails and the base is not
+  in the static seed); (3) legacy logs without `asset_type` render as
+  stock in the web UI while accuracy infers perp pricing (display-only;
+  the inference caveat never reaches the UI).
+
+- **Round 4: execution-advice path + memory-log venue invariants (final
+  review pair; the perp coverage map is closed).**
+  - **P1 — `trade_ticket._fnum` truncated exponent notation** (same drift
+    class the overlay regexes carried): the overlay now renders stop/entry
+    with `%.6g`, so a PEPEUSDT-class stop of `1.14e-05` parsed as `1.14` —
+    the execution ticket's notional/quantity/TP/liquidation outputs all off
+    by five orders of magnitude, and `rank_signals`' 盈亏比 leg contaminated
+    the same way. `_fnum` accepts exponent form; `_money`/rank `_m` render
+    sub-1e-3 prices in `%.4g` instead of "$0"/"0".
+  - **`render_ticket` crashed on breakout layouts** — a long ticket whose
+    every parsed resistance sits BELOW entry (ordinary breakout narrative)
+    made `min()` consume an empty generator and the whole script die with a
+    traceback; the structure-reference row is skipped honestly now (short
+    mirror included).
+  - **`store_decision`'s idempotency guard keyed on (date, ticker)
+    only** — the second venue's same-day decision was silently dropped,
+    defeating the asset= tag's stated purpose. The guard (and
+    `update_with_outcome` / `batch_update_with_outcomes` matching) now
+    carries the venue: same-day perp+spot entries coexist and each outcome
+    attaches to the venue it was priced for (`memory_resolution` threads
+    the entry's asset through).
+  - **`_apply_rotation` misread asset-tagged pending entries as resolved**
+    (the `endswith("| pending]")` suffix test broke when the tag grew a
+    keyed field) — the exact "unprocessed work" rotation promises to keep
+    had become droppable, and resolved-count inflation rotated genuine
+    resolved entries out early. Pending detection goes through the field
+    parser (`_is_pending`) now.
+  - **Known issues (need a product decision, not silently changed)**: (a)
+    `trade_ticket`'s USDT-suffix heuristic still labels every crypto
+    report `crypto_perp` for the ticket header — the spot/perp discriminator
+    (overlay perp-only bullets) exists but re-classing spot reports as
+    `crypto_spot` changes the user-visible ticket semantics, so it waits
+    for a call; (b) the funding gate is sign-blind for V2.4 SHORT candidates
+    in the non-default shadow/enforced portfolio-control modes (positive
+    carry penalises shorts when it should favour them, adverse carry passes
+    undampened via the disclosed transitional heuristic) — sizing-policy
+    semantics, deferred; (c) portfolio-control snapshot equity uses the
+    position value where advisory dollar shocks expect book equity
+    (advisory-only, shadow/enforced).
+
 ### Changed
 
 - **Project renamed: YiAgents → YiAlpha（弈·Alpha）.** Full rename across the

@@ -42,7 +42,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -140,16 +140,21 @@ def _normalize_rating(data: dict[str, Any]) -> str:
 def _resolve_asset_type(ticker: str, logged: Any) -> tuple[str, str]:
     """Map the log's asset_type onto a pricing venue.
 
-    ``crypto`` (the legacy umbrella value) prices as a perp — the primary
-    crypto pipeline. A missing asset_type (pre-T0-5 log) is inferred from the
-    ticker: ``USDT``-suffixed → Binance perp, else spot equity. Inference is
-    reported in the record so a misrouted legacy record is visible.
+    ``crypto`` (the umbrella value, still produced by auto-detect) prices as
+    crypto_spot — matching what the LIVE pipeline did for those runs
+    (routing maps the umbrella to crypto_spot and the graph prices it on the
+    Yahoo spot series; scoring those decisions on Binance PERP klines would
+    fold basis/funding divergence into outcomes the call never traded —
+    round-3 alignment with yialpha.graph.routing). A missing asset_type
+    (pre-T0-5 log) is inferred from the ticker: ``USDT``-suffixed → Binance
+    perp, else spot equity. Inference is reported in the record so a
+    misrouted legacy record is visible.
     """
     logged_str = str(logged or "").strip().lower()
     if logged_str in _CRYPTO_ASSET_TYPES:
         return logged_str, "logged"
     if logged_str == "crypto":
-        return "crypto_perp", "logged"
+        return "crypto_spot", "logged"
     if logged_str == "stock" or not logged_str:
         inferred = (
             "crypto_perp"
@@ -163,18 +168,49 @@ def _resolve_asset_type(ticker: str, logged: Any) -> tuple[str, str]:
 # --------------------------------------------------------------------------- #
 # Forward returns
 # --------------------------------------------------------------------------- #
+def _crypto_daily_frame(
+    ticker: str,
+    asset_type: str,
+    start: str,
+    end: str,
+    cutoff: datetime | None = None,
+) -> pd.DataFrame:
+    """Daily Binance klines for a crypto asset, pinned to CLOSED bars.
+
+    The one crypto fetch seam in this module: ``closed_as_of`` drops the
+    current UTC day's still-forming bar (crypto trades 24/7, so on the
+    horizon's boundary day the frame would otherwise carry today's intraday
+    partial close and a near-zero return's hit/miss label could flip by the
+    day's close while the report already recorded it as final). A ``cutoff``
+    additionally caps visibility at that day's UTC close — replaying
+    resolution as of an older date must not see bars closed after it. Same
+    seam outcome_compute._perp_close_series uses; UTC-everywhere (a naive
+    cutoff would shift the boundary by the host's offset).
+    """
+    from yialpha.dataflows.binance import _now_ms, binance_klines_frame
+
+    closed_ms = _now_ms()
+    if cutoff is not None:
+        closed_ms = min(
+            closed_ms,
+            int(
+                (cutoff + timedelta(days=1)).replace(tzinfo=UTC).timestamp() * 1000
+            ) - 1,
+        )
+    return binance_klines_frame(
+        ticker, start, end, interval="1d",
+        venue=f"binance_{asset_type.split('_', 1)[1]}",
+        closed_as_of=closed_ms,
+    )
+
+
 def _dated_close(
     ticker: str, asset_type: str, start: str, end: str
 ) -> pd.Series:
     """Dated close series for the asset's native venue (empty on failure)."""
     try:
         if asset_type in _CRYPTO_ASSET_TYPES:
-            from yialpha.dataflows.binance import binance_klines_frame
-
-            frame = binance_klines_frame(
-                ticker, start, end, interval="1d",
-                venue=f"binance_{asset_type.split('_', 1)[1]}",
-            )
+            frame = _crypto_daily_frame(ticker, asset_type, start, end)
             series = frame["Close"].astype(float)
             series.index = pd.to_datetime(series.index).date
             return series
@@ -225,14 +261,25 @@ def fetch_returns_yf(
     benchmark: str = "SPY",
     holding_days: int = 5,
     as_of_date: str | None = None,
+    asset_type: str | None = None,
 ) -> tuple[float | None, float | None, int | None]:
-    """Raw + alpha return over ``holding_days`` from ``trade_date`` (yfinance).
+    """Raw + alpha return over ``holding_days`` from ``trade_date``.
 
     Same semantics as ``YiAlphaGraph._fetch_returns`` (which delegates here):
     weekend-buffered window, ``as_of_date`` PIT cutoff with exclusive-end
     trimming, and ``(None, None, None)`` when either leg has no usable rows.
     Used by the memory-log resolution path so the graph and the standalone
     ``memory-resolve`` CLI cannot drift apart.
+
+    ``asset_type`` routes the ASSET leg: a crypto_perp/crypto_spot decision
+    is priced on the venue it actually traded (Binance klines, forming bar
+    dropped via ``closed_as_of`` — the same seam ``_dated_close`` uses),
+    because ``normalize_symbol`` maps BTCUSDT to the Yahoo SPOT symbol and a
+    perp entry's basis/funding divergence would otherwise fold silently into
+    the "did the call play out" number; a tokenized-stock perp (MUUSDT) is
+    not on Yahoo at all and would never resolve. ``None`` (equities, legacy
+    callers) keeps the yfinance path byte-identical. The BENCHMARK leg is
+    always yfinance — alpha is measured against the index either way.
     """
     try:
         start = datetime.strptime(trade_date, "%Y-%m-%d")
@@ -245,10 +292,14 @@ def fetch_returns_yf(
             end = min(end, cutoff + timedelta(days=1))
         end_str = end.strftime("%Y-%m-%d")
 
-        from yialpha.dataflows.symbol_utils import normalize_symbol
         from yialpha.dataflows.y_finance import get_YFin_history_cached
 
-        stock = get_YFin_history_cached(normalize_symbol(ticker), trade_date, end_str)
+        if asset_type in _CRYPTO_ASSET_TYPES:
+            stock = _crypto_daily_frame(ticker, asset_type, trade_date, end_str, cutoff)
+        else:
+            from yialpha.dataflows.symbol_utils import normalize_symbol
+
+            stock = get_YFin_history_cached(normalize_symbol(ticker), trade_date, end_str)
         bench = get_YFin_history_cached(benchmark, trade_date, end_str)
 
         if cutoff is not None:
