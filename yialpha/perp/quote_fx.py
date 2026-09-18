@@ -39,6 +39,7 @@ from datetime import UTC, datetime, timedelta
 
 from yialpha.dataflows.binance import KLINE_CLOSE_COLUMN, binance_klines_frame
 from yialpha.dataflows.disk_cache import cached_or_fetch, vendor_cache_dir
+from yialpha.dataflows.utils import live_anchor_dates
 
 logger = logging.getLogger(__name__)
 
@@ -170,23 +171,29 @@ def fetch_usdt_usd() -> QuoteFxResult | None:
 
 
 def usdt_usd_as_of(as_of: str) -> QuoteFxResult | None:
-    """Point-in-time accessor: only ``as_of == today (UTC)`` can return a rate.
+    """Point-in-time accessor: only a LIVE label (today, UTC or host-local)
+    can return a rate.
 
     The feed is LIVE-ONLY — no PIT archive of USDCUSDT closes exists — so
-    any ``as_of`` other than today UTC (earlier dates strictly, and future
-    dates equally, which can have no observation yet) returns None, and an
-    unparseable date string degrades to None rather than raising. Per the
-    frozen RFC it is FORBIDDEN to default the missing rate to 1.0: the
-    caller must disclose the conversion as unavailable. ``as_of == today``
-    delegates to :func:`fetch_usdt_usd` (whose print is today's forming
-    candle, i.e. the freshest quote available right now).
+    any ``as_of`` other than today (earlier dates strictly, and future dates
+    equally, which can have no observation yet) returns None, and an
+    unparseable date string degrades to None rather than raising. "Today"
+    accepts BOTH anchors via :func:`yialpha.dataflows.utils.live_anchor_dates`:
+    the interactive CLI labels a live run with the HOST-LOCAL date while this
+    module's own fetch/cache path anchors on UTC — on a host off UTC the two
+    disagree for one window a day, and a single-anchor gate returned None for
+    the CLI-labelled live run (fx "unavailable" for 8h/day on UTC+8). A live
+    label delegates to :func:`fetch_usdt_usd` (whose print is today's forming
+    candle, i.e. the freshest quote available right now). Per the frozen RFC
+    it is FORBIDDEN to default the missing rate to 1.0: the caller must
+    disclose the conversion as unavailable.
     """
     try:
         as_of_date = datetime.strptime(as_of, "%Y-%m-%d").replace(tzinfo=UTC).date()
     except ValueError:
         logger.warning("quote_fx: unparseable as_of %r; fx unavailable", as_of)
         return None
-    if as_of_date != datetime.now(UTC).date():
+    if as_of_date not in live_anchor_dates():
         return None
     return fetch_usdt_usd()
 

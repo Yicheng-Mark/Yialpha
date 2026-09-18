@@ -3,7 +3,7 @@ import os
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,22 @@ def is_filing_public(
     return period_end + timedelta(days=lag_days) <= as_of
 
 
+def live_anchor_dates() -> tuple[date, date]:
+    """The two date anchors a LIVE run's label may legitimately carry.
+
+    The interactive CLI defaults its analysis date to the HOST-LOCAL calendar
+    date (``datetime.now()``), while the crypto/perp data layer anchors on UTC
+    end-to-end (klines staleness, ``_futures_data_window``'s "now",
+    ``quote_fx.usdt_usd_as_of``, the vision publication cap — see
+    :func:`yialpha.dataflows.stockstats_utils._utc_today` for the same trap).
+    On any host off UTC the two anchors disagree for one calendar-window a
+    day (00:00–08:00 on UTC+8), and a single-anchor live check misclassifies
+    whichever label the other half of the pipeline produced. The two dates
+    differ by at most one day, so accepting BOTH keeps the live set exact.
+    """
+    return datetime.now().date(), datetime.now(UTC).date()
+
+
 def is_historical_date(curr_date: str | None) -> bool:
     """Return whether an explicit analysis date is not the live/current date.
 
@@ -74,6 +90,13 @@ def is_historical_date(curr_date: str | None) -> bool:
     markets, rolling 24-hour tickers, and selected positioning endpoints).
     A future label must not receive today's snapshot either, so every valid
     explicit date other than today takes the causal/date-bounded branch.
+
+    "Today" is BOTH live anchors from :func:`live_anchor_dates` (host-local
+    AND UTC): a live perp run whose label is the UTC current date must not
+    lose its live-only components (funding/premium/depth/ADL bundle legs,
+    live REST tools, web search) just because the host calendar already
+    rolled to the next date — and vice versa for a local-dated label. Any
+    other date — past or future — remains historical.
 
     Only empty/None means live mode (no as-of constraint). A NON-EMPTY but
     unparseable value (e.g. "2026/08/01" — a form an LLM can emit) cannot be
@@ -89,7 +112,7 @@ def is_historical_date(curr_date: str | None) -> bool:
         as_of = datetime.strptime(str(curr_date)[:10], "%Y-%m-%d").date()
     except (ValueError, TypeError):
         return True
-    return as_of != date.today()
+    return as_of not in live_anchor_dates()
 
 
 def overview_would_leak_future(curr_date: str | None) -> bool:

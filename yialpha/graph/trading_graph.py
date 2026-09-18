@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from contextlib import AbstractContextManager
-from datetime import UTC, datetime
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -73,7 +73,11 @@ from yialpha.agents.utils.prediction_tools import submit_prediction
 from yialpha.agents.utils.valuation_tools import get_valuation_metrics
 from yialpha.dataflows.binance import stock_perp_underlying, warm_equity_perp_bases
 from yialpha.dataflows.config import set_config
-from yialpha.dataflows.utils import safe_ticker_component, set_analysis_date
+from yialpha.dataflows.utils import (
+    live_anchor_dates,
+    safe_ticker_component,
+    set_analysis_date,
+)
 from yialpha.default_config import DEFAULT_CONFIG
 from yialpha.llm_clients import create_llm_client
 from yialpha.reporting import write_report_tree
@@ -746,11 +750,18 @@ class YiAlphaGraph:
         # Perp live runs: the last daily candle is still forming — its close
         # IS the live price, but the ATR feeding the stop/leverage math is
         # computed on completed bars only (atr_stop). Disclose the two bases
-        # so the reader does not treat them as one consistent snapshot.
+        # so the reader does not treat them as one consistent snapshot. The
+        # "live" label accepts BOTH date anchors (host-local CLI default and
+        # the venue's UTC date): crypto trades continuously, so whichever
+        # anchor the run's date carries, the newest kline row is the forming
+        # UTC candle (a single-anchor UTC compare dropped the note for
+        # local-labelled live runs in the post-local-midnight window).
         forming_price_note = ""
         if (
             asset_type == "crypto_perp"
-            and str(trade_date) == datetime.now(UTC).strftime("%Y-%m-%d")
+            and str(trade_date)[:10] in {
+                d.strftime("%Y-%m-%d") for d in live_anchor_dates()
+            }
         ):
             forming_price_note = (
                 " (live forming candle; ATR on completed bars only)"

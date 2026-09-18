@@ -118,6 +118,24 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Live-date anchors: a live perp run is no longer misclassified as a
+  historical replay in the post-local-midnight window.** The pipeline
+  carries TWO date labels — the interactive CLI mints the analysis date on
+  the host-local clock while the crypto/perp data layer anchors on UTC
+  end-to-end — and on any host off UTC the two disagree for one window a
+  day (00:00–08:00 on UTC+8). A single-anchor "is this date today" check
+  then misfired in both directions: `is_historical_date` (host-local
+  anchor) judged a UTC-labelled LIVE perp run historical, silently dropping
+  the bundle's funding/premium/depth/ADL legs, the six live REST tools and
+  web search; `quote_fx.usdt_usd_as_of` (strict UTC anchor) returned None
+  for the CLI-labelled live run, so the stock-perp fair-value bridge
+  disclosed "USDT/USD fx: UNAVAILABLE" for 8h a day. Both gates (plus the
+  overlay's forming-candle note, third instance of the same compare) now
+  accept EITHER anchor via `utils.live_anchor_dates()`; the two dates
+  differ by at most one day, so past and future labels stay historical and
+  the A-share path (whose entry dates are local-minted) is unchanged —
+  the 2026-09-05 sweep's "don't unilaterally switch to UTC" constraint is
+  respected by widening, not by re-anchoring.
 - **Vision metrics: the global (and top-trader account) long/short ratio is
   now served from the archives.** The Binance Vision metrics CSV's
   `count_`/`sum_` prefixes are legacy naming residue — every ratio column
