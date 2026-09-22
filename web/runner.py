@@ -1,6 +1,6 @@
 """Spawn ``scripts/run_robust.py`` as a subprocess and watch its progress.
 
-We never call ``propagate()`` in-process: a DeepSeek mid-response hang freezes
+We never call ``propagate()`` in-process: an LLM mid-response hang freezes
 the interpreter (``ssl.read`` cannot be interrupted) and there is no in-process
 recovery. ``run_robust`` runs each ticker in its own OS process behind a
 wall-clock watchdog with ``taskkill /F /T`` so a hang is killed and retried.
@@ -75,7 +75,7 @@ class TaskRegistry:
     def is_busy(self) -> bool:
         """True iff a task is currently in the running state.
 
-        Single-slot concurrency: VPN single connection + DeepSeek rpm + one form.
+        Single-slot concurrency: VPN single connection + LLM rpm + one form.
         """
         rid = self._running_id
         st = self.tasks.get(rid) if rid else None

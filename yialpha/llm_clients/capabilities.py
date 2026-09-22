@@ -122,15 +122,33 @@ _BY_PATTERN: list[tuple[re.Pattern[str], ModelCapabilities]] = [
     # profile instead of letting them fall through to the default row.
     (re.compile(r"^deepseek-v(?:[4-9]|\d{2,})"), _DEEPSEEK_THINKING),
     (re.compile(r"^deepseek-reasoner"), _DEEPSEEK_THINKING),
-    (re.compile(r"^MiniMax-M\d"), _MINIMAX_THINKING),
+    (re.compile(r"^minimax-m\d"), _MINIMAX_THINKING),
 ]
+
+# Lowercased view of the exact-ID table for case-insensitive lookup. The
+# MiniMax IDs are mixed-case in source; the lowered keys collide with nothing
+# (no two table entries differ only by case).
+_BY_ID_LOWER: dict[str, ModelCapabilities] = {
+    key.lower(): value for key, value in _BY_ID.items()
+}
 
 
 def get_capabilities(model_name: str) -> ModelCapabilities:
-    """Resolve capabilities by exact ID, then pattern, then default."""
-    if model_name in _BY_ID:
-        return _BY_ID[model_name]
+    """Resolve capabilities by exact ID, then pattern, then default.
+
+    Lookup is case-insensitive on BOTH sides (round-6): a naturally-cased
+    custom ID like ``DeepSeek-V4-Pro`` used to miss the lowercase pattern and
+    silently fall to ``_DEFAULT`` — sending ``tool_choice`` to a thinking
+    model that 400s on it. Unknown-case MiniMax IDs lost their enum
+    restriction and ``reasoning_split`` the same way. The exact-ID table
+    keys are compared lowercased; the patterns already match at line start
+    against the lowered needle.
+    """
+    needle = str(model_name).strip().lower()
+    by_id = _BY_ID_LOWER.get(needle)
+    if by_id is not None:
+        return by_id
     for pattern, caps in _BY_PATTERN:
-        if pattern.match(model_name):
+        if pattern.match(needle):
             return caps
     return _DEFAULT

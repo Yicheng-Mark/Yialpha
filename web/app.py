@@ -3,10 +3,10 @@
 
 MUST run from the project root (the dir containing ``.env``, ``yialpha/``,
 ``scripts/``). ``yialpha/__init__.py`` loads ``.env`` via
-``load_dotenv(usecwd=True)``, so running from elsewhere leaves
-``DEEPSEEK_API_KEY`` and the SOCKS5 proxy unset — the spawned ``run_robust``
-subprocess inherits this env and would then be unable to reach DeepSeek or
-yfinance. A cwd check at import time refuses to start otherwise.
+``load_dotenv(usecwd=True)``, so running from elsewhere leaves the LLM
+provider key and the SOCKS5 proxy unset — the spawned ``run_robust``
+subprocess inherits this env and would then be unable to reach the LLM
+endpoint or yfinance. A cwd check at import time refuses to start otherwise.
 
 Start (from the project root):
 
@@ -72,7 +72,7 @@ def _assert_cwd_is_project_root() -> None:
             f"  cwd     = {cwd}\n"
             f"  missing = {', '.join(missing)}\n"
             "  yialpha/__init__.py loads .env via load_dotenv(usecwd=True); "
-            "running elsewhere leaves DEEPSEEK_API_KEY / proxy unset.\n"
+            "running elsewhere leaves the LLM key / proxy unset.\n"
             "  → cd into the project root, then: python web/app.py\n\n"
         )
         sys.exit(2)
@@ -356,10 +356,25 @@ async def api_analyze(req: AnalyzeReq):
     if req.language not in ("en", "zh"):
         raise HTTPException(status_code=400, detail=f"bad language: {req.language!r}")
 
-    # Canonical Yahoo symbol — the pipeline stores results under this exact
-    # spelling (e.g. BTCUSD → BTC-USD), so normalizing here makes the post-run
-    # report_url resolve against the on-disk dir.
-    ticker = normalize_ticker_symbol(raw)
+    # Canonical symbol so the run is filed under the spelling the pipeline
+    # stores (report_url resolves against the on-disk dir). Stock/crypto-
+    # umbrella runs use the Yahoo convention (BTCUSD → BTC-USD); an explicit
+    # Binance-venue run (crypto_perp/crypto_spot) keeps the CONTRACT symbol
+    # (round-6: the Yahoo form used to win here too, so a web-submitted
+    # BTCUSDT perp run was filed under "BTC-USD" while the run_robust CLI
+    # files "BTCUSDT" — the same contract split into two ledger identities:
+    # memory lessons, verify-history grouping, states-log dirs).
+    if req.asset_type in ("crypto_spot", "crypto_perp"):
+        from yialpha.dataflows.symbol_utils import normalize_symbol_for_venue
+
+        try:
+            ticker = normalize_symbol_for_venue(
+                raw, "binance_spot" if req.asset_type == "crypto_spot" else "binance_perp"
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+    else:
+        ticker = normalize_ticker_symbol(raw)
 
     if runner.registry.is_busy():
         raise HTTPException(status_code=409, detail="an analysis is already running")

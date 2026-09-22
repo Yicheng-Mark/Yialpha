@@ -51,13 +51,19 @@ CONV_CAP = {
 VOL_K = {"crypto_perp": 0.30, "crypto_spot": 0.20, "us_stock": 0.20,
          "hk_stock": 0.20, "cn_stock": 0.15}
 
-#: ATR 止损乘数（与框架 risk/atr_stop.py 默认 mult=2.0 对齐）
+#: ATR 止损乘数（与框架 risk/atr_stop.py 默认 mult=2.0 对齐）。仅作缺省值：
+#: 调用方（risk manager 的 ``atr_stop_mult`` 配置）可传自己的乘数，票据
+#: 数字与 overlay 实际挂出的止损必须同一乘数（round-6 修：此前 SHORT 一律
+#: 硬编码 2·ATR 重建止损，配置 3·ATR 时报告与挂单差一整个 ATR）。
 ATR_STOP_MULT = 2.0
 
 #: 爆仓安全倍数：爆仓距离必须 ≥ 爆仓安全倍数 × 止损距离（让止损先于爆仓触发）
 LIQ_SAFETY = 2.0
 
-#: Risk-overlay 默认风险偏好（与脚本默认一致；保守档）
+#: Risk-overlay 默认风险偏好（保守档；config ``risk_profile`` 可覆盖）。
+#: 注意与票据脚本**不共用默认**：scripts/trade_ticket.py 的 ``--risk-profile``
+#: 默认 moderate——那是下单时点的用户选择，这是报告时点的咨询默认，两个
+#: 旋钮故意分开（round-6 修正：旧注释声称「与脚本默认一致」，失实）。
 DEFAULT_PROFILE = "conservative"
 
 #: 爆仓触发里的费用近似（taker 费 + 清算费缓冲，bps），与回测引擎的
@@ -80,19 +86,35 @@ STOP_TRIGGER_BASIS = (
 )
 
 
+def rating_strength(rating: str | None) -> int:
+    """Case-insensitive :data:`RATING_STRENGTH` lookup（"buy"/"BUY" → 2）。
+
+    enforced 组合路径转发的是 side 派生的小写 proxy（"buy"/"sell"/"hold"），
+    而强度表是首字母大写。round-6 修：此前 miss 一律读 0 → L_conv=0 →
+    杠杆恒 1.0x、爆仓 advisory 整体消失（每张 enforced perp 票据）。
+    """
+    if not isinstance(rating, str):
+        return 0
+    return RATING_STRENGTH.get(rating.strip().capitalize(), 0)
+
+
 def compute_leverage(
     stop_dist: float | None,
     atr_pct: float | None,
     asset_type: str,
     strength: int,
     profile: str = DEFAULT_PROFILE,
+    bracket_max_leverage: float | None = None,
 ) -> tuple[float, dict[str, float]]:
-    """杠杆 = min(四个上限)。返回 (L, 各上限明细)。
+    """杠杆 = min(各上限)。返回 (L, 各上限明细)。
 
       L_liq  = 1 / (爆仓安全倍数 × stop_dist)   —— 爆仓距离 ≥ 安全倍数 × 止损距离
       L_vol  = K / atr_pct                       —— 高波动降杠杆
       L_conv = 信心上限（方向强度 × 风险偏好）
       L_hard = 资产类型硬顶
+      L_bracket（可选）= 交易所 leverageBracket 该名义档的 initialLeverage 上限
+      —— round-6 新增：低 maxLeverage 合约（< 硬顶 20x）此前会收到交易所
+      直接拒单的建议杠杆。None（无签名端点/无该字段）时不参与，行为与旧版一致。
     """
     hard = HARD_CEILING.get(asset_type, 5.0)
 
@@ -100,8 +122,12 @@ def compute_leverage(
     l_vol = VOL_K.get(asset_type, 0.20) / atr_pct if atr_pct and atr_pct > 0 else hard
     l_conv = CONV_CAP.get(abs(strength), {}).get(profile, 5.0) if strength else 0.0
 
-    L = max(1.0, min(l_liq, l_vol, l_conv, hard))
-    return L, {"L_liq": l_liq, "L_vol": l_vol, "L_conv": l_conv, "L_hard": hard}
+    caps: dict[str, float] = {"L_liq": l_liq, "L_vol": l_vol, "L_conv": l_conv, "L_hard": hard}
+    if bracket_max_leverage is not None and bracket_max_leverage > 0:
+        caps["L_bracket"] = float(bracket_max_leverage)
+
+    L = max(1.0, min(min(caps.values()), hard))
+    return L, caps
 
 
 def liquidation_price(
@@ -163,6 +189,10 @@ def perp_ticket_numbers(
     stop: float | None,
     weight: float,
     notional: float | None = None,
+    *,
+    profile: str = DEFAULT_PROFILE,
+    atr_mult: float | None = None,
+    bracket_max_leverage: float | None = None,
 ) -> tuple[float, dict[str, float | str], float | None, float] | None:
     """Shared numeric core of the perp ticket: leverage, cap detail, estimated
     liquidation price, and the stop actually used.
@@ -177,26 +207,38 @@ def perp_ticket_numbers(
     one constructed the same way. ``notional`` (USDT) tiers the liquidation
     MMR bracket at a REAL position notional when the caller knows one;
     otherwise the disclosed :data:`ASSUMED_NOTIONAL_USDT` applies. The detail
-    dict carries the four leverage caps as floats plus, when a liquidation
+    dict carries the leverage caps as floats plus, when a liquidation
     estimate exists, the liq assumption fields (floats + one human-readable
     basis note).
+
+    Keyword overrides (round-6): ``profile`` threads the run's
+    ``risk_profile`` config (default :data:`DEFAULT_PROFILE`); ``atr_mult``
+    makes the constructed/SHORT stop use the SAME multiplier the risk manager
+    configured (default :data:`ATR_STOP_MULT` — previously hardcoded, a
+    configured 3·ATR run rendered advice off the actual stop by a whole ATR);
+    ``bracket_max_leverage`` adds the exchange's initialLeverage cap when the
+    caller could fetch it (see :func:`advisory_leverage_cap`).
     """
     if entry is None or entry <= 0.0 or atr is None or atr <= 0.0:
         return None
     if weight == 0.0:
         return None
     direction = "long" if weight > 0.0 else "short"
-    strength = RATING_STRENGTH.get(rating, 0)
+    strength = rating_strength(rating)
+    mult = ATR_STOP_MULT if atr_mult is None else float(atr_mult)
     stop_used = stop
     if direction == "short" or stop_used is None:
         stop_used = (
-            entry - ATR_STOP_MULT * atr
+            entry - mult * atr
             if direction == "long"
-            else entry + ATR_STOP_MULT * atr
+            else entry + mult * atr
         )
     stop_dist = abs(entry - stop_used) / entry
     atr_pct = atr / entry
-    lev, lev_caps = compute_leverage(stop_dist, atr_pct, "crypto_perp", strength)
+    lev, lev_caps = compute_leverage(
+        stop_dist, atr_pct, "crypto_perp", strength,
+        profile=profile, bracket_max_leverage=bracket_max_leverage,
+    )
     detail: dict[str, float | str] = dict(lev_caps)
     liq = liquidation_price(entry, lev, direction, "crypto_perp", notional)
     if liq is not None:
@@ -218,3 +260,27 @@ def perp_ticket_numbers(
             )
         )
     return lev, detail, liq, stop_used
+
+
+def advisory_leverage_cap(symbol: str, notional: float | None = None) -> float | None:
+    """Fail-soft 交易所 initialLeverage 上限（供票据/overlay advisory）。
+
+    需要签名 ``/fapi/v1/leverageBracket`` 端点（操作者的
+    ``BINANCE_API_KEY``/``BINANCE_API_SECRET``）。无 key、传输失败、或该
+    合约的档位表不带 initialLeverage（无签名默认近似表就不带）时返回
+    None——调用方保持旧的静态硬顶，行为与今天字节一致。取档口径与 MMR
+    一致：按 ``notional``（缺省 :data:`ASSUMED_NOTIONAL_USDT`）所在的
+    名义档读该档的 initialLeverage。
+    """
+    try:
+        from ..dataflows.binance_brackets import (
+            bracket_max_leverage_for,
+            get_leverage_brackets,
+        )
+
+        brackets = get_leverage_brackets(symbol)
+        return bracket_max_leverage_for(
+            brackets, ASSUMED_NOTIONAL_USDT if notional is None else notional
+        )
+    except Exception:  # noqa: BLE001 — advisory-only, must never break a render
+        return None

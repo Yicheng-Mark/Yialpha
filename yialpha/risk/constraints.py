@@ -163,10 +163,20 @@ def _veto(rule: str, reason: str) -> RiskDecision:
 def _post_positions(
     candidate: PositionView, snapshot: PortfolioSnapshot
 ) -> tuple[PositionView, ...]:
-    """The post-candidate book: same-symbol position replaced, else appended."""
-    return tuple(p for p in snapshot.positions if p.symbol != candidate.symbol) + (
-        candidate,
+    """The post-candidate book: the same symbol AND instrument class replaced.
+
+    Round-6: keying on symbol alone would drop BOTH rows if a snapshot ever
+    carried the same symbol on two venues (a perp and a spot book of one
+    ticker) and re-add only the candidate — gross/asset-class metrics would
+    silently undercount and constraints could false-PASS. Today's single-
+    venue snapshots are unaffected (one row per symbol either way).
+    """
+    candidate_key = (candidate.symbol, getattr(candidate, "instrument_class", None))
+    kept = tuple(
+        p for p in snapshot.positions
+        if (p.symbol, getattr(p, "instrument_class", None)) != candidate_key
     )
+    return kept + (candidate,)
 
 
 def _degenerate_veto(

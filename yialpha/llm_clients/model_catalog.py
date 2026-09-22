@@ -15,11 +15,14 @@ _CUSTOM_ONLY: dict[str, list[ModelOption]] = {
 
 # Shared model list for GLM via Z.AI (international) and BigModel (China).
 # Source: docs.z.ai (GLM Coding Plan supported models + LLM guides).
-# All GLM 4.7+ entries support thinking mode via thinking={"type":"enabled"}.
+# NOTE (round-6): this repo's openai-compatible transport sends no
+# ``thinking`` parameter for GLM — models run at the endpoint's default
+# thinking behaviour, so the labels below describe speed/tier only and must
+# not promise a switchable mode the client never toggles.
 _GLM_MODELS: dict[str, list[ModelOption]] = {
     "quick": [
-        ("GLM-5.3-Flash - Fast, switchable thinking modes", "glm-5.3-flash"),
-        ("GLM-5-Turbo - Fast, switchable thinking modes", "glm-5-turbo"),
+        ("GLM-5.3-Flash - Fast, coding-plan friendly", "glm-5.3-flash"),
+        ("GLM-5-Turbo - Fast", "glm-5-turbo"),
         ("GLM-4.7 - Previous-gen flagship", "glm-4.7"),
         ("GLM-4.5-Air - Lightweight, cost-efficient", "glm-4.5-air"),
         ("Custom model ID", "custom"),

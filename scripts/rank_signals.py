@@ -187,7 +187,20 @@ def analyze_ticker(ticker: str) -> dict | None:
     target = resolve_target(parsed_pm, entry, direction)
 
     rr = None
-    if entry and stop and target and abs(entry - stop) > 0:
+    # 侧向守卫（round-6，与 trade_ticket 的 build_ticket 同一缺陷类）：overlay
+    # 止损是 long 形（入场下方），markdown 评级为空向时 abs() 会把「止损在
+    # 盈利方向」的倒挂 R 当正常分母——rr 留 None，conviction 降级处理，
+    # 而不是给一个方向语义错误的风险回报比参与排名。
+    if (
+        entry
+        and stop
+        and target
+        and abs(entry - stop) > 0
+        and (
+            (direction == "long" and stop < entry)
+            or (direction == "short" and stop > entry)
+        )
+    ):
         rr = abs(target - entry) / abs(entry - stop)
 
     score, comps = (conviction(direction, rating, sent_score, rr)

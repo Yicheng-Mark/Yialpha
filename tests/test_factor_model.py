@@ -121,7 +121,11 @@ def test_attribution_recovers_known_alphas_and_betas():
     assert attr.betas["Mkt-RF"] == pytest.approx(1.2, abs=1e-6)
     assert attr.betas["SMB"] == pytest.approx(0.5, abs=1e-6)
     assert attr.betas["HML"] == pytest.approx(0.3, abs=1e-6)
-    assert attr.alpha_annual == pytest.approx(0.001 * 252, abs=1e-6)  # annualized
+    # Round-6: annualized on the JOINED calendar's observed frequency (not the
+    # caller's periods_per_year). Hardcoded oracle: this fixture is 80 business
+    # days from 2024-01-01 (span 2024-01-01..2024-04-19, 109 calendar days) →
+    # joined_ppy = 80 / (109/365.25) ≈ 267.98 obs/year — NOT 252, NOT 365.
+    assert attr.alpha_annual == pytest.approx(0.001 * 80 * 365.25 / 109, abs=1e-6)
     assert attr.r_squared == pytest.approx(1.0, abs=1e-6)
     assert attr.n_obs == 80
 

@@ -45,6 +45,7 @@ from typing import Any, Literal
 import pandas as pd
 
 from yialpha.dataflows.binance import binance_klines_frame, get_binance_funding_rate
+from yialpha.dataflows.errors import NoMarketDataError
 from yialpha.dataflows.y_finance import get_YFin_history_cached
 from yialpha.ledger.models import (
     SCOPE_CONTRACT,
@@ -568,7 +569,26 @@ def _compute_reference_outcome(item: dict[str, Any], now_as_of: str) -> OutcomeC
         expected_entry_day = _last_trading_day_at_or_before(expected_entry_day)
         endpoint_day = _last_trading_day_at_or_before(endpoint_day)
     if entry_dt != _bar_close_moment(expected_entry_day.isoformat()):
-        return result("incomplete", "reference_not_latest_closed_daily_bar", (LEG_CONTRACT_PRICE,))
+        # Midnight-cross grace (round-6, both seams): a reference fetch that
+        # straddled UTC midnight stored the latest CLOSED bar at REQUEST time
+        # (one bar-day older than formed_at implies) — a valid snapshot the
+        # strict comparison used to retire as terminal incomplete. Accept
+        # exactly one bar-day of skew (weekend-walked on the equity seam) and
+        # only while formation sits within minutes of UTC midnight; anything
+        # else keeps the strict verdict (the capture path structurally cannot
+        # store a genuinely stale bar).
+        grace_day = expected_entry_day - timedelta(days=1)
+        if equity:
+            grace_day = _last_trading_day_at_or_before(grace_day)
+        if (
+            formed.hour == 0
+            and formed.minute <= 5
+            and entry_dt == _bar_close_moment(grace_day.isoformat())
+        ):
+            expected_entry_day = grace_day
+            context["entry_grace"] = "midnight_cross"
+        else:
+            return result("incomplete", "reference_not_latest_closed_daily_bar", (LEG_CONTRACT_PRICE,))
     exit_dt = _bar_close_moment(endpoint_day.isoformat())
     context.update(
         window_start=entry_dt.isoformat(), window_end=exit_dt.isoformat(),
@@ -746,9 +766,29 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
             position_analysis_dt + timedelta(days=horizon),
             timestamp_as_utc(now_as_of),
         )
-        total, last_iso = _funding_window_sum(
-            instrument_id, position_analysis_dt, position_horizon_end_dt
-        )
+        # Round-6: same PERMANENT-ONLY vendor-raise guard as the price legs
+        # above — a delisted contract's empty funding window raises
+        # NoMarketDataError out of the row handler, marking it "failed"
+        # (never written, never retired, re-raised every batch) instead of
+        # the honest incomplete record. Transient transport errors keep the
+        # propagate-and-retry semantics.
+        try:
+            total, last_iso = _funding_window_sum(
+                instrument_id, position_analysis_dt, position_horizon_end_dt
+            )
+        except NoMarketDataError:
+            legacy_context["reason"] = "funding_window_no_data"
+            outcome_id = write_legacy(
+                prediction_id,
+                run_id,
+                horizon,
+                status="incomplete",
+                legs_missing=[LEG_FUNDING_WINDOW],
+                regime_id=item.get("regime_id"),
+            )
+            return detail(
+                "incomplete", legs_missing=(LEG_FUNDING_WINDOW,), outcome_id=outcome_id
+            )
         if total is None:
             legacy_context["reason"] = "funding_window_missing"
             outcome_id = write_legacy(
@@ -805,14 +845,32 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
     prices_on_equity_seam = (
         scope == SCOPE_UNDERLYING and is_stock_perp
     ) or not is_perp
-    if scope == SCOPE_UNDERLYING and is_stock_perp:
-        series = _equity_close_series(
-            underlying_symbol or instrument_id, start_date, end_date
+    # Round-6: a DELISTED contract's empty klines window raises
+    # NoMarketDataError instead of returning an empty frame — unhandled, it
+    # marked the row "failed" without writing an outcome, so it never
+    # retired and every compute batch re-fetched and re-raised forever.
+    # That PERMANENT taxonomy gets the visible fail-closed terminal record
+    # the unpriceable-entry path uses. TRANSIENT exceptions (transport,
+    # rate limits) still PROPAGATE to the row-level handler on purpose:
+    # "failed" there means "not written, retried next batch" — one network
+    # blip must not retire a prediction (review P2: the first cut caught
+    # Exception wholesale and did exactly that).
+    try:
+        if scope == SCOPE_UNDERLYING and is_stock_perp:
+            series = _equity_close_series(
+                underlying_symbol or instrument_id, start_date, end_date
+            )
+        elif is_perp:
+            series = _perp_close_series(instrument_id, start_date, end_date, now_as_of)
+        else:
+            series = _equity_close_series(instrument_id, start_date, end_date)
+    except NoMarketDataError:
+        legacy_context["reason"] = "legacy_price_leg_no_data"
+        outcome_id = write_legacy(
+            prediction_id, run_id, horizon, status="incomplete",
+            legs_missing=[LEG_CONTRACT_PRICE], regime_id=item.get("regime_id"),
         )
-    elif is_perp:
-        series = _perp_close_series(instrument_id, start_date, end_date, now_as_of)
-    else:
-        series = _equity_close_series(instrument_id, start_date, end_date)
+        return detail("incomplete", legs_missing=(LEG_CONTRACT_PRICE,), outcome_id=outcome_id)
 
     entry = _last_close_at_or_before(series, analysis_dt.date().isoformat())
     if entry is None or (

@@ -116,7 +116,19 @@ class _PoolState:
         if status in (401, 403):
             self.permanent.add(idx)
             return "removed for the rest of the process (auth failure)"
-        self.dead_until[idx] = time.monotonic() + self.cooldown_s
+        now = time.monotonic()
+        current = self.dead_until.get(idx, 0.0)
+        if current > now:
+            # Round-6: already cooling — keep the ORIGINAL revival deadline.
+            # Re-stamping on every forced 429 (force_pick serves the
+            # soonest-reviving key while everything cools) pushed that
+            # deadline out by a full cooldown per arriving request, so under
+            # sustained saturation the pool never revived at all.
+            return (
+                f"still cooling down for {current - now:.0f}s "
+                "(quota/concurrency; original deadline kept)"
+            )
+        self.dead_until[idx] = now + self.cooldown_s
         return f"cooling down for {self.cooldown_s:.0f}s (quota/concurrency)"
 
 
@@ -155,13 +167,23 @@ def _single_key_env(provider: str) -> str:
 
 
 def has_pool(provider: str) -> bool:
-    """Whether the provider's pool env var is set to something non-empty.
+    """Whether the provider's POOL env var carries at least one parseable key.
 
-    This is the gate for engaging the rotating transport: a provider with only
-    the single-key var set behaves exactly as before (SDK default client).
+    The single-key env var does NOT count: a lone ``*_API_KEY`` keeps the
+    legacy SDK-default transport, byte-for-byte (pinned by
+    test_glm_key_pool). Round-6: judged on the same PARSED result
+    :func:`api_key_pool` builds on — the old raw-``.strip()`` truthiness
+    called a pool env of ``" , "`` configured while its parse yields zero
+    keys, and the resulting error message sent the operator hunting the
+    single-key var they never needed.
     """
     pool_env = PROVIDER_API_KEYS_ENV.get(provider.lower())
-    return bool(pool_env and os.environ.get(pool_env, "").strip())
+    if pool_env is None:
+        return False
+    raw = os.environ.get(pool_env)
+    if not raw:
+        return False
+    return any(entry.strip() for entry in raw.split(","))
 
 
 def cooldown_seconds() -> float:
@@ -249,12 +271,22 @@ def get_pool_http_client(provider: str):
     provider = provider.lower()
     with _lock:
         if provider not in _clients:
-            state = _states.get(provider)
-            if state is None or state.size != len(keys):
-                state = _PoolState(len(keys), cooldown_seconds())
-                _states[provider] = state
+            # Process-wide by design (see docstring): a mid-process env
+            # change does NOT re-arm the pool — the first caller's key set
+            # and client live until process restart / reset_for_test. The
+            # old ``state.size != len(keys)`` guard was unreachable dead
+            # code (state and client are created together under this lock
+            # and cleared together) that implied rebuilds happen.
+            state = _PoolState(len(keys), cooldown_seconds())
+            _states[provider] = state
             _clients[provider] = httpx.Client(
-                auth=RotatingKeyAuth(keys, state), trust_env=True
+                auth=RotatingKeyAuth(keys, state),
+                trust_env=True,
+                # The openai SDK's own default client enables redirects; a
+                # custom http_client silently drops to httpx's
+                # follow_redirects=False, so a 30x-relaying base_url would
+                # surface as an APIStatusError only on the pooled path.
+                follow_redirects=True,
             )
         return _clients[provider]
 

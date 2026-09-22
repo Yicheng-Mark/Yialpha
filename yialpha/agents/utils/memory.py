@@ -318,65 +318,92 @@ class TradingMemoryLog:
             text = self._log_path.read_text(encoding="utf-8")
             blocks = text.split(self._SEPARATOR)
 
-            # Build lookup keyed by (trade_date, ticker) for O(1) dispatch.
-            # An update carrying asset_type narrows to that venue's entry
-            # (same-day perp+spot entries are both legal); None keeps the
-            # legacy first-pending-match.
-            update_map = {(u["trade_date"], u["ticker"]): u for u in updates}
+            # Lookup keyed by (trade_date, ticker, asset_type) — same-day
+            # perp AND spot entries are both legal and one sweep can carry
+            # updates for BOTH (round-6: the (date, ticker)-keyed dict
+            # comprehension collapsed the pair to whichever came last,
+            # stranding the other venue's entry for an extra sweep).
+            # asset_type None = legacy untagged entry.
+            update_map = {
+                (u["trade_date"], u["ticker"], u.get("asset_type")): u
+                for u in updates
+            }
 
-            new_blocks = []
-            for block in blocks:
+            def _rewrite(block: str, upd: dict) -> str | None:
+                """Return the outcome-stamped block if ``upd`` applies, else None."""
                 stripped = block.strip()
                 if not stripped:
-                    new_blocks.append(block)
-                    continue
-
+                    return None
                 lines = stripped.splitlines()
                 tag_line = lines[0].strip()
+                if not tag_line.startswith(
+                    f"[{upd['trade_date']} | {upd['ticker']} |"
+                ):
+                    return None
+                fields = (
+                    [f.strip() for f in tag_line[1:-1].split("|")]
+                    if tag_line.startswith("[") and tag_line.endswith("]")
+                    else []
+                )
+                if not self._is_pending(fields):
+                    return None
+                positional = [f for f in fields if "=" not in f]
+                rating = positional[2] if len(positional) > 2 else ""
+                keyed = self._tag_keyed_fields(fields)
+                raw_pct = f"{upd['raw_return']:+.1%}"
+                alpha_pct = f"{upd['alpha_return']:+.1%}"
+                new_tag = (
+                    f"[{upd['trade_date']} | {upd['ticker']} | {rating}"
+                    f" | {raw_pct} | {alpha_pct} | {upd['holding_days']}d"
+                )
+                if upd.get("available_date"):
+                    new_tag += f" | known={upd['available_date']}"
+                if keyed.get("asset"):
+                    new_tag += f" | asset={keyed['asset']}"
+                new_tag += "]"
+                rest = "\n".join(lines[1:])
+                return (
+                    f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{upd['reflection']}"
+                )
 
-                matched = False
-                for (trade_date, ticker), upd in list(update_map.items()):
-                    pending_prefix = f"[{trade_date} | {ticker} |"
-                    fields = (
-                        [f.strip() for f in tag_line[1:-1].split("|")]
-                        if tag_line.startswith("[") and tag_line.endswith("]")
-                        else []
-                    )
-                    if (
-                        tag_line.startswith(pending_prefix)
-                        and self._is_pending(fields)
-                        and (
-                            upd.get("asset_type") is None
-                            or self._tag_keyed_fields(fields).get("asset")
-                            == upd["asset_type"]
+            # Two passes. Exact pass: a tagged block takes the update keyed to
+            # ITS venue; an untagged block takes the None-keyed update — a
+            # None update no longer jumps a tagged block ahead of the exact
+            # venue's own update. Fallback pass: a still-unmatched None update
+            # may apply to a tagged block (the pinned legacy-compat path —
+            # hand-written/legacy logs whose entries never carried the tag).
+            carried = list(blocks)
+            for fallback in (False, True):
+                rewritten: list[str] = []
+                for block in carried:
+                    applied = None
+                    stripped = block.strip()
+                    if stripped:
+                        lines = stripped.splitlines()
+                        tag_line = lines[0].strip()
+                        fields = (
+                            [f.strip() for f in tag_line[1:-1].split("|")]
+                            if tag_line.startswith("[") and tag_line.endswith("]")
+                            else []
                         )
-                    ):
-                        positional = [f for f in fields if "=" not in f]
-                        rating = positional[2] if len(positional) > 2 else ""
-                        keyed = self._tag_keyed_fields(fields)
-                        raw_pct = f"{upd['raw_return']:+.1%}"
-                        alpha_pct = f"{upd['alpha_return']:+.1%}"
-                        new_tag = (
-                            f"[{trade_date} | {ticker} | {rating}"
-                            f" | {raw_pct} | {alpha_pct} | {upd['holding_days']}d"
-                        )
-                        if upd.get("available_date"):
-                            new_tag += f" | known={upd['available_date']}"
-                        if keyed.get("asset"):
-                            new_tag += f" | asset={keyed['asset']}"
-                        new_tag += "]"
-                        rest = "\n".join(lines[1:])
-                        new_blocks.append(
-                            f"{new_tag}\n\n{rest.lstrip()}\n\nREFLECTION:\n{upd['reflection']}"
-                        )
-                        del update_map[(trade_date, ticker)]
-                        matched = True
-                        break
+                        block_asset = self._tag_keyed_fields(fields).get("asset")
+                        for key, upd in list(update_map.items()):
+                            akey = key[2]
+                            if akey is None:
+                                if block_asset is not None and not fallback:
+                                    continue
+                            elif block_asset != akey:
+                                continue
+                            applied = _rewrite(block, upd)
+                            if applied is not None:
+                                del update_map[key]
+                                break
+                    rewritten.append(applied if applied is not None else block)
+                carried = rewritten
+                if not update_map:
+                    break
 
-                if not matched:
-                    new_blocks.append(block)
-
-            new_blocks = self._apply_rotation(new_blocks)
+            new_blocks = self._apply_rotation(carried)
             new_text = self._SEPARATOR.join(new_blocks)
             tmp_path = self._log_path.with_suffix(".tmp")
             tmp_path.write_text(new_text, encoding="utf-8")

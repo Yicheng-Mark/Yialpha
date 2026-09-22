@@ -46,7 +46,8 @@ GLM 两档分工（2026-09-03 从 DeepSeek 切到 GLM Coding Plan，BigModel 国
 
 | 开关（env） | 默认 | 作用 | 备注 / 产物 |
 |---|---|---|---|
-| `YIALPHA_LLM_TIMEOUT_S` | off（未设；生产建议 120） | 单次 LLM 读超时；半开连接 → `APITimeoutError` → SDK 内置重试恢复 | `openai_client.py` 在线读；消除偶发 30min 卡死。默认 OFF 会在首次调用时发出一次性警告。**`run_robust.py` 为子进程 setdefault 120**（2026-09-19：hang-recovery 语义，与 LLM 缓存 setdefault 同一先例——半开挂死从「等看门狗杀整个 attempt」变「120s 超时 → SDK 重试秒级恢复」；用户显式导出的值含 0 优先） |
+| `YIALPHA_LLM_TIMEOUT_S` | off（未设；生产建议 120） | 单次 LLM 读超时；半开连接 → `APITimeoutError` → SDK 内置重试恢复 | `openai_client.py` 在线读；消除偶发 30min 卡死。默认 OFF 会在首次调用时发出一次性警告。**`run_robust.py` 为子进程 setdefault 120**（2026-09-19：hang-recovery 语义，与 LLM 缓存 setdefault 同一先例——半开挂死从「等看门狗杀整个 attempt」变「120s 超时 → SDK 重试秒级恢复」；用户显式导出的值含 0 优先）。**`0` = 显式关闭**（2026-09-22 round-6：此前 0 被当非法值弹回 120s 云默认，与文档相反；现解析为 `timeout=None`，挂死恢复只依赖看门狗） |
+| `YIALPHA_LLM_POOL_STREAM_USAGE` | true | key 池 streaming 模式下显式请求 usage 块（`stream_options.include_usage`），否则 token 遥测归零 | 2026-09-22 round-6：自定义 http_client（池的）会关掉 langchain 的自动 `stream_usage`；false 是端点拒绝 stream_options 时的逃生口 |
 | `YIALPHA_HTTP_KEEPALIVE` | true（已设） | 进程级共享 `httpx.Client`，复用 TLS/SOCKS5 连接 | 仅 OpenAI 兼容 provider；key 池生效时由池的轮换 client 接管（同样是共享 keepalive，见「模型偏好」） |
 | `YIALPHA_LLM_MAX_RETRIES` | 2（= langchain 默认，等价） | 单调用重试次数；抖动期可调低 | 默认值与历史字节一致；外层靠 `run_robust` 看门狗兜底 |
 | `YIALPHA_LLM_CACHE` | false | per-call LLM 响应磁盘缓存（langchain 全局 `set_llm_cache` + `llm_clients/response_cache.py` `DiskLLMCache`）：相同 (model+prompt+temperature+绑定 tools/结构化 schema) 回放缓存的 `ChatGeneration` 而非重调模型 | 默认关=无缓存无 I/O（字节等价）；迭代重跑同一 smoke/单次分析省中间 ~11 个 agent 调用计费；产物 `~/.yialpha/cache/llm_responses/`。**勿与 `run_analyst_parallel_ab.py` / `run_baseline --full` DSR 同用**——会压扁温度>0 多 run 分布；回测整图重跑已由 `backtest/cache.py` DecisionCache 覆盖。**`run_robust.py` 默认为自己的运行开**（`setdefault` 尊重 env 显式值）：重跑回放已完成节点的 LLM 生成、卡死节点重跑 = hang 恢复语义，省整图重计费；run_robust 是 live 单配置分析、不触达上述分布 caveat；`--no-llm-cache` 关 |

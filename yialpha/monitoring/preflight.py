@@ -7,8 +7,10 @@ the web side could not import the script). This module is the single
 implementation returning structured data; both renderers format it.
 
 Checks: (1) Python deps incl. PySocks, (2) env/key presence, (3) proxy port
-reachable, (4) a real yfinance pull, (5) DeepSeek API probe (free GET
-/v1/models over the NO_PROXY direct route — zero LLM cost).
+reachable, (4) a real yfinance pull, (5) provider API probe (free GET
+.../models over the NO_PROXY direct route — zero LLM cost; DeepSeek keeps
+its historical /v1/models branch, every other OpenAI-compatible provider
+probes its resolved base URL).
 
 Run as a sync callable when serving HTTP (register the endpoint as ``def``;
 the yfinance and DeepSeek probes block for several seconds and must not stall
@@ -49,6 +51,26 @@ def _resolve_proxy_probe() -> tuple[str, int]:
             with contextlib.suppress(ValueError):
                 port = int(host_port.rsplit(":", 1)[1])
     return host, port
+
+
+def _resolve_probe_base(provider: str) -> str:
+    """Resolve the probe endpoint with the CLIENT's own precedence (round-6).
+
+    ``YIALPHA_LLM_BACKEND_URL`` (config backend_url, what the chat client's
+    ``self.base_url`` carries) wins FIRST, then the provider's own env
+    override (e.g. ``ZHIPU_CN_BASE_URL``), then the spec default. Returns ""
+    for providers outside the OpenAI-compatible registry.
+    """
+    from yialpha.llm_clients.openai_client import OPENAI_COMPATIBLE_PROVIDERS
+
+    spec = OPENAI_COMPATIBLE_PROVIDERS.get(provider)
+    if spec is None:
+        return ""
+    if os.environ.get("YIALPHA_LLM_BACKEND_URL", "").strip():
+        return os.environ["YIALPHA_LLM_BACKEND_URL"].strip()
+    if spec.base_url_env and os.environ.get(spec.base_url_env, "").strip():
+        return os.environ[spec.base_url_env].strip()
+    return spec.base_url or ""
 
 
 def run_health(ticker: str = "SPY") -> dict:
@@ -113,11 +135,18 @@ def run_health(ticker: str = "SPY") -> dict:
     except Exception as e:  # noqa: BLE001 -- surface the raw failure for triage
         check(f"yfinance pulled {ticker}", False, repr(e)[:140])
 
-    # 5) Provider connectivity — DeepSeek only: free GET /v1/models over the
-    #    NO_PROXY direct route, zero LLM (chat-completion) cost. Other
-    #    providers report key presence (check 2) without a probe; a wrong
-    #    endpoint/key surfaces on the first real call rather than as a false
-    #    preflight red here.
+    # 5) Provider connectivity — free GET .../models, zero LLM
+    #    (chat-completion) cost. DeepSeek keeps its historical /v1/models
+    #    branch; every OTHER OpenAI-compatible provider resolves the endpoint
+    #    the same way the client does (provider base_url_env override →
+    #    YIALPHA_LLM_BACKEND_URL → spec default) and probes {base}/models
+    #    (round-6: the GLM setups this project actually runs reported a
+    #    vacuous True here — "probe implemented for deepseek only" — so a
+    #    wrong endpoint/key only surfaced mid-run). Reachability semantics:
+    #    transport error = red; 401/403 = red (key); any other HTTP status =
+    #    green (the host+auth answered — a 404 just means no models-listing
+    #    route, which chat completions do not depend on). Native providers
+    #    (anthropic/google/azure/bedrock) keep the key-presence-only report.
     if provider == "deepseek" and key:
         try:
             import httpx
@@ -133,11 +162,33 @@ def run_health(ticker: str = "SPY") -> dict:
             check("DeepSeek API reachable", r.status_code == 200, hint)
         except Exception as e:  # noqa: BLE001 -- surface the raw failure for triage
             check("DeepSeek API reachable", False, repr(e)[:140])
-    else:
-        check(
-            f"{provider} API reachable",
-            True,
-            "probe implemented for deepseek only; key presence checked above",
-        )
+    elif provider != "deepseek":
+        from yialpha.llm_clients.openai_client import OPENAI_COMPATIBLE_PROVIDERS
+
+        spec = OPENAI_COMPATIBLE_PROVIDERS.get(provider)
+        base = _resolve_probe_base(provider)
+        probe_key = key or (pool[0] if pool else "")
+        if spec is None or not base or not probe_key or spec.is_local:
+            check(
+                f"{provider} API reachable",
+                True,
+                "no probeable endpoint/key resolved; key presence checked above",
+            )
+        else:
+            try:
+                import httpx
+
+                r = httpx.get(
+                    base.rstrip("/") + "/models",
+                    headers={"Authorization": f"Bearer {probe_key}"},
+                    timeout=12,
+                )
+                ok = r.status_code < 500 and r.status_code not in (401, 403)
+                hint = f"HTTP {r.status_code} from {base}"
+                if r.status_code in (401, 403):
+                    hint += " (key invalid / no credit / wrong endpoint tier)"
+                check(f"{provider} API reachable", ok, hint)
+            except Exception as e:  # noqa: BLE001 -- surface the raw failure for triage
+                check(f"{provider} API reachable", False, repr(e)[:140])
 
     return {"ok": all(c["ok"] for c in checks), "checks": checks}

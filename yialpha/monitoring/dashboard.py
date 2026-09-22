@@ -12,8 +12,10 @@ templates engine, no runtime server.
 
 from __future__ import annotations
 
+import contextlib
 import html
 import logging
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -179,16 +181,29 @@ def write_dashboard(
     portfolio_state: Any = None,
     kill_switch: bool = False,
 ) -> Path:
-    """Render and write the dashboard to disk; return its path."""
+    """Render and write the dashboard to disk; return its path.
+
+    Atomic (tmp + ``os.replace``, round-6): the report tree and states log
+    gained the same discipline in round 5 — a watchdog kill mid-write here
+    would otherwise leave a truncated HTML artifact behind.
+    """
     if path is None:
         base = Path(results_dir) if results_dir else Path(".")
         path = base / "monitoring" / "dashboard.html"
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        render_dashboard(results, portfolio_state=portfolio_state, kill_switch=kill_switch),
-        encoding="utf-8",
-    )
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    try:
+        tmp.write_text(
+            render_dashboard(
+                results, portfolio_state=portfolio_state, kill_switch=kill_switch
+            ),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
     logger.info("Wrote monitoring dashboard to %s", path)
     return path
 

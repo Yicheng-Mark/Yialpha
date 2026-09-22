@@ -292,6 +292,22 @@ def _pool_streaming_enabled() -> bool:
     )
 
 
+def _pool_stream_usage_enabled() -> bool:
+    """Whether pooled STREAMING calls ask the endpoint for a usage block.
+
+    Default ON (round-6): langchain-openai only auto-enables ``stream_usage``
+    when neither a custom ``http_client`` nor a ``base_url`` is set — the pool
+    supplies both, so streamed pooled calls carried ``usage_metadata=None`` and
+    the CLI stats / perf telemetry read zero tokens. Explicitly setting
+    ``stream_usage=True`` sends ``stream_options={"include_usage": true}`` on
+    the stream. YIALPHA_LLM_POOL_STREAM_USAGE=false is the escape hatch for an
+    endpoint that rejects the stream_options field.
+    """
+    return os.getenv("YIALPHA_LLM_POOL_STREAM_USAGE", "true").strip().lower() not in (
+        "false", "0", "no",
+    )
+
+
 class OpenAIClient(BaseLLMClient):
     """Client for OpenAI, Ollama, OpenRouter, and xAI providers.
 
@@ -359,21 +375,49 @@ class OpenAIClient(BaseLLMClient):
                 # never trips it. Opt out with YIALPHA_LLM_POOL_STREAMING=false.
                 if _pool_streaming_enabled():
                     llm_kwargs["streaming"] = True
+                    # Round-6: a custom http_client (the pool's) disables
+                    # langchain-openai's automatic stream_usage, so streamed
+                    # calls never asked the endpoint for a usage block and
+                    # usage_metadata read None — token telemetry silently
+                    # zeroed on every pooled GLM call. Ask for it explicitly;
+                    # kill-switch for endpoints that reject stream_options.
+                    if _pool_stream_usage_enabled():
+                        llm_kwargs["stream_usage"] = True
                 logger.info(
                     "key_pool: %s active with %d key(s) — round-robin per "
                     "request (401/403 drops a key for the process, 429 cools "
-                    "it down); streaming=%s",
-                    self.provider, len(pool), llm_kwargs.get("streaming", False),
+                    "it down); streaming=%s stream_usage=%s",
+                    self.provider, len(pool),
+                    llm_kwargs.get("streaming", False),
+                    llm_kwargs.get("stream_usage", False),
                 )
             elif api_key:
                 llm_kwargs["api_key"] = api_key
             elif spec.key_optional:
                 llm_kwargs["api_key"] = spec.placeholder_key
             elif api_key_env:
+                from .key_pool import PROVIDER_API_KEYS_ENV
+
+                pool_env_name = PROVIDER_API_KEYS_ENV.get(self.provider.lower())
+                hint = f"(e.g. add {api_key_env}=your_key to your .env file)"
+                if pool_env_name:
+                    if os.environ.get(pool_env_name, "").strip():
+                        # The pool var is SET but parses to zero keys — say
+                        # so, or the operator hunts the single-key var they
+                        # never needed (round-6).
+                        hint = (
+                            f"(the {pool_env_name} pool variable is set but "
+                            f"contains no parseable key — fix it, or add "
+                            f"{api_key_env}=your_key to your .env file)"
+                        )
+                    else:
+                        hint = (
+                            f"(e.g. add {api_key_env}=your_key or a "
+                            f"{pool_env_name} pool to your .env file)"
+                        )
                 raise ValueError(
                     f"API key for provider '{self.provider}' is not set. "
-                    f"Please set the {api_key_env} environment variable "
-                    f"(e.g. add {api_key_env}=your_key to your .env file)."
+                    f"Please set the {api_key_env} environment variable {hint}."
                 )
 
             # The Responses API only exists on native OpenAI; if the user points

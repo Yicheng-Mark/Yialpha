@@ -13,7 +13,9 @@ clients so the cloud-default safety net is not an OpenAI-family-only feature.
 The chain (first wins):
 
   1. caller-supplied ``timeout`` kwarg      (explicit per-call override)
-  2. ``YIALPHA_LLM_TIMEOUT_S`` env var     (operator-wide override)
+  2. ``YIALPHA_LLM_TIMEOUT_S`` env var     (operator-wide override;
+     ``0`` = explicitly disabled — no YiAlpha ceiling, hang recovery is
+     the run_robust watchdog's job)
   3. local provider (Ollama / generic)      -> no timeout (slow local
      generation would be killed by a ceiling; this is the expected
      behaviour for self-hosted servers)
@@ -83,8 +85,25 @@ def resolve_timeout(
             parsed = float(raw)
         except ValueError:
             parsed = None
-        # 0 / negative / NaN / inf parse fine but are not usable settings
-        # (0 => every call times out immediately; inf => no ceiling at all).
+        if parsed == 0.0:
+            # Round-6: 0 is the DOCUMENTED "explicitly disabled" value
+            # (CLAUDE.md's "含 0 优先", run_robust's setdefault comment, and
+            # the sister YIALPHA_HTTP_TIMEOUT_S's "0 disables explicitly").
+            # It previously fell into the not-positive rejection below and
+            # bounced to the 120s cloud default — the exact opposite of the
+            # operator's intent (every >120s reasoning call timed out and
+            # retried). None = no YiAlpha ceiling (SDK/transport defaults
+            # may still apply); hang recovery is the run_robust watchdog's
+            # job.
+            llm_kwargs["timeout"] = None
+            logger.info(
+                "YIALPHA_LLM_TIMEOUT_S=0: LLM read-timeout explicitly disabled "
+                "for provider %r (hang recovery delegated to the watchdog).",
+                provider_name or "(unknown)",
+            )
+            return
+        # Negative / NaN / inf parse fine but are not usable settings
+        # (negative => immediate timeout; inf => no ceiling at all).
         if parsed is not None and not (parsed > 0 and math.isfinite(parsed)):
             parsed = None
         if parsed is not None:

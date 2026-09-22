@@ -41,10 +41,19 @@ _brackets_lock = threading.Lock()
 
 @dataclass(frozen=True)
 class Bracket:
-    """One maintenance-margin tier: MMR applies from ``notional_floor`` up."""
+    """One maintenance-margin tier: MMR applies from ``notional_floor`` up.
+
+    ``max_leverage`` carries the tier's ``initialLeverage`` (the exchange's
+    own leverage ceiling at that notional) when the source provided it —
+    only the signed endpoint does; :data:`DEFAULT_USDT_M_BRACKETS` leaves it
+    None. Round-6: previously discarded at parse time, so ticket advisories
+    could suggest leverage the exchange would reject outright on contracts
+    whose tier max is below the static hard ceiling.
+    """
 
     notional_floor: float
     mmr: float
+    max_leverage: float | None = None
 
 
 # Binance's standard USDT-M ladder for the common (<=125x max-leverage) tier
@@ -82,6 +91,22 @@ def mmr_for_notional(brackets, notional: float) -> float:
         if notional >= floor:
             mmr = ratio
     return mmr
+
+
+def bracket_max_leverage_for(brackets, notional: float) -> float | None:
+    """The exchange's ``initialLeverage`` cap for the tier ``notional`` falls in.
+
+    Same ascending-by-floor tiering as :func:`mmr_for_notional`. Returns None
+    when the ladder carries no ``max_leverage`` (the unsigned default
+    approximation) — callers then keep their static hard ceiling, unchanged.
+    """
+    cap: float | None = None
+    for item in brackets:
+        if not isinstance(item, Bracket):
+            continue  # (floor, mmr) pair tuples carry no leverage information
+        if notional >= item.notional_floor:
+            cap = item.max_leverage
+    return cap
 
 
 def signed_fapi_get(
@@ -131,7 +156,12 @@ def _signed_leverage_brackets(symbol: str, canonical: str) -> list[Bracket]:
     out: list[Bracket] = []
     for b in raw if isinstance(raw, list) else []:
         try:
-            out.append(Bracket(float(b["notionalFloor"]), float(b["maintMarginRatio"])))
+            max_lev = b.get("initialLeverage")
+            out.append(Bracket(
+                float(b["notionalFloor"]),
+                float(b["maintMarginRatio"]),
+                float(max_lev) if max_lev is not None else None,
+            ))
         except (KeyError, TypeError, ValueError):
             continue
     if not out:

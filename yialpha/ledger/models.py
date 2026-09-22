@@ -146,7 +146,18 @@ def parse_timestamp(ts: str) -> tuple[datetime, bool]:
     except ValueError as exc:
         raise ValueError(f"invalid ISO-8601 timestamp {ts!r}") from exc
     instant = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-    return instant.astimezone(UTC), "t" not in ts.lower()
+    # date_only by TIME COMPONENT, not by "t" substring sniffing (round-6):
+    # ISO-8601 permits a space as the date/time separator, and
+    # "2026-09-22 10:00:00" parsed as date_only silently bypassed the
+    # intraday knowability gate downstream. Note the pipeline itself writes
+    # pure dates AND "T"-separated midnight instants (time_contract's
+    # close_at) — both read date_only under this rule, which names the same
+    # instant either way (a daily bar's close IS midnight); only
+    # hand-edited/externally imported rows change verdict.
+    date_only = not any(
+        (parsed.hour, parsed.minute, parsed.second, parsed.microsecond)
+    )
+    return instant.astimezone(UTC), date_only
 
 
 def timestamp_as_utc(ts: str) -> datetime:

@@ -1472,6 +1472,7 @@ def run_backtest(
         _run_event_study(
             metrics, graph, ticker, price_provider, trades,
             index_name, end_date,
+            bench_provider=index_price_provider,
         )
 
     return BacktestResult(
@@ -1706,6 +1707,7 @@ def _run_event_study(
     trades: list[TradeRow],
     index_name: str,
     end_date: str,
+    bench_provider: Callable[[str, str, str], pd.Series] | None = None,
 ) -> None:
     """Fill the event-study fields on ``metrics`` in place.
 
@@ -1720,8 +1722,16 @@ def _run_event_study(
     estimation window needs ~250 trading days *before* the earliest event, so a
     wider asset + benchmark window is re-pulled here. The benchmark is resolved
     via the same helper the index-alpha path uses (``_resolve_index_benchmark``)
-    and pulled over the wide window; run_backtest's narrower ``index_prices``
-    copy is not reused because it does not cover the estimation window.
+    and pulled over the wide window with ``bench_provider``; run_backtest's
+    narrower ``index_prices`` copy is not reused because it does not cover the
+    estimation window.
+
+    Round-6: ``bench_provider`` defaults to ``price_provider`` (tests injecting
+    one synthetic provider for both legs keep working), but the production
+    caller passes the ORIGINAL yfinance provider captured before the perp
+    swap — index names ("SPY") are yfinance-shaped, never Binance symbols,
+    and a perp-venue provider would silently resolve "SPY" to the SPYUSDT
+    tokenized-stock perp instead of the equity index the label claims.
     """
     try:
         from datetime import datetime, timedelta
@@ -1748,7 +1758,9 @@ def _run_event_study(
         # window sits before the first event), so pull it from wide_start
         # regardless of whether compute_index_alpha already fetched a copy.
         bench_name = index_name or _resolve_index_benchmark(graph, ticker)
-        bench = price_provider(bench_name, wide_start, end_date).sort_index()
+        bench = (bench_provider or price_provider)(
+            bench_name, wide_start, end_date
+        ).sort_index()
         if bench.empty:
             return
 

@@ -33,9 +33,15 @@ def attach_ticket(
     keys so identical tickets compare byte-equal across processes. Fail-soft
     by the record-stage invariant: a ledger problem is logged and swallowed,
     never raised into the run it is describing.
+
+    Round-6: one short-backoff retry before giving up. Outcome scoring's
+    ticket_cost leg hard-depends on this mirror — a single transient SQLITE_BUSY
+    at run end used to silently strand the WHOLE run unscoreable (grace runs
+    out, terminal "attribution_legs_missing") off one lost row.
     """
     serialized = json.dumps(payload, sort_keys=True, default=str)
-    try:
+
+    def _insert() -> None:
         with ledger_transaction() as cur:
             cur.execute(
                 "INSERT OR IGNORE INTO tickets "
@@ -50,10 +56,27 @@ def attach_ticket(
                     utc_now_iso(),
                 ),
             )
+
+    try:
+        _insert()
     except Exception:  # noqa: BLE001 -- record stage must never abort a run
+        import time as _time
+
         logger.warning(
-            "attach_ticket(%s) failed; ticket not mirrored", ticket_id, exc_info=True
+            "attach_ticket(%s) failed; retrying once after 0.5s",
+            ticket_id,
+            exc_info=True,
         )
+        try:
+            _time.sleep(0.5)
+            _insert()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "attach_ticket(%s) retry failed; ticket not mirrored "
+                "(outcome scoring will report attribution_legs_missing)",
+                ticket_id,
+                exc_info=True,
+            )
 
 
 def ticket_for_run(run_id: str) -> dict[str, Any] | None:

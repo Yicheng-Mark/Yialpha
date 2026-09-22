@@ -156,10 +156,11 @@ def test_non_numeric_env_warns_and_falls_back_to_cloud_default(monkeypatch, capl
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("bad", ["0", "-5", "nan", "inf"])
+@pytest.mark.parametrize("bad", ["-5", "nan", "inf"])
 def test_non_positive_env_warns_and_falls_back(monkeypatch, caplog, bad):
-    """0/negative/NaN/inf parse fine but are not usable timeouts (0 => every
-    call times out immediately); they must warn and fall back like garbage."""
+    """Negative/NaN/inf parse fine but are not usable timeouts; they must
+    warn and fall back like garbage. (0 is NO LONGER in this bucket — see
+    the round-6 pin below.)"""
     import logging
 
     captured = _captured_llm(
@@ -172,6 +173,30 @@ def test_non_positive_env_warns_and_falls_back(monkeypatch, caplog, bad):
         "not a positive finite number" in r.message
         for r in caplog.records
         if r.levelno >= logging.WARNING
+    )
+
+
+@pytest.mark.unit
+def test_zero_env_explicitly_disables_timeout(monkeypatch, caplog):
+    """YIALPHA_LLM_TIMEOUT_S=0 is the documented explicit-disable value.
+
+    Round-6 reversal of the old pin: 0 used to fall into the not-positive
+    rejection and BOUNCE to the 120s cloud default — the exact opposite of
+    the documented contract (CLAUDE.md "含 0 优先", run_robust's setdefault
+    comment, the sister YIALPHA_HTTP_TIMEOUT_S). Now it resolves to
+    ``timeout=None`` (no YiAlpha ceiling; watchdog owns recovery)."""
+    import logging
+
+    captured = _captured_llm(
+        monkeypatch,
+        "deepseek",
+        env={"DEEPSEEK_API_KEY": _DUMMY_KEY, "YIALPHA_LLM_TIMEOUT_S": "0"},
+    )
+    assert captured["timeout"] is None
+    assert any(
+        "explicitly disabled" in r.message
+        for r in caplog.records
+        if r.levelno <= logging.INFO
     )
 
 

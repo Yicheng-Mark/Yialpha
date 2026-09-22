@@ -387,6 +387,19 @@ def build_ticket(report_dir: Path, capital: float, profile: str) -> dict:
     if entry <= 0 or stop == entry:
         ticket["status"] = "degenerate_levels"
         return ticket
+    # 侧向校验（round-6）：overlay 只在 legacy 权重为正时渲染 LONG 形止损
+    # （RiskManager.decide 的 long-only 约定），而本脚本的 direction 来自
+    # markdown 评级——结构化 pm_rating 与 markdown 分歧（前者 Buy 后者
+    # Underweight）、或 Underweight 档正 Kelly 权重，都会把「入场价下方的
+    # 止损」交到一张空单手里。abs() 会吞掉侧向，止损落在空头盈利方向、
+    # 永不触发，TP 阶梯与它同侧倒挂。如实拒出，不猜方向。
+    if (direction == "long" and stop > entry) or (direction == "short" and stop < entry):
+        ticket["status"] = "degenerate_levels"
+        ticket["status_reason"] = (
+            f"stop {stop:.6g} on wrong side of entry {entry:.6g} "
+            f"for a {direction} ticket (overlay stop is long-form)"
+        )
+        return ticket
 
     # ---- 计算仓位 / 杠杆 / TP ----
     stop_dist = abs(entry - stop) / entry            # 止损百分比距离
@@ -480,9 +493,16 @@ def render_ticket(t: dict) -> str:
                          "此时硬上杠杆等于在回撤中接刀，应空仓等体制回到 normal/caution。")
         elif t["status"] == "degenerate_levels":
             lines.append("## ⚠️ 无法生成交易单 —— 价位退化")
-            lines.append(f"入场 {_money(t['entry'])} / 止损 {_money(t['stop'])}："
-                         "止损距离为零（或入场价非正）。报告位价数据退化，"
-                         "无法据此定尺；请核对 trader.md / decision.md 的位价来源。")
+            if t.get("status_reason"):
+                # round-6 侧向校验（止损在错误一侧）携带自己的原因文案，
+                # 比固定话术诚实——固定话术只对「止损=入场/非正价」成立。
+                lines.append(f"{t['status_reason']}。方向与位价侧向矛盾"
+                             "（overlay 止损按 long 形渲染），无法据此定尺；"
+                             "请核对 trader.md / decision.md 的评级与位价来源。")
+            else:
+                lines.append(f"入场 {_money(t['entry'])} / 止损 {_money(t['stop'])}："
+                             "止损距离为零（或入场价非正）。报告位价数据退化，"
+                             "无法据此定尺；请核对 trader.md / decision.md 的位价来源。")
         elif t["status"] == "no_trade_hold":
             lines.append("## ⚪ 本笔观望，不建议进场")
             lines.append(f"{t['direction_reason']}。")

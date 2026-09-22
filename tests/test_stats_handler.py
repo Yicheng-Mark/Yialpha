@@ -54,6 +54,10 @@ def test_fresh_handler_stats_are_zero():
         "tool_calls": 0,
         "tokens_in": 0,
         "tokens_out": 0,
+        # Round-6: cache-replayed tallies stay separate from live spend.
+        "llm_calls_replayed": 0,
+        "tokens_in_replayed": 0,
+        "tokens_out_replayed": 0,
     }
 
 
@@ -80,12 +84,13 @@ def test_on_llm_end_accumulates_tokens_across_calls():
     handler.on_llm_end(_result(10, 3))
     handler.on_chat_model_start({"id": ["m"]}, [[AIMessage(content="hi")]])
     handler.on_llm_end(_result(7, 9))
-    assert handler.get_stats() == {
-        "llm_calls": 1,
-        "tool_calls": 0,
-        "tokens_in": 17,
-        "tokens_out": 12,
-    }
+    stats = handler.get_stats()
+    assert stats["llm_calls"] == 1
+    assert stats["tool_calls"] == 0
+    assert stats["tokens_in"] == 17
+    assert stats["tokens_out"] == 12
+    assert stats["tokens_in_replayed"] == 0
+    assert stats["tokens_out_replayed"] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -151,12 +156,12 @@ def test_on_llm_end_empty_generations_is_noop():
     handler = StatsCallbackHandler()
     handler.on_llm_end(LLMResult(generations=[]))
     handler.on_llm_end(LLMResult(generations=[[]]))
-    assert handler.get_stats() == {
-        "llm_calls": 0,
-        "tool_calls": 0,
-        "tokens_in": 0,
-        "tokens_out": 0,
-    }
+    stats = handler.get_stats()
+    assert stats["llm_calls"] == 0
+    assert stats["tool_calls"] == 0
+    assert stats["tokens_in"] == 0
+    assert stats["tokens_out"] == 0
+    assert stats["llm_calls_replayed"] == 0
 
 
 @pytest.mark.unit

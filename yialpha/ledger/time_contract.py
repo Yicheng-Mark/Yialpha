@@ -140,7 +140,14 @@ def capture_prediction_timing(instrument_id: str, prediction_scope: str) -> dict
         observed_at = _now_utc()
         result["reference_observed_at"] = observed_at.isoformat()
         formed_at = _now_utc()
-        expected_day = expected_reference_date(formed_at, equity=equity)
+        # Round-6: anchor the freshness check to the REQUESTED day, not a day
+        # re-derived from formed_at. A reference fetch that straddles UTC
+        # midnight (requested D 23:59:59.9, formed D+1 00:00:00.x) used to
+        # recompute expected_day = D and then fail to find it in the frame it
+        # fetched FOR D-1 — discarding a snapshot that was the latest CLOSED
+        # bar at the prediction's own knowability moment. The close_at guards
+        # below still prove the stored bar was closed at request/observation.
+        expected_day = day
         if frame is None or frame.empty or "Close" not in frame:
             result["reference_error"] = f"reference_bar_missing:{expected_day.isoformat()}"
         else:

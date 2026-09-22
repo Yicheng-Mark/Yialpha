@@ -114,11 +114,13 @@ class _Seams:
         funding_text: str | None = None,
         equity_closes: dict[str, float] | None = None,
         raise_symbols: frozenset[str] = frozenset(),
+        raise_exc: Exception | None = None,
     ) -> None:
         self.perp_closes = dict(perp_closes or _PERP_CLOSES)
         self.funding_text = funding_text if funding_text is not None else _funding_csv(0.0001)
         self.equity_closes = dict(equity_closes or {})
         self.raise_symbols = raise_symbols
+        self.raise_exc = raise_exc or RuntimeError("vendor down")
         self.perp_calls: list[tuple[str, str, str]] = []
         self.equity_calls: list[tuple[str, str, str]] = []
 
@@ -129,7 +131,7 @@ class _Seams:
 
     def _klines(self, symbol: str, start_date: str, end_date: str, **_kwargs: object):
         if symbol in self.raise_symbols:
-            raise RuntimeError(f"vendor down for {symbol}")
+            raise self.raise_exc
         self.perp_calls.append((symbol, start_date, end_date))
         return _frame(self.perp_closes)
 
@@ -582,8 +584,34 @@ def test_per_row_exception_isolated(monkeypatch: pytest.MonkeyPatch):
     assert (report.considered, report.completed, report.failed) == (2, 1, 1)
     failed = [detail for detail in report.details if detail.status == "failed"]
     assert len(failed) == 1
-    assert "vendor down for ETHUSDT" in str(failed[0].error)
+    assert "vendor down" in str(failed[0].error)
     assert len(all_outcomes()) == 1  # only the healthy row landed
+
+
+@pytest.mark.unit
+def test_permanent_no_data_error_retires_legacy_row(monkeypatch: pytest.MonkeyPatch):
+    """Round-6: a DELISTED contract (NoMarketDataError from an empty klines
+    window) must retire as a terminal incomplete — unhandled it marked the
+    row "failed" forever (no outcome row, retried and re-raised every batch).
+    Transient exceptions keep the failed-retry semantics (previous test)."""
+    from yialpha.dataflows.errors import NoMarketDataError
+
+    seams = _Seams(
+        raise_symbols=frozenset({"ETHUSDT"}),
+        raise_exc=NoMarketDataError("ETHUSDT", "ETHUSDT", "delisted"),
+    )
+    seams.install(monkeypatch)
+    _seed(run_id="run-btc-ok2", ticker="BTCUSDT")
+    _seed(run_id="run-eth-dead", ticker="ETHUSDT")
+    _write_ticket("run-btc-ok2", {"cost_detail": _COST_DETAIL}, ticket_id="T-ok2")
+    _write_ticket("run-eth-dead", {"cost_detail": _COST_DETAIL}, ticket_id="T-dead")
+
+    report = compute_outcomes(_NOW)
+    assert (report.considered, report.completed, report.failed) == (2, 1, 0)
+    incomplete = [detail for detail in report.details if detail.status == "incomplete"]
+    assert len(incomplete) == 1
+    assert "contract_price" in str(incomplete[0].legs_missing)
+    assert len(all_outcomes()) == 2  # BOTH rows land terminal records now
 
 
 @pytest.mark.unit

@@ -225,6 +225,9 @@ class NodePerfTokenCallback(BaseCallbackHandler):
         Reads ``AIMessage.usage_metadata`` from each generation (the same
         pattern as ``cli/stats_handler.py``), with a fallback to
         ``response.llm_output`` for providers that populate that instead.
+        Generations stamped ``cached_replay`` by the LLM response cache are
+        SKIPPED (round-6): their usage belongs to the original call the
+        cache replayed, not to this run's node.
         """
         input_tokens = 0
         output_tokens = 0
@@ -235,6 +238,10 @@ class NodePerfTokenCallback(BaseCallbackHandler):
             if not batch:
                 continue
             for generation in batch:
+                if (getattr(generation, "generation_info", None) or {}).get(
+                    "cached_replay"
+                ):
+                    continue
                 message = getattr(generation, "message", None)
                 if not isinstance(message, AIMessage):
                     continue

@@ -24,7 +24,7 @@
     --no-progress  关闭 tqdm 进度条
     --out          （可选）覆盖 results_dir
 
-注意：K 受 DeepSeek RPM / SOCKS5 代理并发上限 / 厂商限流约束。默认 K=3，先用
+注意：K 受 LLM RPM / SOCKS5 代理并发上限 / 厂商限流约束。默认 K=3，先用
 小批测，确认无 429 风暴再放大。一键回滚串行：YIALPHA_BATCH_CONCURRENCY=false。
 """
 

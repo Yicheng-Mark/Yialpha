@@ -43,7 +43,10 @@ def get_shared_http_client():
         if _client is None:
             # trust_env=True (the default) makes httpx read HTTP_PROXY/HTTPS_PROXY
             # from the environment, matching how the provider SDK already routes.
-            _client = httpx.Client(trust_env=True)
+            # follow_redirects=True mirrors the openai SDK's own default
+            # client (a custom http_client otherwise drops to httpx's False,
+            # and a 30x-relaying base_url would turn into an APIStatusError).
+            _client = httpx.Client(trust_env=True, follow_redirects=True)
         return _client
 
 

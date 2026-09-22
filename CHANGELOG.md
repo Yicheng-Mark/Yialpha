@@ -461,6 +461,191 @@ Breaking changes within the 0.x line are called out explicitly.
     stop==entry ZeroDivisionError and the dead ticker-split line from the
     same review ARE fixed this round (degenerate_levels status + pin).
 
+- **Round 6 (2026-09-22, USDT-perp focus; three parallel review shards —
+  LLM client layer / perp risk-ticket micro-layer / graph+ledger — plus a
+  main-line sweep of the unswept corners: binance_square, monitoring,
+  web, run_batch, backtest attribution, preflight).** All fixes carry pins
+  in `tests/test_round6_regressions.py` (26) or updated dedicated files;
+  full suite 3636 passed / ruff clean.
+  - **P2 — enforced perp tickets pinned leverage to 1.0x with no
+    liquidation advisory**: `_sync_candidate_ticket` forwarded a
+    side-derived lowercase proxy rating ("buy") while `RATING_STRENGTH` is
+    title-case — strength read 0, `L_conv` collapsed to 0.0, so EVERY
+    enforced-mode perp ticket advised ≤1.0x and dropped its liquidation
+    row. Strength lookup is case-insensitive now
+    (`perp_ticket.rating_strength`).
+  - **P2 — SHORT tickets could carry the overlay's LONG-form stop**: the
+    risk manager computes stops only on positive weights (long-only
+    convention), so a report whose markdown rating is bearish while the
+    structured rating sized long (rating divergence, or an Underweight
+    band with positive Kelly) handed `trade_ticket` a stop BELOW entry
+    for a short — `abs()` swallowed the side, the stop sat in the profit
+    direction and never fired, and the TP ladder shared its side. Both
+    `build_ticket` (long AND short side validation, honest
+    `degenerate_levels` + `status_reason`) and `rank_signals`' rr
+    denominator guard refuse inverted levels now.
+  - **P2 — explicit SHORT with a positive legacy weight bypassed the
+    sign-aware funding gate**: round 5's gate lived inside the heuristic
+    sizing branch (`proposed <= 0`), so the divergence scenario above
+    skipped it entirely and shorted full-size into ≤ −0.60 carry. The
+    gate now applies to BOTH short sizing paths, with the
+    `legacy_funding_damped` record key and the shadow/enforced render
+    lines disclosing it.
+  - **P2 — perp backtest `event_study=True` benchmarked against
+    SPYUSDT**: `_run_event_study` received the perp-swapped price
+    provider, whose venue normalization resolved the benchmark name "SPY"
+    into Binance's SPYUSDT tokenized-stock PERP — a silently different
+    instrument than the label claimed (and roughly-sane β made it
+    invisible). The bench leg goes through the ORIGINAL yfinance provider
+    captured before the swap (`bench_provider` param; tests injecting one
+    synthetic provider keep the old both-legs behaviour by default).
+  - **P2 — entrance identity split for major-coin perps**: the web form
+    and the interactive CLI Yahoo-normalized the submitted symbol
+    (BTCUSDT → BTC-USD) while `run_robust --tickers BTCUSDT` files the
+    contract spelling — the same contract split into TWO ledger
+    identities (memory lessons, verify-history grouping, states-log
+    dirs), hitting exactly the `_CRYPTO_BASES` majors. Data was never
+    wrong (every Binance seam re-normalizes), but the learning loop was
+    fragmented. Explicit `crypto_perp`/`crypto_spot` submissions now
+    canonicalize through `normalize_symbol_for_venue` (delivery-contract
+    inputs 400 loudly); stock/crypto-umbrella paths are unchanged.
+  - **P2 — pooled GLM streaming silently zeroed token telemetry**: a
+    custom `http_client` (the key pool's) disables langchain-openai's
+    automatic `stream_usage`, so streamed pooled calls never asked for a
+    usage block — `usage_metadata` read None and CLI stats / perf
+    telemetry counted zero tokens on every uncached call. The pooled
+    branch sets `stream_usage=True` (kill-switch
+    `YIALPHA_LLM_POOL_STREAM_USAGE=false` for endpoints that reject
+    `stream_options`).
+  - **P2 — `YIALPHA_LLM_TIMEOUT_S=0` did the opposite of its docs**: 0
+    fell into the not-positive rejection and BOUNCED to the 120s cloud
+    default, so an operator asking for "no ceiling, watchdog owns
+    recovery" got every >120s reasoning call timed out and retried.
+    0 now resolves to `timeout=None` (explicit disable), matching
+    CLAUDE.md / run_robust's documented contract; the old 0→120 pin is
+    reversed.
+  - **Factor alpha annualized on the wrong calendar**: the intercept is a
+    per-joined-observation mean, but annualization used the ASSET's
+    `periods_per_year` (365 for perps) while the strategy∩FF-factors join
+    is ~252 obs/year — perp factor alpha overstated ~45%. Annualization
+    now derives from the joined calendar's observed frequency.
+  - **Exchange leverage tiers were fetched and thrown away**: the
+    leverageBracket parser discarded `initialLeverage`, so ticket
+    advisories never capped against the exchange's own per-tier ceiling —
+    low-max contracts could be advised leverage Binance rejects outright.
+    `Bracket.max_leverage` parses, `compute_leverage` takes an optional
+    `L_bracket` cap (disclosed in the overlay line), and
+    `advisory_leverage_cap` fetches it fail-soft (no keys / failure →
+    None → byte-identical advice). `perp_ticket_numbers` also gained
+    `profile` (runs honor `risk_profile` config; the DEFAULT_PROFILE
+    comment claiming the script default matches was false — the script's
+    `--risk-profile` is a deliberate execution-time knob, now documented
+    truthfully) and `atr_mult` (a configured 3·ATR run no longer renders
+    SHORT advice a whole ATR from the stop it places).
+  - **Ledger robustness batch**: one reflection-LLM failure during
+    pending-resolution no longer kills the whole analysis run before any
+    node executes (entry stays pending, earlier updates land);
+    `batch_update_with_outcomes` keys its dispatch by (date, ticker,
+    venue) so one sweep resolves BOTH same-day perp+spot entries (the
+    pair used to collapse to whichever came last) and a legacy None-keyed
+    update no longer jumps a venue-tagged block ahead of its own update
+    (exact pass first, legacy fallback pass second — the pinned
+    legacy-compat path survives); the legacy scoring path's PERMANENT
+    vendor failures (a delisted contract's NoMarketDataError) retire the
+    row as terminal incomplete instead of re-raising on every compute
+    batch forever, while transient transport errors keep the
+    failed-and-retried-next-batch semantics (the first cut caught
+    Exception wholesale — one network blip would have retired a
+    prediction; caught in self-review); the reference-time capture
+    anchors its freshness check to
+    the REQUESTED day (a UTC-midnight-straddling fetch used to discard a
+    perfectly valid snapshot) with the scorer granting a one-bar-day,
+    near-midnight grace on both seams (equity weekend-walked, disclosed
+    via `entry_grace`) — the forming-bar security property is unchanged
+    (pinned: the 09-05 row never leaks); `attach_ticket` retries once on
+    a transient DB lock before giving up (a single SQLITE_BUSY used to
+    silently strand the whole run unscoreable after grace);
+    `parse_timestamp` detects date-only by TIME COMPONENT (a
+    space-separated ISO datetime read date_only and bypassed the intraday
+    knowability gate); the streamed interactive path now resets the
+    ledger run context / PIT date / run scope at finalize (mirroring
+    `_run_graph`'s finally) and a failed run-register rolls back the
+    already-bound context instead of "recording" into a run row that does
+    not exist.
+  - **LLM client layer batch (first dedicated sweep — the 4-key pool was
+    3 days old)**: 429 cooldowns are no longer re-stamped while already
+    cooling (forced retries used to push the soonest-reviving key's
+    deadline out by a full cooldown per request — under sustained
+    saturation the pool never revived); `has_pool` parses the pool env
+    instead of raw truthiness (a `" , "` value engaged the pool path with
+    zero keys and the error message pointed at the single-key var — the
+    message now names the actual problem); capability lookups are
+    case-insensitive on both sides (a naturally-cased custom model ID
+    silently lost DeepSeek/MiniMax quirks and sent `tool_choice` to a
+    thinking model); the pooled and keepalive clients set
+    `follow_redirects=True` to match the openai SDK's own default client
+    (a 30x-relaying base_url surfaced as APIStatusError only on the
+    custom-client paths); cache writes use per-writer tmp names (two
+    processes on one cache key could interleave a half-written payload)
+    and `clear()` sweeps tmp husks; cache replays are stamped
+    `cached_replay` and token accounting splits live vs replayed tallies
+    (a robust retry run booked attempt 1's cached usage as its own
+    spend); the dead `state.size != len(keys)` rebuild check is gone
+    (it implied mid-process env changes re-arm the pool; they do not);
+    the model catalog no longer promises "switchable thinking modes" the
+    transport never toggles.
+  - **Preflight actually probes the LLM endpoint**: the connectivity
+    check only implemented DeepSeek's /v1/models probe — the GLM setups
+    this project runs reported a vacuous True ("probe implemented for
+    deepseek only"), so a wrong endpoint/key first surfaced mid-run.
+    Every OpenAI-compatible provider now probes its resolved base URL
+    (`{base}/models`; transport error or 401/403 = red, any other HTTP
+    status = reachable — a 404 just means no models-listing route).
+  - **Monitoring dashboard writes atomically** (the round-5 tmp+replace
+    discipline reached the one writer it missed); assorted DeepSeek→GLM
+    doc drift corrected (web app/runner headers, run_batch help).
+  - **Known issues recorded by round 6 (reviewed, deliberately not
+    changed)**:
+    - `resolve_market_benchmark`'s crypto-native branch (`BTCUSDT`)
+      needs `asset_type`, but `graph._resolve_benchmark` and two other
+      callers drop it at the delegation seam — every crypto run resolves
+      SPY there while market_regime's own call site resolves the
+      crypto-native benchmark. Whether SPY (a USD market factor for a
+      BTC strategy) or BTC (the market itself) is the RIGHT benchmark
+      per consumer is a product call; the drift itself is recorded.
+    - `DrawdownBreaker` state lives only inside one RiskManager
+      instance: live runs (new graph per run) can never accumulate the
+      peak/regime progression across runs, so the 20% drawdown breaker
+      only bites within a single run's decisions. Cross-run persistence
+      needs a state-file design (venue-keyed) — capability gap, not
+      touched in a data-layer batch.
+    - A version bump of `OUTCOME_COMPUTE_VERSION` would mass-retire
+      every stored pending prediction as terminal incomplete in one
+      batch (fail-closed by design; the blast radius deserves a line in
+      the bump checklist rather than code today).
+    - The overlay renders its markdown Stop-Loss bullet in LONG form
+      whenever the legacy weight is positive (long-only convention); with
+      the script-side side validation now refusing inverted tickets this
+      is honest, but a bearish-markdown/positive-weight report yields
+      `missing_levels` at ticket time rather than a short ticket —
+      closing it needs overlay-side direction-aware rendering (product
+      decision on negative-band weights).
+    - The rate limiter is per-provider (not per-key) and keyed
+      `(provider, rpm)` — with the pool multiplying quota the operator's
+      single-key rpm acts as a conservative whole-pool budget, and two
+      graphs with different rpm values in one process get two buckets.
+      Documented semantics, flagged for a future pass.
+    - The entrance unification covers the EXPLICIT venue submissions
+      (crypto_perp / crypto_spot) only: a web "auto" submission of a
+      crypto symbol still files under the Yahoo form (BTC-USD, the
+      historical crypto-umbrella identity) while `run_robust --tickers
+      BTCUSDT` without an explicit `--asset-type` files the contract
+      spelling for the same umbrella mode. Unifying the UMBRELLA identity
+      too would re-home every historical crypto run's ledger identity —
+      deliberately not done in this batch.
+    - run_count / timeline drift from the venue split and the other
+      round-5 web display items remain as recorded there.
+
 ### Changed
 
 - **Project renamed: YiAgents → YiAlpha（弈·Alpha）.** Full rename across the

@@ -186,11 +186,17 @@ def _et_session_state(analysis_as_of: str) -> str:
     on weekends; an unparseable value reads ``closed``.
     """
     raw = str(analysis_as_of).strip()
-    date_only = "t" not in raw.lower()
     try:
         moment = datetime.fromisoformat(raw)
     except ValueError:
         return "closed"
+    # date_only by TIME COMPONENT, matching ledger.models.parse_timestamp
+    # (round-6): the old "t" not in raw substring sniffing called a
+    # space-separated ISO datetime ("2026-09-22 10:00:00") a pure date and
+    # bucketed it weekday-regular regardless of the session clock.
+    date_only = not any(
+        (moment.hour, moment.minute, moment.second, moment.microsecond)
+    )
     if date_only:
         return "closed" if moment.weekday() >= 5 else "regular"
     moment_utc = (

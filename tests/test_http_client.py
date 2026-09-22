@@ -167,8 +167,9 @@ class _CountingClient:
     instances = []
     lock = threading.Lock()
 
-    def __init__(self, trust_env=False):
+    def __init__(self, trust_env=False, follow_redirects=False):
         self.trust_env = trust_env
+        self.follow_redirects = follow_redirects
         self.closed = False
         with _CountingClient.lock:
             _CountingClient.instances.append(self)

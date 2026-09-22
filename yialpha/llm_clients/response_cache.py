@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import threading
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -161,7 +162,20 @@ class DiskLLMCache(BaseCache):
                 data = json.load(fh)
             if data.get("v") != _CACHE_FORMAT_VERSION:
                 raise ValueError("cache format version mismatch")
-            return _deserialize(data)
+            gens = _deserialize(data)
+            # Round-6: stamp replayed generations so token accounting can
+            # tell a REPLAYED usage block (no live call, no billing) from a
+            # fresh one — a robust retry run otherwise counted attempt 1's
+            # cached usage as its own spend. Objects are freshly
+            # deserialized per lookup, so in-place stamping is private.
+            for gen in gens:
+                info = getattr(gen, "generation_info", None)
+                if info is None:
+                    with contextlib.suppress(Exception):
+                        gen.generation_info = {"cached_replay": True}
+                elif isinstance(info, dict):
+                    info["cached_replay"] = True
+            return gens
         except Exception as exc:  # noqa: BLE001 -- any failure -> miss + evict
             logger.warning("LLM cache: corrupt entry %s (%s); removing", path, exc)
             with contextlib.suppress(OSError):
@@ -172,7 +186,12 @@ class DiskLLMCache(BaseCache):
         if not self.enabled:
             return
         path = self.cache_dir / f"{_key(prompt, llm_string)}.json"
-        tmp = path.with_name(path.name + ".tmp")
+        # Per-writer tmp name (round-6): the fixed ``<key>.json.tmp`` path is
+        # shared by every PROCESS touching this cache dir — two concurrent
+        # runs writing the same key could interleave on one tmp file and
+        # publish a half-written payload (self-healing on read, but it burned
+        # a real call). pid + uuid keeps writers disjoint.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         try:
             payload = _serialize(return_val)
             with self._lock:
@@ -188,5 +207,10 @@ class DiskLLMCache(BaseCache):
         if not self.enabled or not self.cache_dir.exists():
             return
         for entry in self.cache_dir.glob("*.json"):
+            with contextlib.suppress(OSError):
+                entry.unlink(missing_ok=True)
+        # Also sweep writer-crash tmp husks (round-6); they never match the
+        # *.json glob above.
+        for entry in self.cache_dir.glob("*.tmp"):
             with contextlib.suppress(OSError):
                 entry.unlink(missing_ok=True)

@@ -124,12 +124,25 @@ def resolve_pending_entries(
             # it does not silently accumulate forever (delisted / bad data).
             _warn_if_stale_pending(ticker, entry["date"], cutoff)
             continue  # price not available yet — try again next run
-        reflection = reflector.reflect_on_final_decision(
-            final_decision=entry.get("decision", ""),
-            raw_return=raw,
-            alpha_return=alpha if alpha is not None else 0.0,
-            benchmark_name=benchmark,
-        )
+        # The price leg above fails SOFT (fetch_returns_yf swallows vendor
+        # errors and returns None); the LLM leg must not be the one hard
+        # failure in the loop — one 429/timeout on entry N used to propagate
+        # out of resolve_pending_entries and kill the WHOLE analysis run
+        # before any node executed (round-6). Leave the entry pending — the
+        # next sweep retries it; earlier entries' updates still land.
+        try:
+            reflection = reflector.reflect_on_final_decision(
+                final_decision=entry.get("decision", ""),
+                raw_return=raw,
+                alpha_return=alpha if alpha is not None else 0.0,
+                benchmark_name=benchmark,
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad entry must not abort the sweep
+            logger.warning(
+                "memory resolution reflection failed for %s %s (left pending): %s",
+                ticker, entry.get("date"), exc,
+            )
+            continue
         updates.append({
             "ticker": ticker,
             "trade_date": entry["date"],

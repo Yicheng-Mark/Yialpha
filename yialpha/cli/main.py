@@ -605,6 +605,36 @@ def get_user_selections(asset_type_override: str = "auto"):
             f"[green]Detected asset type:[/green] {asset_type.value}"
         )
 
+    # Binance-venue runs key every ledger identity (states-log dir, memory
+    # lessons, verify-history grouping) on the CONTRACT symbol — the same
+    # spelling `run_robust --tickers BTCUSDT` files. get_ticker()'s Yahoo
+    # form (BTCUSDT → BTC-USD) would split the same contract into two
+    # identities across entrances (round-6).
+    from .models import AssetType as _VenueAssetType
+
+    if asset_type in (
+        _VenueAssetType.CRYPTO_PERP,
+        _VenueAssetType.CRYPTO_SPOT,
+    ):
+        from yialpha.dataflows.symbol_utils import normalize_symbol_for_venue
+
+        venue = (
+            "binance_perp"
+            if asset_type == _VenueAssetType.CRYPTO_PERP
+            else "binance_spot"
+        )
+        try:
+            contract = normalize_symbol_for_venue(selected_ticker, venue)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=2) from None
+        if contract != selected_ticker:
+            console.print(
+                f"[green]Venue symbol:[/green] {selected_ticker} → {contract} "
+                f"({asset_type.value})"
+            )
+            selected_ticker = contract
+
     # Step 2: Analysis date
     default_date = datetime.datetime.now().strftime("%Y-%m-%d")
     console.print(

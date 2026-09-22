@@ -181,6 +181,9 @@ def build_candidate_ticket(
     funding_rate_annualized: float | None = None,
     trade_date: str | None = None,
     horizon_days: float = DEFAULT_HORIZON_DAYS,
+    profile: str = "conservative",
+    atr_mult: float = 2.0,
+    bracket_max_leverage: float | None = None,
 ) -> ExecutionTicket:
     """Compose the per-run Candidate Ticket deterministically.
 
@@ -219,8 +222,14 @@ def build_candidate_ticket(
     leverage: float | None = None
     if asset_type == "crypto_perp" and reference_price is not None:
         entry_for_lev = entry_price if entry_price else reference_price
+        # Round-6: profile / atr_mult / bracket thread the run's own config so
+        # the Candidate ticket's leverage advice and the markdown overlay's
+        # come off the SAME numbers (a 3·ATR run used to advise here off a
+        # hardcoded 2·ATR reconstructed stop).
         numbers = perp_ticket_numbers(
-            entry_for_lev, atr, rating, stop_loss, target_weight
+            entry_for_lev, atr, rating, stop_loss, target_weight,
+            profile=profile, atr_mult=atr_mult,
+            bracket_max_leverage=bracket_max_leverage,
         )
         if numbers is not None:
             leverage = numbers[0]

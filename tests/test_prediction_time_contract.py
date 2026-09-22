@@ -136,7 +136,17 @@ def test_timing_rejects_naive_future_nonfinite_or_unknown_contract(monkeypatch, 
 
 
 @pytest.mark.unit
-def test_fetch_crossing_midnight_cannot_promote_a_forming_reference(monkeypatch):
+def test_fetch_crossing_midnight_anchors_requested_day_never_the_forming_bar(monkeypatch):
+    """Round-6 contract change (was: ``..._cannot_promote_a_forming_reference``
+    → hard ``reference_bar_not_closed`` error). A reference fetch that
+    straddles UTC midnight now anchors to the REQUESTED day's bar — the
+    latest bar CLOSED at the prediction's own knowability moment — instead of
+    discarding the sample by re-deriving the expected day from the (advanced)
+    formation clock. The SECURITY property is unchanged: the bar dated
+    2026-09-05 (still forming at the 23:59:59 request; closes 09-06 00:00)
+    is never promoted — the snapshot must carry 09-04's close, never the
+    999.0 row, and a close_at after the request is still rejected by the
+    closed-at guards."""
     moments = iter([
         datetime(2026, 9, 5, 23, 59, 59, tzinfo=UTC),
         datetime(2026, 9, 6, 0, 0, 1, tzinfo=UTC),
@@ -145,5 +155,8 @@ def test_fetch_crossing_midnight_cannot_promote_a_forming_reference(monkeypatch)
     monkeypatch.setattr(tc, "_now_utc", lambda: next(moments))
     monkeypatch.setattr(tc, "binance_klines_frame", lambda *a, **k: _frame())
     timing = tc.capture_prediction_timing("BTCUSDT", "CONTRACT")
-    assert timing["reference_price"] is None
-    assert timing["reference_error"] == "reference_bar_not_closed"
+    assert timing["reference_price"] == 100.0  # the 09-04 close, NOT 999.0
+    assert timing["reference_price_at"] == "2026-09-05T00:00:00+00:00"
+    assert timing["reference_error"] is None
+    # Formation crossed into 09-06 — disclosed verbatim.
+    assert timing["prediction_formed_at"] == "2026-09-06T00:00:02+00:00"

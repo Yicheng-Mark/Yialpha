@@ -239,6 +239,13 @@ def factor_attribution(
     ``None`` when fewer than :data:`_MIN_OBS` aligned observations remain or the
     factor frame lacks an ``RF`` column — the caller then skips attribution
     rather than reporting a spurious fit.
+
+    ``alpha_annual`` annualizes the intercept at the JOINED calendar's observed
+    frequency (obs per year over the join's span), not ``periods_per_year``:
+    the intercept is a per-joined-observation mean, and a 7×24 crypto strategy
+    joined onto equity-calendar factors has ~252 joined obs/year regardless of
+    the asset's native 365. ``periods_per_year`` only serves as the fallback
+    when the join's span is degenerate.
     """
     sr = pd.Series(strategy_returns, dtype="float")
     sr.index = pd.to_datetime(sr.index).normalize()
@@ -270,9 +277,23 @@ def factor_attribution(
     ss_tot = float(np.sum((excess - excess.mean()) ** 2))
     r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0.0 else 0.0
 
+    # Annualize on the JOINT calendar's own frequency (round-6): the intercept
+    # is a per-observation mean estimated on the strategy∩factor join, which
+    # for a 7×24 crypto strategy against equity-calendar FF factors is ~252
+    # obs/year even when the asset itself trades 365. Annualizing that
+    # intercept with the ASSET's periods_per_year (365 for perps) overstated
+    # factor alpha by ~45%. The caller's periods_per_year survives only as the
+    # degenerate-span fallback.
+    span_days = float((common[-1] - common[0]).days)
+    joined_ppy = (
+        len(common) / (span_days / 365.25) if span_days > 0 else periods_per_year
+    )
+    if joined_ppy <= 0:
+        joined_ppy = periods_per_year
+
     return FactorAttribution(
         model=model,
-        alpha_annual=alpha_per * periods_per_year,
+        alpha_annual=alpha_per * joined_ppy,
         betas=betas,
         r_squared=r_squared,
         n_obs=int(len(common)),

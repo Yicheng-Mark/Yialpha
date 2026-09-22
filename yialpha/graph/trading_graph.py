@@ -1,5 +1,6 @@
 # yialpha/graph/trading_graph.py
 
+import contextlib
 import json
 import logging
 import os
@@ -817,11 +818,25 @@ class YiAlphaGraph:
         # math — the same formulas scripts/trade_ticket.py uses, extracted to
         # yialpha.risk.perp_ticket so the runtime overlay and the post-hoc
         # ticket can never drift apart. The LLM never fills these numbers.
+        # The profile/multiplier imports live OUTSIDE the perp branch: the
+        # Candidate ticket build below threads them for perp runs without a
+        # NameError on stock paths.
+        from yialpha.risk.perp_ticket import (
+            DEFAULT_PROFILE as _PERP_DEFAULT_PROFILE,
+            advisory_leverage_cap,
+        )
+
         if asset_type == "crypto_perp":
             overlay += self._render_perp_ticket(
                 ticker, str(trade_date), rating, decision, close, atr,
                 funding_total_7d=funding_total_7d,
                 mark_close=self._latest_mark_close(ticker, str(trade_date)),
+                profile=str(
+                    self.config.get("risk_profile") or _PERP_DEFAULT_PROFILE
+                ),
+                atr_mult=float(
+                    self.config.get("atr_stop_mult", 2.0) or 2.0
+                ),
             )
             overlay += self._render_stress_line(ticker, str(trade_date))
         # V2.0: the Candidate ExecutionTicket — the single cross-stage trading
@@ -848,6 +863,20 @@ class YiAlphaGraph:
                 atr=atr,
                 funding_rate_annualized=funding_annualized,
                 trade_date=str(trade_date),
+                # Round-6: same knobs the perp advisory bullet above uses, so
+                # the Candidate ticket and the overlay cannot drift on
+                # profile/ATR-multiplier/bracket cap.
+                profile=str(
+                    self.config.get("risk_profile") or _PERP_DEFAULT_PROFILE
+                ),
+                atr_mult=float(
+                    self.config.get("atr_stop_mult", 2.0) or 2.0
+                ),
+                bracket_max_leverage=(
+                    advisory_leverage_cap(ticker)
+                    if asset_type == "crypto_perp"
+                    else None
+                ),
             )
         except Exception as exc:  # noqa: BLE001 -- ticket must never break a run
             logger.warning("candidate ticket build failed for %s: %s", ticker, exc)
@@ -1140,26 +1169,41 @@ class YiAlphaGraph:
         # construct YiAlphaGraph.__new__) — degrade to config defaults there
         # instead of aborting portfolio control entirely.
         risk_manager = getattr(self, "risk_manager", None)
+        # ONE multiplier for both the synced stop and the leverage advisory
+        # (round-6: perp_ticket_numbers used to hardcode 2·ATR, so a run
+        # configured atr_stop_mult=3.0 rendered SHORT advice one whole ATR
+        # away from the stop it actually placed).
+        atr_mult = getattr(risk_manager, "atr_mult", None)
+        if atr_mult is None:
+            atr_mult = float(self.config.get("atr_stop_mult", 2.0) or 2.0)
         if side != "FLAT" and proposed > 0.0 and (
             risk_manager is None
             or getattr(risk_manager, "use_atr_stop", True)
         ):
             entry_for_stop = getattr(decision, "entry_price", None) or reference_price
-            atr_mult = getattr(risk_manager, "atr_mult", None)
-            if atr_mult is None:
-                atr_mult = float(self.config.get("atr_stop_mult", 2.0) or 2.0)
             if entry_for_stop and atr and atr > 0.0:
                 ticket.stop_price = atr_stop(
                     side_literal, float(entry_for_stop), float(atr), float(atr_mult)
                 )
         # Perp leverage/liquidation advisory follows the synced direction and
         # size (the sign of the weight selects long/short, mirroring the
-        # overlay renderer).
+        # overlay renderer). profile/atr_mult/bracket cap all thread the run's
+        # own config so the advisory and the placed stop agree (round-6).
         if asset_type == "crypto_perp" and reference_price is not None:
             entry_for_lev = getattr(decision, "entry_price", None) or reference_price
+            from yialpha.risk.perp_ticket import (
+                DEFAULT_PROFILE as _PERP_DEFAULT_PROFILE,
+                advisory_leverage_cap,
+            )
+
             numbers = perp_ticket_numbers(
                 entry_for_lev, atr, proxy_rating, ticket.stop_price,
                 signed_position(side_literal, proposed),
+                profile=str(self.config.get("risk_profile") or _PERP_DEFAULT_PROFILE),
+                atr_mult=float(atr_mult),
+                bracket_max_leverage=advisory_leverage_cap(
+                    str(getattr(ticket, "symbol", "") or "")
+                ),
             )
             ticket.leverage = numbers[0] if numbers is not None else None
 
@@ -1282,30 +1326,34 @@ class YiAlphaGraph:
                     self.config.get("max_single_position", 0.2) or 0.2
                 )
                 short_sizing_heuristic = True
-                # Sign-aware funding gate, mirroring RiskManager.decide 5b
-                # for the SHORT side (2026-09-19 known-issue fix): a SHORT
-                # PAYS NEGATIVE funding, so adverse carry is
-                # funding_annualized <= -warn. The legacy 5b gate keys on
-                # `>= warn` with long-side weights only — sign-blind here,
-                # it let a short's adverse carry pass undamped. (The ticket
-                # COST leg was never sign-blind — estimate_round_trip_cost
-                # has always credited positive funding to shorts; this gate
-                # is about the SIZING layer.) Same thresholds, same
-                # halve/quarter ladder, disclosed; favourable carry never
-                # boosts (symmetric with the long gate's no-boost rule).
-                if funding_annualized is not None:
-                    risk_manager = getattr(self, "risk_manager", None)
-                    warn_thr = float(
-                        getattr(risk_manager, "funding_warn_annual", 0.30) or 0.30
-                    )
-                    hard_thr = float(
-                        getattr(risk_manager, "funding_hard_annual", 0.60) or 0.60
-                    )
-                    if funding_annualized <= -hard_thr:
-                        short_funding_damp = 0.25
-                    elif funding_annualized <= -warn_thr:
-                        short_funding_damp = 0.5
-                    proposed *= short_funding_damp
+            # Sign-aware funding gate, mirroring RiskManager.decide 5b for the
+            # SHORT side (2026-09-19 known-issue fix, round-6 widened): a SHORT
+            # PAYS NEGATIVE funding, so adverse carry is
+            # funding_annualized <= -warn. The legacy 5b gate keys on
+            # `>= warn` with long-side weights only — sign-blind here, it let
+            # a short's adverse carry pass undamped. (The ticket COST leg was
+            # never sign-blind — estimate_round_trip_cost has always credited
+            # positive funding to shorts; this gate is about the SIZING
+            # layer.) Same thresholds, same halve/quarter ladder, disclosed;
+            # favourable carry never boosts (symmetric with the long gate's
+            # no-boost rule). ROUND-6: this gate previously lived INSIDE the
+            # heuristic branch, so an explicit SHORT carrying a positive
+            # legacy weight (structured-vs-markdown rating divergence, or an
+            # Underweight band with positive Kelly) skipped it entirely —
+            # both sizing paths now pass through it.
+            if proposed > 0.0 and side == "SHORT" and funding_annualized is not None:
+                risk_manager = getattr(self, "risk_manager", None)
+                warn_thr = float(
+                    getattr(risk_manager, "funding_warn_annual", 0.30) or 0.30
+                )
+                hard_thr = float(
+                    getattr(risk_manager, "funding_hard_annual", 0.60) or 0.60
+                )
+                if funding_annualized <= -hard_thr:
+                    short_funding_damp = 0.25
+                elif funding_annualized <= -warn_thr:
+                    short_funding_damp = 0.5
+                proposed *= short_funding_damp
             # R1 — the Candidate ticket is AUTHORITATIVE: sync it to the
             # side/size this stage actually evaluates BEFORE the constraints
             # run. The ticket was built from the legacy rating/target_weight
@@ -1444,21 +1492,27 @@ class YiAlphaGraph:
                             else "heuristic"
                         )
                         if short_sizing_heuristic
-                        else "legacy_weight"
+                        else (
+                            "legacy_funding_damped"
+                            if short_funding_damp < 1.0
+                            else "legacy_weight"
+                        )
                     )
                     if side == "SHORT"
                     else "n/a",
                     # P2 completeness: the carry the sign-aware gate read and
                     # the damping it applied — without these the record
-                    # cannot recompute the damped proposed_size.
+                    # cannot recompute the damped proposed_size. Round-6:
+                    # disclosed for BOTH short sizing paths (a damped legacy
+                    # weight previously carried no record keys at all).
                     "short_funding_annualized": (
                         funding_annualized
-                        if side == "SHORT" and short_sizing_heuristic
+                        if side == "SHORT"
                         else None
                     ),
                     "short_funding_damp": (
                         short_funding_damp
-                        if side == "SHORT" and short_sizing_heuristic
+                        if side == "SHORT"
                         else None
                     ),
                     "snapshot_id": snapshot_id,
@@ -1470,8 +1524,12 @@ class YiAlphaGraph:
                     else ""
                 )
                 short_line = (
-                    "- **Short sizing**: TRANSITIONAL HEURISTIC "
-                    "(kelly_fraction × max_single_position), not signed-Kelly\n"
+                    (
+                        "- **Short sizing**: TRANSITIONAL HEURISTIC "
+                        "(kelly_fraction × max_single_position), not signed-Kelly\n"
+                        if short_sizing_heuristic
+                        else ""
+                    )
                     + (
                         f"- **Funding gate (short-side, sign-aware)**: carry "
                         f"{funding_annualized:+.0%}/yr against the short → "
@@ -1479,9 +1537,7 @@ class YiAlphaGraph:
                         if short_funding_damp < 1.0
                         else ""
                     )
-                    if short_sizing_heuristic
-                    else ""
-                )
+                ) if side == "SHORT" else ""
                 return (
                     f"\n\n---\n\n[PORTFOLIO CONTROL — SHADOW, not enforced]\n\n"
                     f"- **Side**: {side} · **Proposed**: {proposed:.1%}\n"
@@ -1569,7 +1625,11 @@ class YiAlphaGraph:
                         else "heuristic"
                     )
                     if short_sizing_heuristic
-                    else "legacy_weight"
+                    else (
+                        "legacy_funding_damped"
+                        if short_funding_damp < 1.0
+                        else "legacy_weight"
+                    )
                 )
                 if side == "SHORT"
                 else "n/a",
@@ -1581,10 +1641,19 @@ class YiAlphaGraph:
                 else ""
             )
             short_line = (
-                "- **Short sizing**: TRANSITIONAL HEURISTIC "
-                "(kelly_fraction × max_single_position), not signed-Kelly\n"
-                if short_sizing_heuristic and open_position
-                else ""
+                (
+                    "- **Short sizing**: TRANSITIONAL HEURISTIC "
+                    "(kelly_fraction × max_single_position), not signed-Kelly\n"
+                    if short_sizing_heuristic and open_position
+                    else ""
+                )
+                + (
+                    f"- **Funding gate (short-side, sign-aware)**: carry "
+                    f"{funding_annualized:+.0%}/yr against the short → "
+                    f"size ×{short_funding_damp:.2f}\n"
+                    if short_funding_damp < 1.0
+                    else ""
+                )
             )
             return (
                 f"\n\n---\n\n[PORTFOLIO CONTROL — ENFORCED]\n\n"
@@ -1617,6 +1686,9 @@ class YiAlphaGraph:
         atr: float | None,
         funding_total_7d: float | None = None,
         mark_close: float | None = None,
+        *,
+        profile: str = "conservative",
+        atr_mult: float = 2.0,
     ) -> str:
         """Deterministic perp advisory bullets for the risk overlay.
 
@@ -1646,9 +1718,13 @@ class YiAlphaGraph:
         direction = "long" if weight > 0.0 else "short"
         entry = decision.entry_price if decision.entry_price else close
 
-        from yialpha.risk.perp_ticket import perp_ticket_numbers
+        from yialpha.risk.perp_ticket import advisory_leverage_cap, perp_ticket_numbers
 
-        result = perp_ticket_numbers(entry, atr, rating, decision.stop_loss, weight)
+        result = perp_ticket_numbers(
+            entry, atr, rating, decision.stop_loss, weight,
+            profile=profile, atr_mult=atr_mult,
+            bracket_max_leverage=advisory_leverage_cap(ticker),
+        )
         if result is None:
             return ""
         lev, detail, liq, stop = result
@@ -1656,11 +1732,15 @@ class YiAlphaGraph:
         def _p(x: float) -> str:
             return f"{x:.6g}"
 
-        lines = [
-            "- **Suggested Leverage**: ≤ "
-            f"{lev:.1f}x (liq-dist {detail['L_liq']:.1f}x · vol "
+        cap_bits = (
+            f"liq-dist {detail['L_liq']:.1f}x · vol "
             f"{detail['L_vol']:.1f}x · conviction {detail['L_conv']:.1f}x · "
-            f"hard {detail['L_hard']:.0f}x)\n"
+            f"hard {detail['L_hard']:.0f}x"
+        )
+        if "L_bracket" in detail:
+            cap_bits += f" · bracket {detail['L_bracket']:.0f}x"
+        lines = [
+            "- **Suggested Leverage**: ≤ " f"{lev:.1f}x ({cap_bits})\n"
         ]
         if mark_close is not None and mark_close > 0:
             basis_bps = (entry / mark_close - 1.0) * 1e4
@@ -2206,6 +2286,19 @@ class YiAlphaGraph:
                     exc_info=True,
                 )
                 ledger_run_id = None
+                # Round-6: the context was bound BEFORE register_run — when
+                # the register fails (e.g. DB busy past busy_timeout) the
+                # stale context survived and the run kept "recording":
+                # capture armed, but every submit_predictions flushed into a
+                # run row that does not exist (FK IntegrityError, swallowed)
+                # while tickets still mirrored — orphan ticket rows. Reset
+                # so the whole record stage is honestly off.
+                try:
+                    from yialpha.ledger import run_context as _ledger_run_context_reset
+
+                    _ledger_run_context_reset.reset_ledger_run_context()
+                except Exception:  # noqa: BLE001
+                    pass
             # V2.2 Context stage: compute the run's RegimeState (perp runs,
             # flag regime_state), persist it, and re-bind the run context
             # with regime_id so predictions/tickets carry it and the market
@@ -2691,6 +2784,22 @@ class YiAlphaGraph:
                 self.config["data_cache_dir"], ticker, str(trade_date),
                 self._run_signature(asset_type),
             )
+        # Round-6: mirror ``_run_graph``'s finally-block resets. The streamed
+        # path used to leave the ledger run context / PIT analysis date /
+        # run scope bound after the run — one-run-per-process today, but any
+        # second streamed run in the same process would attribute its
+        # evidence/predictions/tickets to THIS finished run and serve this
+        # run's prefetch snapshot.
+        with contextlib.suppress(Exception):
+            set_analysis_date(None)
+        with contextlib.suppress(Exception):
+            from yialpha.ledger import run_context as _ledger_run_context_streamed
+
+            _ledger_run_context_streamed.reset_ledger_run_context()
+        with contextlib.suppress(Exception):
+            from yialpha.dataflows import run_scope as _run_scope_streamed
+
+            _run_scope_streamed.reset_run_scope()
         return final_state
 
     def _dump_perf(self, trade_date, asset_type: str = "stock"):
