@@ -20,4 +20,11 @@ def get_verified_market_snapshot(
     price levels, Bollinger bands, RSI, MACD, moving averages, support /
     resistance, or historical comparisons, and treat it as the source of truth.
     """
+    # PIT clamp: curr_date comes from the LLM; the pinned analysis date is
+    # the authority (round-7 — the snapshot is the prompt-mandated "source
+    # of truth for exact OHLCV claims", exactly the wrong place for an
+    # unclamped date to serve post-decision bars on a historical run).
+    from yialpha.dataflows.utils import current_pit_end
+
+    curr_date = str(current_pit_end(curr_date) or curr_date)
     return build_verified_market_snapshot(symbol, curr_date, look_back_days)

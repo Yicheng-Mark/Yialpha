@@ -134,10 +134,11 @@ _SPOT_NUDGE = (
     "get_binance_spot_perp_basis to show where the USDT-M perpetual trades "
     "relative to this spot price (positive basis = perp rich / long premium; "
     "negative = discount / short pressure) and reconcile it with the spot "
-    "trend. The get_indicators / get_verified_market_snapshot tools are "
-    "available and resolve correctly for this symbol — use them as usual. If "
-    "a tool returns a sentinel/unavailable marker, say so plainly rather than "
-    "inventing values."
+    "trend. The get_indicators / get_verified_market_snapshot tools are also "
+    "bound; they resolve via the Yahoo pair on major coins, but on other "
+    "pairs they may honestly return a sentinel — for exact indicator claims "
+    "on those, prefer get_binance_spot_indicators above. If a tool returns a "
+    "sentinel/unavailable marker, say so plainly rather than inventing values."
 )
 
 _SPOT_HISTORICAL_NUDGE = (
@@ -340,10 +341,12 @@ def _format_indicator_ic_context(asset_type: str = "stock") -> str | None:
     ``--asset-type`` (``<TICKER>_<h>d_perp.csv.prune.json`` etc.); a crypto
     run averages ONLY its venue's verdicts and a stock run only untagged
     ones, so perp/spot/stock evidence never blends. When a venue has no
-    verdicts yet the function falls back to every file (legacy dirs). Only
-    catalog indicators are rendered; unreadable files are skipped — the
-    function returns ``None`` when no usable evidence exists, leaving the
-    prompt untouched.
+    tagged verdicts yet the function falls back to UNTAGGED files only
+    (legacy dirs) — round-7: the old every-file fallback fed a perp run
+    stock-indicator |IC| weights under an advisory that claims
+    venue-purity. Only catalog indicators are rendered; unreadable files
+    are skipped — the function returns ``None`` when no usable evidence
+    exists, leaving the prompt untouched.
     """
     import json
     from pathlib import Path
@@ -371,7 +374,10 @@ def _format_indicator_ic_context(asset_type: str = "stock") -> str | None:
         if (venue_tag is None and _tagged(p) is None)
         or (venue_tag is not None and _tagged(p) == venue_tag)
     ]
-    files = matching or all_files
+    # Round-7: the fallback is UNTAGGED files only — the old `or all_files`
+    # blended the OTHER venue's tagged verdicts into a run whose docstring
+    # (and the advisory line it renders) promises venue-pure evidence.
+    files = matching or [p for p in all_files if _tagged(p) is None]
     values: dict[str, list[float]] = {}
     for verdict_path in files:
         try:

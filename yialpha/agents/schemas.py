@@ -18,10 +18,11 @@ so that:
 
 from __future__ import annotations
 
+import math
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # LLMs sometimes write a placeholder string ("None", "N/A", ...) into an optional
 # numeric field instead of omitting it. Coerce those to None so the structured
@@ -30,10 +31,64 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 _NULLISH_FLOAT = {"", "none", "n/a", "na", "null", "nil", "-", "tbd", "unknown"}
 
 
-def _coerce_optional_float(value):
-    if isinstance(value, str) and value.strip().lower() in _NULLISH_FLOAT:
-        return None
+def _strip_grouping(value: str) -> str:
+    """Best-effort comma handling for model-emitted numbers (round-7).
+
+    Commas bundling 3-digit groups — with or without a trailing decimal
+    point ("1,250", "1,250.50") — are grouping separators; a single comma
+    with no dot and a non-3-digit tail is a decimal separator ("0,85").
+    Anything else passes through untouched and fails the float parse
+    honestly (the caller degrades the optional field)."""
+    if "," not in value:
+        return value
+    _head, sep, tail = value.rpartition(",")
+    if not sep:
+        return value
+    if "." in tail or len(tail) == 3:
+        return value.replace(",", "")
+    if value.count(",") == 1:
+        return value.replace(",", ".")
     return value
+
+
+def _coerce_optional_float(value):
+    """#1058 coercer, round-7 widened: nullish strings → None, numeric
+    strings parsed here (comma-grouping stripped) so an unparseable string
+    degrades the OPTIONAL field to None instead of raising through pydantic
+    and discarding the WHOLE structured decision."""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.lower() in _NULLISH_FLOAT:
+            return None
+        try:
+            return float(_strip_grouping(stripped))
+        except ValueError:
+            return None
+    return value
+
+
+def _coerce_unit_interval(value):
+    """0-1 optional float with percent-form rescue (round-7, #1058 class).
+
+    ``85`` / ``"85%"`` → ``0.85`` — models emit the percent twin often
+    enough that a strict ``le=1.0`` silently degraded whole PM decisions to
+    regex fallback. Anything still outside [0, 1] after the rescue degrades
+    to None: an optional conviction field never vetoes the decision."""
+    percent = isinstance(value, str) and "%" in value
+    if percent:
+        value = value.strip().rstrip("%").strip()
+    v = _coerce_optional_float(value)
+    if v is None:
+        return None
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    if percent or v > 1.0:
+        v = v / 100.0
+    if not (math.isfinite(v) and 0.0 <= v <= 1.0):
+        return None
+    return v
 
 
 # ---------------------------------------------------------------------------
@@ -378,13 +433,40 @@ class PortfolioDecision(BaseModel):
     )
 
     @field_validator(
-        "price_target", "confidence", "expected_return", "evidence_coverage",
-        "underlying_price_target",
+        "price_target", "expected_return", "underlying_price_target",
         mode="before",
     )
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
+
+    @field_validator("confidence", "evidence_coverage", mode="before")
+    @classmethod
+    def _unit_interval_rescue(cls, v):
+        return _coerce_unit_interval(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _rescue_percent_probabilities(cls, data):
+        """Percent-form probability branches (61/24/16, "70%") used to fail
+        ``le=1.0`` and take the WHOLE decision down with them (#1058 class).
+        Each present branch is rescued through the same unit-interval
+        coercer; one unusable (or missing) branch degrades the OPTIONAL
+        ``probabilities`` block to None — the distribution is advisory, the
+        rating is the artifact."""
+        if not isinstance(data, dict) or "probabilities" not in data:
+            return data
+        raw = data.get("probabilities")
+        if raw is None or not isinstance(raw, dict):
+            return data
+        fixed: dict = {}
+        for key in ("bull", "neutral", "bear"):
+            fixed[key] = (
+                _coerce_unit_interval(raw[key]) if key in raw else None
+            )
+        if any(v is None for v in fixed.values()):
+            return {**data, "probabilities": None}
+        return {**data, "probabilities": fixed}
 
     @field_validator("price_target_currency")
     @classmethod
@@ -535,6 +617,18 @@ class SentimentReport(BaseModel):
             "cap (that ceiling is enforced on the report mechanically)."
         ),
     )
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _confidence_case_rescue(cls, v):
+        """Case-insensitive rescue (round-7, #1058 class): "Medium" must not
+        fail the required Literal and cost the report its deterministic
+        band/score header; out-of-vocab junk degrades to the conservative
+        floor the field itself defines for weak evidence."""
+        if not isinstance(v, str):
+            return v
+        normalized = v.strip().lower()
+        return normalized if normalized in ("low", "medium", "high") else "low"
     narrative: str = Field(
         description=(
             "Full sentiment report covering, in order: "
@@ -639,6 +733,19 @@ class PositioningReport(BaseModel):
             "when the full positioning fabric was available."
         ),
     )
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _confidence_case_rescue(cls, v):
+        """Case-insensitive rescue (round-7, #1058 class): a capitalized
+        variant ("Medium" — the module's own renderer emits ``.capitalize()``
+        prose) must not fail the required Literal and cost the report its
+        deterministic band/score header. Out-of-vocab junk degrades to the
+        field's own conservative floor, never a raise."""
+        if not isinstance(v, str):
+            return v
+        normalized = v.strip().lower()
+        return normalized if normalized in ("low", "medium", "high") else "low"
 
 
 def render_positioning_report(report: PositioningReport) -> str:

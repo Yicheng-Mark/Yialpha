@@ -967,9 +967,18 @@ def get_binance_open_interest(
 
     label = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
     scope = "days + live" if period == "1d" else f"{period} rows"
-    header = (
-        f"# Perp USDT-M open interest for {label} (last {limit} {scope})\n"
-    )
+    # Round-7: a WINDOWED request serves the window (end_iso names it below,
+    # up to the 500-row cap), not the look-back count — the old "(last N)"
+    # phrase claimed the look-back-derived count on every windowed call.
+    if end_iso is not None:
+        header = (
+            f"# Perp USDT-M open interest for {label} "
+            f"(windowed request, {len(df)} rows served)\n"
+        )
+    else:
+        header = (
+            f"# Perp USDT-M open interest for {label} (last {limit} {scope})\n"
+        )
     if period != "1d":
         header += f"# period: {period}\n"
     if end_iso is not None:
@@ -1235,7 +1244,16 @@ def get_binance_long_short_ratio(
 
     df = pd.DataFrame.from_records(records)
     vlabel = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
-    header = f"# Perp USDT-M long/short ratio for {vlabel} (last {limit} {period} rows)\n"
+    # Round-7: windowed requests serve the window, not the look-back count.
+    header = (
+        f"# Perp USDT-M long/short ratio for {vlabel} "
+        + (
+            f"(windowed request, {len(df)} rows served)"
+            if end_iso is not None
+            else f"(last {limit} {period} rows)"
+        )
+        + "\n"
+    )
     if end_iso is not None:
         header += (
             f"# window through {end_iso} (endpoints retain the last "
@@ -1324,7 +1342,16 @@ def get_binance_taker_buy_sell(
 
     df = pd.DataFrame.from_records(records)
     vlabel = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
-    header = f"# Perp USDT-M taker buy/sell for {vlabel} (last {limit} {period} rows)\n"
+    # Round-7: windowed requests serve the window, not the look-back count.
+    header = (
+        f"# Perp USDT-M taker buy/sell for {vlabel} "
+        + (
+            f"(windowed request, {len(df)} rows served)"
+            if end_iso is not None
+            else f"(last {limit} {period} rows)"
+        )
+        + "\n"
+    )
     if end_iso is not None:
         header += (
             f"# window through {end_iso} (endpoint retains the last "
@@ -1430,7 +1457,16 @@ def get_binance_basis(
 
     df = pd.DataFrame.from_records(records)
     vlabel = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
-    header = f"# Perp USDT-M basis for {vlabel} (last {limit} {period} rows)\n"
+    # Round-7: windowed requests serve the window, not the look-back count.
+    header = (
+        f"# Perp USDT-M basis for {vlabel} "
+        + (
+            f"(windowed request, {len(df)} rows served)"
+            if end_iso is not None
+            else f"(last {limit} {period} rows)"
+        )
+        + "\n"
+    )
     if end_iso is not None:
         header += (
             f"# window through {end_iso} (endpoint retains the last "
@@ -2203,22 +2239,41 @@ def derivatives_stress_series(
         start_ms, data_end_ms - _FUTURES_DATA_RETENTION_DAYS * 86_400_000
     )
 
+    def _trim_to_end(rows: list, bound_ms: int) -> list:
+        # Round-7: belt-and-suspenders endTime trim, same defence the four
+        # /futures/data tool consumers carry — a vendor (or mock) that
+        # ignores the endTime must never leak rows past the window end.
+        # Unparseable timestamps stay (their row is the record parser's
+        # business, not this filter's).
+        trimmed = []
+        for r in rows:
+            try:
+                if int(r["timestamp"]) > bound_ms:
+                    continue
+            except (KeyError, TypeError, ValueError):
+                pass
+            trimmed.append(r)
+        return trimmed
+
     for name, path, value_key in (
         ("open_interest", "/futures/data/openInterestHist", "sumOpenInterest"),
         ("global_lsr", "/futures/data/globalLongShortAccountRatio", "longShortRatio"),
     ):
         try:
-            hist_rows = _http_get(
-                path,
-                {
-                    "symbol": canonical,
-                    "period": "1d",
-                    "startTime": data_start_ms,
-                    "endTime": data_end_ms,
-                    "limit": 30,
-                },
-                symbol,
-                canonical,
+            hist_rows = _trim_to_end(
+                _http_get(
+                    path,
+                    {
+                        "symbol": canonical,
+                        "period": "1d",
+                        "startTime": data_start_ms,
+                        "endTime": data_end_ms,
+                        "limit": 30,
+                    },
+                    symbol,
+                    canonical,
+                ),
+                data_end_ms,
             )
             series = _stress_series_from_records(hist_rows, "timestamp", value_key)
             out[name] = series if len(series) > 0 else None
@@ -2254,17 +2309,20 @@ def derivatives_stress_series(
 
     # Taker aggression: latest daily buySellRatio (float, not a series).
     try:
-        ratio_rows = _http_get(
-            "/futures/data/takerlongshortRatio",
-            {
-                "symbol": canonical,
-                "period": "1d",
-                "startTime": end_ms - 2 * 86_400_000,
-                "endTime": end_ms,
-                "limit": 2,
-            },
-            symbol,
-            canonical,
+        ratio_rows = _trim_to_end(
+            _http_get(
+                "/futures/data/takerlongshortRatio",
+                {
+                    "symbol": canonical,
+                    "period": "1d",
+                    "startTime": end_ms - 2 * 86_400_000,
+                    "endTime": end_ms,
+                    "limit": 2,
+                },
+                symbol,
+                canonical,
+            ),
+            end_ms,
         )
         series = _stress_series_from_records(ratio_rows, "timestamp", "buySellRatio")
         out["taker_ratio"] = float(series.iloc[-1]) if len(series) > 0 else None

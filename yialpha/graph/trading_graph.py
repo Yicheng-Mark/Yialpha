@@ -882,7 +882,8 @@ class YiAlphaGraph:
             logger.warning("candidate ticket build failed for %s: %s", ticker, exc)
         if ticket is not None:
             bridge_block = self._link_ticket_to_ledger(
-                ticket, final_state, ticker, str(trade_date), asset_type, close
+                ticket, final_state, ticker, str(trade_date), asset_type, close,
+                funding_annualized=funding_annualized,
             )
             control_block = self._apply_portfolio_control(
                 ticket, decision, final_state, ticker, str(trade_date), asset_type,
@@ -933,6 +934,7 @@ class YiAlphaGraph:
         trade_date: str,
         asset_type: str,
         close: float | None,
+        funding_annualized: float | None = None,
     ) -> str:
         """V2.1 record stage: link the ticket into the ledger + bridge targets.
 
@@ -949,7 +951,14 @@ class YiAlphaGraph:
            chain on the ticket, and return a markdown disclosure block for
            the overlay. A missing FX rate records the gap and a shadow
            DEGRADED_CRITICAL verdict — enforcement arrives with the V2.4
-           enforced mode.
+           enforced mode. When the PM quoted the target in USD (the
+           ``price_target_currency == "USD"`` fallback), the bridge also
+           RE-PRICES the directional tradeability verdict against the
+           converted contract target (``funding_annualized`` threads the
+           overlay's carry input so the re-derivation uses the same cost
+           the build-time verdict used — round-7: that verdict divided a
+           USD target by the USDT reference, off by exactly the fx + basis
+           gap the bridge exists to correct).
 
         Returns "" (no overlay addition) whenever a gate is closed or a leg
         is genuinely absent; an exception anywhere is logged and swallowed —
@@ -985,12 +994,14 @@ class YiAlphaGraph:
                             return None
 
                     underlying_target = _as_float(pm_fields.get("underlying_price_target"))
+                    usd_quoted_fallback = False
                     if (
                         underlying_target is None
                         and str(pm_fields.get("price_target_currency") or "").upper() == "USD"
                     ):
                         # PM quoted the target on the underlying in USD directly.
                         underlying_target = _as_float(pm_fields.get("price_target"))
+                        usd_quoted_fallback = underlying_target is not None
                     if underlying_target is not None:
                         fx = quote_fx_module.usdt_usd_as_of(trade_date)
                         mark_close = self._latest_mark_close(ticker, trade_date)
@@ -1008,6 +1019,71 @@ class YiAlphaGraph:
                         ticket.price_target_basis = "last"
                         if result.contract_target_usdt is not None:
                             ticket.contract_target = result.contract_target_usdt
+                            if usd_quoted_fallback:
+                                # Round-7: the raw price_target was a USD
+                                # number, so the build-time verdict divided it
+                                # by the USDT reference — off by the fx+basis
+                                # gap the bridge just corrected. Make the
+                                # ticket's target the contract-currency
+                                # number it claims to be and re-derive the
+                                # verdict through the SAME gate with the
+                                # same cost inputs the build used.
+                                ticket.target_price = result.contract_target_usdt
+                                try:
+                                    from yialpha.dataflows import (
+                                        quality as quality_module,
+                                    )
+                                    from yialpha.risk.cost_model import (
+                                        estimate_round_trip_cost,
+                                    )
+                                    from yialpha.risk.tradeability import (
+                                        evaluate_tradeability,
+                                    )
+                                    from yialpha.tickets import DEFAULT_HORIZON_DAYS
+
+                                    proxy_rating = {
+                                        "LONG": "buy", "SHORT": "sell",
+                                    }.get(ticket.side.value, "hold")
+                                    reprice_cost = estimate_round_trip_cost(
+                                        asset_type, ticket.side.value.lower(),
+                                        DEFAULT_HORIZON_DAYS, funding_annualized,
+                                    )
+                                    verdict = evaluate_tradeability(
+                                        rating=proxy_rating,
+                                        target_price=ticket.target_price,
+                                        reference_price=close,
+                                        cost=reprice_cost,
+                                        quality_tier=(
+                                            quality_module.classify_quality(
+                                                quality_module.snapshot_quality(),
+                                                quality_module
+                                                .snapshot_core_successes(),
+                                            )["tier"]
+                                        ),
+                                    )
+                                    ticket.tradeability = verdict.tradeability
+                                    ticket.tradeability_reason = (
+                                        verdict.tradeability_reason
+                                    )
+                                    ticket.gross_edge = (
+                                        verdict.gross_edge_bps / 1e4
+                                        if verdict.gross_edge_bps is not None
+                                        else None
+                                    )
+                                    ticket.estimated_cost = (
+                                        reprice_cost.total_bps / 1e4
+                                    )
+                                    ticket.net_edge = (
+                                        verdict.net_edge_bps / 1e4
+                                        if verdict.net_edge_bps is not None
+                                        else None
+                                    )
+                                except Exception:  # noqa: BLE001 -- best-effort
+                                    logger.warning(
+                                        "bridge verdict re-pricing failed for "
+                                        "%s on %s", ticker, trade_date,
+                                        exc_info=True,
+                                    )
                         if fx is not None:
                             ticket.quote_fx = {
                                 "rate": fx.rate,
@@ -1028,6 +1104,13 @@ class YiAlphaGraph:
                             + render_bridge_block(result)
                             + "\n"
                         )
+                        if usd_quoted_fallback and ticket.net_edge is not None:
+                            block += (
+                                "- directional edge re-priced against the "
+                                "converted contract target (the PM's target "
+                                "was USD-quoted; the build-time verdict had "
+                                "divided it by the USDT reference)\n"
+                            )
                         if fx is None:
                             block += (
                                 "- ⚠ shadow verdict: DEGRADED_CRITICAL / NO_TRADE recorded "

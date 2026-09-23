@@ -160,6 +160,13 @@ def _veto(rule: str, reason: str) -> RiskDecision:
     return RiskDecision(rule=rule, action="VETO", multiplier=0.0, reasons=[reason], metrics={})
 
 
+def _candidate_key(position: PositionView) -> tuple[str, str | None]:
+    """The replacement key: (symbol, instrument_class). Same symbol on two
+    venues (perp + spot books of one ticker) are DIFFERENT rows — only the
+    exact candidate row is replaced by a re-size."""
+    return (position.symbol, getattr(position, "instrument_class", None))
+
+
 def _post_positions(
     candidate: PositionView, snapshot: PortfolioSnapshot
 ) -> tuple[PositionView, ...]:
@@ -170,11 +177,16 @@ def _post_positions(
     ticker) and re-add only the candidate — gross/asset-class metrics would
     silently undercount and constraints could false-PASS. Today's single-
     venue snapshots are unaffected (one row per symbol either way).
+
+    Round-7 corollary: every class-AGNOSTIC ``others`` summation over this
+    book must exclude by the same key — a symbol-only ``!=`` filter keeps
+    the same-symbol other-venue row in the book but sums it NOWHERE, so
+    ``post_gross`` undercounts by exactly that row and the constraint can
+    false-PASS a candidate that pushes the TRUE book over its cap.
     """
-    candidate_key = (candidate.symbol, getattr(candidate, "instrument_class", None))
+    candidate_key = _candidate_key(candidate)
     kept = tuple(
-        p for p in snapshot.positions
-        if (p.symbol, getattr(p, "instrument_class", None)) != candidate_key
+        p for p in snapshot.positions if _candidate_key(p) != candidate_key
     )
     return kept + (candidate,)
 
@@ -280,7 +292,10 @@ def global_gross(
     if veto is not None:
         return veto
     positions = _post_positions(candidate, snapshot)
-    others = sum(abs(p.weight) for p in positions if p.symbol != candidate.symbol)
+    candidate_key = _candidate_key(candidate)
+    others = sum(
+        abs(p.weight) for p in positions if _candidate_key(p) != candidate_key
+    )
     return _limit_decision(
         "global_gross", "post_gross", "max_gross",
         others, abs(candidate.weight), limits.max_gross,
@@ -383,7 +398,10 @@ def directional_concentration(
             metrics={"post_directional": 0.0, "max_directional": limits.max_directional},
         )
     positions = _post_positions(candidate, snapshot)
-    others_net = sum(p.weight for p in positions if p.symbol != candidate.symbol)
+    candidate_key = _candidate_key(candidate)
+    others_net = sum(
+        p.weight for p in positions if _candidate_key(p) != candidate_key
+    )
     net = others_net + candidate.weight
     others = max(sign * others_net, 0.0)
     decision = _limit_decision(
@@ -438,10 +456,11 @@ def correlation_cluster(
         return veto
     positions = _post_positions(candidate, snapshot)
     cluster = _cluster_id(candidate.symbol, limits.cluster_of)
+    candidate_key = _candidate_key(candidate)
     others = sum(
         abs(p.weight)
         for p in positions
-        if p.symbol != candidate.symbol
+        if _candidate_key(p) != candidate_key
         and _cluster_id(p.symbol, limits.cluster_of) == cluster
     )
     return _limit_decision(
@@ -650,10 +669,22 @@ def advisory_metrics(
         out["var_95"] = None
         out["cvar_95"] = None
 
-    # Beta vs BTC (None-safe without the bench series).
+    # Beta vs BTC (None-safe without the bench series). Round-7: the finite
+    # filter is PAIRWISE — dropping each side independently left two
+    # equal-length series over DIFFERENT dates when the NaNs fell on
+    # different days, and _beta's equal-length check then fabricated a
+    # date-shifted covariance (the exact misalignment its docstring refuses).
     beta: float | None = None
     if btc_returns is not None:
-        beta = _beta(finite_returns, _finite_floats(btc_returns))
+        paired = [
+            (p, b)
+            for p, b in zip(snapshot.returns_history, btc_returns, strict=False)
+            if isinstance(p, (int, float))
+            and isinstance(b, (int, float))
+            and math.isfinite(p)
+            and math.isfinite(b)
+        ]
+        beta = _beta([p for p, _ in paired], [b for _, b in paired])
     out["beta_vs_btc"] = beta
 
     # Pairwise correlation matrix ({} when no series provided).

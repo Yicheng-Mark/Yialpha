@@ -105,7 +105,7 @@ def resolve_pending_entries(
         # perp decision resolves on the perp's klines even when a later spot
         # run of the same ticker triggers the sweep), normalized through the
         # SAME mapping verify-history uses — the legacy ``crypto`` umbrella
-        # prices as perp and a hand-edited/garbage tag degrades via ticker
+        # prices as crypto_spot and a hand-edited/garbage tag degrades via ticker
         # inference (USDT suffix → perp) instead of silently falling to the
         # Yahoo spot leg.
         from yialpha.accuracy import _resolve_asset_type

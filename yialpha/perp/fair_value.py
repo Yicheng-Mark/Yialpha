@@ -62,6 +62,15 @@ _MISSING_EXPLANATIONS: dict[str, str] = {
 BRIDGE_HEADING = "### Fair Value Bridge (USD → USDT contract target)"
 
 
+def _fmt_price(value: float, digits: int) -> str:
+    """Magnitude-adaptive fixed-decimal render (round-7, the `.2f` micro-price
+    defect class): ``>= 1`` keeps the pinned fixed-decimal form (existing
+    100-scale pins are byte-identical), a sub-1 target switches to ``.6g`` so
+    a 0.004-scale underlying target renders "0.004", not "0.00". The stored
+    float is never rounded — this is the disclosure layer only."""
+    return f"{value:.{digits}f}" if abs(value) >= 1.0 else f"{value:.6g}"
+
+
 @dataclass(frozen=True)
 class FairValueResult:
     """Outcome of one bridge evaluation.
@@ -102,7 +111,10 @@ def fair_value_bridge(
     rendered as a warning) and does not block the conversion.
 
     Validation (every failure keeps the inputs on the result so the caller
-    can log what it had): ``underlying_target_usd`` None or non-finite →
+    can log what it had): ``underlying_target_usd`` None, non-finite, or
+    ``<= 0`` (a zero/negative price target is always garbage — round-7:
+    it used to convert cleanly into a zero/negative contract target that
+    sailed past the ``contract_target is not None`` eligibility veto) →
     ``contract_target_usdt`` is None plus the matching
     ``missing_inputs`` entry; ``usdt_usd`` None → the same; ``usdt_usd``
     that is non-finite, ``<= 0``, or outside [0.9, 1.1] →
@@ -113,7 +125,7 @@ def fair_value_bridge(
     missing: list[str] = []
     underlying_unusable = underlying_target_usd is None or not math.isfinite(
         underlying_target_usd
-    )
+    ) or underlying_target_usd <= 0.0
     if underlying_unusable:
         missing.append(MISSING_UNDERLYING)
     fx_out_of_band = False
@@ -150,10 +162,10 @@ def fair_value_bridge(
     assert underlying_target_usd is not None and usdt_usd is not None  # narrowed above
     contract_target = underlying_target_usd / usdt_usd * (1.0 + expected_basis)
     chain = (
-        f"underlying target {underlying_target_usd:.2f} USD",
+        f"underlying target {_fmt_price(underlying_target_usd, 2)} USD",
         f"÷ USDT/USD {usdt_usd:.6f}",
         f"× (1 + expected basis {expected_basis:.6f})",
-        f"= contract target {contract_target:.6f} USDT",
+        f"= contract target {_fmt_price(contract_target, 6)} USDT",
     )
     return FairValueResult(
         underlying_target_usd=underlying_target_usd,

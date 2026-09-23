@@ -569,21 +569,23 @@ def _compute_reference_outcome(item: dict[str, Any], now_as_of: str) -> OutcomeC
         expected_entry_day = _last_trading_day_at_or_before(expected_entry_day)
         endpoint_day = _last_trading_day_at_or_before(endpoint_day)
     if entry_dt != _bar_close_moment(expected_entry_day.isoformat()):
-        # Midnight-cross grace (round-6, both seams): a reference fetch that
-        # straddled UTC midnight stored the latest CLOSED bar at REQUEST time
-        # (one bar-day older than formed_at implies) — a valid snapshot the
-        # strict comparison used to retire as terminal incomplete. Accept
-        # exactly one bar-day of skew (weekend-walked on the equity seam) and
-        # only while formation sits within minutes of UTC midnight; anything
-        # else keeps the strict verdict (the capture path structurally cannot
-        # store a genuinely stale bar).
-        grace_day = expected_entry_day - timedelta(days=1)
-        if equity:
-            grace_day = _last_trading_day_at_or_before(grace_day)
-        if (
-            formed.hour == 0
-            and formed.minute <= 5
-            and entry_dt == _bar_close_moment(grace_day.isoformat())
+        # Midnight-cross grace (round-6, both seams; round-7: the predicate
+        # lives in time_contract.midnight_cross_grace_day so the scoreboard
+        # and audit qualify the SAME rows this scorer accepts — they used to
+        # re-derive the strict boundary and silently reject grace rows): a
+        # reference fetch that straddled UTC midnight stored the latest
+        # CLOSED bar at REQUEST time (one bar-day older than formed_at
+        # implies) — a valid snapshot the strict comparison used to retire
+        # as terminal incomplete. Accept exactly one bar-day of skew
+        # (weekend-walked on the equity seam) and only while formation sits
+        # within minutes of UTC midnight; anything else keeps the strict
+        # verdict (the capture path structurally cannot store a genuinely
+        # stale bar).
+        from yialpha.ledger.time_contract import midnight_cross_grace_day
+
+        grace_day = midnight_cross_grace_day(formed, equity=equity)
+        if grace_day is not None and entry_dt == _bar_close_moment(
+            grace_day.isoformat()
         ):
             expected_entry_day = grace_day
             context["entry_grace"] = "midnight_cross"

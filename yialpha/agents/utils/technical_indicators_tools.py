@@ -26,6 +26,15 @@ def get_indicators(
     Returns:
         str: A formatted dataframe containing the technical indicators for the specified ticker symbol and indicator.
     """
+    # PIT clamp: curr_date comes from the LLM; the pinned analysis date is
+    # the authority (round-7 — same guard as the news vendors / weekly /
+    # price-structure tools; the indicator-window vendors and the AV
+    # indicator fallback behind this route never clamped on their own, so a
+    # model echoing the cache's "Data retrieved on" header date served
+    # post-decision rows on a historical run).
+    from yialpha.dataflows.utils import current_pit_end
+
+    curr_date = str(current_pit_end(curr_date) or curr_date)
     # LLMs sometimes pass multiple indicators as a comma-separated string;
     # split and process each individually.
     indicators = [i.strip().lower() for i in indicator.split(",") if i.strip()]

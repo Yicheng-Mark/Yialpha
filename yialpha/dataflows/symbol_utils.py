@@ -298,7 +298,17 @@ def normalize_symbol_for_venue(raw: str, venue: str = "binance_perp") -> str:
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError(f"Cannot normalize empty symbol for venue {venue!r}")
 
-    s = raw.strip().upper().rstrip("+").replace("-", "")
+    # Round-7: also strip "/" and ":" — the ccxt/TradingView pair forms
+    # ("BTC/USDT", "BTC:USDT") survived as literal separators and reached
+    # the vision store's cache-filename sanitizer as an untyped
+    # "unsafe cache filename" ValueError (the REST twin typed the same
+    # input through NoMarketDataError with symbol context).
+    s = (
+        raw.strip().upper().rstrip("+")
+        .replace("-", "")
+        .replace("/", "")
+        .replace(":", "")
+    )
 
     if venue not in ("binance_perp", "binance_spot"):
         # Unknown venue: fall back to the cleaned form rather than guessing.

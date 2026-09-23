@@ -161,7 +161,14 @@ def _resolve_asset_type(ticker: str, logged: Any) -> tuple[str, str]:
             if ticker.upper().replace("-", "").endswith("USDT")
             else "stock"
         )
-        return inferred, "logged" if logged_str == "stock" else "inferred"
+        if logged_str == "stock":
+            # Round-7: the USDT-suffix heuristic OVERRIDING an explicit
+            # stock tag is an inference — the report's legacy-inference
+            # caveat must fire. Before, a logged-stock row re-priced as perp
+            # reported "logged" and hid exactly the misroute the caveat
+            # exists to surface.
+            return inferred, "logged" if inferred == "stock" else "inferred"
+        return inferred, "inferred"
     return "stock", "logged"
 
 

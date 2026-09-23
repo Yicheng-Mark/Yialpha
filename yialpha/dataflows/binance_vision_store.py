@@ -335,8 +335,13 @@ class VisionStore:
         continuity): interior day holes and low-row days.
 
         Returns ``{present_days, interior_missing_days, low_row_days,
-        first_day, last_day}`` — days outside the synced range are the sync
-        report's business, not holes."""
+        first_day, last_day, known_missing_days}`` — days outside the synced
+        range are the sync report's business, not holes.
+        ``known_missing_days`` lists the WINDOW EDGE days the manifest has
+        already recorded as 404-missing: the sync's 24h retry backoff
+        excludes them from every later call's attempt set, so without this
+        key a backoff-suppressed edge day would disclose once on the call
+        that 404'd and then silently vanish from the header (round-7)."""
         manifest = self._read_manifest(dataset, symbol)
         window = _day_list(start_dt, end_dt)
         present = [d for d in window if d in manifest["days"]]
@@ -346,6 +351,13 @@ class VisionStore:
             "low_row_days": [],
             "first_day": present[0] if present else None,
             "last_day": present[-1] if present else None,
+            # Computed BEFORE the empty-present early return below: an edge
+            # day that 404'd is exactly the case where present may be short.
+            "known_missing_days": [
+                d
+                for d in dict.fromkeys((window[0], window[-1]))
+                if d not in manifest["days"] and d in manifest["missing"]
+            ],
         }
         if not present:
             return out

@@ -74,8 +74,13 @@ logger = logging.getLogger(__name__)
 #: Calendar days of kline lookback: SMA200 on a ~5-sessions-per-week series
 #: needs ~280 calendar days; 420 covers it with margin for gaps.
 _KLINE_LOOKBACK_DAYS = 420
-#: Trailing funding window (settlement sum over 7 days).
-_FUNDING_WINDOW_DAYS = 7
+#: Trailing funding window: 7 days END-INCLUSIVE (start 6 back) — the seam
+#: semantics ``_trailing_funding_total`` and the perp bundle's
+#: ``_fetch_funding`` settled after their own 8-day off-by-ones. A start 7
+#: back spanned 8 calendar days (24 settlements at the 8h cadence) and
+#: overstated ``funding_pct`` — a frozen RegimeState field and a
+#: ``_market_stress`` trigger input — by a fixed ~14%.
+_FUNDING_WINDOW_START_DAYS = 6
 #: Realized-vol window: stdev of the last 20 daily returns (21 closes).
 _VOL_WINDOW = 20
 #: SMA windows for the trend classifier (frozen with REGIME_VERSION).
@@ -406,7 +411,7 @@ def compute_regime_state(
     if klass == "pure_crypto_perp":
         try:
             csv_text = get_binance_funding_rate(
-                ticker, _window_start(end_date, _FUNDING_WINDOW_DAYS), end_date,
+                ticker, _window_start(end_date, _FUNDING_WINDOW_START_DAYS), end_date,
             )
             settlements = _parse_funding_csv(csv_text)
             if settlements:

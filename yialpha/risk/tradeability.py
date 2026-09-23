@@ -26,6 +26,7 @@ and is disclosed, but must not kill an otherwise healthy BTC perp trade.
 
 from __future__ import annotations
 
+import math
 from enum import StrEnum
 
 from pydantic import BaseModel
@@ -48,7 +49,9 @@ REASON_HOLD = "hold_rating_no_directional_trade"
 REASON_DATA_INVALID = "data_invalid_run_refused"
 REASON_CRITICAL_MISSING = "critical_data_missing"
 REASON_NO_TARGET = "no_target_price"
+REASON_INVALID_TARGET = "invalid_target_price"
 REASON_NO_REFERENCE = "no_reference_price"
+REASON_COST_NON_FINITE = "cost_estimate_not_finite"
 REASON_EDGE = "net_edge_at_or_below_zero"
 REASON_OK = "net_edge_above_costs"
 
@@ -103,8 +106,20 @@ def gross_edge(
     None when the inputs cannot support the computation (missing prices,
     non-positive reference, or a FLAT side). A target on the WRONG side of
     the reference returns a negative fraction — that is the point.
+
+    Round-7: the target must also be finite and STRICTLY POSITIVE. A zero
+    or negative target is arithmetic-valid garbage that the SHORT leg
+    REWARDS (``1 - 0/ref = +1.0`` → a fabricated +100% edge → TRADEABLE),
+    and a NaN target defeats every ``<=`` comparison downstream — both
+    refuse here instead of laundering a verdict.
     """
-    if target_price is None or reference_price is None or reference_price <= 0.0:
+    if (
+        target_price is None
+        or reference_price is None
+        or reference_price <= 0.0
+        or not (target_price > 0.0)
+        or not math.isfinite(target_price)
+    ):
         return None
     if side == TicketSide.LONG:
         return target_price / reference_price - 1.0
@@ -131,10 +146,15 @@ def evaluate_tradeability(
        price/ATR/mark-index/core-fundamental data.
     4. Missing target or reference price -> UNEVALUATED with the specific
        missing input as the reason (the PM is allowed to rate without a
-       numeric target; the gate then declines to invent one).
-    5. ``net_edge_bps = gross_edge_bps - cost.total_bps - risk_buffer_bps``;
+       numeric target; the gate then declines to invent one). A PRESENT but
+       non-finite / non-positive target is the same refusal class with its
+       own reason (``invalid_target_price``) — it is garbage, not opinion.
+    5. A non-finite cost estimate -> NO_TRADE fail-closed: a NaN
+       ``total_bps`` (e.g. NaN funding through ``series.sum()``) defeats the
+       ``net_edge <= 0`` comparison and used to fall through to TRADEABLE.
+    6. ``net_edge_bps = gross_edge_bps - cost.total_bps - risk_buffer_bps``;
        ``<= 0`` -> NO_TRADE (zero expected value is not worth executing).
-    6. Otherwise TRADEABLE.
+    7. Otherwise TRADEABLE.
     """
     side = side_from_rating(rating)
     if side == TicketSide.FLAT:
@@ -167,6 +187,24 @@ def evaluate_tradeability(
         return TradeabilityVerdict(
             tradeability=Tradeability.UNEVALUATED,
             tradeability_reason=REASON_NO_REFERENCE,
+            side=side,
+        )
+    if not math.isfinite(target_price) or not (target_price > 0.0):
+        # Present but garbage: a zero/negative target is short-rewarding
+        # arithmetic junk, NaN defeats the comparisons. The gate declines
+        # to price an opinion it cannot read — distinct reason so a
+        # dashboard can tell garbage from absent.
+        return TradeabilityVerdict(
+            tradeability=Tradeability.UNEVALUATED,
+            tradeability_reason=REASON_INVALID_TARGET,
+            side=side,
+        )
+    if not math.isfinite(cost.total_bps):
+        # A NaN cost (NaN funding through series.sum()) used to fall through
+        # the net_edge <= 0 comparison to TRADEABLE — fail closed instead.
+        return TradeabilityVerdict(
+            tradeability=Tradeability.NO_TRADE,
+            tradeability_reason=REASON_COST_NON_FINITE,
             side=side,
         )
 

@@ -490,8 +490,14 @@ def _coverage_notes(report, qa: dict, start_dt=None, end_dt=None) -> str:
             f"# ⚠ {len(interior)} archive day(s) missing inside the window "
             "(pre-listing / unpublished days)\n"
         )
-    if report is not None and getattr(report, "missing_days", None):
-        missing = set(report.missing_days)
+    # Round-7: union the call-scoped fresh 404s with the manifest's
+    # KNOWN-missing edge days — the 24h retry backoff keeps a previously
+    # 404ed edge day out of every later call's attempt set, so the
+    # call-scoped report alone disclosed once and then went quiet while the
+    # body silently ended a day early.
+    missing = set(getattr(report, "missing_days", None) or [])
+    missing.update(qa.get("known_missing_days") or [])
+    if missing:
         edges = []
         if start_dt is not None and start_dt.strftime("%Y-%m-%d") in missing:
             edges.append(f"start {start_dt.date()}")

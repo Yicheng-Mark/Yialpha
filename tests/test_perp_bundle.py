@@ -166,8 +166,11 @@ def test_taker_latest_and_mean(monkeypatch):
     out = pb._fetch_taker("BTCUSDT", date.today().isoformat())
     assert out["status"] == pb.STATUS_OK
     assert out["latest"] == pytest.approx(1.35)
+    # Round-7: "7d" means 7 daily values END-INCLUSIVE ([D-6..D]) — the same
+    # seam convention the funding fix settled; the old mean over all 8 served
+    # rows averaged 8 days under a 7d label.
     assert out["mean_7d"] == pytest.approx(
-        sum(1.0 + (7 - d) * 0.05 for d in range(8)) / 8
+        sum(1.0 + (7 - d) * 0.05 for d in range(6, -1, -1)) / 7
     )
 
 

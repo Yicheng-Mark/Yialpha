@@ -193,9 +193,14 @@ class RiskManager:
         rating = rating if rating in RATING_TO_CONFIDENCE else "Hold"
 
         # 1. Update the drawdown breaker with the latest equity mark.
-        breaker_state = self.breaker.update(state.equity) if state.equity > 0 else BreakerState(
-            can_open_new=True, position_multiplier=1.0, current_drawdown=0.0, regime="normal",
-        )
+        # Round-7: UNCONDITIONALLY — the breaker's own bad-tick path (None /
+        # NaN / inf / non-positive input replays the last valid regime with
+        # can_open_new=False) is strictly safer than the fabricated
+        # permissive state this guard used to substitute, which skipped a
+        # hard_stop breaker entirely on one corrupt equity tick (NaN > 0 is
+        # False — and the injection site's `or 0.0` PRESERVES NaN because
+        # NaN is truthy).
+        breaker_state = self.breaker.update(state.equity)
 
         # 2. Kelly sizing (rating conviction x optional historical win rate).
         wins, losses, avg_win, avg_loss = _trade_stats(state.trade_history)

@@ -53,7 +53,12 @@ from yialpha.ledger.models import (
     decode_json_list,
 )
 from yialpha.ledger.sqlite import get_connection, ledger_exists
-from yialpha.ledger.time_contract import aware_utc, expected_reference_date, validate_timing
+from yialpha.ledger.time_contract import (
+    aware_utc,
+    entry_boundary_admitted,
+    expected_reference_date,
+    validate_timing,
+)
 from yialpha.versions import LEGACY_OUTCOME_VERSION, OUTCOME_COMPUTE_VERSION
 
 #: V3 discipline: a calibration cell with fewer samples than this is display
@@ -180,12 +185,18 @@ def _scoring_version(row: Any) -> str | None:
             if equity and context.get("reference_basis_check") != "matched_frozen_close":
                 return None
             # The metadata must describe the same exact daily boundaries the
-            # scorer admits, not merely any ordered historical window.
-            for instant, cutoff in ((start, formed), (end, horizon)):
-                expected_day = expected_reference_date(cutoff, equity=equity)
-                expected = datetime.combine(expected_day + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
-                if instant != expected:
-                    return None
+            # scorer admits, not merely any ordered historical window. The
+            # ENTRY boundary also admits the scorer's midnight-cross grace
+            # (round-7): rows the compute layer scored complete with
+            # ``entry_grace`` used to be silently dropped from every
+            # calibration metric here — and outcomes are append-only, so
+            # the sample was lost permanently.
+            if not entry_boundary_admitted(start, formed, equity=equity):
+                return None
+            expected_day = expected_reference_date(horizon, equity=equity)
+            expected = datetime.combine(expected_day + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+            if end != expected:
+                return None
         if missing - {"underlying", "underlying_close", "underlying_price_return", "basis_return"}:
             return None
         if not all(_finite(row[key]) for key in ("contract_price_return", "fees", "slippage")):

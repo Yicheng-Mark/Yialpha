@@ -376,6 +376,73 @@ def test_bridge_usd_price_target_fallback(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_bridge_usd_target_reprices_verdict(tmp_path, monkeypatch):
+    """Round-7: a USD-quoted target's verdict is RE-PRICED against the
+    converted contract target — the build-time verdict divided the raw USD
+    number by the USDT reference (gross 0 here -> NO_TRADE), while the fx
+    conversion lifts it to ~105.26 (+526 bps) -> TRADEABLE. The exact
+    marginal-flip class the re-pricing exists to catch."""
+    monkeypatch.setattr(
+        "yialpha.graph.routing.instrument_class", lambda a, t: "stock_perp"
+    )
+    # 0.95 USD/USDT: inside the bridge's [0.9, 1.1] band, far enough from
+    # parity to flip the verdict once the target is converted.
+    monkeypatch.setattr(
+        "yialpha.perp.quote_fx.usdt_usd_as_of",
+        lambda as_of: QuoteFxResult(
+            rate=0.95,
+            available_at=f"{_TRADE_DATE}T00:00:00+00:00",
+            fetched_at=f"{_TRADE_DATE}T00:00:00+00:00",
+        ),
+    )
+    g = _make_graph(tmp_path, stock_perp_fair_value=True)
+    monkeypatch.setattr(
+        g, "_latest_close_and_atr", lambda t, d, at="stock": (100.0, 2.0)
+    )
+    monkeypatch.setattr(g, "_trailing_funding_total", lambda t, d: None)
+    monkeypatch.setattr(g, "_latest_mark_close", lambda t, d: None)
+
+    out = g._apply_risk_overlay(
+        "MUUSDT", _TRADE_DATE,
+        _perp_state(
+            pm_decision_fields={
+                "price_target": 100.0,
+                "price_target_currency": "USD",
+            }
+        ),
+        {"equity": 100_000},
+        asset_type="crypto_perp",
+    )
+    ticket = out["execution_ticket"]
+    assert ticket["target_price"] == pytest.approx(100.0 / 0.95)
+    assert ticket["tradeability"] == "TRADEABLE"
+    assert ticket["gross_edge"] == pytest.approx(100.0 / 0.95 / 100.0 - 1.0)
+    assert "re-priced against the converted contract target" in (
+        out["final_trade_decision"]
+    )
+
+    # Negative control: an EXPLICIT underlying target leaves the contract-
+    # currency price_target (and its build-time verdict) untouched.
+    out2 = g._apply_risk_overlay(
+        "MUUSDT", _TRADE_DATE,
+        _perp_state(
+            pm_decision_fields={
+                "price_target": 100.0,  # contract currency — no fallback
+                "underlying_price_target": 100.0,
+            }
+        ),
+        {"equity": 100_000},
+        asset_type="crypto_perp",
+    )
+    ticket2 = out2["execution_ticket"]
+    assert ticket2["target_price"] == pytest.approx(100.0)
+    assert ticket2["contract_target"] == pytest.approx(100.0 / 0.95)
+    assert "re-priced against the converted contract target" not in (
+        out2["final_trade_decision"]
+    )
+
+
+@pytest.mark.unit
 def test_bridge_missing_fx_records_shadow_verdict(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "yialpha.graph.routing.instrument_class", lambda a, t: "stock_perp"

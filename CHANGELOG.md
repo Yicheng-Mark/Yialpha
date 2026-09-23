@@ -12,6 +12,168 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Perp bug-fix sweep round 7 (2026-09-23, USDT-perp focus; five parallel
+  review shards — binance+vision core / p0-shadow capture / backtest perp
+  economics / risk micro-layer / analysts+tool-binding — plus a main-line
+  sweep of the perp bundle, regime and instrument registry; every fix
+  verified against the code and pinned in `tests/test_round7_regressions.py`
+  (20 pins) or updated dedicated files; full suite 3660 passed / ruff
+  clean).**
+  - **P2 — regime funding window spanned 8 days** (the THIRD occurrence of
+    the off-by-one rounds 1–2 fixed in `_fetch_funding` and
+    `_trailing_funding_total`): `compute_regime_state` asked the funding
+    seam for `[D-7, D]` = 24 settlements at the 8h cadence, overstating
+    `funding_pct` — a frozen RegimeState field feeding the `regime_id` hash
+    and the `|funding| >= 1%` stress trigger — by a fixed ~14% on the
+    default-ON `regime_state` path.
+  - **P2 — the perp bundle's direct `/futures/data` legs 400'd on EVERY
+    historical replay**: live probe 2026-09-23 confirmed the OI window
+    (`start = D-30`) is always older than the 30-day retention horizon for
+    any past D (HTTP 400 -1130), while the tool layer's
+    `_futures_data_window` clamp serves the retained days for the same
+    date — the bundle bypassed it, so replays lost OI (always) and
+    LSR/taker (replays >3 weeks) that were servable, contradicting the
+    module's own docstring. The three legs clamp their start into the
+    retained tail now (PIT-safe: old rows drop, the end stays at the
+    analysis date; live runs byte-identical), the OI percentile render
+    states the span actually served (`days` field), and the regime's
+    OI/LSR/taker legs inherit the fix as free riders.
+  - **P2 — the tradeability gate converted garbage targets into confident
+    TRADEABLE verdicts**: `gross_edge` validated only `target is None` and
+    `reference <= 0`, so a PM-emitted `price_target: 0` (schema has no
+    `gt=0`) on a Sell rating computed `1 - 0/ref = +100%` edge →
+    TRADEABLE with "net_edge_above_costs" into the ticket/report, and NaN
+    targets/costs defeated every `<=` comparison (NaN funding through
+    `series.sum()` made `total_bps` NaN → fell through to TRADEABLE). The
+    gate refuses non-finite/non-positive targets (UNEVALUATED,
+    `invalid_target_price`) and non-finite costs (NO_TRADE,
+    `cost_estimate_not_finite`) — both new stable reason strings.
+  - **P2 — `RiskManager.decide` laundered a NaN/negative equity tick past
+    the drawdown breaker**: the `equity > 0 else BreakerState(normal)`
+    guard fabricated a permissive state on exactly the corrupt ticks the
+    breaker's own bad-tick path exists to refuse (NaN `> 0` is False, and
+    the injection site's `or 0.0` PRESERVES NaN — NaN is truthy), skipping
+    a hard_stop breaker for one decision at full Kelly. `update()` is now
+    called unconditionally; its documented path replays the last valid
+    regime fail-closed.
+  - **P2 — `get_indicators` / `get_verified_market_snapshot` never clamped
+    the LLM-supplied date** (the round-5 PIT guard's two missed entries):
+    a model echoing the cache's "Data retrieved on" header date served
+    post-decision bars through the prompt-mandated "source of truth"
+    snapshot on historical stock AND crypto_spot runs. Both tool entries
+    clamp to the pinned analysis date now (same guard as the news/weekly/
+    price-structure tools).
+  - **P2 — vision edge-day disclosure vanished for 24h after the first
+    404**: `_coverage_notes` read the call-scoped `report.missing_days`,
+    but the sync's 24h retry backoff keeps a previously-404ed edge day out
+    of every later call's attempt set — the newest, decision-adjacent day
+    silently dropped from the header while the body ended a day early
+    (hits run_robust retries). `qa()` now derives `known_missing_days`
+    from the manifest and the disclosure unions both sources.
+  - **P2 — the three ledger layers disagreed about midnight-cross grace
+    rows**: round-6 granted the scorer a one-bar-day `entry_grace`, but
+    `_scoring_version` and the shadow audit re-derived the STRICT boundary
+    and silently dropped/rejected the same rows (append-only outcomes =
+    permanently lost calibration samples, ~0.7% of live captures). The
+    grace predicate lives in `time_contract.midnight_cross_grace_day` /
+    `entry_boundary_admitted` now, consumed by the scorer, the scoreboard
+    and the audit — one definition, no drift.
+  - **P2 — schema junk still discarded whole structured decisions (#1058
+    class, the remaining strict fields)**: percent-form `confidence` /
+    `evidence_coverage` (`85`, `"85%"`) and `OutcomeProbabilities`
+    (`61/24/16`) failed the 0-1 bounds; `"1,250.50"` failed float
+    coercion; a capitalized Literal `"Medium"` failed the required
+    sentiment/positioning confidence — each killing the WHOLE parsed
+    object to free-text fallback. Numeric strings now parse with
+    comma-grouping stripped, percent forms rescale (one unusable branch
+    degrades the OPTIONAL probabilities block, never the decision),
+    required Literals rescue case-insensitively and floor out-of-vocab
+    junk to "low".
+  - **P3 batch (data layer)**: the taker `mean_7d` averaged 8 daily values
+    under a 7d label (aligned to the funding seam's 7-day end-inclusive
+    convention); `_last_close_hint` ran eagerly on the main thread (now
+    inside the worker lambda); the four windowed `/futures/data` tool
+    headers claimed the look-back count while serving the window (now
+    "windowed request, N rows served"); `derivatives_stress_series` lacked
+    the endTime belt-and-suspenders trim its four sibling consumers carry;
+    ccxt/TradingView pair forms (`BTC/USDT`, `BTC:USDT`) crashed the
+    vision tools with an untyped "unsafe cache filename" ValueError (the
+    venue normalizer strips `/` and `:` now, typing the same input the
+    REST twin always handled).
+  - **P3 batch (risk/bridge)**: the fair-value bridge accepted zero/
+    negative underlying targets (finite ≠ plausible — they converted
+    cleanly into contract targets that sailed past the
+    `contract_target is not None` eligibility veto) and rendered
+    micro-price targets as "0.00 USD" (`.2f` class — adaptive `_fmt_price`
+    keeps 100-scale renders byte-identical); the bridge's converted
+    contract target never fed the tradeability verdict that judged the
+    same trade — a USD-quoted PM target's verdict is re-priced against the
+    converted target at the record stage (funding threaded through so the
+    re-derivation uses the build's own cost inputs; disclosed in the
+    bridge block); the class-agnostic constraint sums (`global_gross` /
+    `directional` / `cluster`) filtered `others` by symbol only, so a
+    same-symbol other-venue row (kept in the post book by the round-6
+    replacement key) counted NOWHERE — post gross undercounted by exactly
+    that row and the cap could false-PASS (excluded by the replacement key
+    now); `_beta` filtered NaNs from each side independently, leaving
+    equal lengths over DIFFERENT dates (pairwise-aligned filtering — the
+    docstring's own refusal rationale).
+  - **P3 batch (analysts/accuracy)**: the news prompt named
+    `get_news(query, …)` while the tool's first parameter is `ticker`;
+    the IC-context fallback blended cross-venue verdicts (a perp run with
+    no tagged verdicts fell back to EVERY file — now untagged-only, the
+    docstring's promised venue purity); the spot nudge overclaimed that
+    Yahoo-resolving tools "resolve correctly" for alt-coin pairs; the
+    sentiment confidence cap regex missed lowercase free-text
+    (`re.IGNORECASE`); `accuracy._resolve_asset_type` labelled a USDT-
+    suffix override of a logged "stock" tag as "logged", hiding the
+    inference caveat; a stale memory_resolution comment claimed the
+    legacy crypto umbrella prices as perp (it prices as spot).
+  - **Known issues recorded by round 7 (reviewed, deliberately not
+    changed)**:
+    - `unknown_perp` annualizes at the 252 equity convention (pinned
+      V2.2 semantics, `test_unknown_perp_annualizes_at_252`): on a machine
+      with an empty instrument registry every pure-crypto perp backtest
+      resolves unknown (routing downgrades when the registry is empty even
+      after a successful warm — BTC is never an equity base), understating
+      Sharpe/vol ×√(252/365)≈0.83 and making results non-reproducible
+      across machines (a populated ledger reports 365). The conservative
+      direction and the pinned convention make this a product call:
+      "unknown" is about fundamentals, but every Binance USDT-M perp
+      trades 24/7 regardless — flipping the calendar is a one-line change
+      awaiting a decision.
+    - The REST paginator's 50k-row safety cap truncates the RECENT tail
+      with a log-only disclosure (the LLM never sees it; a 1m-interval
+      year-long request serves the oldest ~35 days under a full-window
+      header). The pinned warning names the direction honestly; the fix
+      direction (an in-band header note threaded out of `_paginate_
+      history`, or end-anchoring like `_futures_data_window`) needs a
+      design pass.
+    - Live-path robust retries double-sample predictions (each attempt
+      mints a fresh `run_id`; the B1 cohort runner guards exactly this
+      state, the live path does not) — cross-run capture idempotency is a
+      design decision recorded for the P0 track.
+    - The p0-shadow egress guard's curl layer verifies only the
+      first/last effective URL (redirect hops) and `requests.Session.send`
+      is unwrapped — hardening gaps in a four-layer guard with no current
+      caller on those idioms.
+    - The positioning analyst's required `funding_bias` has no
+      "unavailable" value while historical runs structurally skip funding
+      evidence (flag default off); the shared prediction-capture slot
+      mis-routes `submit_prediction` under analyst-parallel + ledger (both
+      flags non-default).
+    - Backtest perp economics observations (reported only): B&H benchmark
+      is frictionless while the strategy pays per-fill costs (conservative
+      for the beats-buyhold bar); full-day funding is charged on intrabar
+      forced-exit days (conservative); funding/MMR-tier notionals use the
+      LAST close where Binance settles on mark; `funding_drag_annualized`
+      is diluted by flat days; `alpha_vs_index` counts the horizon per
+      leg's own calendar; the gate's beats-buyhold rewards leverage for
+      levered runs (B&H pinned at 1x); Sharpe uses ddof=0 while IR/TE use
+      ddof=1.
+    - Round-5's web-display and weekly-Friday items remain as recorded
+      there.
+
 - **Perp bug-fix sweep (2026-09-19, 14 fixes; crypto_perp focus).** Four
   parallel code reviews + runtime smokes across the perp data / risk /
   accuracy / CLI layers; every fix carries a regression pin in

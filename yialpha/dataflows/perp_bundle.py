@@ -19,11 +19,14 @@ Price-basis contract (audit 2026-08, PR3):
 * ``index`` — the settlement fair-value anchor (last−index premium).
 
 Historical (replay) runs: the three kline legs are PIT-clamped and
-memo-cached; the REST positioning family retains only 30 days and degrades
-to ``unavailable`` with the retention reason; live-only snapshots (premium,
-depth, ADL, trailing funding) are ``skipped_live_only``. Everything is
-disclosed per component in the block footer — a missing enrichment never
-masquerades as a calm market.
+memo-cached; the REST positioning family retains only 30 days — a replay
+inside that horizon serves the retained days (window head clamped into the
+retained tail, PIT-safe; the OI percentile label states the span actually
+served) and a replay beyond it degrades to ``unavailable`` with the
+retention reason; live-only snapshots (premium, depth, ADL, trailing
+funding) are ``skipped_live_only``. Everything is disclosed per component
+in the block footer — a missing enrichment never masquerades as a calm
+market.
 
 Core completeness wiring: when the last- or mark-kline leg fails, a
 ``get_binance_klines`` core sentinel is recorded so the four-tier quality
@@ -105,6 +108,27 @@ def _window(start_days: int, end_date: str) -> tuple[str, str, int, int]:
         int(start_dt.timestamp() * 1000),
         int((end_dt.timestamp() + 86399) * 1000),  # end-of-day inclusive
     )
+
+
+def _futures_data_start_ms(start_ms: int) -> int:
+    """Clamp a ``/futures/data`` startTime into the endpoint's retained tail.
+
+    The server REJECTS a startTime older than the retention horizon with
+    HTTP 400 -1130 (live probes 2026-09-19 and 2026-09-23 — the latter with
+    this bundle's own D-30 OI window on a 10-day-back replay, which 400'd
+    while the tool layer's ``_futures_data_window`` clamp served the retained
+    days for the same date). The bundle's direct ``_http_get`` calls
+    bypassed that clamp, so EVERY historical replay's OI leg — and the
+    LSR/taker legs on replays older than ~3 weeks — degraded to
+    ``unavailable`` despite servable retained data. Clamping the head is
+    PIT-safe (old rows drop; the end stays at the analysis date) and matches
+    the tool path's disclosed behaviour; a replay older than the retention
+    window itself still degrades honestly ("no rows in window").
+    """
+    from .binance import _FUTURES_DATA_RETENTION_DAYS, _now_ms
+
+    retention_start = _now_ms() - _FUTURES_DATA_RETENTION_DAYS * 86_400_000
+    return max(start_ms, retention_start)
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +259,7 @@ def _oi_series(symbol: str, end_date: str, window_days: int) -> list[tuple[int, 
 
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
     _start, _end, start_ms, end_ms = _window(window_days, end_date)
+    start_ms = _futures_data_start_ms(start_ms)
     rows = _http_get(
         "/futures/data/openInterestHist",
         {"symbol": canonical, "period": "1d",
@@ -268,6 +293,11 @@ def _fetch_open_interest(symbol: str, end_date: str) -> dict[str, Any]:
     out: dict[str, Any] = {
         "status": STATUS_OK,
         "latest": latest,
+        # Actual window length served: equal to _OI_WINDOW_DAYS on a full
+        # live fetch, shorter when the retention clamp trimmed the head (a
+        # historical replay) or the contract is younger than the window —
+        # the rendered percentile label must state the span it really ranks.
+        "days": len(values),
         "percentile": (
             sum(1 for v in values if v < latest) / len(values) * 100.0
         ),
@@ -295,6 +325,7 @@ def _fetch_lsr(symbol: str, end_date: str) -> dict[str, Any]:
 
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
     _start, _end, start_ms, end_ms = _window(_LSR_WINDOW_DAYS, end_date)
+    start_ms = _futures_data_start_ms(start_ms)
     out: dict[str, Any] = {"status": STATUS_OK}
     latest_values: list[float] = []
     for key, path in _LSR_SERIES:
@@ -333,6 +364,7 @@ def _fetch_taker(symbol: str, end_date: str) -> dict[str, Any]:
 
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
     _start, _end, start_ms, end_ms = _window(_LSR_WINDOW_DAYS, end_date)
+    start_ms = _futures_data_start_ms(start_ms)
     try:
         rows = _http_get(
             "/futures/data/takerlongshortRatio",
@@ -350,7 +382,10 @@ def _fetch_taker(symbol: str, end_date: str) -> dict[str, Any]:
             "status": STATUS_OK,
             "latest": values[-1],
             "mean_7d": (
-                sum(values[-8:]) / len(values[-8:]) if len(values) >= 8 else None
+                # 7 daily values END-INCLUSIVE ([D-6..D]) — the same seam
+                # convention the funding fix settled; the old values[-8:]
+                # averaged 8 days under a "7d" label.
+                sum(values[-7:]) / len(values[-7:]) if len(values) >= 7 else None
             ),
         }
     except Exception as exc:  # noqa: BLE001
@@ -564,6 +599,9 @@ def fetch_perp_market_bundle(symbol: str, end_date: str) -> dict[str, Any]:
         ("open_interest", lambda: _fetch_open_interest(symbol, end_date)),
         ("long_short", lambda: _fetch_lsr(symbol, end_date)),
         ("taker", lambda: _fetch_taker(symbol, end_date)),
+        # _last_close_hint is called INSIDE the worker lambda: at job-list
+        # construction time it ran on the MAIN thread — a memoized kline
+        # fetch on cache miss serialized ahead of the pool for no reason.
         ("spot_basis", lambda: _fetch_spot_basis(
             symbol, end_date,
             _last_close_hint(symbol, end_date),
@@ -789,7 +827,8 @@ def _positioning_lines(bundle: dict[str, Any]) -> list[str]:
         lines.append(
             f"- **Open interest**: {_fmt(oi['latest'])} contracts "
             f"(1d {_pct(oi.get('chg_1d'))}, 7d {_pct(oi.get('chg_7d'))}, "
-            f"{oi['percentile']:.0f}th pct of trailing {_OI_WINDOW_DAYS}d)"
+            f"{oi['percentile']:.0f}th pct of trailing "
+            f"{oi.get('days', _OI_WINDOW_DAYS)}d)"
         )
     lsr = bundle.get("long_short") or {}
     lsr_parts = []

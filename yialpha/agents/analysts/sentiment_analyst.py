@@ -356,8 +356,12 @@ def _enforce_confidence_cap(report_text: str, cap: str, reason: str) -> str:
             )
         return match.group(0)
 
+    # Round-7: case-insensitive — the free-text fallback path (the one this
+    # cap exists for) can write a lowercase "high" the capitalized-only
+    # pattern silently let through.
     return re.sub(
-        r"(\*\*Confidence:\*\*)\s*(Low|Medium|High)", _lower, report_text, count=1
+        r"(\*\*Confidence:\*\*)\s*(Low|Medium|High)",
+        _lower, report_text, count=1, flags=re.IGNORECASE,
     )
 
 

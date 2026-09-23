@@ -202,9 +202,12 @@ def test_indicator_ic_context_filters_by_venue(tmp_path, monkeypatch):
     assert perp_line is not None and "rsi |IC|=0.100" in perp_line
     stock_line = _format_indicator_ic_context("stock")
     assert stock_line is not None and "rsi |IC|=0.010" in stock_line
-    # A venue with no verdicts yet falls back to every file (legacy dirs).
+    # Round-7: a venue with no tagged verdicts yet falls back to UNTAGGED
+    # files only (legacy dirs) — the old every-file fallback blended the
+    # perp verdict (0.055 average) into a spot run whose advisory line
+    # claims venue purity.
     spot_line = _format_indicator_ic_context("crypto_spot")
-    assert spot_line is not None and "rsi |IC|=0.055" in spot_line
+    assert spot_line is not None and "rsi |IC|=0.010" in spot_line
 
 
 # --------------------------------------------------------------------------- #

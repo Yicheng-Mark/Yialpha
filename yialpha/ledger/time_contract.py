@@ -50,6 +50,41 @@ def expected_reference_date(formed_at: datetime, *, equity: bool) -> date:
     return day
 
 
+def midnight_cross_grace_day(formed_at: datetime, *, equity: bool) -> date | None:
+    """The entry-boundary grace day the outcome scorer admits, or None.
+
+    Round-6 granted a one-bar-day grace when a reference fetch straddled UTC
+    midnight (the latest CLOSED bar at request time is one bar-day older
+    than formation implies). Round-7 shares the predicate so the scoreboard
+    and the audit qualify the SAME rows the scorer scored ``complete``
+    instead of silently dropping them as boundary violations. Eligible only
+    while formation sits within five minutes of UTC midnight — beyond that
+    seam the capture path structurally cannot have stored a valid older
+    bar."""
+    if formed_at.hour != 0 or formed_at.minute > 5:
+        return None
+    day = expected_reference_date(formed_at, equity=equity) - timedelta(days=1)
+    while equity and day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def entry_boundary_admitted(
+    boundary: datetime, formed_at: datetime, *, equity: bool
+) -> bool:
+    """True when ``boundary`` is the exact expected daily close for
+    ``formed_at``, or the midnight-cross grace boundary."""
+    expected_day = expected_reference_date(formed_at, equity=equity)
+    if boundary == datetime.combine(
+        expected_day + timedelta(days=1), datetime.min.time(), tzinfo=UTC
+    ):
+        return True
+    grace = midnight_cross_grace_day(formed_at, equity=equity)
+    return grace is not None and boundary == datetime.combine(
+        grace + timedelta(days=1), datetime.min.time(), tzinfo=UTC
+    )
+
+
 def validate_timing(timing: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Validate and canonicalize new timing; None explicitly means legacy.
 

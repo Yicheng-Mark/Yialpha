@@ -193,6 +193,14 @@ def _diagnose(row: dict[str, Any]) -> tuple[str | None, list[dict[str, str]], di
         for boundary, cutoff, field in ((start, formed, "window_start"), (end, horizon, "window_end")):
             if cutoff is None:
                 continue
+            if field == "window_start":
+                # Round-7: the scorer's midnight-cross grace applies to the
+                # ENTRY boundary only — a row the compute layer scored
+                # complete with ``entry_grace`` is not a boundary violation.
+                from yialpha.ledger.time_contract import entry_boundary_admitted
+
+                if entry_boundary_admitted(boundary, cutoff, equity=equity):
+                    continue
             try:
                 day = cutoff.date() - timedelta(days=1)
                 while equity and day.weekday() >= 5:
