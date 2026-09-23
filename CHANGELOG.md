@@ -131,17 +131,6 @@ Breaking changes within the 0.x line are called out explicitly.
     legacy crypto umbrella prices as perp (it prices as spot).
   - **Known issues recorded by round 7 (reviewed, deliberately not
     changed)**:
-    - `unknown_perp` annualizes at the 252 equity convention (pinned
-      V2.2 semantics, `test_unknown_perp_annualizes_at_252`): on a machine
-      with an empty instrument registry every pure-crypto perp backtest
-      resolves unknown (routing downgrades when the registry is empty even
-      after a successful warm — BTC is never an equity base), understating
-      Sharpe/vol ×√(252/365)≈0.83 and making results non-reproducible
-      across machines (a populated ledger reports 365). The conservative
-      direction and the pinned convention make this a product call:
-      "unknown" is about fundamentals, but every Binance USDT-M perp
-      trades 24/7 regardless — flipping the calendar is a one-line change
-      awaiting a decision.
     - The REST paginator's 50k-row safety cap truncates the RECENT tail
       with a log-only disclosure (the LLM never sees it; a 1m-interval
       year-long request serves the oldest ~35 days under a full-window
@@ -173,6 +162,28 @@ Breaking changes within the 0.x line are called out explicitly.
       ddof=1.
     - Round-5's web-display and weekly-Friday items remain as recorded
       there.
+  - **Round-7 closeout (2026-09-23, same day — one user decision + the two
+    P3s the wrap-up was interrupted on; every change pinned)**:
+    - `unknown_perp` annualizes at 365 (user call on the round-7 known
+      issue): `sessions_per_year` gives an unclassified Binance USDT-M
+      perp the same 24/7 calendar as classified ones — "unknown" is a
+      fundamentals-routing verdict, not a session-count one; equity /
+      `None` keep 252. Kills the empty-registry Sharpe understatement
+      (×√(252/365) ≈ 0.83) and the cross-machine non-reproducibility;
+      pin flipped in `test_backtest_perp_classes`
+      (`test_unknown_perp_annualizes_at_365`).
+    - The sentiment prompt's best-practice #1 ("read the StockTwits
+      Bullish/Bearish ratio") no longer appears unconditionally: on
+      square_only runs the StockTwits block is a policy placeholder, so #1
+      becomes an explicit no-evidence instruction. The fetch predicate and
+      the prompt gate now share `_STOCKTWITS_PROFILES`; the fetched
+      (`full` / `square_plus_underlying`) wording is byte-identical.
+    - The REST paginator's malformed-tail break (cursor extraction
+      failing on the last page was treated as a normal final page,
+      silently dropping any remaining recent rows) now emits a
+      distinguishing warning naming the truncation direction. The full
+      in-band header fix stays with the pagination-cap known issue
+      (design pass).
 
 - **Perp bug-fix sweep (2026-09-19, 14 fixes; crypto_perp focus).** Four
   parallel code reviews + runtime smokes across the perp data / risk /

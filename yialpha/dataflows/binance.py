@@ -225,6 +225,19 @@ def _paginate_history(
         try:
             last_ms = cursor_of(page[-1])
         except (TypeError, KeyError, IndexError):
+            # Malformed tail: the cursor extractor failed on the last page,
+            # indistinguishable from a normal final page by shape alone, so
+            # the walk stops here — and whatever the exchange would still
+            # have served AFTER this page (the recent end) is dropped. Same
+            # truncation direction as the safety-cap note below; warn so the
+            # drop is visible instead of silent (the in-band header fix
+            # stays with the pagination-cap known issue).
+            logger.warning(
+                "Binance %s pagination cursor extraction failed for %s at "
+                "%d rows; stopping on malformed tail — recent rows may be "
+                "truncated",
+                path, symbol_for_error, len(out),
+            )
             break
         nxt = int(last_ms) + 1
         if nxt <= cursor:  # no forward progress — avoid an infinite loop

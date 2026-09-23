@@ -765,8 +765,10 @@ def run_backtest(
         # a stock perp annualizes at 365 like a pure crypto perp — klines
         # machine evidence (2026-09-04) shows Binance stock perps trade 24/7
         # (full US-market holidays and weekends carry volume), so the retired
-        # 261 weekday count understated vol — and an unresolvable perp keeps
-        # the 252 equity convention. Only the perp classes REFINE the
+        # 261 weekday count understated vol — and an unresolvable perp
+        # (unknown_perp) joins the 365 calendar in the round-7 closeout
+        # (2026-09-23): it still trades 24/7, and 252 made the factor depend
+        # on the machine's registry state. Only the perp classes REFINE the
         # answer — passing e.g.
         # the "crypto_spot" class would drag spot crypto to 252 and break the
         # historical asset-type rule, so every non-perp class resolves via

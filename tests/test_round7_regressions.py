@@ -29,7 +29,11 @@ round 7). Highlights pinned in this file:
 * the indicator/snapshot tool entries clamp the LLM-supplied date;
 * ``normalize_symbol_for_venue`` accepts ccxt/TradingView pair forms;
 * IC-context fallback never blends venues; the accuracy inference label
-  and the lowercase confidence cap behave as documented.
+  and the lowercase confidence cap behave as documented;
+* the sentiment prompt's best-practice #1 gates on the StockTwits source
+  policy (closeout fix);
+* the REST paginator's malformed-tail break carries a distinguishing
+  warning (closeout fix; in-band header fix remains a known issue).
 """
 
 from __future__ import annotations
@@ -524,3 +528,44 @@ def test_confidence_cap_fires_on_lowercase_free_text():
     )
     assert "capped by source policy" in capped
     assert "**Confidence:** Low" in capped  # normalized capitalized output
+
+
+@pytest.mark.unit
+def test_sentiment_practice_1_gated_on_stocktwits_policy():
+    """Best-practice #1 no longer instructs reading the StockTwits ratio on
+    runs whose StockTwits block is a policy placeholder (the square_only
+    profile — pure crypto); the fetched wording is untouched."""
+    kw = {"ticker": "BTCUSDT", "start_date": "2026-01-01",
+          "end_date": "2026-01-08"}
+    off = sa._build_system_message(has_square=True, has_stocktwits=False, **kw)
+    assert "No StockTwits evidence on this run" in off
+    assert "Bullish/Bearish ratio as a leading" not in off
+    on = sa._build_system_message(has_square=True, **kw)  # default: fetched
+    assert "Bullish/Bearish ratio as a leading retail-sentiment signal" in on
+    assert "No StockTwits evidence on this run" not in on
+
+
+@pytest.mark.unit
+def test_pagination_malformed_tail_warns(monkeypatch, caplog):
+    """Cursor-extraction failure on the last page used to break as a normal
+    final page — silently dropping any remaining RECENT rows. The break now
+    carries a distinguishing warning naming the truncation direction."""
+    import logging
+
+    base = int(datetime(2024, 1, 1, tzinfo=UTC).timestamp() * 1000)
+
+    def malformed_page(path, params, symbol, canonical, **kwargs):  # noqa: ARG001
+        # A full page whose LAST row lacks the cursor key: shape alone
+        # cannot tell this from a normal final page.
+        return [{"fundingTime": base, "fundingRate": "0.0001"},
+                {"fundingRate": "0.0001"}]
+
+    monkeypatch.setattr(bz, "_http_get", malformed_page)
+    with caplog.at_level(logging.WARNING, logger="yialpha.dataflows.binance"):
+        rows = bz._paginate_history(
+            "/fapi/v1/fundingRate", {"symbol": "BTCUSDT"}, 1000,
+            lambda r: r["fundingTime"], base, base + 3 * _DAY_MS,
+            "BTCUSDT", "BTCUSDT",
+        )
+    assert len(rows) == 2  # the served page is kept; the walk just stops
+    assert any("cursor extraction failed" in r.getMessage() for r in caplog.records)

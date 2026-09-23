@@ -119,6 +119,13 @@ _CRYPTO_REDDIT_OFF = (
 #: keep the stock-only prompt.
 _CRYPTO_ASSET_TYPES = frozenset({"crypto", "crypto_spot", "crypto_perp"})
 
+#: Profiles whose evidence carries a real StockTwits block — the cashtag
+#: feed covers US equities: the plain-stock run itself, or the underlying
+#: equity of a tokenized-stock perp. Pure-crypto (square_only) runs carry
+#: the policy placeholder instead. Both the fetch predicate and the prompt's
+#: best-practice #1 gate read this ONE set.
+_STOCKTWITS_PROFILES = frozenset({"full", "square_plus_underlying"})
+
 #: Rendered Square block head — parsed (pre-LLM) for the confidence cap.
 #: Optional second group = the RECENT count from the header's recency note
 #: ("N (R of N within the last 3 days)"); the cap keys on R when present so
@@ -231,7 +238,7 @@ def _fetch_sentiment_sources(
         )
 
     profile, stocktwits_ticker = _source_profile(asset_type, ticker)
-    fetch_stocktwits = profile in ("full", "square_plus_underlying")
+    fetch_stocktwits = profile in _STOCKTWITS_PROFILES
     fetch_reddit = profile == "full"
 
     if _SENTIMENT_PARALLEL_FETCH:
@@ -508,6 +515,7 @@ def create_sentiment_analyst(llm):
             start_date=start_date,
             end_date=end_date,
             has_square=binance_square_block is not None,
+            has_stocktwits=profile in _STOCKTWITS_PROFILES,
             confidence_cap=cap,
         )
 
@@ -578,6 +586,7 @@ def _build_system_message(
     start_date: str,
     end_date: str,
     has_square: bool = False,
+    has_stocktwits: bool = True,
     confidence_cap: str | None = None,
 ) -> str:
     """Assemble the sentiment-analyst system message (instructions only).
@@ -586,6 +595,9 @@ def _build_system_message(
     final user message as untrusted evidence (:func:`_render_evidence_message`)
     — this message describes the sources and how to read them.
     ``has_square`` selects the fourth-source wording and Square guidance.
+    ``has_stocktwits`` (False when the StockTwits block is a policy
+    placeholder, i.e. the square_only profile) swaps best-practice #1 for
+    an explicit no-evidence instruction.
     ``confidence_cap`` (crypto-family runs) states the deterministic ceiling.
     """
     source_count = "four" if has_square else "three"
@@ -611,6 +623,15 @@ Deterministic source policy: the evidence assembled for this run supports at mos
         if confidence_cap is not None
         else ""
     )
+    stocktwits_practice = (
+        """
+1. **Read the StockTwits Bullish/Bearish ratio as a leading retail-sentiment signal.** A 70/30 bullish/bearish split is moderately bullish; ≥90/10 may indicate over-extension and contrarian risk; 50/50 is uncertainty. Sample size matters — base rates on the actual message count, not percentages alone.
+"""
+        if has_stocktwits
+        else """
+1. **No StockTwits evidence on this run — the block is a placeholder.** Cashtag coverage does not apply to this instrument class (and a historical run omits the feed as well), so no Bullish/Bearish ratio was collected; do not cite one or estimate what it would have shown. Ground the retail-social read only in the sources actually fetched (Binance Square on crypto-native runs) and report the gap explicitly in the narrative and `confidence` field.
+"""
+    )
     return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on {source_count} complementary data sources that have already been collected for you.
 
 ## Data sources (pre-fetched; delivered in the final user message as EXTERNAL EVIDENCE)
@@ -627,9 +648,7 @@ Fast-moving signal. Each message carries a user-labeled sentiment tag (Bullish /
 Community discussion. Engagement signal via upvote score and comment count. Subreddit character matters (r/wallstreetbets is often contrarian/exuberant; r/stocks more measured; r/investing longer-term).
 
 ## How to analyze this data (best practices)
-
-1. **Read the StockTwits Bullish/Bearish ratio as a leading retail-sentiment signal.** A 70/30 bullish/bearish split is moderately bullish; ≥90/10 may indicate over-extension and contrarian risk; 50/50 is uncertainty. Sample size matters — base rates on the actual message count, not percentages alone.
-
+{stocktwits_practice}
 2. **Look for cross-source divergences.** If news framing is bearish but the social feeds are overwhelmingly bullish, that mismatch is itself a signal — it can mean retail is leaning into a thesis the news flow hasn't caught up to (or vice versa, that retail is chasing while institutions are cautious).
 
 3. **Weight social posts by engagement.** A 400-upvote / 200-comment thread or a 200k-view Square post reflects real attention; a 3-upvote post is noise. Read the body excerpts for context — the title alone often misleads.

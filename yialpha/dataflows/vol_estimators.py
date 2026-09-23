@@ -55,16 +55,24 @@ def sessions_per_year(instrument_class: str | None) -> float:
       zero-volume days = 0) — a 24/7 calendar. The old 261 weekday count
       (2025 working days) and NYSE's 252 are both FALSIFIED; annualizing at
       261 UNDERSTATED annualized vol (true/old ≈ sqrt(365/261) ≈ 1.18).
-    * anything else (``unknown_perp`` / ``equity`` / ``None``) → the 252
-      equity convention (the historical default).
+    * ``unknown_perp`` → 365 as well (2026-09-23 round-7 closeout, user
+      decision): an unclassified Binance USDT-M perp trades the same 24/7
+      calendar as every classified one — "unknown" is a fundamentals-routing
+      verdict, not a session-count verdict. The old 252 made the factor
+      depend on the machine's registry state (an empty registry resolves
+      EVERY pure-crypto perp unknown, understating Sharpe ×√(252/365) ≈
+      0.83 vs a populated machine — non-reproducible across machines).
+    * anything else (``equity`` / ``None``) → the 252 equity convention
+      (the historical default).
     """
     if instrument_class == "pure_crypto_perp":
         return float(
             trading_sessions_between(SESSION_CONTINUOUS, *_SESSIONS_WINDOW)
         )
-    if instrument_class == "stock_perp":
-        # Klines-verified 24/7 (see docstring): same caliber as pure crypto,
-        # so share the measured 365 factor instead of a weekday-count guess.
+    if instrument_class in ("stock_perp", "unknown_perp"):
+        # stock_perp is klines-verified 24/7 (see docstring); unknown_perp is
+        # still a Binance USDT-M perp on the same calendar (2026-09-23
+        # closeout) — share the measured 365 factor, not a weekday guess.
         return CRYPTO_TRADING_DAYS_PER_YEAR
     return TRADING_DAYS_PER_YEAR
 
@@ -75,8 +83,9 @@ def periods_per_year_for(
     """Annualization factor for a daily series of ``asset_type``.
 
     Crypto (spot and perp) trades every calendar day; equities/A-shares keep
-    the 252-session convention. Unknown/None defaults to 252 (the historical
-    behaviour), matching the backtest engine's ``periods_per_year`` rule.
+    the 252-session convention. A ``None``/unrecognized ``asset_type`` keeps
+    252 (the historical behaviour), matching the backtest engine's
+    ``periods_per_year`` rule.
 
     ``instrument_class`` (V2.2 determinism fix) refines the crypto_perp
     case: a tokenized-stock perp (``stock_perp``) annualizes at the same
@@ -87,7 +96,8 @@ def periods_per_year_for(
     class wins over the asset-type rule; ``None``/unknown keeps the
     historical asset-type behaviour (byte-identical for pure crypto and
     equities — the stock-perp caliber moved from the falsified 261 guess
-    to the measured 365).
+    to the measured 365). ``unknown_perp`` moved to the same 365 caliber in
+    the round-7 closeout (2026-09-23) — see :func:`sessions_per_year`.
     """
     if instrument_class is not None:
         return sessions_per_year(instrument_class)

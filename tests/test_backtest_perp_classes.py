@@ -10,7 +10,10 @@ Pins the perp-class split:
 * Annualization: ``periods_per_year`` defaults resolve through
   ``periods_per_year_for`` — stock_perp 365 / pure_crypto_perp 365
   (klines-verified 24/7, 2026-09-04) / equity 252 / crypto_spot 365
-  (unchanged) / unknown_perp 252; an explicit override still wins.
+  (unchanged) / unknown_perp 365 (round-7 closeout 2026-09-23: an
+  unclassified Binance USDT-M perp still trades 24/7; the old 252 made
+  the factor depend on the machine's registry state); an explicit
+  override still wins.
 * Next-tradable-bar fills on BOTH series shapes: a 24/7 calendar-daily
   series and a stock-perp-like weekday series with session gaps (the fill
   lands on the next PRESENT bar, never an absent calendar day).
@@ -181,10 +184,13 @@ def test_crypto_spot_annualization_stays_365():
 
 
 @pytest.mark.unit
-def test_unknown_perp_annualizes_at_252():
+def test_unknown_perp_annualizes_at_365():
     """Registry flag on + empty registry + a base outside the seed: the
-    honest unknown_perp verdict, which the V2.2 convention annualizes at 252
-    (NOT the 365 the raw crypto_perp string used to imply)."""
+    honest unknown_perp verdict, which the round-7 closeout (2026-09-23,
+    user decision) annualizes at 365 — an unclassified Binance USDT-M perp
+    trades the same 24/7 calendar as a classified one, and the old 252 made
+    the factor depend on the machine's registry state (empty registry →
+    every pure-crypto perp resolves unknown → Sharpe ×√(252/365) ≈ 0.83)."""
     from yialpha.dataflows.config import set_config
 
     set_config({"instrument_registry": True})
@@ -193,7 +199,7 @@ def test_unknown_perp_annualizes_at_252():
         **_PERP_KW,
     )
     assert res.config_summary["instrument_class"] == "unknown_perp"
-    assert res.config_summary["periods_per_year"] == 252
+    assert res.config_summary["periods_per_year"] == 365
 
 
 @pytest.mark.unit
