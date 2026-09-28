@@ -33,6 +33,18 @@ from typing import Annotated
 from langchain_core.tools import tool
 
 from yialpha.dataflows.interface import route_to_vendor
+from yialpha.dataflows.utils import current_pit_end
+
+
+def _pit_curr_date(curr_date):
+    """Clamp an LLM-supplied curr_date to the run's pinned analysis date.
+
+    Same guard as the round-7/8 sweeps on the indicator/fundamentals tools:
+    these vendors PIT-filter rows by the passed ``curr_date`` verbatim, so an
+    LLM echoing a cached header's today-date would admit post-decision rows
+    into a backtest. No-op in live mode (no analysis date pinned).
+    """
+    return current_pit_end(curr_date) or curr_date
 
 
 @tool
@@ -60,7 +72,7 @@ def get_a_share_fundamentals_native(
         str: Header + sampled valuation table + latest summary, or an explicit
         "data not available" string if no rows fall in the window.
     """
-    return route_to_vendor("get_a_share_fundamentals_native", ticker, curr_date, look_back_days)
+    return route_to_vendor("get_a_share_fundamentals_native", ticker, _pit_curr_date(curr_date), look_back_days)
 
 
 @tool
@@ -86,7 +98,7 @@ def get_a_share_ohlc_native(
         str: Header + per-day OHLCV table + window summary, or an explicit
         "data not available" string if no rows fall in the window.
     """
-    return route_to_vendor("get_a_share_ohlc_native", ticker, curr_date, look_back_days)
+    return route_to_vendor("get_a_share_ohlc_native", ticker, _pit_curr_date(curr_date), look_back_days)
 
 
 @tool
@@ -112,7 +124,7 @@ def get_a_share_income_statement_native(
     Returns:
         str: Header + quarterly income-statement table, or "data not available".
     """
-    return route_to_vendor("get_a_share_income_statement_native", ticker, curr_date, look_back_days)
+    return route_to_vendor("get_a_share_income_statement_native", ticker, _pit_curr_date(curr_date), look_back_days)
 
 
 @tool
@@ -135,7 +147,7 @@ def get_a_share_balance_sheet_native(
     Returns:
         str: Header + quarterly balance-sheet table, or "data not available".
     """
-    return route_to_vendor("get_a_share_balance_sheet_native", ticker, curr_date, look_back_days)
+    return route_to_vendor("get_a_share_balance_sheet_native", ticker, _pit_curr_date(curr_date), look_back_days)
 
 
 @tool
@@ -158,7 +170,7 @@ def get_a_share_cashflow_statement_native(
     Returns:
         str: Header + quarterly cashflow table, or "data not available".
     """
-    return route_to_vendor("get_a_share_cashflow_statement_native", ticker, curr_date, look_back_days)
+    return route_to_vendor("get_a_share_cashflow_statement_native", ticker, _pit_curr_date(curr_date), look_back_days)
 
 
 @tool
@@ -187,7 +199,7 @@ def get_a_share_news_native(
         str: Header + bulleted news list, or an explicit "no coverage found"
         string if no items fall in the window.
     """
-    return route_to_vendor("get_a_share_news_native", ticker, curr_date, look_back_days)
+    return route_to_vendor("get_a_share_news_native", ticker, _pit_curr_date(curr_date), look_back_days)
 
 
 @tool
@@ -217,7 +229,7 @@ def get_a_share_money_flow_native(
         str: Header + per-day money-flow table + window summary, or an explicit
         "no coverage found" string if no rows fall in the window.
     """
-    return route_to_vendor("get_a_share_money_flow_native", ticker, curr_date, look_back_days)
+    return route_to_vendor("get_a_share_money_flow_native", ticker, _pit_curr_date(curr_date), look_back_days)
 
 
 @tool
@@ -248,7 +260,7 @@ def get_a_share_dragon_tiger_native(
         str: Header + per-appearance breakdown, or an explicit "no dragon-tiger
         activity" string if the stock did not appear on the board in the window.
     """
-    return route_to_vendor("get_a_share_dragon_tiger_native", ticker, curr_date, look_back_days)
+    return route_to_vendor("get_a_share_dragon_tiger_native", ticker, _pit_curr_date(curr_date), look_back_days)
 
 
 @tool
@@ -277,7 +289,7 @@ def get_a_share_northbound_native(
         str: Header + per-day holding table + window summary, or an explicit
         "no coverage found" string if no rows fall in the window.
     """
-    return route_to_vendor("get_a_share_northbound_native", ticker, curr_date, look_back_days)
+    return route_to_vendor("get_a_share_northbound_native", ticker, _pit_curr_date(curr_date), look_back_days)
 
 
 @tool
@@ -311,7 +323,7 @@ def get_a_share_sector_flow_native(
         str: Header + top-industries-by-inflow table with the stock's sector
         highlighted, or an explicit "no coverage found" string.
     """
-    return route_to_vendor("get_a_share_sector_flow_native", ticker, curr_date, look_back_days)
+    return route_to_vendor("get_a_share_sector_flow_native", ticker, _pit_curr_date(curr_date), look_back_days)
 
 
 @tool
@@ -337,7 +349,7 @@ def get_a_share_realtime_quote_native(
     Returns:
         str: Header + real-time quote details, or a sentinel if historical date.
     """
-    return route_to_vendor("get_a_share_realtime_quote_native", ticker, curr_date)
+    return route_to_vendor("get_a_share_realtime_quote_native", ticker, _pit_curr_date(curr_date))
 
 
 @tool
@@ -363,4 +375,4 @@ def get_a_share_market_breadth_native(
         str: Header + breadth summary (advance/decline/flat, A/D ratio,
         limit-up/down), or a sentinel if historical date.
     """
-    return route_to_vendor("get_a_share_market_breadth_native", curr_date)
+    return route_to_vendor("get_a_share_market_breadth_native", _pit_curr_date(curr_date))

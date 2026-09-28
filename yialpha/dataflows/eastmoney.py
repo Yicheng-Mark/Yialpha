@@ -253,9 +253,10 @@ def get_margin_trading(
 
     融资余额 (margin balance), 融券余额 (short balance), 融资买入额 (margin buy),
     融券卖出量 (short sell, shares), 融资净买入额 (net margin buy). Pulled from
-    the Eastmoney datacenter ``RPTA_WEB_RZRQ_GGMX`` report, which carries
-    **full exchange-disclosed history** (back to each name's 两融 list date), so
-    it is clean for long backtests. Rows are filtered by ``date <= curr_date``
+    the Eastmoney datacenter ``RPTA_WEB_RZRQ_GGMX`` report. Coverage bound: a
+    single 400-row recent-first page (~1.5 years of daily rows) — backtest
+    windows older than that honestly come back empty (no lookahead); this is
+    NOT the exchange's full history. Rows are filtered by ``date <= curr_date``
     (PIT) and within the look-back window.
 
     Non-A-share ticker -> :class:`NoMarketDataError`. A name not on the margin-

@@ -448,7 +448,14 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
                 raise NoMarketDataError(
                     symbol, canonical, "Yahoo Finance returned no rows"
                 )
-            downloaded.to_csv(data_file, index=False, encoding="utf-8")
+            # Atomic swap (round-8): a watchdog kill mid-to_csv used to
+            # leave a fresh-mtime TRUNCATED cache that historical dates
+            # never self-heal from (same-day refresh only fires for today).
+            # os.replace makes readers see the old file or the new one,
+            # never a half-written one (same pattern as disk_cache).
+            tmp_file = f"{data_file}.{os.getpid()}.tmp"
+            downloaded.to_csv(tmp_file, index=False, encoding="utf-8")
+            os.replace(tmp_file, data_file)
             # The cache name is now fixed; drop this symbol's legacy dated
             # files (one per day under the old scheme) so they cannot pile up.
             _purge_legacy_ohlcv_caches(config, safe_symbol)
@@ -463,6 +470,15 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
 
     # Filter to curr_date to prevent look-ahead bias in backtesting
     data = data[data["Date"] <= curr_date_dt]
+
+    # An empty POST-filter frame (analysis date before the symbol's first bar
+    # or before the 5y cache window) fails closed like an empty download
+    # does (round-8): returning it silently produced a "successful" all-N/A
+    # indicator wall and recorded core success in the quality ledger.
+    if data.empty:
+        raise NoMarketDataError(
+            symbol, canonical, f"no OHLCV rows on or before {curr_date}"
+        )
 
     # Reject a stale frame (latest row far older than curr_date) rather than
     # feeding year-old prices into indicators (#1021).

@@ -18,6 +18,22 @@ def _underlying_symbol(ticker: str) -> str:
     return stock_perp_underlying(ticker) or ticker
 
 
+def _pit_curr_date(curr_date: str | None) -> str | None:
+    """Clamp an LLM-supplied curr_date to the run's pinned analysis date.
+
+    Same guard the round-7 sweep added to the indicator/weekly/validation
+    tools; the fundamentals chain was the remaining gap. An LLM can echo a
+    cached report header's "Data retrieved on" date (today) instead of the
+    pinned analysis date — unclamped, filter_financials_by_date and the
+    overview/SEC leak gates would then admit post-decision quarters and
+    today-snapshot overviews into a historical run. Unchanged in live mode
+    (no analysis date pinned).
+    """
+    from yialpha.dataflows.utils import current_pit_end
+
+    return current_pit_end(curr_date) or curr_date
+
+
 @tool
 def get_fundamentals(
     ticker: Annotated[str, "ticker symbol"],
@@ -32,7 +48,7 @@ def get_fundamentals(
     Returns:
         str: A formatted report containing comprehensive fundamental data
     """
-    return route_to_vendor("get_fundamentals", _underlying_symbol(ticker), curr_date)
+    return route_to_vendor("get_fundamentals", _underlying_symbol(ticker), _pit_curr_date(curr_date))
 
 
 @tool
@@ -51,7 +67,7 @@ def get_balance_sheet(
     Returns:
         str: A formatted report containing balance sheet data
     """
-    return route_to_vendor("get_balance_sheet", _underlying_symbol(ticker), freq, curr_date)
+    return route_to_vendor("get_balance_sheet", _underlying_symbol(ticker), freq, _pit_curr_date(curr_date))
 
 
 @tool
@@ -70,7 +86,7 @@ def get_cashflow(
     Returns:
         str: A formatted report containing cash flow statement data
     """
-    return route_to_vendor("get_cashflow", _underlying_symbol(ticker), freq, curr_date)
+    return route_to_vendor("get_cashflow", _underlying_symbol(ticker), freq, _pit_curr_date(curr_date))
 
 
 @tool
@@ -89,4 +105,4 @@ def get_income_statement(
     Returns:
         str: A formatted report containing income statement data
     """
-    return route_to_vendor("get_income_statement", _underlying_symbol(ticker), freq, curr_date)
+    return route_to_vendor("get_income_statement", _underlying_symbol(ticker), freq, _pit_curr_date(curr_date))

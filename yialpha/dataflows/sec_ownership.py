@@ -83,21 +83,26 @@ _FTD_URL = "https://www.sec.gov/files/data/fails-deliver-data/cnsfails{yyyymm}{h
 # insider filings is far more than a 180-day window normally accumulates and
 # keeps a single analysis under ~30 SEC requests.
 _MAX_FORM4 = 25
+# Each FTD half-month ZIP is one throttled SEC GET; 730d = 48 files is a
+# generous ceiling (default is 180d = 12 files).
+_FTD_MAX_LOOKBACK_DAYS = 730
 
 
 def _as_of_date(curr_date: str | None) -> date:
-    """Parse an LLM-supplied as-of date into a :class:`date`, degrading to
-    ``date.today()`` instead of crashing the tool.
+    """Parse an LLM-supplied as-of date into a :class:`date`.
 
-    An LLM can emit malformed ``curr_date`` values (``"2026/08/01"``,
-    ``"garbage"`` — forms the strict ``date.fromisoformat`` rejects), which
-    previously raised a bare :class:`ValueError` straight out of the tool.
-    The fallback keeps the same direction as
-    :func:`yialpha.dataflows.utils.is_historical_date`'s handling of
-    unparseable input: the value must never crash and never leak. For an
-    as-of *upper bound*, today is the conservative ceiling — no real filing
-    is dated later than today, so the PIT gate can never admit not-yet-public
-    rows. Empty/None is genuine live mode -> today, without a warning.
+    Empty/None is genuine live mode -> today, without a warning. A NON-EMPTY
+    but unparseable value (``"2026/08/01"``, ``"garbage"`` — forms the strict
+    ``date.fromisoformat`` rejects) cannot be proven to be any date, and
+    degrading to ``date.today()`` would *widen* a backtest run's PIT upper
+    bound to today — admitting filings/FTD rows/13F holdings dated after the
+    simulated ``curr_date`` (a lookahead leak; "today is the conservative
+    ceiling" holds only in live mode). Matching
+    :func:`yialpha.dataflows.utils.is_historical_date`'s fail-closed stance
+    for unparseable input, raise :class:`NoMarketDataError` instead; the
+    router surfaces it as the optional-category NO_DATA sentinel. (History:
+    this first raised a bare ValueError out of the tool, then degraded to
+    today — both wrong.)
     """
     text = (curr_date or "").strip()[:10]
     if not text:
@@ -106,10 +111,13 @@ def _as_of_date(curr_date: str | None) -> date:
         return date.fromisoformat(text)
     except ValueError:
         logger.warning(
-            "sec_ownership: unparseable curr_date %r; falling back to today (%s)",
-            curr_date, date.today(),
+            "sec_ownership: unparseable curr_date %r; refusing to guess an "
+            "as-of bound (degrading to NO_DATA_AVAILABLE)", curr_date,
         )
-        return date.today()
+        raise NoMarketDataError(
+            "?", detail=f"unparseable curr_date {curr_date!r} — no safe PIT "
+                        "upper bound; refusing a today-fallback that would leak"
+        ) from None
 
 
 def _ftd_pub_lag_days() -> int:
@@ -232,8 +240,8 @@ def get_form4_insider_trading(
     subs = _fetch_submissions(cik)
 
     # Live mode: no as-of upper bound; anchor the look-back window at today.
-    # A malformed LLM date ("2026/08/01") degrades to today via the helper
-    # instead of raising bare ValueError out of the tool.
+    # A malformed LLM date ("2026/08/01") fails closed via the helper
+    # (NoMarketDataError -> NO_DATA sentinel), never guesses an as-of bound.
     upper = (curr_date or "")[:10]
     upper_d = _as_of_date(curr_date)
     lower_d = upper_d - timedelta(days=int(look_back_days))
@@ -301,6 +309,14 @@ def get_form4_insider_trading(
               f"as of {curr_date or 'now'})\n")
     out.write(f"# Source: SEC EDGAR Form 4 (PIT: filingDate <= {curr_date or 'now'}; "
               f"CIK {cik})\n")
+    if len(forms) >= 1000:
+        # submissions.recent holds only the ~1000 most recent filings of ANY
+        # type; a high-volume issuer's older in-window Form 4s live in the
+        # files[] archive segments this tool does not read — say so instead
+        # of presenting a fabricated clean window.
+        out.write("# Note: EDGAR 'recent' filings segment is at its ~1000 cap; "
+                  "older in-window Form 4s of high-volume filers may fall "
+                  "outside this tool's coverage.\n")
 
     if not rows:
         out.write(f"\nNo Form 4 transactions for {ticker} in the last "
@@ -482,8 +498,18 @@ def get_ftd_data(
     no rows -> an informative "no fails reported" string (it does NOT resolve a
     CIK, unlike Form 4).
     """
-    upper_d = _as_of_date(curr_date)   # malformed input degrades, not crashes
-    start_d = upper_d - timedelta(days=int(look_back_days))
+    upper_d = _as_of_date(curr_date)   # malformed input fails closed, never guesses
+    look_back_days = int(look_back_days)
+    if look_back_days > _FTD_MAX_LOOKBACK_DAYS:
+        # Each half-month is one throttled ZIP fetch (~0.12s + RTT); an
+        # LLM-supplied 3000 would mean hundreds of GETs and a huge cache for
+        # one tool call. Cap like Form4's _MAX_FORM4 / tushare's news cap.
+        logger.warning(
+            "sec_ownership: get_ftd_data look_back_days %d capped to %d",
+            look_back_days, _FTD_MAX_LOOKBACK_DAYS,
+        )
+        look_back_days = _FTD_MAX_LOOKBACK_DAYS
+    start_d = upper_d - timedelta(days=look_back_days)
     lag = _ftd_pub_lag_days()
 
     # Only files whose half-month end + publication lag has elapsed by
@@ -604,8 +630,9 @@ def _extract_cusip(facts: dict, curr_date: str | None) -> str:
         raise NoMarketDataError(
             "cusip", detail="dei:EntityCusip not reported in companyfacts") from err
     upper = (curr_date or "")[:10]
-    # Live mode (empty) keeps the no-gate None; a malformed value degrades to
-    # today via the helper — the PIT gate then still applies, conservatively.
+    # Live mode (empty) keeps the no-gate None; a malformed value fails
+    # closed via the helper (raise -> NO_DATA sentinel) rather than guessing
+    # an as-of bound.
     upper_d = _as_of_date(upper) if upper else None
 
     valid: list[tuple[date, str]] = []
@@ -796,7 +823,7 @@ def get_institutional_holdings(
     facts = _fetch_company_facts(cik)
     cusip = _extract_cusip(facts, curr_date)
 
-    upper_d = _as_of_date(curr_date)   # malformed input degrades, not crashes
+    upper_d = _as_of_date(curr_date)   # malformed input fails closed, never guesses
     lower_d = upper_d - timedelta(days=int(look_back_days))
     lag = _sec_13f_pub_lag_days()
     visible_end = upper_d - timedelta(days=lag)

@@ -741,45 +741,51 @@ def test_13f_router_optional_category_degrades_to_sentinel(monkeypatch, tmp_path
 # Hardening regressions (malformed LLM input / degenerate data)
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
-@pytest.mark.parametrize("bad_date", ["2026/08/01", "garbage", ""])
-def test_form4_malformed_curr_date_degrades_not_crashes(
+@pytest.mark.parametrize("bad_date", ["2026/08/01", "garbage"])
+def test_form4_malformed_curr_date_fails_closed(
         monkeypatch, tmp_path, bad_date, caplog):
     """An LLM-emitted malformed curr_date ("2026/08/01" is a documented form)
-    must degrade via _as_of_date instead of a bare ValueError from
-    date.fromisoformat. Empty string stays genuine live mode (no warning)."""
+    must fail closed via _as_of_date (NoMarketDataError -> router
+    NO_DATA_AVAILABLE sentinel): the pre-round-8 today-fallback widened a
+    backtest's PIT upper bound to today = lookahead. No bare ValueError."""
     _patch_form4(monkeypatch, tmp_path)
     with caplog.at_level("WARNING", logger="yialpha.dataflows.sec_ownership"):
-        out = sec_ownership.get_form4_insider_trading("AAPL", bad_date, 180)
+        with pytest.raises(NoMarketDataError):
+            sec_ownership.get_form4_insider_trading("AAPL", bad_date, 180)
+    assert any("unparseable curr_date" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_form4_empty_curr_date_stays_live(monkeypatch, tmp_path, caplog):
+    """Empty string is genuine live mode: normal output, no warning."""
+    _patch_form4(monkeypatch, tmp_path)
+    with caplog.at_level("WARNING", logger="yialpha.dataflows.sec_ownership"):
+        out = sec_ownership.get_form4_insider_trading("AAPL", "", 180)
     assert "# Form 4 Insider Trading for AAPL" in out
     assert isinstance(out, str)
-    if bad_date:
-        assert any("unparseable curr_date" in r.message for r in caplog.records)
-    else:
-        assert not any("unparseable curr_date" in r.message for r in caplog.records)
+    assert not any("unparseable curr_date" in r.message for r in caplog.records)
 
 
 @pytest.mark.unit
-def test_ftd_malformed_curr_date_degrades_not_crashes(monkeypatch, tmp_path):
+def test_ftd_malformed_curr_date_fails_closed(monkeypatch, tmp_path):
     _patch_ftd(monkeypatch, tmp_path)
-    out = sec_ownership.get_ftd_data("AAPL", "2026/08/01", 90)
-    assert "# Fails-to-Deliver for AAPL" in out
+    with pytest.raises(NoMarketDataError):
+        sec_ownership.get_ftd_data("AAPL", "2026/08/01", 90)
 
 
 @pytest.mark.unit
-def test_13f_malformed_curr_date_degrades_not_crashes(monkeypatch, tmp_path,
-                                                      caplog):
+def test_13f_malformed_curr_date_fails_closed(monkeypatch, tmp_path):
     """get_institutional_holdings hits two former crash sites (the
-    _extract_cusip PIT gate and the window anchor); the malformed date must
-    degrade to today at both."""
+    _extract_cusip PIT gate and the window anchor); a malformed date now
+    fails closed at both instead of degrading to today (round-8 lookahead
+    fix)."""
     cover = COVER_HEADER + "\n" + "00010A\t0001\t2024-05-15\tSAFE CAPITAL\t2024-03-31"
     holding = HOLDING_HEADER + "\n" + (
         "00010A\tAPPLE INC\t037833100\tCOM\t10000\t100\tSH\t\tSOLE\t100\t0\t0"
     )
     _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
-    with caplog.at_level("WARNING", logger="yialpha.dataflows.sec_ownership"):
-        out = sec_ownership.get_institutional_holdings("AAPL", "2026/08/01", 180)
-    assert "# 13F Institutional Holdings for AAPL" in out
-    assert any("unparseable curr_date" in r.message for r in caplog.records)
+    with pytest.raises(NoMarketDataError):
+        sec_ownership.get_institutional_holdings("AAPL", "2026/08/01", 180)
 
 
 @pytest.mark.unit

@@ -76,13 +76,27 @@ def resample_weekly(daily: pd.DataFrame, curr_date: str | None = None) -> pd.Dat
             from .utils import is_historical_date
 
             cutoff_str = str(curr_date)[:10]
-            if (
-                not is_historical_date(cutoff_str)
-                and len(weekly) > 0
-                and len(df) > 0
-                and weekly.index[-1] >= df["Date"].max()
-            ):
-                weekly = weekly.iloc[:-1]
+            if not is_historical_date(cutoff_str) and len(weekly) > 0 and len(df) > 0:
+                # A bin is still forming when its label day's bar does not
+                # yet exist as a PAST day: either the label lies beyond the
+                # last daily row (mid-week), or the last daily row is dated
+                # today (that day's bar can still extend). Equities never
+                # print a Saturday row, so the old ``label >= last_daily``
+                # heuristic deleted every completed Friday bin on weekend /
+                # Monday-premarket live runs; a crypto run whose Saturday
+                # row had not landed in the cache yet hit the same false
+                # positive.
+                last_label = weekly.index[-1]
+                last_daily = df["Date"].max()
+                last_day = last_daily
+                if last_day.tzinfo is not None:
+                    last_day = last_day.tz_convert("UTC").tz_localize(None)
+                today_utc = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+                if (
+                    last_label > last_daily
+                    or last_day.normalize() >= today_utc
+                ):
+                    weekly = weekly.iloc[:-1]
         else:
             # Fail-visible: an unparseable curr_date must not silently keep
             # the trailing incomplete week (a look-ahead-style weekly close).

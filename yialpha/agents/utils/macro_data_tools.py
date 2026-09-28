@@ -3,6 +3,18 @@ from typing import Annotated
 from langchain_core.tools import tool
 
 from yialpha.dataflows.interface import route_to_vendor
+from yialpha.dataflows.utils import current_pit_end
+
+
+def _pit_curr_date(curr_date):
+    """Clamp an LLM-supplied curr_date to the run's pinned analysis date.
+
+    Same guard as the round-7/8 sweeps on the indicator/fundamentals tools:
+    the macro vendors PIT-filter series by the passed ``curr_date`` verbatim
+    (window end), so an LLM echoing a cached header's today-date would admit
+    post-decision observations into a backtest. No-op in live mode.
+    """
+    return current_pit_end(curr_date) or curr_date
 
 
 @tool
@@ -33,4 +45,4 @@ def get_macro_indicators(
     Returns:
         str: A formatted markdown report of the macro series
     """
-    return route_to_vendor("get_macro_indicators", indicator, curr_date, look_back_days)
+    return route_to_vendor("get_macro_indicators", indicator, _pit_curr_date(curr_date), look_back_days)

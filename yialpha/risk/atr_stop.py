@@ -73,7 +73,14 @@ def latest_atr_from_frame(ohlcv: pd.DataFrame) -> tuple[float, float]:
     work = ohlcv
     if rows > 1:
         try:
-            last_ts = pd.Timestamp(ohlcv.index[-1])
+            if "Date" in ohlcv.columns:
+                # load_ohlcv frames carry Date as a *column* with a Range
+                # index; pd.Timestamp(<row number>) silently parses as a
+                # 1970-01-01 ns stamp, so the forming-bar guard never fired
+                # for equity frames (round-8).
+                last_ts = pd.Timestamp(ohlcv["Date"].iloc[-1])
+            else:
+                last_ts = pd.Timestamp(ohlcv.index[-1])
             if last_ts.tzinfo is not None:
                 # Fold an aware stamp onto the file-wide naive-UTC
                 # convention; comparing aware vs naive raises TypeError,

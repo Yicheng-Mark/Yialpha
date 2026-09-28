@@ -801,29 +801,45 @@ def _live_week_days() -> tuple[date, date, date]:
 
 @pytest.mark.unit
 def test_resample_weekly_drops_forming_trailing_week_on_live_date():
-    """Live run dated on/after the trailing bin's own Friday label, last
-    daily row ON that label → the trailing week is DROPPED: a bin is
-    complete only when a daily row exists BEYOND its label."""
+    """Round-8 contract: the trailing bin is forming (and dropped) only when
+    its label day's daily bar is dated TODAY (that bar can still extend) or
+    the label lies beyond the last daily row (mid-week). A Friday bin whose
+    bar is a PAST day is complete — equities never print a Saturday row, so
+    the round-5 "complete only when a row exists BEYOND the label" doctrine
+    silently deleted every completed Friday bin on weekend / Monday-
+    premarket equity live runs."""
     prev_friday, last_friday, today = _live_week_days()
     days = [prev_friday] + [
         last_friday - timedelta(days=k) for k in (4, 3, 2, 1, 0)
     ]
     weekly = ors.resample_weekly(_daily_frame(days), curr_date=today.isoformat())
     labels = [ts.date() for ts in weekly["Date"]]
-    # The trailing (still-forming) week is gone; the prior closed week stays.
-    assert last_friday not in labels
-    assert labels == [prev_friday]
+    if last_friday == today:
+        # Live ON the Friday itself: the day's bar is still intraday ->
+        # the trailing week is forming and dropped; the prior week stays.
+        assert labels == [prev_friday]
+    else:
+        # Weekend / Monday-premarket / later-weekday run: the Friday bar is
+        # a closed past day -> the bin is completed and must survive.
+        assert labels == [prev_friday, last_friday]
 
 
 @pytest.mark.unit
 def test_resample_weekly_keeps_week_when_row_beyond_label_exists():
-    """A Saturday daily row beyond the Friday label proves the bin closed →
-    the week is KEPT (this is exactly what load_ohlcv serves on a crypto
-    venue after the UTC day rolls)."""
+    """A past Saturday daily row beyond the Friday label proves the bin
+    closed -> the week is KEPT (exactly what load_ohlcv serves on a crypto
+    venue after the UTC day rolls). The synthetic Saturday row must already
+    be a past day for the scenario to describe a real feed."""
     prev_friday, last_friday, today = _live_week_days()
+    saturday = last_friday + timedelta(days=1)
+    if saturday > today:
+        pytest.skip(
+            "synthetic beyond-label row would be future-dated today; "
+            "scenario needs a rolled UTC day (run any day but Friday)"
+        )
     days = [prev_friday] + [
         last_friday - timedelta(days=k) for k in (4, 3, 2, 1, 0)
-    ] + [last_friday + timedelta(days=1)]  # the Saturday row
+    ] + [saturday]  # the Saturday row
     weekly = ors.resample_weekly(_daily_frame(days), curr_date=today.isoformat())
     labels = [ts.date() for ts in weekly["Date"]]
     assert labels == [prev_friday, last_friday]

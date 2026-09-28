@@ -462,6 +462,11 @@ def get_fundamentals(
     today/future) keeps the snapshot -- it is legitimately current then.
     """
     canonical = normalize_symbol(ticker)
+    # PIT clamp (round-8): an LLM can echo a cached header's "Data retrieved
+    # on" date (today) instead of the pinned analysis date; unclamped, the
+    # gate below would judge that as live mode and serve the today snapshot
+    # into a historical run.
+    curr_date = current_pit_end(curr_date) or curr_date
     if overview_would_leak_future(curr_date):
         raise NoMarketDataError(
             ticker, canonical,
@@ -516,6 +521,9 @@ def get_balance_sheet(
             loader,
         )
 
+        # PIT clamp (round-8): tool layer clamps too; this covers direct
+        # callers — filter_financials_by_date trusts curr_date verbatim.
+        curr_date = current_pit_end(curr_date) or curr_date
         data = filter_financials_by_date(data, curr_date)
 
         if data.empty:
@@ -556,6 +564,8 @@ def get_cashflow(
             loader,
         )
 
+        # PIT clamp (round-8): see balance sheet.
+        curr_date = current_pit_end(curr_date) or curr_date
         data = filter_financials_by_date(data, curr_date)
 
         if data.empty:
@@ -596,6 +606,8 @@ def get_income_statement(
             loader,
         )
 
+        # PIT clamp (round-8): see balance sheet.
+        curr_date = current_pit_end(curr_date) or curr_date
         data = filter_financials_by_date(data, curr_date)
 
         if data.empty:
@@ -618,10 +630,25 @@ def get_income_statement(
 
 
 def get_insider_transactions(
-    ticker: Annotated[str, "ticker symbol of the company"]
+    ticker: Annotated[str, "ticker symbol of the company"],
+    curr_date: Annotated[str | None, "current date in YYYY-MM-DD format"] = None,
 ):
-    """Get insider transactions data from yfinance."""
+    """Get insider transactions data from yfinance.
+
+    The feed is a *today* snapshot (which filings get listed is decided now,
+    not as of curr_date), so an explicit historical curr_date refuses the
+    same way the overview snapshot does, instead of leaking post-decision
+    transactions into a backtest. Dormant today (no analyst binds this
+    tool); the gate exists so a future wiring cannot reintroduce the leak.
+    """
     canonical = normalize_symbol(ticker)
+    curr_date = current_pit_end(curr_date) or curr_date
+    if overview_would_leak_future(curr_date):
+        raise NoMarketDataError(
+            ticker, canonical,
+            f"insider feed is a point-in-time (today only) snapshot; "
+            f"not valid as of {curr_date}",
+        )
     try:
         data = _cached_yf_frame(
             canonical,

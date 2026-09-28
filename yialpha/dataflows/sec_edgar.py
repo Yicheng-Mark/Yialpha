@@ -393,8 +393,14 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
     def _latest(candidates: list[str]) -> tuple[Any, str]:
         recs = _concept_records(facts, candidates)
         recs = [r for r in recs if _period_public(r, curr_date)]
-        recs.sort(key=lambda r: r.get("end", ""), reverse=True)
-        return (recs[0]["val"] if recs else None), (recs[0].get("end", "") if recs else "")
+        if not recs:
+            return None, ""
+        # Same-ended QTD and YTD records coexist (one 10-Q reports both) and
+        # units-array order is arbitrary — pick by reporting duration like
+        # _render_statement does (quarterly target), not by array order.
+        end = max(r.get("end", "") for r in recs)
+        chosen = _pick_period_record(recs, end, 90)
+        return chosen["val"], chosen.get("end", "")
 
     out = io.StringIO()
     out.write(f"# Company Fundamentals for {ticker}\n")
