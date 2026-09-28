@@ -749,9 +749,11 @@ def test_form4_malformed_curr_date_fails_closed(
     NO_DATA_AVAILABLE sentinel): the pre-round-8 today-fallback widened a
     backtest's PIT upper bound to today = lookahead. No bare ValueError."""
     _patch_form4(monkeypatch, tmp_path)
-    with caplog.at_level("WARNING", logger="yialpha.dataflows.sec_ownership"):
-        with pytest.raises(NoMarketDataError):
-            sec_ownership.get_form4_insider_trading("AAPL", bad_date, 180)
+    with (
+        caplog.at_level("WARNING", logger="yialpha.dataflows.sec_ownership"),
+        pytest.raises(NoMarketDataError),
+    ):
+        sec_ownership.get_form4_insider_trading("AAPL", bad_date, 180)
     assert any("unparseable curr_date" in r.message for r in caplog.records)
 
 

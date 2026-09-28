@@ -543,6 +543,7 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                         )
                     else:
                         result["ok"] = True
+                        result.pop("degraded", None)
                         result["report_path"] = new_report
                         result["reason"] = f"ok (quality unknown; wall {wall:.0f}s)"
                         print(
@@ -576,6 +577,11 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                         break
                 else:
                     result["ok"] = True
+                    # Round-8: a DEGRADED marker set by an earlier attempt
+                    # must not survive into a CLEAN retry's result dict —
+                    # downstream JSON consumers would read the contradictory
+                    # ok=True + degraded=True pair.
+                    result.pop("degraded", None)
                     result["report_path"] = new_report
                     result["reason"] = f"ok (wall {wall:.0f}s)"
                     print(

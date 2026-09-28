@@ -121,10 +121,18 @@ def gross_edge(
         or not math.isfinite(target_price)
     ):
         return None
+    ratio = target_price / reference_price
+    if not (0.05 <= ratio <= 20.0):
+        # Sanity band (round-8): a target implying the price collapses to
+        # ~zero (SHORT edge ≈ +100%, e.g. a mis-parsed 0.001 target against
+        # a ~1.0 reference) or a >20x moonshot is garbage that sails past
+        # every cost check — refuse it like round-7 refused non-positive
+        # targets. 0.05..20x is deliberately generous for a 1-5 day horizon.
+        return None
     if side == TicketSide.LONG:
-        return target_price / reference_price - 1.0
+        return ratio - 1.0
     if side == TicketSide.SHORT:
-        return 1.0 - target_price / reference_price
+        return 1.0 - ratio
     return None
 
 
@@ -209,7 +217,16 @@ def evaluate_tradeability(
         )
 
     edge = gross_edge(side, target_price, reference_price)
-    assert edge is not None  # both prices validated above; side is LONG/SHORT
+    if edge is None:
+        # Round-8 sanity band (gross_edge refuses target/reference outside
+        # [0.05, 20x]): magnitude garbage — the same treatment as an invalid
+        # target above, NOT an assertion (which detonated the whole ticket
+        # build on exactly this input class).
+        return TradeabilityVerdict(
+            tradeability=Tradeability.UNEVALUATED,
+            tradeability_reason=REASON_INVALID_TARGET,
+            side=side,
+        )
     gross_bps = edge * 1e4
     net_bps = gross_bps - cost.total_bps - risk_buffer_bps
     # Epsilon, not raw `<= 0`: a mathematically-exact edge==cost comparison

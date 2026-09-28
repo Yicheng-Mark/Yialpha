@@ -104,7 +104,17 @@ def test_write_report_to_disk(buy_result: BacktestResult, tmp_path):
 
 @pytest.mark.unit
 def test_write_multi_run_report(buy_result: BacktestResult, tmp_path):
-    path = write_report([buy_result, buy_result], results_dir=tmp_path)
+    # A distribution needs independent draws: since round 8, results sharing
+    # a run_tag (A/B replay legs, e.g. run_baseline --full) are excluded from
+    # the multi-run section, so give the second result its own tag like
+    # multi_run does.
+    from dataclasses import replace
+
+    second = replace(
+        buy_result,
+        config_summary={**buy_result.config_summary, "run_tag": "r1"},
+    )
+    path = write_report([buy_result, second], results_dir=tmp_path)
     text = path.read_text(encoding="utf-8")
     assert "Multi-run distribution" in text
     # Each individual run also rendered.

@@ -364,6 +364,21 @@ def render_multi_run_report(results: Sequence[BacktestResult]) -> str:
     return "\n".join(lines)
 
 
+def _is_single_run_distribution(results: Sequence[BacktestResult]) -> bool:
+    """True when the results are N independent draws of ONE configuration.
+
+    ``run_tag`` is the draw identity (``multi_run`` varies it by design), so
+    two results sharing a tag are replay legs of one realization — e.g.
+    ``run_baseline --full`` renders baseline + risk-improved legs under the
+    SAME pair tag, and folding them into one distribution table blends two
+    configurations (and multiple tickers blend multiple instruments) into
+    meaningless mean/std columns.
+    """
+    tickers = {r.ticker for r in results}
+    tags = [str(r.config_summary.get("run_tag", "")) for r in results]
+    return len(tickers) == 1 and len(set(tags)) == len(tags)
+
+
 def write_report(
     result_or_results: BacktestResult | Sequence[BacktestResult],
     path: str | Path | None = None,
@@ -389,9 +404,16 @@ def write_report(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     parts: list[str] = []
-    if len(results) > 1:
+    if len(results) > 1 and _is_single_run_distribution(results):
         parts.append(render_multi_run_report(results))
         parts.append("\n\n---\n\n")
+    elif len(results) > 1:
+        logger.info(
+            "Skipping multi-run distribution: %d results span multiple "
+            "tickers or share run_tags (mixed A/B legs?); writing "
+            "individual reports only.",
+            len(results),
+        )
     for r in results:
         parts.append(render_backtest_report(r))
         parts.append("\n\n---\n\n")

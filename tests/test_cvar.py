@@ -40,16 +40,15 @@ def test_historical_cvar_empty_inputs():
 
 @pytest.mark.unit
 def test_historical_cvar_is_mean_of_worst_tail():
-    # Float subtlety worth pinning: 1.0 - 0.95 == 0.050000000000000044 in
-    # binary, so 100 observations at 95% give ceil(5.000000000000004) = SIX
-    # tail observations, not five. The tail mean here averages the five -0.10
-    # observations plus one +0.01: (-0.50 + 0.01) / 6.
+    # Round-8: 1.0 - 0.95 == 0.050000000000000044 in binary — the old
+    # ceil(100 * that) = 6 pulled one MILD observation into the tail (mean
+    # (-0.50 + 0.01)/6 instead of -0.10), biasing CVaR less negative on
+    # every 20-multiple window and making the -5% breach harder to fire.
+    # The epsilon-rounded tail count keeps the worst-5% window EXACT.
     returns = [0.01] * 95 + [-0.10] * 5
-    assert historical_cvar(returns, confidence=0.95) == pytest.approx(
-        (-0.50 + 0.01) / 6.0
-    )
-    # 99% over 100 observations: 1.0-0.99 rounds UP, ceil -> 2-deep tail of
-    # the two -0.10 observations -> exactly -0.10.
+    assert historical_cvar(returns, confidence=0.95) == pytest.approx(-0.10)
+    # 99% over 100 observations: the exact 1-obs tail (the binary dust used
+    # to widen it to 2 by accident).
     assert historical_cvar(returns, confidence=0.99) == pytest.approx(-0.10)
     # Mixed tail: worst two of {-0.5, +0.01} average to -0.245.
     mixed = [0.01] * 30 + [-0.5]

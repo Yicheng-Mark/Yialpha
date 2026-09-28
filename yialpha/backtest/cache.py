@@ -32,9 +32,11 @@ logger = logging.getLogger(__name__)
 # next-bar point-in-time fixes. Version 3 folds asset_type into the key:
 # a crypto vs crypto_perp (or stock) backtest of the same ticker+date+run_tag
 # used to replay the OTHER venue's realized decision — the same venue-
-# blindness the states log carried. Old entries fail the version check and
-# are honestly recomputed.
-DECISION_CACHE_SCHEMA_VERSION = 3
+# blindness the states log carried. Version 4 adds ``was_degraded`` so a
+# replay counts a forced-Hold (unparseable rating) as degraded exactly as
+# the live run did. Old entries lack the field (degraded status unknown);
+# they fail the version check and are honestly recomputed.
+DECISION_CACHE_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,7 @@ class CachedDecision:
     rating: str
     final_decision: str
     asset_type: str = "stock"
+    was_degraded: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -57,6 +60,7 @@ class CachedDecision:
             "rating": self.rating,
             "final_decision": self.final_decision,
             "asset_type": self.asset_type,
+            "was_degraded": self.was_degraded,
         }
 
     @classmethod
@@ -73,6 +77,7 @@ class CachedDecision:
             rating=d["rating"],
             final_decision=d["final_decision"],
             asset_type=d.get("asset_type", "stock"),
+            was_degraded=bool(d.get("was_degraded", False)),
         )
 
 
@@ -123,6 +128,10 @@ class DecisionCache:
         asset_type: str = "stock",
     ) -> CachedDecision | None:
         if not self.enabled:
+            return None
+        if self.cache_dir is None:
+            # Enabled-but-dirless cache: "no cache directory" means every
+            # lookup is a miss — never a TypeError on the legacy-path maths.
             return None
         path = self._key_path(ticker, date, run_tag, asset_type)
         if path is not None and path.exists():
@@ -177,6 +186,7 @@ class DecisionCache:
         final_decision: str,
         run_tag: str = "default",
         asset_type: str = "stock",
+        was_degraded: bool = False,
     ) -> CachedDecision:
         """Store a realized decision and return the cached record."""
         decision = CachedDecision(
@@ -186,6 +196,7 @@ class DecisionCache:
             rating=rating,
             final_decision=final_decision,
             asset_type=asset_type,
+            was_degraded=was_degraded,
         )
         self.put(decision)
         return decision

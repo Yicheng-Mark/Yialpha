@@ -289,44 +289,46 @@ def create_fundamentals_analyst(llm):
                 SCOPE_UNDERLYING if prediction_underlying else SCOPE_CONTRACT,
             )
 
+        # Plain string, NOT a 1-tuple: the prompt template's {system_message}
+        # slot renders a tuple as its Python repr, which wrapped this whole
+        # instruction block (grounding rules, every nudge) in ("...",) garbage
+        # quotes on every fundamentals run (round-8 prompt-bugfix — the
+        # change is deliberately NOT byte-equivalent with the polluted
+        # rendering it replaces).
         system_message = (
             "You are a researcher tasked with analyzing fundamental information over the past week about a company. Please write a comprehensive report of the company's fundamental information such as financial documents, company profile, basic company financials, and company financial history to gain a full view of the company's fundamental information to inform traders. Focus on the most decision-relevant figures rather than exhaustive detail, and tie every claim to a specific number and reporting period pulled from the tools. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + " Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."
             + " Use the available tools: `get_fundamentals` for comprehensive company analysis, `get_balance_sheet`, `get_cashflow`, and `get_income_statement` for specific financial statements."
             + " Grounding rules (anti-hallucination): (1) Every conclusion must cite a concrete data point with its date or reporting period (e.g. 'FY2025 Q3 revenue $X reported on YYYY-MM-DD'). (2) If two tools disagree (e.g. get_fundamentals vs get_income_statement), flag the discrepancy explicitly rather than inventing a reconciled number. (3) If a figure is missing, stale, or the tools return no data for the period, write 'data not available' for that item instead of estimating or extrapolating."
-            + get_language_instruction(),
+            + get_language_instruction()
         )
         if get_config().get("sec_ownership"):
-            # system_message is a 1-tuple by long-standing construction (the
-            # trailing comma above); append the nudge to its string element,
-            # preserving the tuple shape so prompt formatting is identical in
-            # structure to the off-path (byte-equivalent when off).
-            system_message = (system_message[0] + _SEC_OWNERSHIP_NUDGE,)
+            system_message += _SEC_OWNERSHIP_NUDGE
         # A-share nudge uses the SAME double gate (flag AND is_a_stock) as the
         # tool extension above, so the prompt only changes when the tools do.
         if get_config().get("a_stock") and is_a_stock(ticker):
-            system_message = (system_message[0] + _A_STOCK_NUDGE,)
+            system_message += _A_STOCK_NUDGE
         # Native A-share nudge uses the SAME double gate (flag AND is_a_stock) as
         # its tool extension above, so the prompt only changes when the tools do.
         if get_config().get("a_share_native") and is_a_stock(ticker):
-            system_message = (system_message[0] + _A_SHARE_NATIVE_NUDGE,)
+            system_message += _A_SHARE_NATIVE_NUDGE
         # Web-search nudge uses the SAME gate (flag AND live date) as the tool
         # extension above, so the prompt only changes when the tools do.
         if bind_web_search:
-            system_message = (system_message[0] + _WEB_SEARCH_NUDGE,)
+            system_message += _WEB_SEARCH_NUDGE
         # Tokenized-stock perp nudge: gated on the run being a crypto_perp
         # whose symbol resolves to an equity underlying (the analyst only
         # exists on such a run because filter_analysts_for_asset_type kept
         # it). Prompt-only — the statement tools already remap the symbol.
         if state.get("asset_type") == "crypto_perp" and stock_perp_underlying(ticker):
-            system_message = (system_message[0] + _STOCK_PERP_NUDGE,)
+            system_message += _STOCK_PERP_NUDGE
         # ETF nudge (PR5): fund framing for high-confidence ETFs — applies
         # to plain-stock ETF runs and to perps whose UNDERLYING is an ETF
         # (e.g. SPYUSDT). Heuristic detection lives in yialpha.graph.routing.
         from yialpha.graph.routing import is_exchange_traded_fund
 
         if is_exchange_traded_fund(state.get("asset_type"), ticker):
-            system_message = (system_message[0] + _ETF_NUDGE,)
+            system_message += _ETF_NUDGE
 
         # Deterministic fundamentals bundle (config: fundamentals_bundle,
         # default ON): ONE parallel prefetch assembles the core fundamentals

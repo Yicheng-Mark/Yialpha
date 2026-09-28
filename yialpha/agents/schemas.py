@@ -91,6 +91,28 @@ def _coerce_unit_interval(value):
     return v
 
 
+def _coerce_signed_percent_float(value):
+    """Unbounded optional float with percent-form rescue (round-8, #1058
+    class). ``"+4.7%"`` → ``0.047`` — expected_return's own description
+    ("0.047 means +4.7%") invites the percent twin, and pre-round-8 it
+    degraded to None while sibling 0-1 fields already rescued theirs. No
+    unit-interval clamp here: the value is a signed return fraction and can
+    legitimately exceed ±1."""
+    percent = isinstance(value, str) and "%" in value
+    if percent:
+        value = value.strip().rstrip("%").strip()
+    v = _coerce_optional_float(value)
+    if v is None:
+        return None
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    if percent:
+        v = v / 100.0
+    return v if math.isfinite(v) else None
+
+
 # ---------------------------------------------------------------------------
 # Shared rating types
 # ---------------------------------------------------------------------------
@@ -433,17 +455,51 @@ class PortfolioDecision(BaseModel):
     )
 
     @field_validator(
-        "price_target", "expected_return", "underlying_price_target",
+        "price_target", "underlying_price_target",
         mode="before",
     )
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
 
+    @field_validator("expected_return", mode="before")
+    @classmethod
+    def _expected_return_percent_rescue(cls, v):
+        return _coerce_signed_percent_float(v)
+
     @field_validator("confidence", "evidence_coverage", mode="before")
     @classmethod
     def _unit_interval_rescue(cls, v):
         return _coerce_unit_interval(v)
+
+    @field_validator(
+        "underlying_direction", "contract_direction", "desired_side",
+        mode="before",
+    )
+    @classmethod
+    def _direction_case_rescue(cls, v, info):
+        """Case-insensitive, FIELD-SCOPED rescue (round-8, #1058 class).
+
+        The three fields carry different vocabularies, so a cross-vocabulary
+        wording ("Long" on a direction field, "Bullish" on desired_side) is
+        OUT of vocab for that field and degrades it to None — an optional
+        field never vetoes the decision. Only wording that matches the
+        TARGET field's vocabulary (case-insensitively) is rescued.
+        """
+        if not isinstance(v, str):
+            return v
+        normalized = v.strip().lower()
+        vocab = {
+            "underlying_direction": {"bullish", "bearish", "neutral"},
+            "contract_direction": {
+                "bullish", "bearish", "neutral",
+                "avoid_long", "avoid_short", "avoid",
+            },
+            "desired_side": {"long", "short", "flat"},
+        }.get(info.field_name, set())
+        if normalized not in vocab:
+            return None
+        return normalized.upper() if info.field_name == "desired_side" else normalized
 
     @model_validator(mode="before")
     @classmethod

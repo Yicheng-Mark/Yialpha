@@ -88,6 +88,12 @@ def clear_all_checkpoints(data_dir: str | Path) -> int:
     dbs = list(cp_dir.glob("*.db"))
     for db in dbs:
         db.unlink()
+        # WAL/SHM sidecars are left orphaned when another process still held
+        # the connection at unlink time (round-8): a stale sidecar never gets
+        # applied to a fresh DB (salt mismatch) but it does accumulate as
+        # garbage — delete alongside its db.
+        for suffix in ("-wal", "-shm"):
+            db.with_name(db.name + suffix).unlink(missing_ok=True)
     return len(dbs)
 
 

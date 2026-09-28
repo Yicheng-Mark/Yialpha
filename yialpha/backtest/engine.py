@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import math
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC
@@ -332,6 +333,24 @@ def _asset_return(prices: pd.Series, start_date: str, horizon: int) -> float | N
     if p0 <= 0 or not np.isfinite(p0) or not np.isfinite(p1):
         return None
     return p1 / p0 - 1.0
+
+
+def _forward_buffer_days(holding_days: int) -> int:
+    """Calendar-day tail buffer so ``holding_days`` TRADING days all fit.
+
+    ``holding_days`` counts sessions, but the buffer is calendar days (and the
+    fetch ``end`` is exclusive): 25 sessions span 35+ calendar days once
+    holidays land in the window, which the old ``holding_days + 10`` formula
+    silently truncated — the last decisions' forward windows computed on
+    short bars with no warning. 7/5 converts sessions to calendar days; the
+    +10 margin covers exclusivity and holiday clustering. The wider fetch
+    exists ONLY for ``_asset_return``'s forward windows; the equity/B&H
+    marking window stays capped at the legacy ``holding_days + 10`` boundary
+    (see ``mark_end`` at the call site), so metrics are byte-identical with
+    pre-round-8 runs and only the previously-truncated forward returns
+    change.
+    """
+    return math.ceil(holding_days * 7 / 5) + 10
 
 
 def _execution_date_after_signal(
@@ -790,8 +809,20 @@ def run_backtest(
     start_date = sorted_dates[0]
     # Buffer the end so the last decision still has a full holding window to mark.
     from datetime import datetime, timedelta
-    end_dt = datetime.strptime(sorted_dates[-1], "%Y-%m-%d") + timedelta(days=holding_days + 10)
+    end_dt = datetime.strptime(
+        sorted_dates[-1], "%Y-%m-%d"
+    ) + timedelta(days=_forward_buffer_days(holding_days))
     end_date = end_dt.strftime("%Y-%m-%d")
+    # Marking cap (round-8 review): the equity/B&H loops used to run over the
+    # WHOLE fetch window, so widening the buffer above would have lengthened
+    # every equity curve and silently drifted Sharpe/CAGR/alpha. Cap the
+    # marking window at the legacy ``holding_days + 10`` boundary instead —
+    # identical bar set to pre-round-8 for every ``holding_days``; the wider
+    # fetch feeds only ``_asset_return``'s per-decision forward windows.
+    mark_end = (
+        datetime.strptime(sorted_dates[-1], "%Y-%m-%d")
+        + timedelta(days=holding_days + 10)
+    ).strftime("%Y-%m-%d")
 
     # Perp mode prices/marks on the perp's own candles: the historical default
     # (Yahoo spot, e.g. BTC-USD) is the wrong instrument with the wrong basis.
@@ -1075,7 +1106,7 @@ def run_backtest(
     pos_avg_entry = 0.0            # weighted-average fill price of the open position
     current_stop: float | None = None  # armed GTC stop from the risk overlay
 
-    for trade_date, price in prices.items():
+    for trade_date, price in prices.loc[prices.index < mark_end].items():
         if trade_date < sorted_dates[0]:
             continue
 
@@ -1353,19 +1384,34 @@ def run_backtest(
 
             was_invested = abs(previous_weight) > 1e-12
             is_invested = abs(executed_weight) > 1e-12
+            # A long->short (or short->long) flip closes one episode and opens
+            # another on the same bar; without this the two legs merge into a
+            # single win/loss sample and win_rate / num_trades mix both sides.
+            sign_flip = (
+                was_invested
+                and is_invested
+                and (previous_weight > 0.0) != (executed_weight > 0.0)
+            )
             if not was_invested and is_invested:
                 opening_trade = row
                 # Pre-fill equity makes the eventual episode return net of the
                 # entry transaction cost already deducted from the portfolio.
                 opening_equity = equity_before
-            elif was_invested and not is_invested:
+            elif (was_invested and not is_invested) or sign_flip:
                 realized = _finish_open_position_episode(
                     opening_trade, opening_equity, equity_after,
                 )
                 if realized is not None:
                     ctx["realized_returns"].append(realized)
-                opening_trade = None
-                opening_equity = None
+                if sign_flip:
+                    # The flip bar's cost stays with the closing episode; the
+                    # new leg starts from post-cost equity so the cost is not
+                    # charged to both legs.
+                    opening_trade = row
+                    opening_equity = equity_after
+                else:
+                    opening_trade = None
+                    opening_equity = None
 
             # Costs are part of same-day equity and the next risk decision must
             # see them.  Refresh the latest history values after every fill.
@@ -1407,7 +1453,9 @@ def run_backtest(
     bh_curve: list[float] = []
     for date, price in zip(
         equity_dates,
-        prices.loc[prices.index >= sorted_dates[0]].values,
+        prices.loc[
+            (prices.index >= sorted_dates[0]) & (prices.index < mark_end)
+        ].values,
         strict=True,
     ):
         px = float(price)
@@ -1701,6 +1749,20 @@ def _attribute_factors(
         )
 
 
+def _event_study_seed(ticker: str, event_dates: Sequence[str]) -> int:
+    """Stable seed so the bootstrap CI survives a cache replay unchanged.
+
+    Replay determinism is the point of DecisionCache; an unseeded bootstrap
+    made ``metrics.event_study_ci`` the one number that wobbled between
+    otherwise byte-identical replays. The seed keys on the realized event
+    tape (same decisions -> same seed -> same CI).
+    """
+    if not event_dates:
+        return zlib.crc32(ticker.encode("utf-8"))
+    tape = f"{ticker}|{len(event_dates)}|{event_dates[0]}|{event_dates[-1]}"
+    return zlib.crc32(tape.encode("utf-8"))
+
+
 def _run_event_study(
     metrics: BacktestMetrics,
     graph: _GraphLike,
@@ -1770,6 +1832,7 @@ def _run_event_study(
             asset_prices, bench, event_dates,
             ratings=ratings,
             benchmark_name=bench_name or "benchmark",
+            rng_seed=_event_study_seed(ticker, event_dates),
         )
         if result.n_events == 0:
             return
@@ -1821,7 +1884,11 @@ def _resolve_decision(
     if cache is not None:
         cached = cache.get(ticker, trade_date, run_tag, asset_type=asset_type)
         if cached is not None:
-            return cached.rating, cached.final_decision, True, False
+            # Replay the recorded degraded flag too: a run whose unparseable
+            # rating forced "Hold" must count as degraded on replay exactly as
+            # it did live, or degraded_decision_count differs between the two
+            # reports of the same decision tape.
+            return cached.rating, cached.final_decision, True, cached.was_degraded
 
     final_state, rating, propagate_failed = _call_graph(graph, ticker, trade_date, asset_type)
     # ``propagate`` already returns a canonical 5-tier rating (it runs
@@ -1839,7 +1906,7 @@ def _resolve_decision(
     if cache is not None and not propagate_failed:
         cache.remember(
             ticker, trade_date, rating, decision_md, run_tag,
-            asset_type=asset_type,
+            asset_type=asset_type, was_degraded=was_degraded,
         )
     return rating, decision_md, False, was_degraded
 

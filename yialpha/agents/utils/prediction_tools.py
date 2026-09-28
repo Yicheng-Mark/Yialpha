@@ -411,7 +411,7 @@ def analyst_capture_is_empty(analyst: str) -> bool:
     return isinstance(capture, _PredictionCapture) and not capture.entries
 
 
-def flush_predictions() -> list[str]:
+def flush_predictions(analyst: str | None = None) -> list[str]:
     """Submit each capture grouped by its already-frozen acceptance snapshot.
 
     Uses the bound run context (``analysis_as_of`` from it, evidence ids
@@ -422,6 +422,14 @@ def flush_predictions() -> list[str]:
     cannot rewrite its rows against a grown evidence chain. Any exception
     is caught, logged as a WARNING, and ``[]`` returned: prediction
     recording must never abort the run.
+
+    ``analyst`` scopes the flush to that analyst's capture only. Settlement
+    must never mark a sibling analyst's in-flight capture as submitted: the
+    tool reply then tells the model "already been settled" for horizons it
+    believed were pending, and those rows are silently lost. In serial runs
+    the filter is byte-identical (a settling analyst is the only one holding
+    unsubmitted entries); under the opt-in parallel fan-out it is the
+    difference between correct per-analyst settlement and cross-talk.
     """
     context = current_ledger_run_context()
     if context is None:
@@ -431,6 +439,7 @@ def flush_predictions() -> list[str]:
         for capture in (_CAPTURE_SCOPE.get() or {}).values()
         if isinstance(capture, _PredictionCapture)
         and capture.run_id == context.run_id
+        and (analyst is None or capture.analyst == analyst)
     ]
     if not candidates:
         return []
@@ -499,7 +508,7 @@ def settle_prediction_capture(analyst: str, instrument_id: str) -> None:
                 ),
             )
             return
-        flush_predictions()
+        flush_predictions(analyst=analyst)
     except Exception:  # noqa: BLE001 -- settlement must never abort the node
         logger.warning(
             "prediction capture settlement failed for %s", analyst, exc_info=True

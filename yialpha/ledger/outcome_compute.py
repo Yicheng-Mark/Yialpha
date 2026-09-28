@@ -961,13 +961,26 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
         if scope == SCOPE_UNDERLYING:
             underlying_series = series  # same seam call, same window
         else:
-            underlying_series = _equity_close_series(
-                underlying_symbol or instrument_id, start_date, end_date
+            try:
+                underlying_series = _equity_close_series(
+                    underlying_symbol or instrument_id, start_date, end_date
+                )
+            except Exception as exc:  # noqa: BLE001 — leg degrades, row retires
+                # Round-8: this legacy leg (unlike its reference-path twin)
+                # had no guard — an empty yfinance window raised out to the
+                # per-row catcher, marking the row "failed" without retiring
+                # it, so every later batch re-fetched and re-raised forever.
+                logger.debug(
+                    "legacy underlying diagnostic unavailable for %s: %s",
+                    instrument_id, exc,
+                )
+                underlying_series = None
+        u_entry = u_exit = None
+        if underlying_series is not None:
+            u_entry = _last_close_at_or_before(
+                underlying_series, analysis_dt.date().isoformat()
             )
-        u_entry = _last_close_at_or_before(
-            underlying_series, analysis_dt.date().isoformat()
-        )
-        u_exit = _last_close_at_or_before(underlying_series, end_date)
+            u_exit = _last_close_at_or_before(underlying_series, end_date)
         if (
             u_entry is not None
             and u_exit is not None
@@ -990,9 +1003,20 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
         # Aligned window: settlements while the measured price position is
         # actually held — (entry bar close, exit bar close] — not the nominal
         # as-of/horizon-end instants the daily bars cannot price against.
-        funding_pnl, funding_missing = _funding_pnl_leg(
-            instrument_id, entry_close_dt, exit_close_dt
-        )
+        try:
+            funding_pnl, funding_missing = _funding_pnl_leg(
+                instrument_id, entry_close_dt, exit_close_dt
+            )
+        except Exception as exc:  # noqa: BLE001 — leg degrades, row retires
+            # Round-8: an empty funding window (delisted/archived contract)
+            # raised NoMarketDataError out to the per-row catcher — "failed"
+            # WITHOUT retirement, so every later batch re-fetched the same
+            # dead window forever. Mirror the reference path: degrade the
+            # leg, retire the row.
+            logger.debug(
+                "legacy funding leg unavailable for %s: %s", instrument_id, exc
+            )
+            funding_missing = True
         if funding_missing:
             missing.add(LEG_FUNDING)
             funding_pnl = None

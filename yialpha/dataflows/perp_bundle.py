@@ -185,7 +185,9 @@ def _fetch_prices(symbol: str, end_date: str) -> dict[str, Any]:
 
             price, atr = latest_atr_from_frame(frame)
             out["last"]["atr_14"] = atr
-            out["last"]["atr_pct"] = atr / price if price > 0 else None
+            out["last"]["atr_pct"] = (
+                atr / price if atr is not None and price > 0 else None
+            )
         except Exception as exc:  # noqa: BLE001 — ATR degrades, close stays
             out["last"]["atr_14"] = None
             out["last"]["atr_error"] = f"{type(exc).__name__}: {exc}"

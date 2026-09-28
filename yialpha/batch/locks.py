@@ -63,8 +63,14 @@ class FileLock:
     def __enter__(self):
         # Process-local first: serializes threads (OS locks do not).
         self._plock.acquire()
-        if self._oslock is not None:
-            self._oslock.acquire()
+        try:
+            if self._oslock is not None:
+                self._oslock.acquire()
+        except BaseException:
+            # An OS-lock failure must not strand the process-local lock:
+            # every later thread queuing on this path would deadlock.
+            self._plock.release()
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb):

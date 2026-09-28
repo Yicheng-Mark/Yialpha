@@ -449,14 +449,26 @@ def summarize_gate(metrics: dict) -> tuple[bool, list[str]]:
     elif p > _RATING_P_THRESHOLD:
         pass  # ok
     else:
-        # Too few samples for chi-square → fall back to overlap.
+        # Overlap rescue is a SMALL-SAMPLE fallback only. chi_square_p
+        # already returns 1.0 in degenerate cases (<=1 category, empty leg),
+        # so a real p <= threshold with decent n is a genuine statistical
+        # rejection — round-8: the unconditional overlap>0.5 rescue used to
+        # pass a 0.9→0.5 Buy-rate drift at n=20/leg (p≈0.006), exactly the
+        # distribution shift this gate exists to catch before the parallel
+        # default flips.
+        n_small = min(
+            metrics.get("n_serial") or 0,
+            metrics.get("n_parallel") or 0,
+        ) < 5
         overlap = metrics.get("overlap_ratio", 0.0)
-        if overlap > 0.5:
-            pass  # ok via fallback
+        if n_small and overlap > 0.5:
+            pass  # ok via small-sample fallback
         else:
             fail(
                 f"rating chi-square p={p:.4f} <= {_RATING_P_THRESHOLD} "
-                f"(overlap fallback {overlap:.2f} <= 0.50)"
+                f"(overlap fallback unavailable: "
+                f"n_min={min(metrics.get('n_serial') or 0, metrics.get('n_parallel') or 0)}"
+                f"{' >=5' if not n_small else ''}, overlap {overlap:.2f})"
             )
 
     # 2) Per-field similarity: between >= min(within_serial, within_parallel).

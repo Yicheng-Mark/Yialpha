@@ -23,22 +23,41 @@ from yialpha.dataflows.stockstats_utils import load_ohlcv
 # A precomputed OHLCV frame OR a ticker symbol. Accepted by atr_stop.
 SymbolOrFrame: TypeAlias = str | pd.DataFrame
 
+#: Minimum COMPLETED bars before an ATR is trustworthy: 14 TRs need 15 bars
+#: (the first TR itself needs a previous close), and stockstats' SMMA seed is
+#: just the first bar's High-Low — anything shorter is that one bar's range
+#: masquerading as a 14-period volatility.
+_ATR_MIN_COMPLETED_ROWS = 15
 
-def latest_atr(symbol: str, curr_date: str) -> tuple[float, float]:
+
+def _last_finite_close(ohlcv: pd.DataFrame) -> float:
+    """Last finite close of the FULL frame (forming row included — its
+    close is the live price, not a completed-bar statistic)."""
+    close_arr = np.asarray(ohlcv["Close"], dtype=float)
+    for i in range(len(close_arr) - 1, -1, -1):
+        c = close_arr[i]
+        if np.isfinite(c):
+            return float(c)
+    raise ValueError("atr_stop: no finite close row in the OHLCV frame")
+
+
+def latest_atr(symbol: str, curr_date: str) -> tuple[float, float | None]:
     """Return ``(last_close, last_atr)`` for ``symbol`` truncated to ``curr_date``.
 
     Point-in-time safe: ``load_ohlcv`` caches the full history but filters
     rows to ``<= curr_date`` so backtests never see future prices, and it
-    rejects a present-but-stale frame. ATR is the stockstats 14-period ATR.
+    rejects a present-but-stale frame. ATR is the stockstats 14-period ATR;
+    ``None`` when there are fewer than 15 completed bars (the close is
+    still returned — see :func:`latest_atr_from_frame`).
 
-    Raises :class:`ValueError` when there is no data or the ATR cannot be
-    computed (too few rows / all-NaN tail).
+    Raises :class:`ValueError` when there is no data or the close cannot be
+    computed.
     """
     data = load_ohlcv(symbol, curr_date)
     return latest_atr_from_frame(data)
 
 
-def latest_atr_from_frame(ohlcv: pd.DataFrame) -> tuple[float, float]:
+def latest_atr_from_frame(ohlcv: pd.DataFrame) -> tuple[float, float | None]:
     """Return ``(last_close, last_atr)`` from a precomputed OHLCV DataFrame.
 
     The project's ``load_ohlcv`` / ``binance_klines_frame`` return a frame
@@ -54,7 +73,11 @@ def latest_atr_from_frame(ohlcv: pd.DataFrame) -> tuple[float, float]:
     yesterday's close as "current"). Historical frames (nothing dated today)
     are unaffected.
 
-    Raises :class:`ValueError` on empty/NaN input.
+    Raises :class:`ValueError` on empty/NaN input. ``last_atr`` is ``None``
+    (with a valid close) when fewer than 15 completed bars exist — a
+    single-bar range is not a 14-period ATR, but the close is still the
+    close (round-8 review: raising here used to throw the valid close away
+    too, degrading price_at_decision to "unavailable").
     """
     if ohlcv is None:
         raise ValueError("atr_stop: OHLCV frame is None")
@@ -95,6 +118,13 @@ def latest_atr_from_frame(ohlcv: pd.DataFrame) -> tuple[float, float]:
             work = ohlcv  # non-datetime index: keep the historical behaviour
 
     # Work on a copy so stockstats' column additions never leak back.
+    if len(work) < _ATR_MIN_COMPLETED_ROWS:
+        # Round-8: a 1-row frame used to sail through and return that bar's
+        # High-Low as "the 14-period ATR" (the SMMA seed value) — a newly
+        # listed instrument got a single-sample volatility reading driving
+        # its 2·ATR stop. Too few completed bars is "no ATR" — but the close
+        # is still valid, so return it rather than raising the whole tuple.
+        return _last_finite_close(ohlcv), None
     df = wrap(work.copy())
     atr_series = df["atr"]  # access triggers stockstats computation
 
@@ -113,13 +143,7 @@ def latest_atr_from_frame(ohlcv: pd.DataFrame) -> tuple[float, float]:
 
     # Close: last finite close of the FULL frame (forming row included — its
     # close is the live price, not a completed-bar statistic).
-    close_arr = np.asarray(ohlcv["Close"], dtype=float)
-    for i in range(len(close_arr) - 1, -1, -1):
-        c = close_arr[i]
-        if np.isfinite(c):
-            return float(c), last_atr
-
-    raise ValueError("atr_stop: no finite close row in the OHLCV frame")
+    return _last_finite_close(ohlcv), last_atr
 
 
 def atr_stop(
@@ -146,6 +170,12 @@ def atr_stop(
         last_close, last_atr = latest_atr(symbol_or_frame, curr_date)
     else:
         last_close, last_atr = latest_atr_from_frame(symbol_or_frame)
+    if last_atr is None:
+        # This wrapper exists to COMPUTE a stop; without an ATR it cannot.
+        raise ValueError(
+            "atr_stop: ATR undefined (fewer than "
+            f"{_ATR_MIN_COMPLETED_ROWS} completed bars); no stop can be placed"
+        )
 
     m = float(mult)
     if not np.isfinite(m):

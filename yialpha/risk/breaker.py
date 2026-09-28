@@ -219,14 +219,19 @@ class DrawdownBreaker:
 
         if sector_value is not None:
             sv = float(sector_value)
-            if sv == sv:  # not NaN
-                sector_frac = sv / eq
-                if sector_frac > self.max_single_sector + 1e-12:
-                    return (
-                        False,
-                        f"sector {sector_frac:.1%} exceeds cap "
-                        f"{self.max_single_sector:.1%}",
-                    )
+            if not isfinite(sv) or sv < 0.0:
+                # Same treatment as position_value above: a NaN sector value
+                # slips past every ``>`` cap comparison — the only leg that
+                # used to fail open. A negative sector is garbage ledger
+                # state and rejects the same way.
+                return False, "sector_value must be a non-negative finite number"
+            sector_frac = sv / eq
+            if sector_frac > self.max_single_sector + 1e-12:
+                return (
+                    False,
+                    f"sector {sector_frac:.1%} exceeds cap "
+                    f"{self.max_single_sector:.1%}",
+                )
 
         return True, "ok"
 

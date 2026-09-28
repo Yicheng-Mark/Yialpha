@@ -257,12 +257,22 @@ class TestSummarizeGate:
         assert ok is False
         assert any("rating chi-square" in r for r in reasons)
 
-    def test_rating_p_low_but_overlap_high_passes(self):
-        # Too-few-samples fallback: overlap > 0.5 rescues a low p.
+    def test_rating_p_low_but_overlap_high_rescues_only_small_samples(self):
+        # Round-8: overlap > 0.5 is a SMALL-SAMPLE rescue only. chi_square_p
+        # already returns 1.0 in degenerate cases, so a computed low p with
+        # decent n is a genuine statistical rejection — the unconditional
+        # rescue used to pass a real distribution drift (0.9->0.5 Buy-rate
+        # at n=20/leg, p~0.006, overlap 0.60).
         m = _passing_metrics(rating_p=0.01, overlap_ratio=0.7)
         ok, reasons = ab.summarize_gate(m)
-        assert ok is True
-        assert reasons == []
+        assert ok is False
+        assert any("rating chi-square" in r for r in reasons)
+        # The same drift at toy-n still rescues via overlap.
+        small = _passing_metrics(
+            rating_p=0.01, overlap_ratio=0.7, n_serial=3, n_parallel=3
+        )
+        ok2, reasons2 = ab.summarize_gate(small)
+        assert ok2 is True, reasons2
 
     def test_similarity_criterion_fails(self):
         m = _passing_metrics(per_field_similarity={

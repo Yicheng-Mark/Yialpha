@@ -72,12 +72,15 @@ class RiskDecision:
     position_value: float            # target_weight * equity
     stop_loss: float | None
     entry_price: float | None
-    kelly_raw: float                 # pre-clip Kelly weight (transparency)
+    kelly_raw: float                 # band-clipped Kelly weight feeding target_weight
     breaker: BreakerState
     cvar_multiplier: float
     exposure_ok: bool
     exposure_reason: str
     rationale: str
+    # Pre-clip Kelly fraction (round-8 transparency): makes the band clip /
+    # floor lift visible next to the clipped weight above.
+    kelly_preclip: float | None = None
 
 
 def _trade_stats(history: list[dict[str, Any]]) -> tuple[int, int, float, float]:
@@ -204,12 +207,13 @@ class RiskManager:
 
         # 2. Kelly sizing (rating conviction x optional historical win rate).
         wins, losses, avg_win, avg_loss = _trade_stats(state.trade_history)
-        kelly_raw = kelly_sizing(
+        kelly_raw, kelly_preclip = kelly_sizing(
             rating,
             wins=wins if wins or losses else None,
             losses=losses if wins or losses else None,
             avg_win=avg_win, avg_loss=avg_loss,
             kelly_fraction_mult=self.kelly_fraction,
+            return_raw=True,
         )
 
         # 3. CVaR de-risking from the returns history.
@@ -266,17 +270,29 @@ class RiskManager:
         # Sector exposure cap (advisory: flags but does not zero the position
         # because sector data may be partial).
         if sector is not None and target_weight > 0:
-            sector_weight = state.sectors.get(sector, 0.0) / state.equity if state.equity > 0 else 0.0
-            if sector_weight + target_weight > self.breaker.max_single_sector:
-                headroom = max(0.0, self.breaker.max_single_sector - sector_weight)
-                if headroom <= 0.0:
-                    target_weight = 0.0
-                    action = "blocked"
-                    exposure_ok = False
-                    exposure_reason = f"sector cap reached for {sector}"
-                else:
-                    target_weight = headroom
-                    exposure_reason = f"trimmed to sector cap for {sector}"
+            if not (0.0 < state.equity < float("inf")):
+                # Round-8: a dead/invalid equity tick (0, negative, NaN, +inf)
+                # must not silently bypass the cap — the old ``else 0.0`` read
+                # "no exposure" and let garbage ledger state under a fresh
+                # manager walk past the sector hat. Block like a full sector.
+                target_weight = 0.0
+                action = "blocked"
+                exposure_ok = False
+                exposure_reason = (
+                    f"invalid equity ({state.equity!r}) for sector cap on {sector}"
+                )
+            else:
+                sector_weight = state.sectors.get(sector, 0.0) / state.equity
+                if sector_weight + target_weight > self.breaker.max_single_sector:
+                    headroom = max(0.0, self.breaker.max_single_sector - sector_weight)
+                    if headroom <= 0.0:
+                        target_weight = 0.0
+                        action = "blocked"
+                        exposure_ok = False
+                        exposure_reason = f"sector cap reached for {sector}"
+                    else:
+                        target_weight = headroom
+                        exposure_reason = f"trimmed to sector cap for {sector}"
 
         # 7. ATR stop (only when we have a price; long-only convention here).
         stop_loss: float | None = None
@@ -317,6 +333,7 @@ class RiskManager:
             stop_loss=stop_loss,
             entry_price=entry_price,
             kelly_raw=kelly_raw,
+            kelly_preclip=kelly_preclip,
             breaker=breaker_state,
             cvar_multiplier=cvar_mult,
             exposure_ok=exposure_ok,

@@ -89,7 +89,9 @@ def kelly_sizing(
     kelly_fraction_mult: float = 0.25,
     confidence_map: Mapping[str, float] | None = None,
     band_map: Mapping[str, tuple[float, float]] | None = None,
-) -> float:
+    *,
+    return_raw: bool = False,
+) -> float | tuple[float, float]:
     """Return a target portfolio weight in ``[0, 1]``.
 
     Resolution order for the effective win probability ``p``:
@@ -120,7 +122,7 @@ def kelly_sizing(
     # Sell never takes a long position.
     low, high = band
     if high <= 0.0:
-        return 0.0
+        return (0.0, 0.0) if return_raw else 0.0
 
     # Resolve effective p.
     if wins is not None and losses is not None:
@@ -142,4 +144,10 @@ def kelly_sizing(
     if not np.isfinite(f):
         f = 0.0
 
-    return float(min(max(f, low), high))
+    # ``return_raw`` exposes the pre-clip fraction (round-8): the band clip
+    # and its floor used to be invisible in every downstream log that showed
+    # only the clipped weight.
+    clipped = float(min(max(f, low), high))
+    if return_raw:
+        return clipped, float(f)
+    return clipped

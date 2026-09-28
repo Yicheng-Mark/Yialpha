@@ -15,7 +15,6 @@ import pytest
 from yialpha.dataflows import sec_edgar, sec_ownership
 from yialpha.dataflows.errors import NoMarketDataError
 
-
 # --- _as_of_date: malformed curr_date fails closed (PIT upper bound) -------- #
 
 def test_as_of_date_live_and_parseable():
@@ -189,8 +188,7 @@ def test_resample_weekly_keeps_completed_week_on_weekend_live(monkeypatch):
     """Equities never print a Saturday row: the old ``label >= last_daily``
     heuristic deleted every completed Friday bin on weekend/Monday-premarket
     live runs. Mid-week forming bins must still drop."""
-    from yialpha.dataflows import ohlcv_resample
-    from yialpha.dataflows import utils as df_utils
+    from yialpha.dataflows import ohlcv_resample, utils as df_utils
 
     monkeypatch.setattr(df_utils, "is_historical_date", lambda d: False)
     daily = _daily_frame(["2026-09-21", "2026-09-22", "2026-09-25"])
@@ -250,11 +248,11 @@ def test_thin_tool_layer_clamps_echoed_today_date(monkeypatch):
     verbatim — an LLM echoing a today-date would admit post-decision rows
     into a backtest. Each must clamp to the pinned analysis date, and stay
     untouched in live mode."""
-    from yialpha.dataflows.utils import set_analysis_date
     import yialpha.agents.utils.a_share_native_tools as a_share
     import yialpha.agents.utils.eastmoney_tools as em
     import yialpha.agents.utils.macro_data_tools as macro
     import yialpha.agents.utils.sec_ownership_tools as so
+    from yialpha.dataflows.utils import set_analysis_date
 
     cases = [
         (a_share, "get_a_share_fundamentals_native",

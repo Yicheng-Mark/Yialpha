@@ -90,12 +90,20 @@ def resolve_pending_entries(
         return 0
 
     cutoff_str = cutoff.strftime("%Y-%m-%d")
-    pending = [
-        entry
-        for entry in memory_log.get_pending_entries()
-        if entry["ticker"] == ticker
-        and _entry_precedes_cutoff(entry, cutoff)
-    ]
+    pending = []
+    for entry in memory_log.get_pending_entries():
+        entry_ticker = entry.get("ticker") if isinstance(entry, dict) else None
+        if entry_ticker is None:
+            # Round-8: one hand-corrupted pending row used to raise KeyError
+            # here — BEFORE any graph node ran — killing every future run of
+            # this ticker (and the memory-resolve sweep) until the log was
+            # hand-fixed. Skip the bad row loudly instead; the rest resolve.
+            logger.warning(
+                "memory log: pending entry lacks a ticker; skipping %r", entry
+            )
+            continue
+        if entry_ticker == ticker and _entry_precedes_cutoff(entry, cutoff):
+            pending.append(entry)
     if not pending:
         return 0
 

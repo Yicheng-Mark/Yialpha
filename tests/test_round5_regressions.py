@@ -589,7 +589,7 @@ def test_decision_cache_asset_type_key_roundtrip(tmp_path):
     )
     assert isinstance(rec, CachedDecision)
     assert rec.asset_type == "crypto_perp"
-    assert DECISION_CACHE_SCHEMA_VERSION == 3
+    assert DECISION_CACHE_SCHEMA_VERSION == 4  # v4: +was_degraded (round-8)
     # Persisted payload carries the venue (roundtrip through to_dict/from_dict).
     path = cache._key_path("BTCUSDT", "2026-09-19", "default", "crypto_perp")
     assert path is not None and path.is_file()

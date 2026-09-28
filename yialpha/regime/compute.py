@@ -572,9 +572,11 @@ def compute_regime_state(
             funding_pct, oi_pct, lsr_crowding, taker_aggression, spot_basis_bps,
         ]
     elif klass == "stock_perp":
-        core_inputs += [
-            underlying_trend, overnight_gap_bps, index_basis_bps, session_state,
-        ]
+        # ``session_state`` is a deterministic constant for stock_perp
+        # (continuous 24/7), not a data input — keeping it in the guard made
+        # the all-missing check unreachable for this class, so a fully-empty
+        # record still minted a regime id (round-8).
+        core_inputs += [underlying_trend, overnight_gap_bps, index_basis_bps]
     if all(value is None for value in core_inputs):
         return None
 

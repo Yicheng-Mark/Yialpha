@@ -104,7 +104,10 @@ _SIGNATURE_CONFIG_KEYS = (
     "deep_think_llm",
     "debate_llm",
     "sec_ownership",
+    "a_stock",
     "a_share_native",
+    "web_search_enabled",
+    "regime_context",
     "valuation_tools",
     "indicator_battery",
     "indicator_ic_context",
@@ -152,13 +155,13 @@ def _memoized_close_and_atr(
         ).strftime("%Y-%m-%d")
         frame = binance_klines_frame(ticker, lookback, str(trade_date))
         close, atr = latest_atr_from_frame(frame)
-        return float(close), float(atr)
+        return float(close), None if atr is None else float(atr)
 
     from yialpha.dataflows.stockstats_utils import load_ohlcv
 
     frame = load_ohlcv(ticker, str(trade_date))
     close, atr = latest_atr_from_frame(frame)
-    return float(close), float(atr)
+    return float(close), None if atr is None else float(atr)
 
 
 @lru_cache(maxsize=4096)

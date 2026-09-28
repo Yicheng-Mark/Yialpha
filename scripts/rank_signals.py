@@ -299,7 +299,8 @@ def render_rank(rows: list[dict], tickers: list[str], top: int, capital=None) ->
             elif r is top_short:
                 star = " ← **最强空头**"
             lines.append(
-                f"| {i} | `{r['ticker']}` | {r['rating']} | **{r['conviction']}** | "
+                f"| {i} | `{r['ticker']}` | {r['rating']} | "
+                f"**{r['conviction'] if r['conviction'] is not None else '—'}** | "
                 f"{r['sentiment_score'] if r['sentiment_score'] is not None else '—'} | "
                 f"{r['rr'] if r['rr'] is not None else '—'} | "
                 f"{_m(r['entry'])} | {_m(r['stop'])} | {r['report_date'] or '—'} | "
@@ -309,6 +310,13 @@ def render_rank(rows: list[dict], tickers: list[str], top: int, capital=None) ->
 
     group_table("做多排名", longs, "🟢")
     group_table("做空排名", shorts, "🔴")
+
+    lines.append(
+        "> 注：「资产」列按 ticker 启发式判定（USDT 后缀 → 永续）；实际执行"
+        "以 trade_ticket 出单时的 venue 判别（含 overlay 证据修正）为准。"
+        "信心分为 — 表示评级缺失、仅 Trader action 兜底方向，无综合信心分。"
+    )
+    lines.append("")
 
     if holds:
         lines.append(f"## ⚪ 观望（{len(holds)}，不建议进场）")
@@ -332,7 +340,8 @@ def render_rank(rows: list[dict], tickers: list[str], top: int, capital=None) ->
             lines.append(
                 f"| `{r['ticker']}` | {DIR_BADGE[r['direction']]} | "
                 f"{_f2(c.get('rating'))} | {_f2(c.get('sent'))} | "
-                f"{_f2(c.get('rr'))} | **{r['conviction']}** |"
+                f"{_f2(c.get('rr'))} | "
+                f"**{r['conviction'] if r['conviction'] is not None else '—'}** |"
             )
         lines.append("")
 

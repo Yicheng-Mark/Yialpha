@@ -12,6 +12,115 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Adversarial bug-hunt round 8 (2026-09-28, two waves; eight review shards
+  — S1 dataflows core / S2 vendors (wave 1, commit 347a01a), S3 agents tree /
+  S4 risk math / S5 backtest+batch / S6 graph+ledger / S7 cli+scripts+transport
+  / S8 execution (audit-only, known-issues ledger, no code); every fix
+  code-verified before landing and pinned in
+  `tests/test_round8_regressions.py` (12 pins, wave 1) and
+  `tests/test_round8_wave2_regressions.py` (26 pins, wave 2); an adversarial
+  self-review of the wave-2 diff found 1 P1 + 2 P2 + 5 P3 self-introduced
+  defects — all fixed and pinned; full suite 3700 passed).**
+  - **Wave 1 (S1+S2, 2 P1 + 2 P2 + 8 P3):** fundamentals/vendor-tool PIT
+    clamp coverage across fundamental / A-share / eastmoney / macro /
+    SEC-ownership tools; `_as_of_date` fails CLOSED on malformed `curr_date`
+    (used to widen the PIT upper bound to today = lookahead); `_latest`
+    duration disambiguation; FTD look-back hard cap 730d; `load_ohlcv`
+    empty-frame fail-closed + atomic write; weekly-bar guard refinement;
+    `atr_stop` forming-bar guard sees the `Date` COLUMN (Range-index frames
+    parsed row numbers as 1970 ns stamps, so the guard never fired for
+    equities); insider-filing dormancy gate.
+  - **Wave 2, P2 — `run_baseline --full` folded baseline + risk-improved
+    legs (and multiple tickers) into ONE multi-run distribution table**: two
+    results sharing a `run_tag` are replay legs of one realization, not two
+    independent draws — `write_report` renders the distribution section only
+    when one ticker + all-distinct tags, logging the skip otherwise.
+  - **Wave 2, P2 — the fundamentals system message rendered as a Python
+    tuple repr**: a trailing comma made the whole instruction block
+    (grounding rules + every nudge) render inside `("...",)` on EVERY
+    fundamentals run. Now a plain string — a deliberate prompt-bugfix, NOT
+    byte-equivalent with the polluted rendering it replaces.
+  - **Wave 2, P2 — CVaR tail count had float dust**: `1-0.95` is
+    `0.05000…044` in binary, so `ceil(n * that)` counted one extra MILD
+    observation on every 20-multiple window at 95% — CVaR biased less
+    negative, the −5% breach and its 0.5× de-risk multiplier harder to
+    fire. Tail count is epsilon-rounded before the ceil.
+  - **Wave 2, P2 — checkpoint run-signature missed three input-affecting
+    flags**: `web_search_enabled` / `a_stock` / `regime_context` all change
+    node inputs (tool bindings, prompt context) — flipping one across a
+    resumed checkpoint replayed the old configuration's analyst reports.
+    Added to `_SIGNATURE_CONFIG_KEYS` (existing checkpoints honestly
+    invalidate, same as the #1089 precedent).
+  - **Wave 2, P2 — legacy outcome legs never retired**: the legacy
+    `_compute_one` funding and underlying-diagnostic legs (unlike their
+    reference-path twins) did not wrap vendor failures — a delisted
+    contract's empty funding window raised into the per-row catcher as
+    "failed" WITHOUT retirement, so every later batch re-fetched the same
+    dead window forever. Both legs degrade (`LEG_FUNDING` / `LEG_UNDERLYING`
+    missing) and the row retires.
+  - **Wave 2, P2 — the accuracy scan scored stock decisions on the day's
+    still-forming bar**: the crypto leg drops its forming bar via
+    `closed_as_of`; the stock leg had no twin, so a boundary-day decision
+    run intraday scored a hit/miss label that could flip by the close (and
+    memory resolution permanently froze it as the reflection input). Both
+    seams (`_dated_close`, `fetch_returns_yf`) now exclude the current
+    US-session bar — anchored on the US equity calendar, not the host's
+    local date (UTC+8 hosts had a ~5h hole) — and the same rescue applies to
+    the memory-resolution cutoff.
+  - **Wave 2, P2 — prediction settlement cross-talk**: settling one
+    analyst's capture flushed EVERY analyst's in-flight capture for the run,
+    marking siblings `submitted` — their later re-files were rejected ("already
+    been settled") and the rows silently lost. `flush_predictions` scopes to
+    the settling analyst (byte-identical in serial; the parallel `__active__`
+    routing race is recorded as a known-issue tied to the A/B gate
+    checklist).
+  - **Wave 2, P3 selections** (each pinned): `DecisionCache` schema v4
+    carries `was_degraded` so replays count forced-Holds as degraded exactly
+    like the live run (and dirless-but-enabled caches miss instead of
+    raising); event-study bootstrap CI is seeded (replay determinism);
+    forward-window buffer converts trading→calendar days with the
+    equity/B&H marking window capped at the legacy boundary (forward windows
+    complete; metrics byte-identical — pinned); long→short flips split into
+    two episodes instead of one merged win/loss sample; `batch.locks`
+    releases the process lock when the OS lock fails (was a permanent
+    in-process deadlock); `kelly_sizing(return_raw=True)` +
+    `RiskDecision.kelly_preclip` make the band clip / floor lift visible;
+    the sector cap blocks (instead of bypassing) on invalid equity ticks;
+    `DrawdownBreaker.check_exposure` rejects NaN/negative sector values
+    (was the only fail-open leg); `atr_stop` returns `(close, None)` — not a
+    single-bar range masquerading as ATR, and not raising away the valid
+    close — with the stop-computing wrapper still refusing; perp tickets
+    honour direction-correct caller stops on SHORT (were silently rebuilt);
+    the tradeability gate refuses target/reference ratios outside
+    [0.05, 20×] as magnitude garbage (evaluate_tradeability degrades to
+    UNEVALUATED where it used to `assert`); corporate-action `event_date`
+    is a strict padded `YYYY-MM-DD` (compact AND non-padded forms both
+    mis-sort lexicographically); regime's all-inputs-missing guard is
+    reachable for stock_perp (a constant `session_state` used to defeat
+    it); `PortfolioDecision` rescues case (field-scoped vocabularies —
+    cross-vocab wording degrades the field to None) and percent-form
+    `expected_return` ("+4.7%" → 0.047); `clear_all_checkpoints` removes
+    WAL/SHM sidecars; memory resolution skips (loudly) hand-corrupted
+    pending rows lacking a ticker instead of KeyError-ing before any graph
+    node runs; config-check flags unknown providers (a typo'd
+    `YIALPHA_LLM_PROVIDER` used to get a fake green "no API key required"
+    light); `run_robust` clears the DEGRADED marker on a clean retry;
+    rank_signals renders missing conviction as "—" (both tables) and
+    footnotes the asset column's heuristic; the analyst-parallel A/B gate's
+    overlap rescue is small-sample-only (it used to rescue real statistical
+    rejections at n=20/leg).
+  - **Wave-2 self-review fixes (found by the adversarial re-review of this
+    very diff):** the widened fetch buffer originally lengthened the equity
+    curve itself (Sharpe/alpha drift on every run — now capped at the legacy
+    marking boundary and pinned byte-identical); the direction-rescue
+    validator originally matched a cross-field vocabulary union ("Long" on a
+    direction field still vetoed the decision — now field-scoped); the
+    forming-bar exclusion originally anchored the host's local date (now the
+    US equity calendar); strict-ISO validation originally admitted
+    non-padded dates via strptime (now regex-shaped first); and the
+    atr_stop guard originally threw the valid close away (now returns it
+    with `atr=None`).
+
 - **Perp bug-fix sweep round 7 (2026-09-23, USDT-perp focus; five parallel
   review shards — binance+vision core / p0-shadow capture / backtest perp
   economics / risk micro-layer / analysts+tool-binding — plus a main-line

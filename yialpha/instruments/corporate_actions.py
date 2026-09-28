@@ -10,12 +10,18 @@ adjustments. Defining the shape now keeps those later PRs additive.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Literal
 
 from yialpha.ledger.sqlite import utc_now_iso
+
+#: Strict padded ISO shape — the lexicographic-sort contract this module
+#: pins (round-8: fromisoformat's compact form AND strptime's non-padded
+#: form both violate it).
+_STRICT_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 #: The corporate-action vocabulary (record stage: dividends + splits are the
 #: V2.4 return-attribution drivers; merger/ticker_change cover identity
@@ -65,7 +71,16 @@ def validate_corporate_action(record: CorporateActionRecord) -> None:
             f"for {record.symbol!r}"
         )
     try:
-        date.fromisoformat(record.event_date)
+        # Strict shape FIRST (regex), then strptime for calendar validity:
+        # Python 3.11+ date.fromisoformat also accepts the compact
+        # 'YYYYMMDD' form, and strptime's %m/%d alone accept non-padded
+        # '2026-3-1' — both mis-sort against downstream lexicographic date
+        # comparisons, which is exactly what this validator exists to stop.
+        if not isinstance(record.event_date, str) or not _STRICT_ISO_DATE_RE.fullmatch(
+            record.event_date
+        ):
+            raise ValueError("not a padded YYYY-MM-DD string")
+        datetime.strptime(record.event_date, "%Y-%m-%d")
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"event_date must be an ISO date (YYYY-MM-DD), "

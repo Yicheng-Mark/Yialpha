@@ -201,10 +201,12 @@ def perp_ticket_numbers(
     :class:`~yialpha.tickets.ExecutionTicket` and the markdown advisory can
     never drift apart. Returns None when the inputs cannot support a ticket —
     non-positive price/ATR, or a flat (zero) weight. Direction is the SIGN of
-    ``weight`` (long for positive, short for negative), mirroring the overlay;
-    a SHORT always re-derives its stop from ATR (the ATR stop module
-    implements the long form only), and a LONG without an explicit stop gets
-    one constructed the same way. ``notional`` (USDT) tiers the liquidation
+    ``weight`` (long for positive, short for negative), mirroring the overlay.
+    Round-8: an explicit ``stop`` is honoured on BOTH directions when it is
+    finite and direction-correct (long: below entry; short: above entry);
+    anything missing, non-finite, or on the wrong side is rebuilt as
+    ``mult * ATR`` offset against the position. ``notional`` (USDT) tiers the
+    liquidation
     MMR bracket at a REAL position notional when the caller knows one;
     otherwise the disclosed :data:`ASSUMED_NOTIONAL_USDT` applies. The detail
     dict carries the leverage caps as floats plus, when a liquidation
@@ -227,7 +229,20 @@ def perp_ticket_numbers(
     strength = rating_strength(rating)
     mult = ATR_STOP_MULT if atr_mult is None else float(atr_mult)
     stop_used = stop
-    if direction == "short" or stop_used is None:
+    if stop_used is not None and not (0.0 < stop_used < float("inf")):
+        # Non-positive/NaN/inf stop: unusable, fall through to the rebuild.
+        stop_used = None
+    # Round-8: a caller-supplied stop must be direction-correct to be
+    # honoured — SHORT used to discard ANY supplied stop and silently
+    # rebuild mult·ATR, so a future structural short stop would advise
+    # leverage/TP levels off a stop the ticket never placed. (Rejection
+    # here mirrors the round-6 LONG side-guard.)
+    if stop_used is not None and (
+        (direction == "long" and stop_used >= entry)
+        or (direction == "short" and stop_used <= entry)
+    ):
+        stop_used = None
+    if stop_used is None:
         stop_used = (
             entry - mult * atr
             if direction == "long"

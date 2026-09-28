@@ -42,7 +42,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -169,7 +169,17 @@ def _resolve_asset_type(ticker: str, logged: Any) -> tuple[str, str]:
             # exists to surface.
             return inferred, "logged" if inferred == "stock" else "inferred"
         return inferred, "inferred"
-    return "stock", "logged"
+    # Any other non-empty tag is hand-edited/garbage ("perp", "crypto-perp").
+    # Round-8: it used to fall straight to ("stock", "logged") — silently
+    # pricing a perp row on the Yahoo spot leg with NO inference caveat,
+    # exactly what the memory_resolution comment promises cannot happen.
+    # Degrade through the SAME ticker inference the empty-tag path uses.
+    inferred = (
+        "crypto_perp"
+        if ticker.upper().replace("-", "").endswith("USDT")
+        else "stock"
+    )
+    return inferred, "inferred"
 
 
 # --------------------------------------------------------------------------- #
@@ -211,6 +221,22 @@ def _crypto_daily_frame(
     )
 
 
+def _us_equity_today() -> date:
+    """Current date on the US equity calendar (America/New_York).
+
+    Round-8 review: anchoring the forming-bar exclusion on the HOST's local
+    date leaves a ~5h hole on UTC+8 hosts — the local calendar rolls past
+    midnight while the previous US session is still trading, and the forming
+    bar would pass the guard. The exchange calendar is the correct anchor;
+    the conservative side effect (a just-closed session stays excluded until
+    the Eastern date rolls over) mirrors the crypto seam's UTC-midnight
+    rollover.
+    """
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo("America/New_York")).date()
+
+
 def _dated_close(
     ticker: str, asset_type: str, start: str, end: str
 ) -> pd.Series:
@@ -224,6 +250,14 @@ def _dated_close(
         from yialpha.dataflows.symbol_utils import normalize_symbol
         from yialpha.dataflows.y_finance import get_YFin_history_cached
 
+        # Round-8: a present/future ``end`` makes yfinance return rows through
+        # TODAY INCLUSIVE — and intraday, today's row is a still-forming
+        # partial bar. The crypto seam drops its forming bar via
+        # ``closed_as_of``; the stock seam mirrors that by excluding today
+        # entirely (yfinance's exclusive ``end`` = today does exactly that),
+        # so a boundary-day record stays pending until the session closes
+        # instead of scoring a label that can flip by the close.
+        end = min(end, _us_equity_today().isoformat())
         frame = get_YFin_history_cached(normalize_symbol(ticker), start, end)
         series = frame["Close"].astype(float)
         series.index = pd.to_datetime(series.index).date
@@ -311,9 +345,19 @@ def fetch_returns_yf(
 
         if cutoff is not None:
             # PIT belt-and-suspenders: trim dated frames again on the client.
+            # Round-8: when the cutoff IS today (a live rerun resolving
+            # boundary-day pending entries), today's row is a forming partial
+            # bar — trim STRICTLY before it so the entry stays pending until
+            # the session closes (same seam semantics as the crypto leg).
+            keep_through = (
+                cutoff.date() - timedelta(days=1)
+                if cutoff.date() == _us_equity_today()
+                else cutoff.date()
+            )
+
             def _through_cutoff(frame: pd.DataFrame) -> pd.DataFrame:
                 try:
-                    return frame[frame.index.date <= cutoff.date()]  # type: ignore[attr-defined]
+                    return frame[frame.index.date <= keep_through]  # type: ignore[attr-defined]
                 except (AttributeError, TypeError):
                     return frame
 

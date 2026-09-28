@@ -37,8 +37,12 @@ def historical_cvar(returns: Iterable[float], confidence: float = 0.95) -> float
         raise ValueError("historical_cvar: confidence must be in the open interval (0, 1)")
 
     # Number of observations in the tail. At least one so a single bad
-    # observation is still captured.
-    tail_count = int(np.ceil(arr.size * (1.0 - confidence)))
+    # observation is still captured. Round away float dust BEFORE the ceil:
+    # 1-0.95 is 0.05000...044 in binary, so n=40 computes ceil(2.0000000000000018)
+    # = 3 — every 20-multiple window at the 95% level counted one extra,
+    # MILDER observation into the tail, biasing CVaR less negative and making
+    # the -5% breach (and its 0.5x de-risk multiplier) harder to trigger.
+    tail_count = int(np.ceil(round(arr.size * (1.0 - confidence), 9)))
     if tail_count < 1:
         tail_count = 1
     if tail_count > arr.size:

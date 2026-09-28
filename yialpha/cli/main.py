@@ -1886,15 +1886,35 @@ def config_check():
     No secrets are printed — only SET / MISSING status.
     """
     from yialpha.llm_clients.api_key_env import get_api_key_env
-    from yialpha.llm_clients.openai_client import OPENAI_COMPATIBLE_PROVIDERS
+    from yialpha.llm_clients.openai_client import (
+        OPENAI_COMPATIBLE_PROVIDERS,
+        is_openai_compatible,
+    )
 
     # -- LLM provider + key ---------------------------------------------------
     provider = os.environ.get("YIALPHA_LLM_PROVIDER", "openai")
     key_env = get_api_key_env(provider)
     from yialpha.llm_clients.key_pool import PROVIDER_API_KEYS_ENV, api_key_pool, has_pool
 
+    # Round-8: get_api_key_env ALSO returns None for an unknown provider
+    # (its contract: None = "no key check possible", not "no key required")
+    # — treating that as a green "no API key required" lighted a typo'd
+    # provider that factory.py rejects on first call. Validate the name
+    # against factory's supported set first.
+    _NATIVE_PROVIDERS = {"anthropic", "google", "azure", "bedrock"}
+    _provider_lower = provider.lower()
+    provider_unknown = not (
+        _provider_lower in _NATIVE_PROVIDERS or is_openai_compatible(_provider_lower)
+    )
+
     pool_active = has_pool(provider) and bool(api_key_pool(provider))
-    if pool_active:
+    if provider_unknown:
+        console.print(
+            f"  [red]❌[/red] Provider [bold]{provider}[/bold]: "
+            "unknown provider (supported: "
+            f"{', '.join(sorted(_NATIVE_PROVIDERS | set(OPENAI_COMPATIBLE_PROVIDERS)))})"
+        )
+    elif pool_active:
         pool = api_key_pool(provider)
         console.print(
             f"  [green]✅[/green] Provider [bold]{provider}[/bold]: "
@@ -2079,7 +2099,9 @@ def config_check():
             )
 
     # -- Verdict --------------------------------------------------------------
-    ready = pool_active or key_env is None or bool(key_env and os.environ.get(key_env))
+    ready = not provider_unknown and (
+        pool_active or key_env is None or bool(key_env and os.environ.get(key_env))
+    )
     console.print()
     if ready:
         console.print("[bold green]✅ Configuration ready for analysis.[/bold green]")
