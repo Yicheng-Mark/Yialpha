@@ -19,6 +19,7 @@ so that:
 from __future__ import annotations
 
 import math
+import re
 from enum import StrEnum
 from typing import Literal
 
@@ -818,3 +819,40 @@ def render_positioning_report(report: PositioningReport) -> str:
         "",
         report.narrative,
     ])
+
+
+# Direction-bearing imperative phrases for the free-text fallback clamp.
+# Imperative position phrasing only — verb-led forms cover plain and -ing
+# variants ("go/going long", "enter/entering a short", "open/opening");
+# "long/short entry" alone is NOT matched (descriptive narrative like "long
+# entry levels were observed by takers" is legitimate content); "buy/sell
+# flow" likewise survives. A blacklist can never be complete — the clamp is
+# a backstop for the prompt-level freeze, observable via its banner.
+_DIRECTION_CLAIM_RE = re.compile(
+    r"(?im)^[^\n]*\b("
+    r"(?:go|going|enter|entering|open|opening)\s+(?:a\s+|the\s+)?(?:long|short)"
+    r"|(?:take|taking|consider|considering|place|placing|add|adding)\s+"
+    r"(?:a\s+)?(?:long|short)(?:\s+entry)?"
+    r"|(?:strong\s+)?(?:bullish|bearish)\s+(?:call|signal|setup)"
+    r")\b[^\n]*$"
+)
+
+
+def clamp_direction_language(text: str) -> str:
+    """Deterministic positioning direction-freeze for the free-text fallback.
+
+    The structured path enforces the freeze mechanically —
+    ``PositioningReport`` has no direction field and ``extra="forbid"``
+    rejects any. The free-text fallback has only the prompt's instruction
+    left, so strip direction-bearing LINES (whole-line replacement keeps the
+    surrounding narrative readable) and append an observable banner. No-op
+    for text without direction claims.
+    """
+    redacted = _DIRECTION_CLAIM_RE.sub(
+        "[direction statement removed — positioning freeze]", text)
+    if redacted != text:
+        redacted += (
+            "\n\n> ⚠️ Free-text fallback: direction-bearing lines were "
+            "deterministically removed (positioning direction freeze)."
+        )
+    return redacted

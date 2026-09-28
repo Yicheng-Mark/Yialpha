@@ -216,7 +216,15 @@ def _record_submitted_entries(
             new_entries[coerced.horizon_days] = coerced
             accepted.append(coerced.horizon_days)
         if new_entries:
-            timing = capture_prediction_timing(capture.instrument_id, capture.prediction_scope)
+            # Feed the run context's classification into the seam verdict so
+            # capture picks the vendor seam scoring will later expect (see
+            # reference_seam_equity) instead of guessing "UNDERLYING=equity".
+            ctx = current_ledger_run_context()
+            timing = capture_prediction_timing(
+                capture.instrument_id, capture.prediction_scope,
+                instrument_class=ctx.instrument_class if ctx else None,
+                asset_type=ctx.asset_type if ctx else None,
+            )
             for horizon, coerced in new_entries.items():
                 capture.entries.append(coerced)
                 capture.timings[horizon] = dict(timing)
@@ -353,6 +361,23 @@ def ensure_prediction_capture_scope() -> None:
 def reset_prediction_capture_for_test() -> None:
     """Drop the bound registry (test isolation / forced cold start)."""
     _CAPTURE_SCOPE.set(None)
+
+
+def bind_isolated_prediction_capture_scope() -> None:
+    """Bind a FRESH capture registry in the CURRENT context (fan-out worker).
+
+    Parallel-leg twin of :func:`ensure_prediction_capture_scope`: each
+    analyst-subgraph worker binds its own registry dict right before
+    invoking, so the ``__active__`` slot and the per-analyst captures never
+    race across worker threads that would otherwise share the parent's
+    registry (four parallel ``begin_prediction_capture`` calls each write
+    ``scope["__active__"]``; the last writer wins and every
+    ``submit_prediction`` would append to the wrong analyst's capture).
+    The worker context is a copy (``submit_with_context`` snapshots via
+    ``copy_context()``), so the parent's registry — and sibling workers' —
+    are untouched. Serial runs never call this (zero-change guarantee).
+    """
+    _CAPTURE_SCOPE.set({})
 
 
 def begin_prediction_capture(

@@ -152,6 +152,20 @@ def _fetch_submissions(cik: int) -> dict:
         raise NoMarketDataError(str(cik), detail=f"could not parse submissions: {exc}") from exc
 
 
+def _fetch_submissions_segment(cik: int, name: str) -> dict:
+    """Fetch (cached 90 days; archive segments are immutable) one ``files[]``
+    submissions segment (e.g. ``CIK0000320193-submissions-001.json``)."""
+    url = f"https://data.sec.gov/submissions/{name}"
+    path = os.path.join(
+        _cache_dir(), f"submissions_{cik}_{safe_cache_component(name)}")
+    raw = _cached_or_fetch(path, url, ttl_days=90.0)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise NoMarketDataError(
+            str(cik), detail=f"could not parse submissions segment: {exc}") from exc
+
+
 def _fetch_form4_xml(cik: int, accession: str, doc: str) -> bytes:
     """Fetch (cached 90 days; accession docs are immutable) a Form 4 XML."""
     acc_nodash = accession.replace("-", "")
@@ -223,42 +237,28 @@ def _num(s: str) -> float | None:
         return None
 
 
-def get_form4_insider_trading(
-    ticker: str, curr_date: str | None = None, look_back_days: int = 180
-) -> str:
-    """Recent SEC Form 4 insider transactions for a US ticker, PIT by filingDate.
+def _scan_form4_segment(
+    cik: int,
+    recent: dict,
+    indices,
+    lower_d, upper_d, upper,
+    rows: list, skipped: list, fetched: int,
+) -> int:
+    """Scan one submissions segment's parallel arrays for Form 4 filings.
 
-    Resolves the CIK, enumerates ``form == "4"`` filings from the submissions
-    JSON whose ``filingDate <= curr_date`` and within the look-back window, then
-    fetches + parses each Form 4's non-derivative trades. Renders a per-trade
-    table plus a window summary (buy/sell counts and net dollar flow).
-
-    Non-US / no CIK -> :class:`NoMarketDataError`. No Form 4 in the window ->
-    an informative string (honest "no recent insider activity", not an error).
+    Shared by the ``recent`` head (newest-first) and the ``files[]`` archive
+    backfill (newest segment first, ascending arrays reversed) so both apply
+    identical PIT / budget / skip semantics. ``indices`` lets the caller
+    control scan order. Returns the updated ``fetched`` count.
     """
-    cik = _cik_for_ticker(ticker)
-    subs = _fetch_submissions(cik)
-
-    # Live mode: no as-of upper bound; anchor the look-back window at today.
-    # A malformed LLM date ("2026/08/01") fails closed via the helper
-    # (NoMarketDataError -> NO_DATA sentinel), never guesses an as-of bound.
-    upper = (curr_date or "")[:10]
-    upper_d = _as_of_date(curr_date)
-    lower_d = upper_d - timedelta(days=int(look_back_days))
-
-    recent = (subs.get("filings") or {}).get("recent") or {}
     forms = recent.get("form") or []
     accessions = recent.get("accessionNumber") or []
     filing_dates = recent.get("filingDate") or []
     primary_docs = recent.get("primaryDocument") or []
-
-    rows = []
-    fetched = 0
-    skipped: list[str] = []
-    # Parallel arrays, most-recent-first in submissions; take the first N that
-    # match the PIT window (filingDate within [lower_d, upper_d]).
-    for i, form in enumerate(forms):
-        if form != "4":
+    for i in indices:
+        if i >= len(forms):
+            break
+        if forms[i] != "4":
             continue
         if i >= len(accessions):
             # Malformed submissions payload: the parallel accessionNumber
@@ -303,20 +303,104 @@ def get_form4_insider_trading(
                 "action": t["action"], "shares": t["shares"], "price": t["price"],
                 "post_shares": t["post_shares"],
             })
+    return fetched
+
+
+def get_form4_insider_trading(
+    ticker: str, curr_date: str | None = None, look_back_days: int = 180
+) -> str:
+    """Recent SEC Form 4 insider transactions for a US ticker, PIT by filingDate.
+
+    Resolves the CIK, enumerates ``form == "4"`` filings from the submissions
+    JSON (``recent`` head, plus the ``files[]`` archive segments when the head
+    is at its ~1000-filing cap) whose ``filingDate <= curr_date`` and within
+    the look-back window, then fetches + parses each Form 4's non-derivative
+    trades. Renders a per-trade table plus a window summary (buy/sell counts
+    and net dollar flow).
+
+    Non-US / no CIK -> :class:`NoMarketDataError`. No Form 4 in the window ->
+    an informative string (honest "no recent insider activity", not an error).
+    """
+    cik = _cik_for_ticker(ticker)
+    subs = _fetch_submissions(cik)
+
+    # Live mode: no as-of upper bound; anchor the look-back window at today.
+    # A malformed LLM date ("2026/08/01") fails closed via the helper
+    # (NoMarketDataError -> NO_DATA sentinel), never guesses an as-of bound.
+    upper = (curr_date or "")[:10]
+    upper_d = _as_of_date(curr_date)
+    lower_d = upper_d - timedelta(days=int(look_back_days))
+
+    recent = (subs.get("filings") or {}).get("recent") or {}
+    forms = recent.get("form") or []
+
+    rows = []
+    fetched = 0
+    skipped: list[str] = []
+    # Parallel arrays, most-recent-first in submissions; take the first N that
+    # match the PIT window (filingDate within [lower_d, upper_d]).
+    fetched = _scan_form4_segment(
+        cik, recent, range(len(forms)), lower_d, upper_d, upper,
+        rows, skipped, fetched,
+    )
+
+    # files[] archive backfill: submissions.recent holds only the newest
+    # ~1000 filings of ANY type. When it is at its cap, a high-volume
+    # issuer's older in-window Form 4s live in the immutable files[] archive
+    # segments — pull them (newest segment first; each segment's ascending
+    # arrays reversed) with identical PIT/budget semantics until the budget
+    # is spent or history ends. A 404/unparseable segment degrades to the
+    # honesty note below; a transport outage still fails the tool.
+    archive_gap = False
+    if len(forms) >= 1000 and fetched < _MAX_FORM4:
+        segs = (subs.get("filings") or {}).get("files") or []
+        if not segs:
+            archive_gap = True
+        for seg in reversed(segs):
+            if fetched >= _MAX_FORM4:
+                break
+            name = (seg or {}).get("name") or ""
+            if not name:
+                archive_gap = True
+                continue
+            try:
+                seg_recent = _fetch_submissions_segment(cik, name).get(
+                    "filings") or {}
+                seg_recent = seg_recent.get("recent") or {}
+            except NoMarketDataError as exc:
+                if isinstance(exc, SecNoFileError) or "could not parse" in (exc.detail or ""):
+                    archive_gap = True
+                    logger.debug(
+                        "sec_ownership: archive segment %s unavailable: %s",
+                        name, exc,
+                    )
+                    continue
+                raise
+            fetched = _scan_form4_segment(
+                cik, seg_recent, range(len(seg_recent.get("form") or []) - 1, -1, -1),
+                lower_d, upper_d, upper, rows, skipped, fetched,
+            )
+    elif len(forms) >= 1000 and fetched >= _MAX_FORM4:
+        # At cap AND the head alone filled the budget: the archive was never
+        # scanned, so older in-window Form 4s beyond the budget are unknown —
+        # disclose that instead of presenting a clean window (review P3-3).
+        archive_gap = True
 
     out = io.StringIO()
     out.write(f"# Form 4 Insider Trading for {ticker} (last {look_back_days} days, "
               f"as of {curr_date or 'now'})\n")
     out.write(f"# Source: SEC EDGAR Form 4 (PIT: filingDate <= {curr_date or 'now'}; "
               f"CIK {cik})\n")
-    if len(forms) >= 1000:
-        # submissions.recent holds only the ~1000 most recent filings of ANY
-        # type; a high-volume issuer's older in-window Form 4s live in the
-        # files[] archive segments this tool does not read — say so instead
-        # of presenting a fabricated clean window.
-        out.write("# Note: EDGAR 'recent' filings segment is at its ~1000 cap; "
-                  "older in-window Form 4s of high-volume filers may fall "
-                  "outside this tool's coverage.\n")
+    if archive_gap:
+        # submissions.recent is at its ~1000 cap AND the archive was not
+        # fully scanned (no segments listed, one unavailable, or the head
+        # alone filled the fetch budget) — say so instead of presenting a
+        # fabricated clean window.
+        out.write("# Note: EDGAR 'recent' filings segment is at its ~1000 cap "
+                  "and the files[] archive was not fully scanned (backfill "
+                  "incomplete or fetch budget reached) — older in-window "
+                  "Form 4s of high-volume filers may fall outside this "
+                  "tool's coverage.\n")
 
     if not rows:
         out.write(f"\nNo Form 4 transactions for {ticker} in the last "

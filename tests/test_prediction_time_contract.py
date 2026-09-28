@@ -28,7 +28,8 @@ def test_capture_only_uses_exact_closed_perp_reference(monkeypatch, symbol):
         return _frame()
 
     monkeypatch.setattr(tc, "binance_klines_frame", fetch)
-    timing = tc.capture_prediction_timing(symbol, "CONTRACT")
+    timing = tc.capture_prediction_timing(
+        symbol, "CONTRACT", asset_type="crypto_perp")
     assert timing["version"] == PREDICTION_TIME_VERSION
     assert timing["reference_price"] == 100.0
     assert timing["reference_price_at"] == "2026-09-05T00:00:00+00:00"
@@ -48,7 +49,8 @@ def test_reference_observation_precedes_actual_acceptance_after_fetch(monkeypatc
     ))
     monkeypatch.setattr(tc, "_now_utc", lambda: next(instants))
     monkeypatch.setattr(tc, "binance_klines_frame", lambda *a, **k: _frame())
-    timing = tc.capture_prediction_timing("BTCUSDT", "CONTRACT")
+    timing = tc.capture_prediction_timing(
+        "BTCUSDT", "CONTRACT", asset_type="crypto_perp")
     assert timing["reference_observed_at"] == "2026-09-05T12:00:03+00:00"
     assert timing["prediction_formed_at"] == "2026-09-05T12:00:04+00:00"
 
@@ -82,7 +84,8 @@ def test_missing_expected_bar_never_uses_older_bar(monkeypatch, scope):
 def test_invalid_reference_is_recorded_as_unavailable(monkeypatch, price):
     _clock(monkeypatch)
     monkeypatch.setattr(tc, "binance_klines_frame", lambda *a, **k: _frame(("2026-09-04",), (price,)))
-    timing = tc.capture_prediction_timing("BTCUSDT", "CONTRACT")
+    timing = tc.capture_prediction_timing(
+        "BTCUSDT", "CONTRACT", asset_type="crypto_perp")
     assert timing["reference_price"] is None
     assert timing["reference_error"] == "reference_price_invalid"
 
@@ -95,7 +98,8 @@ def test_vendor_failure_keeps_new_version_and_formation_time(monkeypatch):
         raise RuntimeError("offline")
 
     monkeypatch.setattr(tc, "binance_klines_frame", fail)
-    timing = tc.capture_prediction_timing("BTCUSDT", "CONTRACT")
+    timing = tc.capture_prediction_timing(
+        "BTCUSDT", "CONTRACT", asset_type="crypto_perp")
     assert timing["version"] == PREDICTION_TIME_VERSION
     assert timing["reference_price"] is None
     assert timing["reference_error"] == "reference_fetch_failed:RuntimeError"
@@ -130,7 +134,8 @@ def test_nonprice_scope_records_formation_without_fetch(monkeypatch, scope):
 def test_timing_rejects_naive_future_nonfinite_or_unknown_contract(monkeypatch, changes):
     _clock(monkeypatch)
     monkeypatch.setattr(tc, "binance_klines_frame", lambda *a, **k: _frame())
-    timing = tc.capture_prediction_timing("BTCUSDT", "CONTRACT")
+    timing = tc.capture_prediction_timing(
+        "BTCUSDT", "CONTRACT", asset_type="crypto_perp")
     with pytest.raises(ValueError):
         tc.validate_timing({**timing, **changes})
 
@@ -154,7 +159,8 @@ def test_fetch_crossing_midnight_anchors_requested_day_never_the_forming_bar(mon
     ])
     monkeypatch.setattr(tc, "_now_utc", lambda: next(moments))
     monkeypatch.setattr(tc, "binance_klines_frame", lambda *a, **k: _frame())
-    timing = tc.capture_prediction_timing("BTCUSDT", "CONTRACT")
+    timing = tc.capture_prediction_timing(
+        "BTCUSDT", "CONTRACT", asset_type="crypto_perp")
     assert timing["reference_price"] == 100.0  # the 09-04 close, NOT 999.0
     assert timing["reference_price_at"] == "2026-09-05T00:00:00+00:00"
     assert timing["reference_error"] is None

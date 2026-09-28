@@ -116,6 +116,7 @@ _BINANCE_STATUS_MAP = {
     "PENDING_CANCEL": Status.PARTTRADED,  # still working until confirmed
     "REJECTED": Status.REJECTED,
     "EXPIRED": Status.REJECTED,
+    "EXPIRED_IN_MATCH": Status.REJECTED,
 }
 
 # Exceptions that can ONLY come from a bug in our own submit path (wrong
@@ -126,6 +127,30 @@ _BINANCE_STATUS_MAP = {
 # (they subclass Exception, not these builtins), so genuine Binance errors —
 # rate limit, ban, bad request, server error — still reach _handle_submit_error.
 _PROGRAMMING_BUG_ERRORS = (AttributeError, TypeError, NameError, KeyError)
+
+
+def _resolve_timeout_ms(raw: str | None) -> int:
+    """Parse ``YIALPHA_EXECUTION_TIMEOUT_MS`` into a usable millisecond int.
+
+    Non-integer values fall back to the default (historical behaviour); a
+    zero/negative value ALSO falls back — ``ConfigurationRestAPI(timeout<=0)``
+    has undefined semantics (requests treats a non-positive timeout as an
+    immediate expiry, killing every call after connect) and must never reach
+    the SDK (round-8 S8 KI-6). Pure module-level function so the clamp is
+    unit-testable without the SDK installed.
+    """
+    try:
+        timeout_ms = int(raw if raw is not None else _DEFAULT_TIMEOUT_MS)
+    except (TypeError, ValueError):
+        return _DEFAULT_TIMEOUT_MS
+    if timeout_ms <= 0:
+        logger.warning(
+            "BinanceGateway: %s=%r is <= 0 (undefined SDK semantics); "
+            "falling back to the default %d ms.",
+            _ENV_TIMEOUT_MS, raw, _DEFAULT_TIMEOUT_MS,
+        )
+        return _DEFAULT_TIMEOUT_MS
+    return timeout_ms
 
 
 class ExecutionEnableSwitch:
@@ -245,6 +270,13 @@ class BinanceGateway(BaseGateway):
 
     # Strict in-process uniqueness under bursts/clock rollback; the random
     # process nonce separates independently-running gateway processes.
+    # Collision math (round-8 S8 KI-12 audit): the nonce is 32 bits, so two
+    # independently started processes collide with p ≈ 2^-32 per ns tick —
+    # and the tick itself is a strictly monotonic nanosecond timestamp, so a
+    # collision additionally requires both processes to draw the SAME nonce
+    # AND land on the same nanosecond. At this deployment's process counts
+    # the residual risk is negligible; widening the nonce (token_hex(5))
+    # stays possible within the 36-char cap if process fan-out ever grows.
     _client_id_lock = threading.Lock()
     _client_id_last_ns = 0
     _client_id_nonce = secrets.token_hex(4)
@@ -274,9 +306,18 @@ class BinanceGateway(BaseGateway):
         The project carries the VPN as ``HTTPS_PROXY=socks5h://127.0.0.1:1080``
         in ``.env``; we split it back into the SDK's dict shape so the gateway
         is consistent with the analysis layer's transport without hard-coding
-        an endpoint here.
+        an endpoint here. Both the upper- and lower-case spellings are read
+        (POSIX tools commonly export ``https_proxy``); a URL without a port is
+        passed on port-less with a warning — whether a default port applies
+        is the SDK parser's call, not ours (round-8 S8 KI-7).
         """
-        url = os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY")
+        url = (
+            os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+            or os.environ.get("ALL_PROXY")
+            or os.environ.get("all_proxy")  # noqa: SIM112 — deliberately the
+            # POSIX lowercase spelling: tools exporting only https_proxy/
+            # all_proxy must not leave the gateway silently direct-connecting.
+        )
         if not url:
             return None
         parsed = urlparse(url)
@@ -286,6 +327,13 @@ class BinanceGateway(BaseGateway):
         proxy: dict = {"protocol": parsed.scheme or "socks5h", "host": host}
         if parsed.port:
             proxy["port"] = parsed.port
+        else:
+            logger.warning(
+                "BinanceGateway: proxy URL %r carries no port; passing it on "
+                "port-less (a socks5h endpoint normally needs an explicit "
+                "port — verify the SDK accepts a default).",
+                url,
+            )
         return proxy
 
     def connect(self, setting: dict | None = None) -> None:
@@ -316,6 +364,11 @@ class BinanceGateway(BaseGateway):
                 "cannot build the Binance execution client."
             )
 
+        # Reconnect safety (round-8 S8 KI-10): tear down any client a prior
+        # connect() left behind BEFORE overwriting the reference, or the old
+        # SDK facade's requests session leaks. close() also resets the
+        # hedge-mode / leverage caches, which a fresh connection re-queries.
+        self.close()
         self._client = self._build_client(api_key, api_secret)
         self._connected = True
         if self._product == "perp":
@@ -369,10 +422,7 @@ class BinanceGateway(BaseGateway):
         the SDK installed and so unit tests can inject a mock client without
         any SDK on disk.
         """
-        try:
-            timeout_ms = int(os.environ.get(_ENV_TIMEOUT_MS, _DEFAULT_TIMEOUT_MS))
-        except ValueError:
-            timeout_ms = _DEFAULT_TIMEOUT_MS
+        timeout_ms = _resolve_timeout_ms(os.environ.get(_ENV_TIMEOUT_MS))
         proxy = self._proxy_dict()
         # Fail-closed: a malformed ``YIALPHA_EXECUTION_MAINNET`` must not raise
         # (``_coerce_bool_env`` throws on unrecognised values); it falls back to
@@ -553,15 +603,12 @@ class BinanceGateway(BaseGateway):
             return self._rejected(req, reason=str(exc))
 
         # Exchange-rule gates (2026-08-16): quantize to the symbol's
-        # tick/step grid (Binance rejects off-grid floats with -1111) and,
-        # when an explicit leverage is configured, confirm it once per
-        # symbol. Both fail closed with a stated reason. The risk reference
-        # price rides along so MARKET orders get the -4014 MIN_NOTIONAL
-        # pre-check instead of a guaranteed exchange reject.
+        # tick/step grid (Binance rejects off-grid floats with -1111). Fails
+        # closed with a stated reason. The risk reference price rides along
+        # so MARKET orders get the -4014 MIN_NOTIONAL pre-check instead of a
+        # guaranteed exchange reject.
         ref_px = reference_price or (reference_prices or {}).get(req.symbol)
         gate_reason = self._shape_to_symbol_rules(req, extra, ref_price=ref_px)
-        if gate_reason is None:
-            gate_reason = self._ensure_leverage(req.symbol)
         if gate_reason is not None:
             logger.warning(
                 "BinanceGateway.send_order(%s): %s -> REJECTED (fail-closed).",
@@ -569,7 +616,13 @@ class BinanceGateway(BaseGateway):
             )
             return self._rejected(req, reason=gate_reason)
 
-        client_order_id = req.reference or self._gen_client_order_id()
+        # ``reference`` is a free-text tag (the bridge defaults it to ""),
+        # not a caller-controlled idempotency key: a bare value can collide
+        # with a HISTORICAL order's client id, and the recovery query would
+        # then surface that old order as this submit's outcome. Always mint
+        # our own unique id (round-8 S8 KI-5); the reference still rides on
+        # the returned OrderData.
+        client_order_id = self._gen_client_order_id()
         kwargs = {
             "symbol": req.symbol,
             "side": side,
@@ -579,10 +632,22 @@ class BinanceGateway(BaseGateway):
         }
         kwargs.update(extra)
 
-        # Final guard: re-check the kill switch at the network edge. The entry
-        # check (line ~453) reads it once; an operator may have engaged it
-        # during the quantitative-risk gate above. Honor it so the order is
-        # NOT transmitted. Mirrors the browser broker's submit-edge guard.
+        # Final guard at the network edge (round-8 S8 KI-4): BOTH switches are
+        # re-read here — the entry checks above read them once and an operator
+        # may have disengaged either during the quantitative-risk gate. This
+        # now mirrors the browser broker's submit-edge guard (KillSwitch +
+        # live-execution switch), which the old comment claimed but the code
+        # did not do.
+        if not ExecutionEnableSwitch.is_enabled():
+            reason = ExecutionEnableSwitch.reason()
+            logger.warning(
+                "BinanceGateway.send_order(%s): execution policy disabled at "
+                "network edge -> REJECTED. %s",
+                req.symbol,
+                reason,
+            )
+            return self._rejected(
+                req, reason=f"execution policy at submit edge: {reason}")
         if KillSwitch.is_halted():
             reason = KillSwitch.reason()
             logger.warning(
@@ -592,6 +657,18 @@ class BinanceGateway(BaseGateway):
                 reason,
             )
             return self._rejected(req, reason=f"kill switch at submit edge: {reason}")
+
+        # Leverage confirmation runs only AFTER the final guard (round-8 S8
+        # KI-4): it POSTs /fapi/v1/leverage, and a rejected order must never
+        # leave a side-effect request behind. Still one POST per symbol per
+        # connection; failure rejects the order (fail-closed, unchanged).
+        gate_reason = self._ensure_leverage(req.symbol)
+        if gate_reason is not None:
+            logger.warning(
+                "BinanceGateway.send_order(%s): %s -> REJECTED (fail-closed).",
+                req.symbol, gate_reason,
+            )
+            return self._rejected(req, reason=gate_reason)
 
         try:
             resp = client.rest_api.new_order(**kwargs)
@@ -632,11 +709,15 @@ class BinanceGateway(BaseGateway):
 
         Position-mode aware (2026-08-16): one-way accounts send
         ``position_side=BOTH`` + ``reduce_only``; hedge (dual-side) accounts
-        send ``position_side=LONG/SHORT`` per the requested direction with the
-        BUY/SELL side flipped for closes — ``reduce_only`` is INVALID in hedge
-        mode per the SDK signature (``NewOrderReduceOnlyEnum`` doc: "Cannot be
-        sent in Hedge Mode"). The strings "true"/"false" for ``reduce_only``
-        are deliberate: the SDK enum's values are those exact strings.
+        send ``position_side`` naming the POSITION the order acts on while the
+        BUY/SELL side keeps its natural direction — in the vnpy/bridge
+        semantics ``direction`` is the ORDER direction (SHORT = a sell), so
+        closing a long arrives as ``SHORT+CLOSE`` and maps to ``SELL +
+        position_side=LONG`` (sell flat the long). ``reduce_only`` is INVALID
+        in hedge mode per the SDK signature (``NewOrderReduceOnlyEnum`` doc:
+        "Cannot be sent in Hedge Mode"). The strings "true"/"false" for
+        ``reduce_only`` are deliberate: the SDK enum's values are those exact
+        strings.
         """
         if req.direction == Direction.LONG:
             side = "BUY"
@@ -654,13 +735,22 @@ class BinanceGateway(BaseGateway):
             }
             is_close = req.offset in close_offsets
             if self._hedge_mode:
-                # Hedge mode: position_side carries the direction; the order
-                # side flips to unwind (close long = SELL against LONG).
-                extra["position_side"] = (
-                    "LONG" if req.direction == Direction.LONG else "SHORT"
-                )
+                # Hedge mode (round-8 S8 KI-3): position_side names the
+                # position being acted on; the side is NOT flipped. A close of
+                # a LONG arrives as direction=SHORT -> SELL + LONG (sell flat
+                # the long); a close of a SHORT arrives as direction=LONG ->
+                # BUY + SHORT (buy back the short). The previous side-flip
+                # variant turned those closes into reverse-side OPENS — under
+                # a drawdown hard stop (CLOSE-only) it would have DOUBLED the
+                # exposure instead of unwinding it.
                 if is_close:
-                    side = "SELL" if side == "BUY" else "BUY"
+                    extra["position_side"] = (
+                        "SHORT" if req.direction == Direction.LONG else "LONG"
+                    )
+                else:
+                    extra["position_side"] = (
+                        "LONG" if req.direction == Direction.LONG else "SHORT"
+                    )
                 # reduce_only must NOT be sent in hedge mode.
             else:
                 extra["position_side"] = "BOTH"
@@ -795,10 +885,20 @@ class BinanceGateway(BaseGateway):
         # TooManyRequestsError, BinanceAPIException …). Substring matching on
         # the lowered name keeps us resilient to those renames without having
         # to import SDK exception types (the SDK is lazily imported).
+        # Connection-level failures (round-8 S8 KI-1) join the transient set:
+        # a request that died reading its response may already be on the book,
+        # and requests.exceptions.* carries no status_code — the old filter
+        # funneled them straight to REJECTED without the recovery query.
         name_lower = name.lower()
         transient = (
             name in {"TooManyRequestsError", "ServerError", "NetworkError"}
-            or any(tok in name_lower for tok in ("rate", "limit", "timeout", "network"))
+            or any(
+                tok in name_lower
+                for tok in (
+                    "rate", "limit", "timeout", "network", "connect",
+                    "proxy", "ssl", "chunked",
+                )
+            )
             or (
                 isinstance(status_code, int)
                 and (status_code >= 500 or status_code == 429)
@@ -828,39 +928,65 @@ class BinanceGateway(BaseGateway):
         return self._rejected(req, reason=f"{name}: {body}")
 
     def _safe_query_by_client_id(
-        self, req: OrderRequest, client_order_id: str
+        self, req: OrderRequest, client_order_id: str,
+        *, attempts: int = 3, retry_delay_s: float = 0.3,
     ) -> OrderData | None:
-        """Best-effort order lookup by client id; None on any failure/absence."""
+        """Best-effort order lookup by client id; None on any failure/absence.
+
+        Binance's matching engine is only eventually consistent with the
+        query API: immediately after a 429/timeout, an ACCEPTED order can
+        still answer ``{"code": -2013, "msg": "Order does not exist"}``. A
+        single probe used to turn that into a false REJECTED while the order
+        lived on the book (round-8 S8 KI-2). Retry the probe a bounded
+        number of times with a short backoff before concluding absence —
+        GET requests only, never a re-POST.
+        """
         client = self._client
         if client is None:
             return None
-        try:
-            if self._product == "perp":
-                resp = client.rest_api.query_order(
-                    symbol=req.symbol, orig_client_order_id=client_order_id
+        last_detail = "no probe completed"
+        for attempt in range(1, max(attempts, 1) + 1):
+            if attempt > 1:
+                time.sleep(retry_delay_s)
+            try:
+                if self._product == "perp":
+                    resp = client.rest_api.query_order(
+                        symbol=req.symbol, orig_client_order_id=client_order_id
+                    )
+                else:
+                    resp = client.rest_api.get_order(
+                        symbol=req.symbol, orig_client_order_id=client_order_id
+                    )
+                data = _as_dict(_resp_data(resp)) or {}
+                orderid = data.get("orderId")
+                # A real order always carries ``orderId``. An error payload
+                # (e.g. -2013) is non-empty but has no ``orderId`` — it may be
+                # genuine absence OR visibility lag; retry before concluding.
+                if orderid is None:
+                    last_detail = f"probe {attempt}: no orderId ({data.get('code', '')})"
+                    logger.debug(
+                        "order recovery probe %d/%d for %s (client id %s): "
+                        "no orderId yet",
+                        attempt, attempts, req.symbol, client_order_id,
+                    )
+                    continue
+                return self._order_from_response(req, data, client_order_id)
+            except Exception as exc:  # noqa: BLE001 - recovery must never raise
+                last_detail = f"probe {attempt}: {type(exc).__name__}: {exc}"
+                logger.debug(
+                    "order recovery probe %d/%d for %s (client id %s) raised: %s",
+                    attempt, attempts, req.symbol, client_order_id, exc,
                 )
-            else:
-                resp = client.rest_api.get_order(
-                    symbol=req.symbol, orig_client_order_id=client_order_id
-                )
-            data = _as_dict(_resp_data(resp)) or {}
-            orderid = data.get("orderId")
-            # A real order always carries ``orderId``. An error payload
-            # (e.g. ``{"code": -2013, "msg": "Order does not exist."}``) is
-            # non-empty but has no ``orderId`` — returning None lets the caller
-            # treat the submit as ambiguous (-> REJECTED) instead of falling
-            # through to ``_order_from_response`` which would default the
-            # unknown status to ``SUBMITTING`` (a live, optimistic state).
-            if orderid is None:
-                return None
-            return self._order_from_response(req, data, client_order_id)
-        except Exception as exc:  # noqa: BLE001 - recovery must never raise
-            # None -> the caller treats the submit as ambiguous (-> REJECTED),
-            # which is fail-closed for trading, but the recovery failure itself
-            # should be observable for post-mortem.
-            logger.warning("order recovery lookup failed for %s (client id %s): %s",
-                           req.symbol, client_order_id, exc)
-            return None
+                continue
+        # None -> the caller treats the submit as ambiguous (-> REJECTED),
+        # which is fail-closed for trading, but the recovery failure itself
+        # should be observable for post-mortem.
+        logger.warning(
+            "order recovery lookup could not confirm %s (client id %s) after "
+            "%d probe(s): %s",
+            req.symbol, client_order_id, attempts, last_detail,
+        )
+        return None
 
     def _order_from_response(
         self, req: OrderRequest, data: dict, client_order_id: str
@@ -868,7 +994,20 @@ class BinanceGateway(BaseGateway):
         """Build the ``OrderData`` from a normalised (camelCase) response dict."""
         binance_status = str(data.get("status", "")).upper()
         orderid = str(data.get("orderId") or client_order_id)
-        status = _BINANCE_STATUS_MAP.get(binance_status, Status.SUBMITTING)
+        if binance_status in _BINANCE_STATUS_MAP:
+            status = _BINANCE_STATUS_MAP[binance_status]
+        else:
+            # Unknown (a status added by a future Binance release) or absent
+            # status: map to NOTTRADED — an ACTIVE state that makes no
+            # "submission in flight" claim the way SUBMITTING did, and the
+            # ambiguity is logged for post-mortem (round-8 S8 KI-8).
+            if binance_status:
+                logger.warning(
+                    "unknown Binance order status %r (order %s); mapping to "
+                    "NOTTRADED (active, unconfirmed).",
+                    binance_status, orderid,
+                )
+            status = Status.NOTTRADED
         traded = _to_float(data.get("executedQty") or data.get("cumQty"))
         fill_price = _to_float(data.get("avgPrice") or data.get("price"))
 
@@ -898,18 +1037,81 @@ class BinanceGateway(BaseGateway):
     # ------------------------------------------------------------------
 
     def cancel_order(self, req: CancelRequest) -> None:
-        """Cancel by broker order id; raises on failure (explicit action)."""
+        """Cancel by broker order id (or client order id); raises on failure.
+
+        ``CancelRequest.client_order_id`` (round-8 S8 KI-9), when set, is the
+        preferred channel — it survives the broker-id↔client-id mapping that
+        a caller could get wrong. After a successful cancel request a
+        best-effort GET re-reads the order: the SDK retries DELETE transport
+        errors internally, so an ALREADY-cancelled order answers -2011 and a
+        naive re-raise would fake a failure that triggers caller-side re-
+        cancels. The reconciliation only LOGS a mismatch; it never raises.
+        """
         client = self._require_client()
+        by_client_id = bool(getattr(req, "client_order_id", ""))
         try:
             if self._product == "perp":
-                client.rest_api.cancel_order(symbol=req.symbol, order_id=_as_order_id(req.orderid))
+                if by_client_id:
+                    client.rest_api.cancel_order(
+                        symbol=req.symbol,
+                        orig_client_order_id=req.client_order_id,
+                    )
+                else:
+                    client.rest_api.cancel_order(
+                        symbol=req.symbol, order_id=_as_order_id(req.orderid)
+                    )
             else:
-                client.rest_api.delete_order(
-                    symbol=req.symbol, order_id=_as_order_id(req.orderid)
-                )
+                if by_client_id:
+                    client.rest_api.delete_order(
+                        symbol=req.symbol,
+                        orig_client_order_id=req.client_order_id,
+                    )
+                else:
+                    client.rest_api.delete_order(
+                        symbol=req.symbol, order_id=_as_order_id(req.orderid)
+                    )
         except Exception as exc:  # noqa: BLE001
             logger.warning("cancel_order(%s %s) failed: %s", req.symbol, req.orderid, exc)
             raise
+        # Best-effort reconciliation (GET only, never raises).
+        try:
+            if self._product == "perp":
+                resp = (
+                    client.rest_api.query_order(
+                        symbol=req.symbol,
+                        orig_client_order_id=req.client_order_id,
+                    )
+                    if by_client_id
+                    else client.rest_api.query_order(
+                        symbol=req.symbol, order_id=_as_order_id(req.orderid)
+                    )
+                )
+            else:
+                resp = (
+                    client.rest_api.get_order(
+                        symbol=req.symbol,
+                        orig_client_order_id=req.client_order_id,
+                    )
+                    if by_client_id
+                    else client.rest_api.get_order(
+                        symbol=req.symbol, order_id=_as_order_id(req.orderid)
+                    )
+                )
+            data = _as_dict(_resp_data(resp)) or {}
+            status = str(data.get("status", "")).upper()
+            if data.get("orderId") is not None and status not in (
+                "CANCELED", "CANCELLED", "EXPIRED", "EXPIRED_IN_MATCH",
+            ):
+                logger.warning(
+                    "cancel_order(%s %s): post-cancel status is %r (expected "
+                    "CANCELED) — order may still be working; verify manually.",
+                    req.symbol, req.orderid, status or "<absent>",
+                )
+        except Exception as exc:  # noqa: BLE001 — reconciliation is advisory
+            logger.debug(
+                "cancel_order(%s %s): reconciliation query failed: %s",
+                req.symbol, req.orderid, exc,
+            )
 
     def query_account(self) -> AccountData:
         """Return the USDT balance snapshot (single-asset AccountData)."""

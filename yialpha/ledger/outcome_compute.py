@@ -70,8 +70,14 @@ _LOOKBACK_BUFFER_DAYS = 10
 _RETRY_GRACE_DAYS = 7
 
 #: Registry instrument classes that denote a perpetual contract (anything
-#: else — plain equities — prices on the equity seam).
-_PERP_INSTRUMENT_CLASSES = frozenset({"stock_perp", "pure_crypto_perp", "unknown_perp"})
+#: else — plain equities — prices on the equity seam). ONE shared spelling
+#: with the capture side — see time_contract.PERP_INSTRUMENT_CLASSES.
+from yialpha.ledger.time_contract import (  # noqa: E402
+    PERP_INSTRUMENT_CLASSES as _PERP_INSTRUMENT_CLASSES,
+    REFERENCE_SOURCE_EQUITY,
+    REFERENCE_SOURCE_PERP,
+    reference_seam_equity,
+)
 
 #: Payload keys under which a ticket may nest the cost-model decomposition.
 _TICKET_COST_KEYS = ("cost_detail", "cost_estimate", "cost")
@@ -552,8 +558,10 @@ def _compute_reference_outcome(item: dict[str, Any], now_as_of: str) -> OutcomeC
         or item.get("asset_type") == "crypto_perp"
     )
     stock_perp = item["instrument_class"] == "stock_perp"
-    equity = (scope == SCOPE_UNDERLYING and stock_perp) or not is_perp
-    expected_source = "yfinance:1d:close" if equity else "binance_perp:1d:last"
+    equity = reference_seam_equity(
+        scope, item["instrument_class"], item.get("asset_type"))
+    expected_source = (
+        REFERENCE_SOURCE_EQUITY if equity else REFERENCE_SOURCE_PERP)
     if timing.get("reference_error") or timing.get("reference_price") is None:
         return result(
             "incomplete", "reference_unavailable_at_prediction: "
@@ -844,9 +852,8 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
     # (disclosed approximation — a pure-crypto underlying has no equity seam).
     # The seam decides the endpoint rule below: perps trade 24/7 (a bar
     # exists for every calendar day), equities print weekdays only.
-    prices_on_equity_seam = (
-        scope == SCOPE_UNDERLYING and is_stock_perp
-    ) or not is_perp
+    prices_on_equity_seam = reference_seam_equity(
+        scope, instrument_class, asset_type)
     # Round-6: a DELISTED contract's empty klines window raises
     # NoMarketDataError instead of returning an empty frame — unhandled, it
     # marked the row "failed" without writing an outcome, so it never

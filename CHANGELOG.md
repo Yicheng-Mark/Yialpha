@@ -12,6 +12,100 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Round-8 known-issues batch landing (2026-09-28, the full audit ledger
+  from both waves — every item code-verified, landed at minimum blast
+  radius, and pinned across `tests/test_round8_ki_{dataflows,ledger_ab,
+  execution,backtest_misc}.py`; adversarial self-review of the diff closed
+  before commit).**
+  - **Self-review of the landing diff (P1 × 0, P2 × 1, P3 × 7 — all
+    processed):** the one P2 closed a systemic PIT hole the new gates
+    inherited — `_pit_curr_date`'s clamp passed empty/omitted `curr_date`
+    through unchanged, so "or empty for live mode" disarmed the historical
+    gates in a pinned backtest; every tool-layer clamp (10 files) now falls
+    back to the run's pinned analysis date on empty input. P3s landed:
+    the mark_end extension anchors on `execution_lag_bars` (not a
+    hardcoded 1), Form 4 discloses budget-capped archive coverage, the
+    direction clamp covers -ing forms and no longer strips descriptive
+    "long entry" narrative, redaction exact-matches the Binance/Tushare
+    credentials, and two test-quality items. Accepted-as-documented: the
+    same-day margin page-boundary row gap (self-heals within the TTL) and
+    the "rather Sell than Buy" preference shape (heuristic cost, noted in
+    code).
+  - **Wave-1 vendor PIT set (5 items):** the A-share sector-flow ranking is
+    a live-only snapshot and now refuses historical dates with a
+    `SECTOR_FLOW_UNAVAILABLE` sentinel (the old caveat note still served
+    today's ranking into backtests); Eastmoney margin paginates (400-row
+    pages, hard cap 5, per-page cache) so deep look-back windows no longer
+    silently lose their older tail; SEC Form 4 pulls the `files[]` archive
+    segments when the submissions `recent` head is at its ~1000 cap (the
+    honest cap note now fires only when backfill cannot complete); AV
+    `INSIDER_TRANSACTIONS` refuses historical as-of dates (mirroring the
+    yfinance-side gate); the `get_insider_transactions` tool schema carries
+    and PIT-clamps `curr_date` so a future wiring cannot leak today's
+    snapshot.
+  - **S3 — agents:** parallel analyst fan-out workers each bind a FRESH
+    prediction-capture registry before `subgraph.invoke`, killing the
+    `__active__` single-slot race that attributed every parallel
+    submission to the last writer (serial path untouched); `parse_rating`
+    skips rating words preceded by a nearby negator ("argues against Sell"
+    no longer parses as Sell); the Positioning Analyst's free-text
+    fallback gets a deterministic direction clamp (line-level removal +
+    banner) so the direction freeze no longer rests on prompt compliance
+    alone.
+  - **S5 — backtest:** the A/B gate script excludes propagate-failed runs
+    from every distributional statistic (a crashed run's `"?"` rating and
+    empty reports used to skew chi-square/TF-IDF and silently flip the
+    speedup criterion to N/A), fails a leg that lost all its runs, and
+    gains an S3-a race probe criterion (parallel predictions must attribute
+    to 2+ distinct analysts when recorded); `DecisionCache` v5 folds a
+    decision-config signature (graph `_run_signature` + provider keys)
+    into the key so a model/analyst/vendor change never replays another
+    configuration's decision (v4/v2 layouts swept on miss); the event-study
+    docstrings now state the execution-bar anchor and the offset-0
+    fill-bar convention (note-level, no numeric change).
+  - **Wave-2 leftover — the final episode's semantic window:** the equity
+    marking window starts at the legacy `holding_days + 10` calendar-day
+    boundary and EXTENDS (never shortens) to the last decision's execution
+    bar + `holding_days` sessions when holidays push that span past the
+    legacy boundary — the final episode's `position_return` now covers the
+    same window as `raw_return` instead of being force-marked mid-window.
+  - **S6 — graph/ledger:** `positioning_report` persists (presence-gated
+    log key + `1_analysts/positioning.md`); `instrument_registry` joins
+    `_SIGNATURE_CONFIG_KEYS` (flag-on routing re-binds perp tools — a
+    resumed checkpoint under the other flag would replay stale reports);
+    capture and scoring share ONE `reference_seam_equity` verdict (an
+    `unknown_perp` underlying capture used to store the equity source and
+    retire as a permanent `reference_source_mismatch`), with the perp
+    class frozenset and source labels de-duplicated across
+    time_contract / outcome_compute / engine.
+  - **S7 — transport/cli:** credential redaction exact-matches the Zhipu
+    and Tavily key pools (comma-split env vars) and adds the
+    `tvly-<base62>` / `<32-hex>.<alnum>` family shapes ahead of the generic
+    16-char shape (a uuid4 hex never matches); dead `cli/utils.py`
+    `get_analysis_date` removed (the live `cli.main` twin has the
+    future-date guard).
+  - **S8 — execution layer (project-grade landing of the 12 audit items,
+    default-off, still unwired from the graph):** connection-level submit
+    errors (Connection/Proxy/SSL/Chunked family) join the transient set
+    and take the query-recovery path; the recovery probe retries
+    `-2013` a bounded 3×0.3s before concluding absence (matching-engine
+    visibility lag used to turn an accepted order into a false REJECTED);
+    hedge-mode closes keep the natural side and set `position_side` to the
+    position being closed (the old side-flip turned a drawdown hard-stop
+    into a reverse-side OPEN — doubling exposure instead of unwinding);
+    the network-edge final guard re-reads BOTH switches and the leverage
+    POST moved after it (a rejected order no longer leaves a side-effect
+    request); the idempotency id is always gateway-minted (`reference` is
+    a label — a bare value could collide with a historical order and
+    poison recovery); `YIALPHA_EXECUTION_TIMEOUT_MS` <= 0 clamps to the
+    default; the proxy reader accepts lowercase env spellings and warns on
+    port-less URLs; unknown Binance statuses map to `NOTTRADED` with a
+    warning (+ `EXPIRED_IN_MATCH`); `CancelRequest` gains an optional
+    `client_order_id` channel and cancels reconcile via a best-effort GET
+    (log-only); `connect()` re-entry closes the previous SDK client.
+    KI-12 (client-id collision) audited as already-mitigated (process
+    nonce + monotonic tick; math documented in-code).
+
 - **Adversarial bug-hunt round 8 (2026-09-28, two waves; eight review shards
   — S1 dataflows core / S2 vendors (wave 1, commit 347a01a), S3 agents tree /
   S4 risk math / S5 backtest+batch / S6 graph+ledger / S7 cli+scripts+transport

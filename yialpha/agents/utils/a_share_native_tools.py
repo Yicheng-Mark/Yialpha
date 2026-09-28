@@ -19,13 +19,15 @@ they stay dormant.
 * ``get_a_share_northbound_native`` — daily northbound (Stock Connect / 沪深港通)
   holding for a stock from AKShare (东财).
 * ``get_a_share_sector_flow_native`` — industry/sector fund-flow ranking with
-  this stock's own sector highlighted, from AKShare (东财).
+  this stock's own sector highlighted, from AKShare (东财). Live mode only.
 * ``get_a_share_realtime_quote_native`` — real-time spot quote (latest price,
   change, volume, turnover, PE) from AKShare (东财). Live mode only.
 * ``get_a_share_market_breadth_native`` — whole-market advance-decline breadth
   from AKShare. Live mode only (market-level, not per-stock).
-``NO_DATA_AVAILABLE`` sentinel. Point-in-time correct (rows filtered by
-``date <= curr_date``) so they are safe to use in backtests.
+``NO_DATA_AVAILABLE`` sentinel. Date-keyed tools are point-in-time correct
+(rows filtered by ``date <= curr_date``); the live-mode-only snapshot tools
+(sector flow, real-time quote, market breadth) refuse historical dates with
+an explicit sentinel instead of serving today's data into a backtest.
 """
 
 from typing import Annotated
@@ -33,7 +35,7 @@ from typing import Annotated
 from langchain_core.tools import tool
 
 from yialpha.dataflows.interface import route_to_vendor
-from yialpha.dataflows.utils import current_pit_end
+from yialpha.dataflows.utils import current_pit_end, get_analysis_date
 
 
 def _pit_curr_date(curr_date):
@@ -44,7 +46,7 @@ def _pit_curr_date(curr_date):
     LLM echoing a cached header's today-date would admit post-decision rows
     into a backtest. No-op in live mode (no analysis date pinned).
     """
-    return current_pit_end(curr_date) or curr_date
+    return current_pit_end(curr_date) or get_analysis_date() or curr_date
 
 
 @tool
@@ -309,9 +311,9 @@ def get_a_share_sector_flow_native(
     capital-magnet or capital-outflow industry.
 
     NOTE: This is a live snapshot (the endpoint has no historical date param).
-    For a historical curr_date the function returns the current snapshot with
-    an explicit caveat — treat it as current context, not a point-in-time
-    backtest signal.
+    For a historical curr_date the function refuses with a
+    SECTOR_FLOW_UNAVAILABLE sentinel — do not fabricate sector flows for a
+    past date.
     China A-share only (Shanghai .SS/.SH or Shenzhen .SZ): a non-A-share ticker
     returns the NO_DATA_AVAILABLE sentinel — report "data not available" rather
     than estimating sector flows.

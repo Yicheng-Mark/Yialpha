@@ -216,6 +216,10 @@ def _fmt_yi(v, sign: bool = True) -> str:
 # --------------------------------------------------------------------------- #
 # Margin trading (融资融券)
 # --------------------------------------------------------------------------- #
+_MARGIN_PAGE_SIZE = 400   # rows per request (most-recent-first)
+_MARGIN_MAX_PAGES = 5     # hard cap ≈ 8 years of daily rows; bounds fan-out
+
+
 def _parse_margin(raw: bytes, scode: str) -> list[dict]:
     """Parse the RPTA_WEB_RZRQ_GGMX payload into per-day margin dicts."""
     try:
@@ -253,11 +257,12 @@ def get_margin_trading(
 
     融资余额 (margin balance), 融券余额 (short balance), 融资买入额 (margin buy),
     融券卖出量 (short sell, shares), 融资净买入额 (net margin buy). Pulled from
-    the Eastmoney datacenter ``RPTA_WEB_RZRQ_GGMX`` report. Coverage bound: a
-    single 400-row recent-first page (~1.5 years of daily rows) — backtest
-    windows older than that honestly come back empty (no lookahead); this is
-    NOT the exchange's full history. Rows are filtered by ``date <= curr_date``
-    (PIT) and within the look-back window.
+    the Eastmoney datacenter ``RPTA_WEB_RZRQ_GGMX`` report. Coverage bound:
+    paginated most-recent-first 400-row pages (~1.5 years of daily rows each,
+    hard cap 5 pages ≈ 8 years) pulled until the look-back window is covered
+    or a short page ends the history — windows older than that honestly come
+    back empty (no lookahead). Rows are deduped by date, then filtered by
+    ``date <= curr_date`` (PIT) and within the look-back window.
 
     Non-A-share ticker -> :class:`NoMarketDataError`. A name not on the margin-
     trading list -> an honest empty string (no fabricated balances).
@@ -265,26 +270,48 @@ def get_margin_trading(
     Caching: an as-of date in the past is immutable and cached 1 day; an as-of
     date of TODAY uses a 15-minute TTL (``_SAME_DAY_TTL_DAYS``) so the day's
     freshly disclosed rows appear in intraday/after-close runs instead of the
-    next day.
+    next day. Pages cache independently (``margin_<scode>_p<N>.json``);
+    within the same-day TTL window the per-page caches can expire at
+    staggered moments, so a freshly disclosed row that shifts the page
+    boundary can leave one older row temporarily absent from the merged
+    window — it self-heals within the TTL (review P3-2, accepted).
     """
     _, scode = _to_em_symbol(ticker)
-    params = {
-        "reportName": "RPTA_WEB_RZRQ_GGMX", "columns": "ALL",
-        "filter": f'(SCODE="{scode}")',
-        "pageNumber": "1", "pageSize": "400",
-        "sortColumns": "DATE", "sortTypes": "-1",
-        "source": "WEB", "client": "WEB",
-    }
-    # pageSize 400 (most-recent-first) comfortably covers a 180d look-back plus
-    # headroom; margin reports are daily so 400 rows > 1.5 years.
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
     ttl_days = _SAME_DAY_TTL_DAYS if upper_d == date.today() else 1.0
-    cache_path = os.path.join(_cache_dir(), f"margin_{scode}.json")
-    raw = _cached_or_fetch(cache_path, _MARGIN_URL, params, ttl_days=ttl_days)
-    rows = _parse_margin(raw, scode)
-
     lower_d = upper_d - timedelta(days=int(look_back_days))
+    lower_iso = lower_d.isoformat()
+
+    # Page through the report (newest page first): stop on a short page (end
+    # of history) or once a page's oldest row predates the window lower bound
+    # (older pages can only add out-of-window rows). The hard cap bounds
+    # request fan-out for absurdly large look_back_days values.
+    rows: list[dict] = []
+    seen_dates: set[str] = set()
+    for page in range(1, _MARGIN_MAX_PAGES + 1):
+        params = {
+            "reportName": "RPTA_WEB_RZRQ_GGMX", "columns": "ALL",
+            "filter": f'(SCODE="{scode}")',
+            "pageNumber": str(page), "pageSize": str(_MARGIN_PAGE_SIZE),
+            "sortColumns": "DATE", "sortTypes": "-1",
+            "source": "WEB", "client": "WEB",
+        }
+        cache_path = os.path.join(
+            _cache_dir(), f"margin_{scode}_p{page}.json")
+        page_rows = _parse_margin(
+            _cached_or_fetch(cache_path, _MARGIN_URL, params,
+                             ttl_days=ttl_days),
+            scode,
+        )
+        for r in page_rows:
+            if r["date"] not in seen_dates:
+                seen_dates.add(r["date"])
+                rows.append(r)
+        if len(page_rows) < _MARGIN_PAGE_SIZE:
+            break  # short page = the report's last page
+        if page_rows and page_rows[-1]["date"] <= lower_iso:
+            break  # window lower bound already covered
 
     out = io.StringIO()
     out.write(f"# Margin Trading (融资融券) for {ticker} (last {look_back_days} days, "

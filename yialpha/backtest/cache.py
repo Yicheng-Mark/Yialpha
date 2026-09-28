@@ -35,8 +35,12 @@ logger = logging.getLogger(__name__)
 # blindness the states log carried. Version 4 adds ``was_degraded`` so a
 # replay counts a forced-Hold (unparseable rating) as degraded exactly as
 # the live run did. Old entries lack the field (degraded status unknown);
-# they fail the version check and are honestly recomputed.
-DECISION_CACHE_SCHEMA_VERSION = 4
+# they fail the version check and are honestly recomputed. Version 5 folds
+# a decision-config signature (models, analyst set, tool flags, vendor
+# chain — derived by the engine from the graph) into the key: the same
+# ticker+date+run_tag+asset_type under a different configuration is a
+# DIFFERENT decision and must be recomputed, never replayed.
+DECISION_CACHE_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,7 @@ class CachedDecision:
     final_decision: str
     asset_type: str = "stock"
     was_degraded: bool = False
+    config_signature: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +66,7 @@ class CachedDecision:
             "final_decision": self.final_decision,
             "asset_type": self.asset_type,
             "was_degraded": self.was_degraded,
+            "config_signature": self.config_signature,
         }
 
     @classmethod
@@ -78,6 +84,7 @@ class CachedDecision:
             final_decision=d["final_decision"],
             asset_type=d.get("asset_type", "stock"),
             was_degraded=bool(d.get("was_degraded", False)),
+            config_signature=str(d.get("config_signature", "")),
         )
 
 
@@ -114,18 +121,20 @@ class DecisionCache:
 
     def _key_path(
         self, ticker: str, date: str, run_tag: str, asset_type: str = "stock",
+        config_signature: str = "",
     ) -> Path | None:
         if self.cache_dir is None:
             return None
         name = (
             f"{_safe_component(ticker)}_{_safe_component(date)}_"
-            f"{_safe_component(run_tag)}_{_safe_component(asset_type)}.json"
+            f"{_safe_component(run_tag)}_{_safe_component(asset_type)}_"
+            f"{_safe_component(config_signature)}.json"
         )
         return self.cache_dir / name
 
     def get(
         self, ticker: str, date: str, run_tag: str = "default",
-        asset_type: str = "stock",
+        asset_type: str = "stock", config_signature: str = "",
     ) -> CachedDecision | None:
         if not self.enabled:
             return None
@@ -133,7 +142,7 @@ class DecisionCache:
             # Enabled-but-dirless cache: "no cache directory" means every
             # lookup is a miss — never a TypeError on the legacy-path maths.
             return None
-        path = self._key_path(ticker, date, run_tag, asset_type)
+        path = self._key_path(ticker, date, run_tag, asset_type, config_signature)
         if path is not None and path.exists():
             try:
                 with path.open("r", encoding="utf-8") as fh:
@@ -143,6 +152,12 @@ class DecisionCache:
                     # treat as a miss — replaying the other venue's decision
                     # is exactly the bug the key change exists to prevent.
                     return None
+                if cached.config_signature != config_signature:
+                    # Config-mismatched entry (pre-v5 filename collision):
+                    # replaying a decision made under a different model /
+                    # analyst / vendor configuration is exactly the bug the
+                    # signature exists to prevent.
+                    return None
                 return cached
             except (OSError, ValueError, KeyError) as exc:
                 logger.warning(
@@ -151,22 +166,27 @@ class DecisionCache:
                 with contextlib.suppress(OSError):
                     path.unlink(missing_ok=True)
                 return None
-        # v2-era path (no asset_type component): remove it so the stale
-        # entry cannot shadow the correctly-keyed v3 entry later.
-        legacy = self.cache_dir / (
+        # Legacy layouts (v2 without asset_type, v4 without the config
+        # signature): remove them so a stale entry cannot shadow the
+        # correctly-keyed v5 entry later.
+        for legacy_name in (
             f"{_safe_component(ticker)}_{_safe_component(date)}_"
-            f"{_safe_component(run_tag)}.json"
-        )
-        if legacy.exists():
-            with contextlib.suppress(OSError):
-                legacy.unlink(missing_ok=True)
+            f"{_safe_component(run_tag)}_{_safe_component(asset_type)}.json",
+            f"{_safe_component(ticker)}_{_safe_component(date)}_"
+            f"{_safe_component(run_tag)}.json",
+        ):
+            legacy = self.cache_dir / legacy_name
+            if legacy.exists():
+                with contextlib.suppress(OSError):
+                    legacy.unlink(missing_ok=True)
         return None
 
     def put(self, decision: CachedDecision) -> None:
         if not self.enabled:
             return
         path = self._key_path(
-            decision.ticker, decision.date, decision.run_tag, decision.asset_type
+            decision.ticker, decision.date, decision.run_tag,
+            decision.asset_type, decision.config_signature,
         )
         if path is None:
             return
@@ -187,6 +207,7 @@ class DecisionCache:
         run_tag: str = "default",
         asset_type: str = "stock",
         was_degraded: bool = False,
+        config_signature: str = "",
     ) -> CachedDecision:
         """Store a realized decision and return the cached record."""
         decision = CachedDecision(
@@ -197,6 +218,7 @@ class DecisionCache:
             final_decision=final_decision,
             asset_type=asset_type,
             was_degraded=was_degraded,
+            config_signature=config_signature,
         )
         self.put(decision)
         return decision

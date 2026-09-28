@@ -25,6 +25,8 @@ Design choices driven by the roadmap:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import zlib
@@ -72,9 +74,11 @@ logger = logging.getLogger(__name__)
 # routed via any entrance gets perp semantics where the gates use it.
 # ---------------------------------------------------------------------------
 #: The perpetual instrument family (see
-#: :func:`yialpha.graph.routing.instrument_class`).
-_PERP_INSTRUMENT_CLASSES = frozenset(
-    {"stock_perp", "pure_crypto_perp", "unknown_perp"}
+#: :func:`yialpha.graph.routing.instrument_class`). ONE shared spelling
+#: with capture/scoring — imported from the ledger time contract so the
+#: classifier set cannot drift between the seams.
+from yialpha.ledger.time_contract import (  # noqa: E402
+    PERP_INSTRUMENT_CLASSES as _PERP_INSTRUMENT_CLASSES,
 )
 
 #: Per-``(asset_type, symbol)`` memo for the classification seam. Routing
@@ -344,11 +348,12 @@ def _forward_buffer_days(holding_days: int) -> int:
     silently truncated — the last decisions' forward windows computed on
     short bars with no warning. 7/5 converts sessions to calendar days; the
     +10 margin covers exclusivity and holiday clustering. The wider fetch
-    exists ONLY for ``_asset_return``'s forward windows; the equity/B&H
-    marking window stays capped at the legacy ``holding_days + 10`` boundary
-    (see ``mark_end`` at the call site), so metrics are byte-identical with
-    pre-round-8 runs and only the previously-truncated forward returns
-    change.
+    exists for ``_asset_return``'s forward windows; the equity/B&H marking
+    window keeps the legacy ``holding_days + 10`` boundary as its FLOOR (see
+    ``mark_end`` at the call site) and only extends past it when that
+    boundary would truncate the final episode's semantic window — so
+    metrics are byte-identical with pre-round-8 runs except for the
+    previously-truncated tail.
     """
     return math.ceil(holding_days * 7 / 5) + 10
 
@@ -815,10 +820,13 @@ def run_backtest(
     end_date = end_dt.strftime("%Y-%m-%d")
     # Marking cap (round-8 review): the equity/B&H loops used to run over the
     # WHOLE fetch window, so widening the buffer above would have lengthened
-    # every equity curve and silently drifted Sharpe/CAGR/alpha. Cap the
-    # marking window at the legacy ``holding_days + 10`` boundary instead —
-    # identical bar set to pre-round-8 for every ``holding_days``; the wider
-    # fetch feeds only ``_asset_return``'s per-decision forward windows.
+    # every equity curve and silently drifted Sharpe/CAGR/alpha. The marking
+    # window starts from the legacy ``holding_days + 10`` boundary — the
+    # identical bar set to pre-round-8 for every ``holding_days`` — and is
+    # EXTENDED (never shortened) after prices load when that boundary would
+    # truncate the final episode's semantic window (see the wave-2 fix below).
+    # The wider fetch feeds ``_asset_return``'s per-decision forward windows
+    # and, when extended, that final marking segment.
     mark_end = (
         datetime.strptime(sorted_dates[-1], "%Y-%m-%d")
         + timedelta(days=holding_days + 10)
@@ -842,6 +850,36 @@ def run_backtest(
             "cannot mark the backtest to market."
         )
     prices = prices.sort_index()
+
+    # Wave-2 leftover fix: extend ``mark_end`` to the LAST decision's semantic
+    # window when the legacy ``holding_days + 10`` CALENDAR-day boundary would
+    # truncate it. On session-based markets (equities) ``h+10`` calendar days
+    # can fall short of ``h`` trading sessions once weekends/holidays cluster
+    # (h=25 needs ~35+ calendar days), and the final episode then gets force-
+    # marked-to-market mid-window — its ``position_return`` no longer covers
+    # the same window as ``raw_return``. The semantic end is the last
+    # decision's execution bar + ``holding_days`` SESSIONS on the price
+    # index (never via ``_forward_buffer_days`` — the byte-identity pin
+    # monkeypatches that helper and must not move the marking boundary).
+    # EXTEND-ONLY: small ``h`` (including the default 5) keeps the exact
+    # legacy bar set; only genuinely truncated tails change.
+    last_exec = _execution_date_after_signal(
+        prices.index, sorted_dates[-1], execution_lag_bars)
+    if last_exec is not None:
+        exec_pos = _index_position_at_or_after(prices.index, last_exec)
+        if exec_pos is not None:
+            semantic_end_pos = min(
+                exec_pos + holding_days, len(prices.index) - 1)
+            # The marking loops use a STRICTLY-less-than bound, so the
+            # window's final bar is included only when mark_end sits one
+            # calendar day PAST it.
+            semantic_end = (
+                datetime.strptime(
+                    str(prices.index[semantic_end_pos]), "%Y-%m-%d")
+                + timedelta(days=1)
+            ).strftime("%Y-%m-%d")
+            if semantic_end > mark_end:
+                mark_end = semantic_end
 
     # --- Corporate-action price adjustment (V2.4 honest skeleton) -----------
     # Splits/dividends on the underlying are mechanics, not P&L: adjust the
@@ -1850,6 +1888,29 @@ def _run_event_study(
         logger.warning("event study failed for %s: %s", ticker, exc)
 
 
+def _decision_config_signature(graph: _GraphLike, asset_type: str) -> str:
+    """Hash the decision-affecting configuration of one graph instance.
+
+    Combines the graph's own ``_run_signature`` (analysts, debate/risk depth,
+    asset type, parallel mode, and the ``_SIGNATURE_CONFIG_KEYS`` tool /
+    semantic flags) with the provider-level keys that signature does NOT
+    carry — ``llm_provider`` / ``backend_url`` / ``tool_vendors`` (the same
+    coverage set the batch runner's ``_config_signature`` folds). Test
+    fakes without the method degrade to the provider segment alone (still
+    a stable, non-empty signature), so the cache key stays well-formed.
+    """
+    run_sig = getattr(graph, "_run_signature", None)
+    base = str(run_sig(asset_type)) if callable(run_sig) else "no-run-signature"
+    config = getattr(graph, "config", None) or {}
+    provider = json.dumps(
+        {k: config.get(k)
+         for k in ("llm_provider", "backend_url", "tool_vendors")},
+        sort_keys=True, default=str,
+    )
+    return hashlib.sha256(
+        (base + "|" + provider).encode("utf-8")).hexdigest()
+
+
 def _resolve_decision(
     graph: _GraphLike,
     ticker: str,
@@ -1882,7 +1943,11 @@ def _resolve_decision(
       which is the honest measurement.
     """
     if cache is not None:
-        cached = cache.get(ticker, trade_date, run_tag, asset_type=asset_type)
+        config_signature = _decision_config_signature(graph, asset_type)
+        cached = cache.get(
+            ticker, trade_date, run_tag, asset_type=asset_type,
+            config_signature=config_signature,
+        )
         if cached is not None:
             # Replay the recorded degraded flag too: a run whose unparseable
             # rating forced "Hold" must count as degraded on replay exactly as
@@ -1907,6 +1972,7 @@ def _resolve_decision(
         cache.remember(
             ticker, trade_date, rating, decision_md, run_tag,
             asset_type=asset_type, was_degraded=was_degraded,
+            config_signature=config_signature,
         )
     return rating, decision_md, False, was_degraded
 

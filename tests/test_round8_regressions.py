@@ -112,9 +112,16 @@ def test_fundamentals_tool_clamps_echoed_today_date():
     try:
         assert _pit_curr_date("2026-09-28") == "2024-06-03"
         assert _pit_curr_date("2024-01-15") == "2024-01-15"
-        assert _pit_curr_date(None) is None  # live passthrough
+        # Review P2-1 (round-8 known-issues batch): an EMPTY/omitted date in
+        # a PINNED run now falls back to the pinned date — "or empty for
+        # live mode" must not disarm a historical gate. Live passthrough
+        # (None in, None out) holds only without a pinned date, asserted
+        # below.
+        assert _pit_curr_date(None) == "2024-06-03"
+        assert _pit_curr_date("") == "2024-06-03"
     finally:
         set_analysis_date(None)
+    assert _pit_curr_date(None) is None  # live mode: no pinned date
 
 
 def test_balance_sheet_vendor_clamps_curr_date(monkeypatch):

@@ -84,9 +84,10 @@ def _load(symbol: str, curr_date: str) -> pd.DataFrame | str:
     # must not see past — the same guard the news vendors carry
     # (yfinance_news / alpha_vantage_news). get_stock_data clamps inside
     # y_finance; these TA tools feed load_ohlcv directly, so clamp here.
-    from yialpha.dataflows.utils import current_pit_end
+    from yialpha.dataflows.utils import current_pit_end, get_analysis_date
 
-    curr_date = str(current_pit_end(curr_date) or curr_date)
+    curr_date = str(
+        current_pit_end(curr_date) or get_analysis_date() or curr_date)
     try:
         data = load_ohlcv(symbol, curr_date)
     except Exception as exc:  # noqa: BLE001 — typed degrade, never crash the node
@@ -377,9 +378,10 @@ def get_relative_strength(
     # must not see past — the same guard the news vendors carry
     # (yfinance_news / alpha_vantage_news). get_stock_data clamps inside
     # y_finance; these TA tools feed load_ohlcv directly, so clamp here.
-    from yialpha.dataflows.utils import current_pit_end
+    from yialpha.dataflows.utils import current_pit_end, get_analysis_date
 
-    curr_date = str(current_pit_end(curr_date) or curr_date)
+    curr_date = str(
+        current_pit_end(curr_date) or get_analysis_date() or curr_date)
     try:
         data = load_ohlcv(symbol, curr_date)
     except Exception as exc:  # noqa: BLE001

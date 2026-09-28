@@ -296,7 +296,10 @@ def test_settle_scopes_flush_to_one_analyst(monkeypatch):
 
     import yialpha.agents.utils.prediction_tools as pt
 
-    ctx = SimpleNamespace(run_id="r-pin", analysis_as_of="2026-01-05", regime_id=None)
+    ctx = SimpleNamespace(
+        run_id="r-pin", analysis_as_of="2026-01-05", regime_id=None,
+        instrument_class=None, asset_type="crypto_perp",
+    )
     monkeypatch.setattr(pt, "current_ledger_run_context", lambda: ctx)
     monkeypatch.setattr(pt, "evidence_ids_for_run", lambda run_id: ())
     monkeypatch.setattr(pt, "submit_predictions", lambda **kw: [kw["analyst"]])

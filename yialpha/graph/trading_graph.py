@@ -112,6 +112,7 @@ _SIGNATURE_CONFIG_KEYS = (
     "indicator_battery",
     "indicator_ic_context",
     "market_regime",
+    "instrument_registry",
     "data_vendors",
 )
 
@@ -2781,6 +2782,12 @@ class YiAlphaGraph:
             "pm_decision_fields": final_state.get("pm_decision_fields") or {},
             "execution_ticket": final_state.get("execution_ticket"),
         }
+        # V2.3 positioning analyst's report — present only when the
+        # positioning_split flag ran the analyst (crypto_perp). Presence-
+        # gated like run_id below: flag-off logs stay byte-identical, and
+        # older readers ignore the unknown key.
+        if final_state.get("positioning_report"):
+            entry["positioning_report"] = final_state["positioning_report"]
         # V2.1: ledger run id — present only when the record-stage pipeline
         # ran (prediction_ledger on). Key presence (not a null value) keeps
         # flag-off logs byte-identical to the pre-V2.1 shape.

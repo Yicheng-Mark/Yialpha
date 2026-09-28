@@ -767,15 +767,31 @@ def get_a_share_sector_flow_native(
     AKShare board-catalog call never worked). Shows where capital is rotating
     across industries and whether this stock's sector is gaining or losing
     institutional money. The endpoint returns the latest snapshot (no
-    historical date param), so rows are not date-filtered — for a historical
-    ``curr_date`` this honestly returns the current snapshot with an explicit
-    caveat (the sector-flow signal is a real-time/live-mode indicator, not
-    reconstructable for backtests).
+    historical date param) — for a historical ``curr_date`` the function
+    refuses with a ``SECTOR_FLOW_UNAVAILABLE`` sentinel instead of serving
+    today's ranking (the old caveat note still leaked the future ranking
+    into backtests; snapshot-type data follows the same live-mode-only
+    contract as :func:`get_a_share_realtime_quote_native`).
 
     Non-A-share ticker -> :class:`NoMarketDataError`.
     """
     ak = _require_akshare()
     code = _to_akshare_code(ticker)
+
+    # Historical mode (a past/future analysis date): the ranking is a
+    # today-only snapshot with no date parameter — serving it would leak the
+    # future sector-flow ranking into the backtest. Today itself is live and
+    # allowed (is_historical_date gate semantics).
+    if is_historical_date(curr_date):
+        out = io.StringIO()
+        out.write(f"# A-share Sector Fund Flow for {ticker}\n")
+        out.write(f"(requested as of {curr_date})\n\n")
+        out.write("SECTOR_FLOW_UNAVAILABLE: This is a historical analysis "
+                  "date. The industry fund-flow ranking is a live Eastmoney "
+                  "snapshot with no historical reconstruction; returning it "
+                  "would leak future ranking information into the backtest. "
+                  "Do not infer or fabricate sector flows for this date.")
+        return out.getvalue().rstrip("\n")
 
     try:
         with _direct_connect():
@@ -796,10 +812,6 @@ def get_a_share_sector_flow_native(
         out.write("# Stock's industry: could not be resolved — do not guess it\n")
     out.write("# Source: AKShare stock_sector_fund_flow_rank (东财 行业资金流). Reached "
               "directly (proxy bypassed). Positive 主力净流入 = net institutional inflow.\n")
-    if curr_date:
-        out.write("# NOTE: sector fund-flow is a live snapshot — it cannot be "
-                  "reconstructed for a historical date. Treat this as current "
-                  "context, not as a point-in-time backtest signal.\n")
     if df is None or getattr(df, "empty", True):
         out.write("\nNo sector fund-flow data returned. Report 'no coverage found' "
                   "and do not fabricate flows.")

@@ -465,7 +465,7 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 │   ├── risk/                 # kelly / atr_stop / breaker / cvar / manager（量化风控叠加层）
 │   ├── backtest/             # engine / metrics / validation_gate / ic / report / cache
 │   ├── batch/                # 多 ticker 并发 runner + filelock
-│   ├── execution/            # browser_broker（浏览器券商 + kill switch）
+│   ├── execution/            # domain/gateway/bridge（Binance SDK 网关）+ browser_broker 兜底
 │   ├── monitoring/           # dashboard（HTML 仪表盘）
 │   ├── llm_clients/          # 多 LLM 提供商适配 + 限流器 + 共享 httpx
 │   ├── cli/                  # 交互式 CLI（analyze / batch / config-check / snapshot）

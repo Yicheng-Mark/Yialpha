@@ -366,7 +366,8 @@ def test_margin_same_day_cache_refetches_after_ttl(monkeypatch, tmp_path):
 
     # Age the cache past the 15-minute TTL: the next same-day call refetches
     # (this is where the old 1-day TTL served stale data until tomorrow).
-    cache_file = tmp_path / "margin_600519.json"
+    # Round-8 pagination: page 1 now caches under its own per-page name.
+    cache_file = tmp_path / "margin_600519_p1.json"
     stale = time.time() - eastmoney._SAME_DAY_TTL_DAYS * 86400.0 - 60
     os.utime(cache_file, (stale, stale))
     eastmoney.get_margin_trading("600519.SS", today, 7)

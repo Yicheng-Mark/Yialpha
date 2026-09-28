@@ -717,7 +717,7 @@ def test_parallel_tool_replays_keep_first_acceptance(monkeypatch, conflicting):
     fetches = []
     counter = count()
 
-    def fetch(*args):
+    def fetch(*args, **kwargs):
         number = next(counter)
         fetches.append(number)
         if number:
@@ -773,7 +773,7 @@ def test_flush_waits_for_acceptance_before_selecting_pending_capture(monkeypatch
             overlap.set()
 
     with ThreadPoolExecutor(max_workers=1) as executor:
-        def fetch(*args):
+        def fetch(*args, **kwargs):
             flushes.append(executor.submit(copy_context().run, flush))
             assert overlap.wait(timeout=5), "flush neither waited nor completed"
             return _concurrent_timing()
@@ -792,7 +792,7 @@ def test_capture_write_failure_can_retry_without_recapturing(monkeypatch):
     pt.begin_prediction_capture("market", "BTCUSDT", SCOPE_CONTRACT)
     fetches = []
 
-    def fetch(*args):
+    def fetch(*args, **kwargs):
         fetches.append(args)
         return _concurrent_timing()
 

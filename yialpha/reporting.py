@@ -88,6 +88,13 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
         analysts_dir.mkdir(exist_ok=True)
         _atomic_write_text(analysts_dir / "fundamentals.md", final_state["fundamentals_report"])
         analyst_parts.append(("Fundamentals Analyst", final_state["fundamentals_report"]))
+    # V2.3 positioning analyst (crypto_perp only, positioning_split flag).
+    # Presence-gated: the file and the consolidated-report section appear
+    # only when the analyst actually ran.
+    if final_state.get("positioning_report"):
+        analysts_dir.mkdir(exist_ok=True)
+        _atomic_write_text(analysts_dir / "positioning.md", final_state["positioning_report"])
+        analyst_parts.append(("Positioning Analyst", final_state["positioning_report"]))
     if analyst_parts:
         content = "\n\n".join(f"### {name}\n{text}" for name, text in analyst_parts)
         sections.append(f"## I. Analyst Team Reports\n\n{content}")

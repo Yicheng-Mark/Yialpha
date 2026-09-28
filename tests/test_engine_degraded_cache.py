@@ -15,7 +15,7 @@ import pandas as pd
 import pytest
 
 from yialpha.backtest.cache import DecisionCache
-from yialpha.backtest.engine import run_backtest
+from yialpha.backtest.engine import _decision_config_signature, run_backtest
 
 
 def _rising_prices(ticker: str, start: str, end: str) -> pd.Series:
@@ -63,9 +63,12 @@ def test_propagate_failure_is_not_cached(tmp_path):
     )
     assert first.degraded_decision_count == len(dates)
     assert all(t.rating == "Hold" for t in first.trades)
-    # Nothing was remembered: every key misses on a fresh lookup.
+    # Nothing was remembered: every key misses on a fresh lookup. Lookups
+    # carry the SAME config signature the engine derives (v5 keys fold it),
+    # so the miss is a genuine "never written", not a signature mismatch.
+    sig = _decision_config_signature(graph, "stock")
     for d in dates:
-        assert cache.get("AAPL", d, "r1") is None
+        assert cache.get("AAPL", d, "r1", config_signature=sig) is None
 
     # Heal the graph: the replay retries (does not serve the fake Hold) and
     # now caches the genuine decision.
@@ -78,7 +81,7 @@ def test_propagate_failure_is_not_cached(tmp_path):
     assert second.degraded_decision_count == 0
     assert all(t.rating == "Buy" for t in second.trades)
     for d in dates:
-        assert cache.get("AAPL", d, "r1") is not None
+        assert cache.get("AAPL", d, "r1", config_signature=sig) is not None
 
 
 @pytest.mark.unit
@@ -94,8 +97,9 @@ def test_genuine_decision_still_cached_after_fix(tmp_path):
         price_provider=_rising_prices, cache=cache, run_tag="r1",
     )
     calls_after_first = graph.calls
+    sig = _decision_config_signature(graph, "stock")
     for d in dates:
-        assert cache.get("AAPL", d, "r1") is not None
+        assert cache.get("AAPL", d, "r1", config_signature=sig) is not None
 
     run_backtest(
         graph, "AAPL", dates, holding_days=5,
@@ -128,7 +132,8 @@ def test_unparseable_rating_is_cached_but_counted_degraded(tmp_path):
     )
     assert result.degraded_decision_count == len(dates)
     assert all(t.rating == "Hold" for t in result.trades)
+    sig = _decision_config_signature(graph, "stock")
     for d in dates:
-        cached = cache.get("AAPL", d, "r1")
+        cached = cache.get("AAPL", d, "r1", config_signature=sig)
         assert cached is not None
         assert cached.rating == "Hold"

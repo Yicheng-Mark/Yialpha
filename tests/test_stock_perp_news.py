@@ -526,7 +526,8 @@ class GenericNewsToolRoutingTests(unittest.TestCase):
             {"ticker": "MUUSDT"},
             underlying="MU",
         )
-        self.assertEqual(calls, [("get_insider_transactions", "MU")])
+        # Third tuple element = the PIT-clamped curr_date (None in live mode).
+        self.assertEqual(calls, [("get_insider_transactions", "MU", None)])
 
     def test_get_insider_transactions_keeps_plain_equity_ticker(self):
         calls = self._vendor_calls(
@@ -534,7 +535,7 @@ class GenericNewsToolRoutingTests(unittest.TestCase):
             {"ticker": "MU"},
             underlying=None,
         )
-        self.assertEqual(calls, [("get_insider_transactions", "MU")])
+        self.assertEqual(calls, [("get_insider_transactions", "MU", None)])
 
 
 if __name__ == "__main__":

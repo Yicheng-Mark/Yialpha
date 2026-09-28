@@ -183,6 +183,16 @@ def _invoke_analyst_subgraph(
     )
     if perf_tracker is not None and perf_node_name is not None:
         perf_tracker.set_active_node(perf_node_name)
+    # Per-subgraph prediction-capture isolation: the worker context is a
+    # copy, so binding a fresh registry here confines the __active__ slot
+    # (and this analyst's captures) to this subgraph — without it, four
+    # parallel analysts race the single shared slot and tool calls append
+    # to the wrong analyst's capture. Serial runs never enter this helper.
+    from yialpha.agents.utils.prediction_tools import (
+        bind_isolated_prediction_capture_scope,
+    )
+
+    bind_isolated_prediction_capture_scope()
     try:
         final_state = subgraph.invoke(clone, config=invoke_config)
         return spec_key, final_state

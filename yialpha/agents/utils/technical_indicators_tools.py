@@ -32,9 +32,10 @@ def get_indicators(
     # indicator fallback behind this route never clamped on their own, so a
     # model echoing the cache's "Data retrieved on" header date served
     # post-decision rows on a historical run).
-    from yialpha.dataflows.utils import current_pit_end
+    from yialpha.dataflows.utils import current_pit_end, get_analysis_date
 
-    curr_date = str(current_pit_end(curr_date) or curr_date)
+    curr_date = str(
+        current_pit_end(curr_date) or get_analysis_date() or curr_date)
     # LLMs sometimes pass multiple indicators as a comma-separated string;
     # split and process each individually.
     indicators = [i.strip().lower() for i in indicator.split(",") if i.strip()]

@@ -273,11 +273,19 @@ class OrderRequest:
 
 @dataclass
 class CancelRequest:
-    """Request to cancel an existing order."""
+    """Request to cancel an existing order.
+
+    ``client_order_id`` (round-8 S8 KI-9) is the optional preferred channel:
+    Binance supports cancel-by-origClientOrderId, which survives a caller
+    getting the broker id↔client id mapping wrong. Empty (default) keeps the
+    legacy orderid channel — the field is additive and ignored by gateways
+    that lack the capability.
+    """
 
     orderid: str
     symbol: str
     exchange: Exchange
+    client_order_id: str = ""
 
     def __post_init__(self) -> None:
         self.vt_symbol: str = f"{self.symbol}.{self.exchange.value}"

@@ -86,9 +86,10 @@ def get_indicators_weekly(
     """
     # PIT clamp: curr_date comes from the LLM; the pinned analysis date is
     # the authority (same guard as the news vendors / price-structure _load).
-    from yialpha.dataflows.utils import current_pit_end
+    from yialpha.dataflows.utils import current_pit_end, get_analysis_date
 
-    curr_date = str(current_pit_end(curr_date) or curr_date)
+    curr_date = str(
+        current_pit_end(curr_date) or get_analysis_date() or curr_date)
     try:
         weekly = weekly_ohlcv(symbol, curr_date)
     except Exception as exc:  # noqa: BLE001 — typed degrade, never crash the node

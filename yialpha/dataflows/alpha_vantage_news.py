@@ -99,17 +99,36 @@ def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict
     )
 
 
-def get_insider_transactions(symbol: str) -> dict[str, str] | str:
+def get_insider_transactions(
+    symbol: str, curr_date: str | None = None,
+) -> dict[str, str] | str:
     """Returns latest and historical insider transactions by key stakeholders.
 
     Covers transactions by founders, executives, board members, etc.
 
+    The endpoint has no as-of parameter — it answers a *today* snapshot of
+    which transactions get listed. An explicit historical ``curr_date``
+    refuses with :class:`NoMarketDataError` (mirroring the yfinance-side
+    gate in ``y_finance.get_insider_transactions``) instead of leaking
+    post-decision transactions into a backtest; live mode (``curr_date`` is
+    today/empty) is unchanged.
+
     Args:
         symbol: Ticker symbol. Example: "IBM".
+        curr_date: As-of date yyyy-mm-dd (today/empty = live mode).
 
     Returns:
         Dictionary containing insider transaction data or JSON string.
     """
+    from .utils import overview_would_leak_future
+
+    curr_date = current_pit_end(curr_date) or curr_date
+    if overview_would_leak_future(curr_date):
+        raise NoMarketDataError(
+            symbol, symbol,
+            f"insider feed is a point-in-time (today only) snapshot; "
+            f"not valid as of {curr_date}",
+        )
 
     params = {
         "symbol": symbol,

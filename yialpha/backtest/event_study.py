@@ -26,10 +26,20 @@ ratings and prices. It runs entirely outside the agent graph: it changes no
 agent input, capability, or depth, and adds no non-determinism to the graph.
 ``scipy`` is optional (``scipy.stats.ttest_1samp`` gives an exact t-distribution
 p-value; without it the t-statistic is still returned and ``p_value`` is
-``None``). The event anchor is the decision date -- the question the engine
-answers is "did the asset move abnormally after *our* analyst decided?" -- so
-unlike a classic earnings-announcement study it depends on no filing-date
-source.
+``None``). The event anchor is the EXECUTION date as passed by the caller
+(the engine passes each trade's first executable bar -- the bar after the
+signal-day close -- so the question answered is "did the asset move
+abnormally once the decision was executable?"). Unlike a classic
+earnings-announcement study it depends on no filing-date source.
+
+**Window convention.** With the default ``event_window=(0, 20)`` the first
+CAR term is offset 0 = the EXECUTION bar's own close-to-close return
+(signal-day close -> execution-day close). That move is already complete at
+the fill and is NOT capturable by the strategy (position starts at the
+execution close); it also correlates with the signal (post-rating drift), so
+it systematically tilts mean CAR. A strict post-fill convention passes
+``event_window=(1, N)``. The default keeps offset 0 for comparability with
+the naive ``alpha_vs_index`` baseline it strengthens.
 """
 
 from __future__ import annotations
@@ -199,7 +209,11 @@ def event_study(
     event_window:
         ``(start_offset, end_offset)`` return offsets relative to the event-day
         return, inclusive (default ``(0, 20)`` -- the event day through 20
-        sessions after).
+        sessions after). Offset 0 is the event bar's OWN close-to-close
+        return: when the caller anchors on the execution bar (the engine's
+        convention), that is the signal-close -> execution-close move --
+        complete at the fill, not capturable by the strategy, and correlated
+        with the signal. Use ``(1, N)`` for a strict post-fill CAR.
     """
     if ratings is not None and len(ratings) != len(event_dates):
         raise ValueError(

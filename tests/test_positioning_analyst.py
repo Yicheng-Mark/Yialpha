@@ -185,7 +185,7 @@ def test_positioning_report_forbids_a_direction_key():
 def test_node_skips_non_perp_with_zero_llm_calls(monkeypatch):
     set_config({"positioning_split": True})
     llm = _FakeLLM()
-    monkeypatch.setattr(pa, "invoke_structured_or_freetext", lambda *a, **k: "R")
+    monkeypatch.setattr(pa, "invoke_structured_or_freetext", lambda *a, **k: ("R", True))
     out = pa.create_positioning_analyst(llm)(
         {**_perp_state(), "asset_type": "stock"}
     )
@@ -196,7 +196,7 @@ def test_node_skips_non_perp_with_zero_llm_calls(monkeypatch):
 @pytest.mark.unit
 def test_node_skips_when_flag_off(monkeypatch):
     llm = _FakeLLM()
-    monkeypatch.setattr(pa, "invoke_structured_or_freetext", lambda *a, **k: "R")
+    monkeypatch.setattr(pa, "invoke_structured_or_freetext", lambda *a, **k: ("R", True))
     out = pa.create_positioning_analyst(llm)(_perp_state())
     assert "skipped" in out["positioning_report"].lower()
     assert llm.calls == 0
@@ -258,7 +258,7 @@ def test_node_runs_bundle_evidence_and_prediction_capture(monkeypatch):
         monkeypatch.setattr(
             pb, "fetch_perp_market_bundle", lambda t, d: _minimal_bundle()
         )
-        monkeypatch.setattr(pa, "invoke_structured_or_freetext", lambda *a, **k: "R")
+        monkeypatch.setattr(pa, "invoke_structured_or_freetext", lambda *a, **k: ("R", True))
         tool_call = AIMessage(
             content="",
             tool_calls=[
@@ -308,7 +308,7 @@ def test_node_appends_onchain_block_when_enabled(monkeypatch):
         monkeypatch.setattr(
             pb, "fetch_perp_market_bundle", lambda t, d: _minimal_bundle()
         )
-        monkeypatch.setattr(pa, "invoke_structured_or_freetext", lambda *a, **k: "R")
+        monkeypatch.setattr(pa, "invoke_structured_or_freetext", lambda *a, **k: ("R", True))
         monkeypatch.setattr(ocf, "fetch_chart_json", lambda chart, **k: _chart_payload())
         llm = _FakeLLM()
         pa.create_positioning_analyst(llm)(_perp_state())
@@ -334,7 +334,7 @@ def test_node_degrades_when_bundle_fetch_fails(monkeypatch):
             raise RuntimeError("vendor down")
 
         monkeypatch.setattr(pb, "fetch_perp_market_bundle", boom)
-        monkeypatch.setattr(pa, "invoke_structured_or_freetext", lambda *a, **k: "R")
+        monkeypatch.setattr(pa, "invoke_structured_or_freetext", lambda *a, **k: ("R", True))
         llm = _FakeLLM()
         out = pa.create_positioning_analyst(llm)(_perp_state())
         assert out["positioning_report"] == "R"  # fail-soft: report still runs

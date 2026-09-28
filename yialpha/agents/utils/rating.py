@@ -27,6 +27,23 @@ _RATING_SET = {r.lower() for r in RATINGS_5_TIER}
 # bold wrappers and either a colon or hyphen separator.
 _RATING_LABEL_RE = re.compile(r"rating.*?[:\-][\s*]*(\w+)", re.IGNORECASE)
 
+# Negation words that flip the meaning of a rating word following within a
+# small window ("argues against Sell", "counter to Sell", "not Sell").
+# Known uncovered shape (review P3-5, accepted): "rather Sell than Buy" is a
+# PREFERENCE for Sell, but a backward window cannot tell it apart from the
+# negating "rather than Sell" — the heuristic keeps "rather" because the
+# negating phrasing dominates PM prose.
+_NEGATORS = frozenset({
+    "not", "no", "never", "neither", "nor", "against", "counter",
+    "counters", "countered", "contrary", "opposed", "versus", "vs",
+    "instead", "rather", "despite", "anti",
+})
+
+
+def _negated_before(tokens: list[str], idx: int, window: int = 2) -> bool:
+    """True when a negator sits within ``window`` tokens before ``tokens[idx]``."""
+    return any(t in _NEGATORS for t in tokens[max(0, idx - window):idx])
+
 
 def parse_rating(
     text: str, default: str = "Hold", *, warn_on_default: bool = False,
@@ -35,7 +52,12 @@ def parse_rating(
 
     Two-pass strategy:
     1. Look for an explicit "Rating: X" label (tolerant of markdown bold).
-    2. Fall back to the first 5-tier rating word found anywhere in the text.
+    2. Fall back to the first 5-tier rating word found anywhere in the text
+       that is not preceded by a nearby negator — "argues against Sell" must
+       not parse as Sell. A 2-token backward window covers "against Sell",
+       "counter to Sell", "not Sell", "rather than Sell". The label pass
+       needs no guard: the regex captures the word immediately after the
+       separator, so a negator cannot slip in between.
 
     Returns a Title-cased rating string, or ``default`` if no rating word appears.
     When ``warn_on_default`` is True, a ``logger.warning`` is emitted on fallback
@@ -48,10 +70,10 @@ def parse_rating(
             return m.group(1).capitalize()
 
     for line in text.splitlines():
-        for word in line.lower().split():
-            clean = word.strip("*:.,")
-            if clean in _RATING_SET:
-                return clean.capitalize()
+        tokens = [w.strip("*:.,") for w in line.lower().split()]
+        for i, t in enumerate(tokens):
+            if t in _RATING_SET and not _negated_before(tokens, i):
+                return t.capitalize()
 
     if warn_on_default:
         snippet = (text or "").strip().replace("\n", " ")[:120]

@@ -29,9 +29,9 @@ def _pit_curr_date(curr_date: str | None) -> str | None:
     today-snapshot overviews into a historical run. Unchanged in live mode
     (no analysis date pinned).
     """
-    from yialpha.dataflows.utils import current_pit_end
+    from yialpha.dataflows.utils import current_pit_end, get_analysis_date
 
-    return current_pit_end(curr_date) or curr_date
+    return current_pit_end(curr_date) or get_analysis_date() or curr_date
 
 
 @tool

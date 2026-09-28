@@ -144,6 +144,42 @@ def _now_utc() -> datetime:
     return datetime.now(UTC)
 
 
+#: Reference-seam source labels shared by capture and scoring (the ONE
+#: spelling — a mismatch between the two sides retires the row permanently).
+REFERENCE_SOURCE_EQUITY = "yfinance:1d:close"
+REFERENCE_SOURCE_PERP = "binance_perp:1d:last"
+
+#: Registry instrument classes that denote a perpetual contract (anything
+#: else — plain equities — prices on the equity seam). Shared with
+#: outcome_compute and the backtest engine so the classifier set cannot
+#: drift between capture, scoring, and backtest seams.
+PERP_INSTRUMENT_CLASSES = frozenset(
+    {"stock_perp", "pure_crypto_perp", "unknown_perp"}
+)
+
+
+def reference_seam_equity(
+    prediction_scope: str | None,
+    instrument_class: str | None,
+    asset_type: str | None,
+) -> bool:
+    """The ONE equity/perp reference-seam verdict, shared by capture and scoring.
+
+    Scoring's predicate is canonical (existing outcome rows were scored
+    under it); capture adopts it so both sides pick the same vendor for
+    the same prediction row. UNDERLYING scope prices the equity seam ONLY
+    for a stock perp's underlying equity; any non-perp instrument is
+    equity; everything else (perp contract scopes included) prices the
+    perp seam.
+    """
+    is_perp = (
+        instrument_class in PERP_INSTRUMENT_CLASSES
+        or asset_type == "crypto_perp"
+    )
+    stock_perp = instrument_class == "stock_perp"
+    return (prediction_scope == "UNDERLYING" and stock_perp) or not is_perp
+
+
 def _reference_frame(symbol: str, day: date, *, equity: bool, as_of: datetime) -> pd.DataFrame:
     """Narrow, deterministic vendor seam; fetch exactly one expected daily bar."""
     if equity:
@@ -154,20 +190,34 @@ def _reference_frame(symbol: str, day: date, *, equity: bool, as_of: datetime) -
     )
 
 
-def capture_prediction_timing(instrument_id: str, prediction_scope: str) -> dict[str, Any]:
+def capture_prediction_timing(
+    instrument_id: str,
+    prediction_scope: str,
+    *,
+    instrument_class: str | None = None,
+    asset_type: str | None = None,
+) -> dict[str, Any]:
     """Freeze a locally sourced snapshot before accepting the tool submission.
 
     Formation is stamped after the reference fetch/observation; delayed
     flushes never re-fetch it. Failed fetches are explicit new-contract
     snapshots, never an implicit request for legacy historical scoring.
+
+    ``instrument_class`` / ``asset_type`` (from the ledger run context)
+    feed :func:`reference_seam_equity` so the capture side picks the SAME
+    vendor seam the scoring side will later expect — without them capture
+    guesses "UNDERLYING = equity", which diverges from scoring for e.g. an
+    ``unknown_perp`` underlying (the row then retires as a permanent
+    ``reference_source_mismatch``).
     """
     result: dict[str, Any] = dict.fromkeys(_FIELDS)
     result["version"] = PREDICTION_TIME_VERSION
     if prediction_scope in {"POSITIONING", "MACRO"}:
         result["prediction_formed_at"] = _now_utc().isoformat()
         return validate_timing(result)  # type: ignore[return-value]
-    equity = prediction_scope == "UNDERLYING"
-    result["reference_source"] = "yfinance:1d:close" if equity else "binance_perp:1d:last"
+    equity = reference_seam_equity(prediction_scope, instrument_class, asset_type)
+    result["reference_source"] = (
+        REFERENCE_SOURCE_EQUITY if equity else REFERENCE_SOURCE_PERP)
     requested_at = _now_utc()
     day = expected_reference_date(requested_at, equity=equity)
     try:

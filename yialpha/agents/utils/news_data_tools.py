@@ -3,6 +3,21 @@ from typing import Annotated
 from langchain_core.tools import tool
 
 from yialpha.dataflows.interface import route_to_vendor
+from yialpha.dataflows.utils import current_pit_end, get_analysis_date
+
+
+def _pit_curr_date(curr_date):
+    """Clamp an LLM-supplied curr_date to the run's pinned analysis date.
+
+    Same guard as the a_share_native / sec_ownership tools: vendors
+    PIT-filter (or refuse historical snapshots) by the passed ``curr_date``
+    verbatim, so an LLM echoing a cached header's today-date must not
+    disarm the gate. An EMPTY/omitted curr_date in a pinned (backtest) run
+    falls back to the pinned date — "or empty for live mode" cannot be
+    used to sidestep a historical gate (review P2-1); genuinely live runs
+    have no pinned date and keep the empty value.
+    """
+    return current_pit_end(curr_date) or get_analysis_date() or curr_date
 
 
 def _vendor_ticker(ticker: str) -> str:
@@ -66,13 +81,20 @@ def get_global_news(
 @tool
 def get_insider_transactions(
     ticker: Annotated[str, "ticker symbol"],
+    curr_date: Annotated[str | None, "current/as-of date in yyyy-mm-dd (the trade date, or empty for live mode)"] = None,
 ) -> str:
     """
     Retrieve insider transaction information about a company.
-    Uses the configured news_data vendor.
+    Uses the configured news_data vendor. Dormant today (no analyst
+    advertises it); the curr_date gate mirrors the vendor-side historical
+    refusal so a future wiring cannot leak today's snapshot into a backtest.
     Args:
         ticker (str): Ticker symbol of the company
+        curr_date (str | None): As-of date yyyy-mm-dd (empty for live mode)
     Returns:
         str: A report of insider transaction data
     """
-    return route_to_vendor("get_insider_transactions", _vendor_ticker(ticker))
+    return route_to_vendor(
+        "get_insider_transactions", _vendor_ticker(ticker),
+        _pit_curr_date(curr_date),
+    )

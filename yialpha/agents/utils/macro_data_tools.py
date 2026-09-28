@@ -3,7 +3,7 @@ from typing import Annotated
 from langchain_core.tools import tool
 
 from yialpha.dataflows.interface import route_to_vendor
-from yialpha.dataflows.utils import current_pit_end
+from yialpha.dataflows.utils import current_pit_end, get_analysis_date
 
 
 def _pit_curr_date(curr_date):
@@ -14,7 +14,7 @@ def _pit_curr_date(curr_date):
     (window end), so an LLM echoing a cached header's today-date would admit
     post-decision observations into a backtest. No-op in live mode.
     """
-    return current_pit_end(curr_date) or curr_date
+    return current_pit_end(curr_date) or get_analysis_date() or curr_date
 
 
 @tool

@@ -466,7 +466,7 @@ One-line telemetry: `python scripts/run_baseline.py --smoke --profile --ticker <
 │   ├── risk/                 # kelly / atr_stop / breaker / cvar / manager (quant risk overlay)
 │   ├── backtest/             # engine / metrics / validation_gate / ic / report / cache
 │   ├── batch/                # multi-ticker concurrent runner + filelock
-│   ├── execution/            # browser_broker (browser broker + kill switch)
+│   ├── execution/            # domain/gateway/bridge (Binance SDK gateway) + browser_broker fallback
 │   ├── monitoring/           # dashboard (HTML dashboard)
 │   ├── llm_clients/          # multi-provider adapters + rate limiter + shared httpx
 │   ├── cli/                  # interactive CLI (analyze / batch / config-check / snapshot)

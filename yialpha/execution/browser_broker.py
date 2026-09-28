@@ -3,7 +3,9 @@
 When a broker has no first-class API, this module drives the broker's Web
 order-entry UI via Playwright with Microsoft Edge. It is intentionally
 **fail-closed and dry-run by default**, and gated behind an analysis-only
-boundary, two explicit enable switches, and an environment kill switch. The
+boundary plus three explicit live-policy settings (see
+:class:`LiveExecutionSwitch`: the boundary disabled AND the live switch AND
+the legacy switch all armed) and an environment kill switch. The
 preferred execution path is always a real broker API; this is the
 fallback for the brokers that only expose a Web UI.
 
@@ -344,7 +346,9 @@ class BrowserBroker:
            configured (still never submit).
         8. Launch Edge, navigate, fill via :meth:`_fill_order_form`, capture
            preview. If ``dry_run`` -> stop, return ``DRY_RUN_PREVIEW``.
-           Else -> :meth:`_click_submit` and return ``SUBMITTED``.
+           Else -> the submit-edge :meth:`_final_guard` re-checks BOTH the
+           kill switch and the live-execution policy immediately before
+           :meth:`_click_submit`, then returns ``SUBMITTED``.
 
         Every browser interaction is wrapped so any exception becomes
         ``ERROR`` or ``BLOCKED_PLAYWRIGHT`` — a live submission can never slip
@@ -499,7 +503,7 @@ class BrowserBroker:
                     submitted=False,
                 )
 
-        # Gate 4: optional pre-submit validator.
+        # Gate 5: optional pre-submit validator.
         if pre_submit_validator is not None:
             try:
                 verdict = pre_submit_validator(ticker, action_enum, size_f)
@@ -522,7 +526,7 @@ class BrowserBroker:
                     submitted=False,
                 )
 
-        # Gate 5: Playwright must be importable for anything beyond a pure
+        # Gate 6: Playwright must be importable for anything beyond a pure
         # dry-run preview. For dry-run we can short-circuit before needing it.
         if is_dry_run:
             # Dry run never touches the browser if we have nowhere to go, and
@@ -543,7 +547,7 @@ class BrowserBroker:
                 submitted=False,
             )
 
-        # Gate 6: must know where to navigate for a live order.
+        # Gate 7: must know where to navigate for a live order.
         if not self.order_page_url:
             return OrderResult(
                 status=OrderStatus.BLOCKED_PLAYWRIGHT,
@@ -557,7 +561,7 @@ class BrowserBroker:
                 submitted=False,
             )
 
-        # Gate 7: launch Edge, fill, submit. Any exception -> ERROR, never a
+        # Gate 8: launch Edge, fill, submit. Any exception -> ERROR, never a
         # submission leaking through.
         try:
             return self._do_live_order(

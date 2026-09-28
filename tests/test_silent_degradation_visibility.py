@@ -182,7 +182,8 @@ def test_memory_bad_as_of_date_warns(tmp_path, caplog):
 # L5 — Binance order-recovery lookup failure is logged (None -> REJECTED)
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
-def test_binance_recovery_failure_warns(caplog):
+def test_binance_recovery_failure_warns(caplog, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _s: None)  # retry backoff
     gw = BinanceGateway()
     gw._client = MagicMock()
     gw._client.rest_api.query_order.side_effect = RuntimeError("boom")
@@ -195,4 +196,9 @@ def test_binance_recovery_failure_warns(caplog):
     )
     with caplog.at_level("WARNING", logger="yialpha.execution.binance_gateway"):
         assert gw._safe_query_by_client_id(req, "coid-1") is None
-    assert any("recovery lookup failed" in r.message for r in caplog.records)
+    # Round-8 S8 KI-2: the probe retries a bounded 3 times (visibility lag),
+    # then warns once with the final failure detail.
+    assert any(
+        "could not confirm" in r.message and "3 probe" in r.message
+        for r in caplog.records
+    )

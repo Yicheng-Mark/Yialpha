@@ -516,6 +516,28 @@ def summarize_gate(metrics: dict) -> tuple[bool, list[str]]:
     if metrics.get("exceptions_parallel", 0) > 0:
         fail(f"{metrics['exceptions_parallel']} exception(s) in parallel leg")
 
+    # 7) Both legs retain usable samples after exception-dropping. An
+    #    all-crashed leg has no distribution to compare — that is an infra
+    #    failure, not a parallel-vs-serial verdict.
+    n_serial_ok = (metrics.get("n_serial") or 0) - (metrics.get("dropped_serial") or 0)
+    n_parallel_ok = (metrics.get("n_parallel") or 0) - (metrics.get("dropped_parallel") or 0)
+    if n_serial_ok <= 0:
+        fail("serial leg: all propagate runs failed (no usable samples)")
+    if n_parallel_ok <= 0:
+        fail("parallel leg: all propagate runs failed (no usable samples)")
+
+    # 8) Prediction attribution (S3-a race probe): when the parallel leg
+    #    recorded settled predictions, at least one run must attribute them
+    #    to 2+ distinct analysts — the __active__ single-slot race collapses
+    #    every submission onto the last writer.
+    if not metrics.get("prediction_attribution_measured", False):
+        pass  # N/A — no predictions recorded (ledger off / no submissions)
+    elif not metrics.get("prediction_attribution_ok", False):
+        fail(
+            "prediction attribution: every parallel run's predictions land "
+            "on a single analyst (__active__ capture race)"
+        )
+
     return ok, reasons
 
 
@@ -546,6 +568,18 @@ def write_report(
     lines.append(f"- Runs per leg: **{n}**")
     lines.append(f"- Serial leg exceptions: {metrics.get('exceptions_serial', 0)}")
     lines.append(f"- Parallel leg exceptions: {metrics.get('exceptions_parallel', 0)}")
+    lines.append(
+        f"- Dropped from stats (propagate failed): serial "
+        f"{metrics.get('dropped_serial', 0)}, parallel "
+        f"{metrics.get('dropped_parallel', 0)}"
+    )
+    if metrics.get("prediction_attribution_measured", False):
+        lines.append(
+            "- Prediction attribution (S3-a race probe): "
+            + ("OK (2+ distinct analysts in a parallel run)"
+               if metrics.get("prediction_attribution_ok", False)
+               else "FAILED (single-analyst collapse)")
+        )
     speedup = metrics.get("speedup")
     if dry_run:
         lines.append("- Parallel speedup: N/A (dry-run, synthetic timing)")
@@ -709,9 +743,26 @@ def _compute_metrics(
     *,
     dry_run: bool = False,
 ) -> dict:
-    """Run every metric function over two legs and return the metrics dict."""
-    s_ratings = [r["rating"] for r in serial_runs]
-    p_ratings = [r["rating"] for r in parallel_runs]
+    """Run every metric function over two legs and return the metrics dict.
+
+    Runs whose propagate raised are EXCLUDED from every distributional
+    statistic: a crashed run's ``"?"`` rating and empty reports are infra
+    artifacts, not samples — they used to skew the chi-square / TF-IDF
+    inputs and silently flip the speedup criterion to N/A via a None
+    analyst segment. They still count in ``exceptions_*`` (gate criterion
+    6 fails on them) and in the new ``dropped_*`` keys; criterion 7 fails
+    outright when a leg loses ALL its runs.
+    """
+    def _ok(runs: list[dict]) -> list[dict]:
+        return [r for r in runs if not r.get("exception")]
+
+    serial_ok = _ok(serial_runs)
+    parallel_ok = _ok(parallel_runs)
+    dropped_serial = len(serial_runs) - len(serial_ok)
+    dropped_parallel = len(parallel_runs) - len(parallel_ok)
+
+    s_ratings = [r["rating"] for r in serial_ok]
+    p_ratings = [r["rating"] for r in parallel_ok]
     sh = rating_histogram(s_ratings)
     ph = rating_histogram(p_ratings)
     p = chi_square_p(sh, ph)
@@ -720,8 +771,8 @@ def _compute_metrics(
     fields = ("market_report", "sentiment_report", "news_report", "fundamentals_report")
     per_field: dict[str, dict[str, float]] = {}
     for f in fields:
-        s_texts = [r.get(f, "") for r in serial_runs]
-        p_texts = [r.get(f, "") for r in parallel_runs]
+        s_texts = [r.get(f, "") for r in serial_ok]
+        p_texts = [r.get(f, "") for r in parallel_ok]
         per_field[f] = between_vs_within_similarity(s_texts, p_texts)
 
     def empty_count(runs: list[dict], fields_) -> int:
@@ -739,10 +790,10 @@ def _compute_metrics(
     # that dilutes the analyst-only speedup with the serial debate/trader/risk/PM
     # tail and would falsely fail a correct implementation. The whole-run ratio
     # is still recorded as informational-only in ``speedup_wall_full``.
-    serial_segs: list[float | None] = [r.get("analyst_segment") for r in serial_runs]
-    par_segs: list[float | None] = [r.get("analyst_segment") for r in parallel_runs]
-    serial_walls = [r.get("wall_full", 0.0) for r in serial_runs]
-    par_walls = [r.get("wall_full", 0.0) for r in parallel_runs]
+    serial_segs: list[float | None] = [r.get("analyst_segment") for r in serial_ok]
+    par_segs: list[float | None] = [r.get("analyst_segment") for r in parallel_ok]
+    serial_walls = [r.get("wall_full", 0.0) for r in serial_ok]
+    par_walls = [r.get("wall_full", 0.0) for r in parallel_ok]
     speedup_na = dry_run
     speedup = None
     speedup_wall_full = None
@@ -767,20 +818,33 @@ def _compute_metrics(
     if dry_run:
         speedup_na = True
 
+    # S3-a race probe: a healthy parallel leg attributes one run's settled
+    # predictions to 2+ DISTINCT analysts; the __active__ single-slot race
+    # collapses every submission onto the last writer. N/A when no
+    # predictions were recorded at all (ledger off / no tool submissions) —
+    # unmeasured, not passed.
+    par_pred_sets = [r.get("prediction_analysts") or [] for r in parallel_ok]
+    any_predictions = any(par_pred_sets)
+    prediction_attribution_ok = any(len(a) >= 2 for a in par_pred_sets)
+
     return {
         "n_serial": len(serial_runs),
         "n_parallel": len(parallel_runs),
+        "dropped_serial": dropped_serial,
+        "dropped_parallel": dropped_parallel,
         "serial_hist": sh,
         "parallel_hist": ph,
         "rating_p": p,
         "overlap_ratio": overlap,
         "per_field_similarity": per_field,
-        "risk_determinism_serial": risk_overlay_determinism(serial_runs),
-        "risk_determinism_parallel": risk_overlay_determinism(parallel_runs),
-        "empty_reports_serial": empty_count(serial_runs, fields),
-        "empty_reports_parallel": empty_count(parallel_runs, fields),
+        "risk_determinism_serial": risk_overlay_determinism(serial_ok),
+        "risk_determinism_parallel": risk_overlay_determinism(parallel_ok),
+        "empty_reports_serial": empty_count(serial_ok, fields),
+        "empty_reports_parallel": empty_count(parallel_ok, fields),
         "exceptions_serial": sum(1 for r in serial_runs if r.get("exception")),
         "exceptions_parallel": sum(1 for r in parallel_runs if r.get("exception")),
+        "prediction_attribution_ok": prediction_attribution_ok,
+        "prediction_attribution_measured": any_predictions,
         "speedup": speedup,
         "speedup_na": speedup_na,
         "speedup_wall_full": speedup_wall_full,
@@ -933,6 +997,24 @@ def _capture_run(graph, ticker: str, date: str) -> dict:
             analyst_segment = None
 
     decision = (final_state or {}).get("final_trade_decision", "") or ""
+
+    # S3-a race probe material: the distinct analysts this run's settled
+    # predictions attribute to. A healthy run with multiple tool-loop
+    # analysts attributes to 2+; the __active__ single-slot race collapses
+    # every submission onto the last writer (one analyst). Fail-soft — the
+    # attribution check must never break the gate run itself.
+    prediction_analysts: list[str] = []
+    run_id = (final_state or {}).get("run_id")
+    if run_id:
+        try:
+            from yialpha.ledger.predictions import predictions_for_run
+
+            prediction_analysts = sorted(
+                {p.analyst for p in predictions_for_run(str(run_id))}
+            )
+        except Exception:  # noqa: BLE001
+            prediction_analysts = []
+
     return {
         "ticker": ticker,
         "rating": rating,
@@ -944,6 +1026,7 @@ def _capture_run(graph, ticker: str, date: str) -> dict:
         "risk_overlay": parse_risk_overlay(decision),
         "wall_full": wall_full,
         "analyst_segment": analyst_segment,
+        "prediction_analysts": prediction_analysts,
         "exception": repr(exception) if exception else None,
     }
 

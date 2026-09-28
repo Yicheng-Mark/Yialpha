@@ -50,13 +50,17 @@ __all__ = [
 # can never reach a sink even if a future call site forgets to redact.
 #
 # Redaction layers, cheapest/most-precise first:
-#   1. the active Alpha Vantage key value (env) — exact string match;
+#   1. every configured credential value (Alpha Vantage + the Zhipu / Tavily
+#      key pools, comma-separated env vars split) — exact string match;
 #   2. any caller-supplied secret values (e.g. the key a request actually
 #      used, which may come from a patched source rather than the env);
 #   3. ``apikey=<token>`` / ``apikey: <token>`` query-parameter forms;
-#   4. key-shaped tokens: a 16-char alphanumeric run containing both a letter
-#      and a digit (Alpha Vantage keys are 16-char mixed alphanumerics). The
-#      letter+digit requirement keeps ordinary words and pure numbers intact.
+#   4. key-shaped tokens, family by family: a 16-char alphanumeric run
+#      containing both a letter and a digit (Alpha Vantage shape — the
+#      letter+digit requirement keeps ordinary words and pure numbers
+#      intact); ``tvly-<base62>`` (Tavily shape, prefix is distinctive);
+#      ``<32-hex>.<alnum>`` (Zhipu/BigModel shape — uuid4().hex carries no
+#      dot, so thread/request ids never match).
 #
 # Redaction preserves surrounding error semantics ("rate limit exceeded",
 # "Your API key [REDACTED] ...") — the message is scrubbed, never swallowed.
@@ -65,6 +69,22 @@ __all__ = [
 REDACTED_PLACEHOLDER = "[REDACTED]"
 
 ALPHA_VANTAGE_KEY_ENV = "ALPHA_VANTAGE_API_KEY"
+
+# Multi-key env vars (comma-separated pools) plus the single-key forms: every
+# configured value is exact-match redacted first — zero false positives, the
+# primary coverage for the providers this deployment actually uses. This is
+# the credential SET this deployment configures; a value NOT in an env var
+# relies on the shape fallbacks below.
+_KEYRING_ENVS = (
+    ALPHA_VANTAGE_KEY_ENV,
+    "ZHIPU_CN_API_KEYS",
+    "ZHIPU_CN_API_KEY",
+    "TAVILY_API_KEYS",
+    "TAVILY_API_KEY",
+    "BINANCE_API_KEY",
+    "BINANCE_API_SECRET",
+    "TUSHARE_TOKEN",
+)
 
 # ``apikey=SECRET`` / ``apikey: SECRET`` (also inside URLs: stops at '&').
 _APIKEY_PARAM_RE = re.compile(r"(?i)(apikey\s*[=:]\s*)([^\s,'\"&]+)")
@@ -81,15 +101,28 @@ _KEY_SHAPE_RE = re.compile(
     r"(?![A-Za-z0-9])"
 )
 
+# Tavily keys ("tvly-" + long base62 body): the distinctive prefix makes a
+# shape-level fallback safe even when the exact value is not loaded in env
+# (e.g. rotated out mid-process).
+_TAVILY_KEY_SHAPE_RE = re.compile(r"tvly-[0-9A-Za-z]{20,}")
+
+# BigModel/Zhipu keys ("<32-hex id>.<alnum secret>"): the dot-joined shape is
+# distinctive enough that uuid4().hex (32 hex, NO dot) never matches, so
+# thread ids / request ids in logs survive the fallback untouched.
+_ZHIPU_KEY_SHAPE_RE = re.compile(r"[0-9a-f]{32}\.[0-9A-Za-z]{8,}")
+
 
 def redact_secrets(text: str, extra_secrets: Iterable[str] | None = None) -> str:
     """Scrub credential material from *text*, preserving error semantics.
 
-    Removes the configured Alpha Vantage key (``ALPHA_VANTAGE_API_KEY``), any
-    caller-supplied *extra_secrets* (e.g. the key a specific request used),
-    ``apikey=...``/``apikey: ...`` parameter values, and key-shaped 16-char
-    alphanumeric tokens. Idempotent: already-redacted text is returned
-    unchanged.
+    Removes every configured credential value (Alpha Vantage, the Zhipu
+    key pool ``ZHIPU_CN_API_KEYS``/``ZHIPU_CN_API_KEY``, the Tavily pool
+    ``TAVILY_API_KEYS``/``TAVILY_API_KEY`` — comma-separated pools are
+    split), any caller-supplied *extra_secrets* (e.g. the key a specific
+    request used), ``apikey=...``/``apikey: ...`` parameter values, and
+    key-shaped tokens (16-char AV shape, ``tvly-`` prefixed Tavily shape,
+    ``<32-hex>.<alnum>`` Zhipu shape). Idempotent: already-redacted text is
+    returned unchanged.
     """
     if not text:
         return text
@@ -98,14 +131,25 @@ def redact_secrets(text: str, extra_secrets: Iterable[str] | None = None) -> str
         if secret and secret in out:
             out = out.replace(secret, REDACTED_PLACEHOLDER)
     out = _APIKEY_PARAM_RE.sub(r"\g<1>" + REDACTED_PLACEHOLDER, out)
+    # Family-specific shapes FIRST (a "tvly-…" or "<32hex>.<alnum>" run is a
+    # more precise claim than the generic 16-char shape, which would
+    # otherwise bite off just the trailing half of a longer family key).
+    out = _TAVILY_KEY_SHAPE_RE.sub(REDACTED_PLACEHOLDER, out)
+    out = _ZHIPU_KEY_SHAPE_RE.sub(REDACTED_PLACEHOLDER, out)
     out = _KEY_SHAPE_RE.sub(REDACTED_PLACEHOLDER, out)
     return out
 
 
 def _active_api_keys() -> tuple[str, ...]:
-    """The configured API key, read per call so tests/rotations stay current."""
-    key = os.getenv(ALPHA_VANTAGE_KEY_ENV)
-    return (key,) if key else ()
+    """Every configured credential value, read per call so tests/rotations
+    stay current."""
+    keys: list[str] = []
+    for name in _KEYRING_ENVS:
+        raw = os.getenv(name)
+        if not raw:
+            continue
+        keys.extend(part.strip() for part in raw.split(",") if part.strip())
+    return tuple(keys)
 
 
 class CredentialRedactionFilter(logging.Filter):

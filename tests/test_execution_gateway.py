@@ -324,7 +324,11 @@ class TestSendOrderMapping:
         assert kw["price"] == 60000.0
         assert kw["position_side"] == "BOTH"
         assert kw["reduce_only"] == "false"
-        assert kw["new_client_order_id"] == "coid-1"
+        # Round-8 S8 KI-5: the reference is a LABEL only — the idempotency id
+        # is always gateway-minted (a bare reference could collide with a
+        # historical order's client id and poison the recovery query).
+        assert kw["new_client_order_id"].startswith("yialpha-")
+        assert len(kw["new_client_order_id"]) <= 36
         assert kw["new_order_resp_type"] == "RESULT"
         # status mapping + derived fields
         assert order.status is Status.NOTTRADED
@@ -517,12 +521,15 @@ class TestNoBlindResubmit:
         order = gw.send_order(_req(reference="coid-x"))
         # new_order attempted exactly once — never re-POSTed.
         assert gw._client.rest_api.new_order.call_count == 1
+        minted = gw._client.rest_api.new_order.call_args.kwargs["new_client_order_id"]
+        assert minted.startswith("yialpha-")  # KI-5: reference is only a label
         gw._client.rest_api.query_order.assert_called_once_with(
-            symbol="BTCUSDT", orig_client_order_id="coid-x"
+            symbol="BTCUSDT", orig_client_order_id=minted
         )
         assert order.status is Status.NOTTRADED  # recovered, not rejected
 
-    def test_transient_unconfirmed_rejected(self):
+    def test_transient_unconfirmed_rejected(self, monkeypatch):
+        monkeypatch.setattr("time.sleep", lambda _s: None)  # retry backoff
         gw = _perp_gw_with_client()
         gw._client.rest_api.new_order.side_effect = ServerError("500")
         gw._client.rest_api.query_order.side_effect = Exception("not found")
@@ -688,12 +695,14 @@ class TestRateLimit429Detection:
         )
         order = gw.send_order(_req(reference="coid-429"))
         assert gw._client.rest_api.new_order.call_count == 1
+        minted = gw._client.rest_api.new_order.call_args.kwargs["new_client_order_id"]
         gw._client.rest_api.query_order.assert_called_once_with(
-            symbol="BTCUSDT", orig_client_order_id="coid-429"
+            symbol="BTCUSDT", orig_client_order_id=minted
         )
         assert order.status is Status.NOTTRADED  # recovered, not rejected
 
-    def test_429_with_unrecognized_class_name_unconfirmed_rejected(self):
+    def test_429_with_unrecognized_class_name_unconfirmed_rejected(self, monkeypatch):
+        monkeypatch.setattr("time.sleep", lambda _s: None)  # retry backoff
         class BinanceAPIException(Exception):
             def __init__(self, msg="rate limited", status_code=429, error_message=""):
                 super().__init__(msg)
@@ -708,8 +717,29 @@ class TestRateLimit429Detection:
         order = gw.send_order(_req(reference="coid-429b"))
         assert order.status is Status.REJECTED  # not resubmitted
         assert gw._client.rest_api.new_order.call_count == 1
+        # Round-8 S8 KI-2: -2013 immediately after a 429 can be visibility
+        # lag, not absence — the probe retries a bounded 3 times before
+        # concluding REJECTED (GET only, never a re-POST).
+        assert gw._client.rest_api.query_order.call_count == 3
 
-    def test_rate_limit_named_exception_detected_via_substring(self):
+    def test_2013_visibility_lag_recovers_on_retry(self, monkeypatch):
+        # Round-8 S8 KI-2: probe 1 answers -2013 (order not yet visible),
+        # probe 2 finds the live order -> recovered, NOT rejected, and the
+        # submit was never re-POSTed.
+        monkeypatch.setattr("time.sleep", lambda _s: None)
+        gw = _perp_gw_with_client()
+        gw._client.rest_api.new_order.side_effect = ServerError("503")
+        gw._client.rest_api.query_order.side_effect = [
+            _FakeResp({"code": -2013, "msg": "Order does not exist."}),
+            _FakeResp({"status": "NEW", "orderId": 777, "executedQty": "0"}),
+        ]
+        order = gw.send_order(_req())
+        assert order.status is Status.NOTTRADED
+        assert gw._client.rest_api.new_order.call_count == 1
+        assert gw._client.rest_api.query_order.call_count == 2
+
+    def test_rate_limit_named_exception_detected_via_substring(self, monkeypatch):
+        monkeypatch.setattr("time.sleep", lambda _s: None)  # retry backoff
         # A rate-limit exception whose class name contains "rate"/"limit"
         # but is NOT exactly "TooManyRequestsError" and carries no status_code.
         class RateLimitError(Exception):
@@ -722,8 +752,9 @@ class TestRateLimit429Detection:
         gw._client.rest_api.new_order.side_effect = RateLimitError()
         gw._client.rest_api.query_order.side_effect = Exception("not found")
         order = gw.send_order(_req(reference="coid-rl"))
-        # Must have queried (transient path), not treated as a hard reject.
-        gw._client.rest_api.query_order.assert_called_once()
+        # Must have queried (transient path), not treated as a hard reject —
+        # all 3 bounded probes (KI-2), then REJECTED.
+        assert gw._client.rest_api.query_order.call_count == 3
         assert order.status is Status.REJECTED  # unconfirmed -> no resubmit
 
 
@@ -737,7 +768,8 @@ class TestSafeQueryErrorPayload:
     orderId) slipped through and was reported as SUBMITTING — a live state.
     """
 
-    def test_error_payload_returns_none(self):
+    def test_error_payload_returns_none(self, monkeypatch):
+        monkeypatch.setattr("time.sleep", lambda _s: None)  # retry backoff
         gw = _perp_gw_with_client()
         # Drive through _safe_query_by_client_id via a transient submit error.
         gw._client.rest_api.new_order.side_effect = NetworkError("net", status_code=500)
@@ -977,17 +1009,37 @@ class TestPositionMode:
         assert gw._query_hedge_mode() is None
 
     def test_hedge_mode_long_close_maps_sell_long_no_reduce_only(self):
+        # Round-8 S8 KI-3: in bridge semantics direction is the ORDER
+        # direction, so unwinding a LONG arrives as direction=SHORT+CLOSE and
+        # must map to SELL against position_side=LONG. The pre-fix side-flip
+        # variant pinned here (LONG+CLOSE -> SELL+LONG) actually opened a
+        # reverse position instead of closing.
         gw = _perp_gw_with_client()
         gw._hedge_mode = True
         gw._client.rest_api.new_order.return_value = _FakeResp(
             {"status": "FILLED", "orderId": 9, "executedQty": "0.5",
              "avgPrice": "61000"}
         )
-        gw.send_order(_req(direction=Direction.LONG, offset=Offset.CLOSE))
+        gw.send_order(_req(direction=Direction.SHORT, offset=Offset.CLOSE))
         kw = gw._client.rest_api.new_order.call_args.kwargs
         assert kw["side"] == "SELL"       # unwinding the long
         assert kw["position_side"] == "LONG"
         assert "reduce_only" not in kw    # invalid in hedge mode
+
+    def test_hedge_mode_short_close_maps_buy_short(self):
+        # Mirror of the KI-3 fix: closing a SHORT arrives as direction=
+        # LONG+CLOSE -> BUY against position_side=SHORT (buy back the short).
+        gw = _perp_gw_with_client()
+        gw._hedge_mode = True
+        gw._client.rest_api.new_order.return_value = _FakeResp(
+            {"status": "FILLED", "orderId": 12, "executedQty": "0.5",
+             "avgPrice": "59000"}
+        )
+        gw.send_order(_req(direction=Direction.LONG, offset=Offset.CLOSE))
+        kw = gw._client.rest_api.new_order.call_args.kwargs
+        assert kw["side"] == "BUY"
+        assert kw["position_side"] == "SHORT"
+        assert "reduce_only" not in kw
 
     def test_hedge_mode_short_open_maps_sell_short(self):
         gw = _perp_gw_with_client()

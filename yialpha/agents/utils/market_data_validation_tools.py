@@ -24,7 +24,8 @@ def get_verified_market_snapshot(
     # the authority (round-7 — the snapshot is the prompt-mandated "source
     # of truth for exact OHLCV claims", exactly the wrong place for an
     # unclamped date to serve post-decision bars on a historical run).
-    from yialpha.dataflows.utils import current_pit_end
+    from yialpha.dataflows.utils import current_pit_end, get_analysis_date
 
-    curr_date = str(current_pit_end(curr_date) or curr_date)
+    curr_date = str(
+        current_pit_end(curr_date) or get_analysis_date() or curr_date)
     return build_verified_market_snapshot(symbol, curr_date, look_back_days)

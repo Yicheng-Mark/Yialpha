@@ -44,7 +44,11 @@ import logging
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from yialpha.agents.schemas import PositioningReport, render_positioning_report
+from yialpha.agents.schemas import (
+    PositioningReport,
+    clamp_direction_language,
+    render_positioning_report,
+)
 from yialpha.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
@@ -58,6 +62,7 @@ from yialpha.agents.utils.prediction_tools import (
 from yialpha.agents.utils.prompt_builder import build_collaborator_prompt
 from yialpha.agents.utils.structured import (
     NO_EXTERNAL_TOOLS,
+    STRUCTURED_FALLBACK,
     bind_structured,
     invoke_structured_or_freetext,
 )
@@ -317,13 +322,23 @@ def create_positioning_analyst(llm):
                 )
             settle_prediction_capture("positioning", ticker)
 
-        report_text = invoke_structured_or_freetext(
+        def _structured_ok(_report) -> bool:
+            return True
+
+        report_text, structured_ok = invoke_structured_or_freetext(
             structured_llm,
             llm,
             llm_messages,
             render_positioning_report,
             "Positioning Analyst",
+            extract=_structured_ok,
         )
+        # Structured path: extra="forbid" on PositioningReport IS the
+        # direction freeze (no direction field can exist). Free-text
+        # fallback: only the prompt's freeze instruction remains — enforce
+        # it deterministically by stripping direction-bearing lines.
+        if structured_ok is STRUCTURED_FALLBACK:
+            report_text = clamp_direction_language(report_text)
 
         return {
             "messages": [AIMessage(content=report_text)],
