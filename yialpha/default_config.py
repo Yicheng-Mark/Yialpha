@@ -176,6 +176,19 @@ _ENV_OVERRIDES = {
     # its domestic HTTP calls. Optional deps are lazy-imported, so default-off
     # runs never import baostock/akshare (zero overhead).
     "YIALPHA_A_SHARE_NATIVE":               "a_share_native",
+    # Crypto-native fundamentals (crypto_native) — the mirror-image gap of
+    # a_share_native: PURE-crypto instruments (BTCUSDT-style perps, crypto spot)
+    # are dropped from the fundamentals analyst entirely (no company to analyze),
+    # which also removes token/network fundamentals the crypto ecosystem DOES
+    # expose. When this flag is on AND the instrument classifies as pure crypto
+    # (pure_crypto_perp / crypto_spot), the fundamentals analyst runs with a
+    # REPLACEMENT crypto tool set (CoinGecko token fundamentals + DefiLlama
+    # chain/protocol TVL — keyless free tiers via the SOCKS5 proxy) instead of
+    # the stock statement tools. Off by default = the analyst is still dropped
+    # for pure crypto and every other run's tool list / prompt / capabilities
+    # are byte-for-byte unchanged (same contract as a_stock / sec_ownership).
+    # Stock runs and tokenized-stock perps are untouched by the flag.
+    "YIALPHA_CRYPTO_NATIVE":                "crypto_native",
     # Market turbulence index (FinRL-derived, see yialpha.dataflows.market_regime).
     # Off by default = the conservative risk debater's prompt is byte-for-byte
     # unchanged (same opt-in contract as sec_ownership / valuation_tools). When
@@ -413,6 +426,18 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # baostock/akshare are optional lazy-imported dependencies, so default-off
     # runs (and machines without the 'a-share' extra) are unaffected.
     "a_share_native": False,
+    # Crypto-native fundamentals (env: YIALPHA_CRYPTO_NATIVE). Off by default =
+    # pure-crypto instruments are still dropped from the fundamentals analyst
+    # and every other run's tool list is unchanged (byte-equivalent). When on
+    # AND the instrument classifies as pure crypto (pure_crypto_perp /
+    # crypto_spot), the fundamentals analyst RUNS with a replacement crypto
+    # tool set — CoinGecko token fundamentals (market cap / supply / FDV /
+    # ATH-ATL; free tier, history capped at the trailing ~365 days) and
+    # DefiLlama network fundamentals (chain & protocol TVL full history) —
+    # instead of the stock statement tools. Stock runs and tokenized-stock
+    # perps never enter the branch. Keyless foreign hosts via the SOCKS5
+    # proxy; no optional dependency (requests is core).
+    "crypto_native": False,
     # Market turbulence index (env: YIALPHA_MARKET_REGIME). Off by default =
     # the conservative risk debater's prompt is unchanged (byte-equivalent).
     # When on, a one-line benchmark market-stress reading (252d rolling

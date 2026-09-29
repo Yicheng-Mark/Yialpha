@@ -44,6 +44,10 @@ from yialpha.agents.utils.binance_spot_tools import (
     get_binance_spot_ticker24,
 )
 from yialpha.agents.utils.core_stock_tools import get_stock_data
+from yialpha.agents.utils.crypto_native_tools import (
+    get_crypto_network_fundamentals,
+    get_crypto_token_fundamentals,
+)
 from yialpha.agents.utils.eastmoney_tools import get_margin_trading
 from yialpha.agents.utils.fundamental_data_tools import (
     get_balance_sheet,
@@ -111,6 +115,8 @@ __all__ = [
     "get_balance_sheet",
     "get_cashflow",
     "get_income_statement",
+    "get_crypto_token_fundamentals",
+    "get_crypto_network_fundamentals",
     "get_form4_insider_trading",
     "get_ftd_data",
     "get_institutional_holdings",

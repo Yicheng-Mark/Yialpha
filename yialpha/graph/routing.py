@@ -174,6 +174,30 @@ def fundamentals_applicable(asset_type: str | None, ticker: str) -> bool:
     return instrument_class(asset_type, ticker) in ("equity", "stock_perp")
 
 
+#: Instrument classes the crypto_native optional category serves: pure-crypto
+#: perps and spot (spot covers the legacy auto-detected ``crypto`` mode).
+#: ``unknown_perp`` is deliberately absent — an unresolvable contract gets no
+#: fabricated fundamentals.
+_CRYPTO_NATIVE_CLASSES = frozenset({"pure_crypto_perp", "crypto_spot"})
+
+
+def crypto_native_fundamentals_run(asset_type: str | None, ticker: str) -> bool:
+    """True when the ``crypto_native`` category should RUN the fundamentals
+    analyst for this instrument (env ``YIALPHA_CRYPTO_NATIVE``).
+
+    The flag-aware counterpart of :func:`fundamentals_applicable`: when the
+    flag is on and the instrument classifies as pure crypto, the analyst
+    runs with the replacement crypto tool set instead of being skipped.
+    Single source for BOTH the selection layer
+    (``cli.utils.filter_analysts_for_asset_type`` / the batch union) and the
+    node's runtime gate, so the two can never drift apart. Flag off
+    (default) is unconditionally False — byte-identical historical skip.
+    """
+    if not get_config().get("crypto_native"):
+        return False
+    return instrument_class(asset_type, ticker) in _CRYPTO_NATIVE_CLASSES
+
+
 # ---------------------------------------------------------------------------
 # InstrumentDescriptor — routing facts + contract metadata, one object.
 # ---------------------------------------------------------------------------

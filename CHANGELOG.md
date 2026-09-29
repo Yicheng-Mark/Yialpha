@@ -10,7 +10,66 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+
+- **Crypto-native fundamentals (`YIALPHA_CRYPTO_NATIVE`, default off):** pure-crypto
+  instruments (BTCUSDT-style perps, crypto spot, legacy `crypto`) previously lost the
+  Fundamentals Analyst entirely — no company, no statements. The new optional
+  category `crypto_native` brings the analyst back with a REPLACEMENT tool set
+  (market-analyst perp precedent) behind the a_share_native-style contract:
+  flag off = the historical skip and every other run's tool list / prompt are
+  byte-identical. Two keyless free-tier vendors via the existing SOCKS5 proxy —
+  `yialpha/dataflows/coingecko_vendor.py` (`get_crypto_token_fundamentals`:
+  market cap / rank, supply schedule, FDV, ATH/ATL; live snapshot, historical
+  daily PIT series with the free tier's trailing ~365-day cap honestly
+  degraded beyond it; `/search`-based canonical symbol resolution with
+  1000-prefix fallback; browser UA required — the edge 403s default Python
+  UAs) and `yialpha/dataflows/defillama_vendor.py`
+  (`get_crypto_network_fundamentals`: chain TVL full history, protocol TVL for
+  governance tokens with a $1M-TVL credibility floor against junk symbol
+  collisions (SHIB→shibex), live-only chain ranking). Gate = flag AND
+  `instrument_class ∈ {pure_crypto_perp, crypto_spot}` (unknown_perp honestly
+  skips); CLI/batch analyst filtering and the runtime node skip both carry the
+  bypass; the stock fundamentals bundle is skipped on the crypto branch
+  (expected statement failures must not masquerade as data-quality
+  degradation); `crypto_native` joined `_SIGNATURE_CONFIG_KEYS` so stale
+  checkpoints don't replay pre-flag analyst reports. Pinned across
+  `tests/test_crypto_native.py` (28 tests: wiring byte-equivalence, prompt
+  reframe, vendor PIT windows, resolution/floor, router sentinels, tool-layer
+  date clamp).
+
 ### Fixed
+
+- **crypto_native adversarial review batch (2026-09-29, /code-review high —
+  14 findings landed, 5 accepted as documented):** two PIT leaks (the DefiLlama
+  protocol title rendered the catalog's TODAY TVL into historical runs — now
+  omitted with an explicit version-selection caveat; the ETF fund-framing nudge
+  could stack on the crypto persona for legacy-crypto symbols whose base
+  collides with the ETF set — now suppressed on the crypto branch); three
+  crash/coverage bugs (space-named chains like 'zkSync Era' broke the cache
+  filename allowlist before any fetch — now folded to a safe key with per-leg
+  fail-soft so one broken leg no longer discards the other's rendered
+  evidence; malformed LLM-echoed dates like "2026/08/01" crashed
+  date.fromisoformat — now degrade in-band; the 1000-prefix guard missed
+  7-char bases (1000CAT) and mangled the 1000000x family (1000000MOG →
+  000MOG) — one shared multiplier-prefix rule now serves both vendors, and
+  legacy dashed symbols (BTC-USD) reduce to their base instead of the
+  unresolvable BTCUSD); two rendering bugs (a dead `or` made the price-change
+  n/a fallback unreachable; sub-cent meme-coin prices collapsed to 0.00 —
+  both now render honestly); and a drift-collapse refactor (flag-aware
+  `crypto_native_fundamentals_run` predicate in `graph/routing.py` shared by
+  the node gate and the CLI/batch selection layer; mtime-keyed parse memos so
+  the LLM tool loop stops re-parsing ~1MB cached JSON per round; unused
+  dev/community params dropped from the /coins snapshot; data-driven
+  base→chain resolution from the /v2/chains catalog's tokenSymbol so newly
+  listed chains auto-extend coverage; shared Markdown-table persona constant;
+  test-hygiene: the zero-interval throttle leak). Accepted as documented:
+  per-module `_pit_curr_date` / RecordingLLM copies (established repo idiom),
+  the stock-bundle skip at the call site (single caller today), protocol
+  version selection by today's catalog (disclosed in-band — as-of selection
+  would need every candidate's full history), and the pre-existing router
+  ValueError on a category-level data_vendors pin naming a vendor a method
+  does not have (a_share_native behaves identically).
 
 - **Round-8 known-issues batch landing (2026-09-28, the full audit ledger
   from both waves — every item code-verified, landed at minimum blast

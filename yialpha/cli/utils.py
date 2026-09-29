@@ -137,9 +137,18 @@ def filter_analysts_for_asset_type(
         return analysts
     filtered = list(analysts)
     if not fundamentals_applicable(asset_type.value, ticker):
-        filtered = [
-            analyst for analyst in filtered if analyst != AnalystType.FUNDAMENTALS
-        ]
+        # crypto_native (default off): the flag-aware routing predicate
+        # (single source, shared with the fundamentals node's runtime gate)
+        # decides whether the analyst is kept for a pure-crypto instrument.
+        # unknown_perp stays dropped on both sides — an unresolvable
+        # contract gets no fabricated fundamentals. Flag off = the
+        # historical drop, byte-for-byte.
+        from yialpha.graph.routing import crypto_native_fundamentals_run
+
+        if not crypto_native_fundamentals_run(asset_type.value, ticker):
+            filtered = [
+                analyst for analyst in filtered if analyst != AnalystType.FUNDAMENTALS
+            ]
     # V2.3 positioning split: APPEND the Positioning Analyst for crypto_perp
     # runs when the flag is on (default off). Never user-selected; the
     # execution-plan builder pins its position right after "market", so the

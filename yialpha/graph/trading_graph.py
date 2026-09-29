@@ -45,6 +45,8 @@ from yialpha.agents.utils.agent_utils import (
     get_binance_vision_metrics,
     get_candlestick_patterns,
     get_cashflow,
+    get_crypto_network_fundamentals,
+    get_crypto_token_fundamentals,
     get_form4_insider_trading,
     get_ftd_data,
     get_fundamentals,
@@ -106,6 +108,7 @@ _SIGNATURE_CONFIG_KEYS = (
     "sec_ownership",
     "a_stock",
     "a_share_native",
+    "crypto_native",
     "web_search_enabled",
     "regime_context",
     "valuation_tools",
@@ -553,6 +556,16 @@ class YiAlphaGraph:
                     get_a_share_income_statement_native,
                     get_a_share_balance_sheet_native,
                     get_a_share_cashflow_statement_native,
+                    # Crypto-native fundamentals (crypto_native gate). Dormant
+                    # for default runs: the fundamentals analyst only
+                    # advertises them when YIALPHA_CRYPTO_NATIVE is on AND the
+                    # instrument classifies as pure crypto
+                    # (pure_crypto_perp / crypto_spot), so the LLM never
+                    # names them otherwise and they are simply extra entries
+                    # in ToolNode's name->tool map (same dormant contract as
+                    # the A-share tools above).
+                    get_crypto_token_fundamentals,
+                    get_crypto_network_fundamentals,
                     # Deterministic valuation + PoT compute (valuation_tools
                     # gate). The analyst binds make_pot_compute_tool(llm) with
                     # the SAME quick-tier client this graph was built with; the

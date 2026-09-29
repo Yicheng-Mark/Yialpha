@@ -82,6 +82,17 @@ Opt-in native data for A-share tickers: set `YIALPHA_A_SHARE_NATIVE=true` (defau
 
 A Tushare quality tier (`pip install "yialpha[a-share-tushare]"` + `TUSHARE_TOKEN`) is also available for fundamentals/news. Vendors are lazy-imported: without the extras, default-off runs are unaffected.
 
+### Crypto-native fundamentals
+
+Pure-crypto instruments (BTCUSDT-style perps, crypto spot) have no company fundamentals, so the Fundamentals Analyst is normally skipped for them. Set `YIALPHA_CRYPTO_NATIVE=true` (default off, no extra install — keyless free tiers via the existing proxy) to bring the analyst back with a **replacement** crypto tool set:
+
+| Tool | Source | What it gives the analyst |
+| ------ | ------ | ------ |
+| `get_crypto_token_fundamentals` | CoinGecko (free public tier) | Market cap + rank, circulating / total / max supply, FDV, ATH/ATL with dates, price changes (live snapshot); point-in-time daily series for historical dates (free tier caps history at the trailing ~365 days — older dates honestly report "data not available") |
+| `get_crypto_network_fundamentals` | DefiLlama | Chain TVL history (full daily series from genesis, PIT-filtered), protocol TVL history when the token governs a protocol (highest-TVL version, disclosed), live chain ranking |
+
+The gate is flag **and** a pure-crypto instrument class (`pure_crypto_perp` / `crypto_spot`); equity runs and tokenized-stock perps (e.g. MUUSDT) are untouched. History discipline matches the stock side: rows are filtered to `date <= curr_date`, and current-only fields never enter a historical view.
+
 ---
 
 ## Analysis pipeline

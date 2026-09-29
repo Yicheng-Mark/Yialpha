@@ -82,6 +82,17 @@ YiAlpha 用一组分工明确的 **LLM 智能体**模拟真实交易团队的分
 
 另提供 Tushare 质量档（`pip install "yialpha[a-share-tushare]"` + `TUSHARE_TOKEN`）用于基本面/新闻。数据源均为惰性导入：未装 extra 时默认关闭的运行不受影响。
 
+### 加密原生基本面
+
+纯加密标的（BTCUSDT 类永续、crypto 现货）没有公司基本面，Fundamentals 分析师默认对它们整体跳过。设 `YIALPHA_CRYPTO_NATIVE=true`（默认关闭；无需额外安装——keyless 免费档，走既有代理）即可让该分析师**带着替换版**加密工具集复活：
+
+| 工具 | 数据源 | 提供给分析师的内容 |
+| ------ | ------ | ------ |
+| `get_crypto_token_fundamentals` | CoinGecko（免费公共档） | 市值 + 排名、流通 / 总量 / 最大供给、FDV、带日期的 ATH/ATL、多周期涨跌幅（实盘快照）；历史日期返回按日 PIT 序列（免费档历史限最近 ~365 天，更早的日期诚实返回 "data not available"） |
+| `get_crypto_network_fundamentals` | DefiLlama | 链 TVL 历史（自创世全量日级序列，PIT 过滤）、代币治理协议时的协议 TVL 历史（取最高 TVL 版本并披露）、实盘链排名 |
+
+门控为 **开关 AND 纯加密 instrument class**（`pure_crypto_perp` / `crypto_spot`）；美股运行与代币化股票永续（如 MUUSDT）不受影响。历史纪律与股票侧一致：行按 `date <= curr_date` 过滤，current-only 字段绝不进入历史视图。
+
 ---
 
 ## 分析流程

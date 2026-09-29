@@ -47,7 +47,13 @@ from .binance_vision import (
     get_binance_vision_book_depth,
     get_binance_vision_metrics,
 )
+from .coingecko_vendor import (
+    get_crypto_token_fundamentals as get_coingecko_crypto_token,
+)
 from .config import get_config
+from .defillama_vendor import (
+    get_crypto_network_fundamentals as get_defillama_crypto_network,
+)
 from .eastmoney import get_margin_trading as get_eastmoney_margin_trading
 from .errors import (
     NoMarketDataError,
@@ -221,6 +227,23 @@ TOOLS_CATEGORIES = {
             "get_a_share_market_breadth_native",
         ],
     },
+    # Crypto-native fundamentals (crypto_native). Fills the mirror-image gap of
+    # a_share_native: PURE-crypto instruments (BTCUSDT-style perps / crypto spot)
+    # have no company fundamentals, but they DO have token-level fundamentals
+    # (market cap, supply schedule, FDV, ATH/ATL — CoinGecko free tier) and
+    # network/protocol fundamentals (chain & protocol TVL history — DefiLlama).
+    # Keyless foreign hosts on the SOCKS5 proxy. Only the fundamentals analyst
+    # advertises these, and only when YIALPHA_CRYPTO_NATIVE is on AND the
+    # instrument is pure crypto. Same optional-category contract — a vendor
+    # block / unresolved symbol / beyond-window historical date degrades to a
+    # sentinel rather than aborting the run.
+    "crypto_native": {
+        "description": "Crypto-native token fundamentals (CoinGecko: market cap / supply / FDV / ATH-ATL) + network & protocol TVL history (DefiLlama). Pure-crypto instruments only.",
+        "tools": [
+            "get_crypto_token_fundamentals",
+            "get_crypto_network_fundamentals",
+        ],
+    },
 }
 
 VENDOR_LIST = [
@@ -235,6 +258,8 @@ VENDOR_LIST = [
     "baostock",
     "akshare",
     "tushare",
+    "defillama",
+    "coingecko",
 ]
 
 # Optional enrichment categories. These add macro/event context to the news
@@ -242,7 +267,7 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "binance_perp", "binance_spot", "sec_ownership", "a_stock", "a_share_native"}
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "binance_perp", "binance_spot", "sec_ownership", "a_stock", "a_share_native", "crypto_native"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS: dict[str, dict[str, Callable[..., Any] | list[Any]]] = {
@@ -453,6 +478,15 @@ VENDOR_METHODS: dict[str, dict[str, Callable[..., Any] | list[Any]]] = {
     # contract as the real-time quote for historical dates.
     "get_a_share_market_breadth_native": {
         "akshare": get_akshare_a_share_market_breadth,
+    },
+    # crypto_native — single vendor each; the category is optional so a vendor
+    # block / unresolved base symbol / beyond-window historical date degrades to
+    # a sentinel rather than aborting the pure-crypto run.
+    "get_crypto_token_fundamentals": {
+        "coingecko": get_coingecko_crypto_token,
+    },
+    "get_crypto_network_fundamentals": {
+        "defillama": get_defillama_crypto_network,
     },
 }
 
