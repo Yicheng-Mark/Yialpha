@@ -515,5 +515,226 @@ class TestSerialParallelPlaceholderEquivalence(unittest.TestCase):
         self.assertIsInstance(placeholder_from_clear, HumanMessage)
 
 
+class FanoutMaxThreadsClampTests(unittest.TestCase):
+    def test_fanout_max_threads_zero_clamped_not_crash(self):
+        """Round-10: a configured max_threads <= 0 (env typo) used to hit
+        ThreadPoolExecutor(max_workers=0) on FIRST INVOKE — mid-graph, as a
+        bare ValueError. The clamp makes the fan-out degrade to a working
+        pool instead of exploding after billing has started."""
+        plan = build_analyst_execution_plan(("market", "social"))
+        factories = {
+            "market": _make_scripted_agent_factory("market_report", "STUB MARKET"),
+            "social": _make_scripted_agent_factory("sentiment_report", "STUB SENTIMENT"),
+        }
+        tools = {
+            "market": _make_stub_tool_node(),
+            "social": _make_stub_tool_node(),
+        }
+        fanout = create_analyst_fanout_node(
+            plan, factories, tools, ConditionalLogic(), max_threads=0
+        )
+        result = fanout(_make_minimal_state())
+        self.assertEqual(result["market_report"], "STUB MARKET")
+        self.assertEqual(result["sentiment_report"], "STUB SENTIMENT")
+
+
+# ---------------------------------------------------------------------------
+# Round-10 G4: wall-time tracker PROVIDER wiring through GraphSetup
+# ---------------------------------------------------------------------------
+
+class GraphSetupProviderWiringTests(unittest.TestCase):
+    """The fan-out node built via GraphSetup resolves the wall-time tracker
+    through the PROVIDER at node-run time (once per invoke), so per-invoke
+    trackers reach the parallel workers; serial mode never consults it."""
+
+    class _StubLLM:
+        # setup_graph dereferences the three LLM tiers eagerly but never
+        # invokes them at compile time (the non-analyst nodes created here
+        # are never run by these tests).
+        pass
+
+    def test_parallel_fanout_via_setup_marks_started_completed_per_analyst(self):
+        """Round-10 (G4): mirror of WallTimeTrackerTests.test_wall_time_tracker_
+        is_called, but THROUGH GraphSetup — the provider is resolved per
+        invoke (not at graph-construction time), and each analyst's worker
+        marks started/completed on the CURRENT invoke's tracker."""
+        from unittest.mock import patch
+
+        import yialpha.graph.setup as setup_module
+        from yialpha.graph.setup import GraphSetup
+
+        calls: list[tuple[str, str]] = []
+        calls_lock = threading.Lock()
+
+        class FakeTracker:
+            def mark_started(self, key):
+                with calls_lock:
+                    calls.append(("started", key))
+
+            def mark_completed(self, key):
+                with calls_lock:
+                    calls.append(("completed", key))
+
+        trackers = [FakeTracker(), FakeTracker()]
+        provider_calls: list[int] = []
+
+        def provider():
+            provider_calls.append(1)
+            return trackers[len(provider_calls) - 1]
+
+        # The analyst factories inside setup_graph are lazy lambdas resolving
+        # the creator names from setup.py's module globals at call time —
+        # patching those names swaps in the scripted stub agents. The patch
+        # must stay live through the first fanout invoke (subgraphs build
+        # lazily on first call and are cached afterwards).
+        with (
+            patch.object(
+                setup_module,
+                "create_market_analyst",
+                lambda llm: _make_scripted_agent_factory("market_report", "M")(),
+            ),
+            patch.object(
+                setup_module,
+                "create_sentiment_analyst",
+                lambda llm: _make_scripted_agent_factory("sentiment_report", "S")(),
+            ),
+        ):
+            gs = GraphSetup(
+                self._StubLLM(),
+                self._StubLLM(),
+                self._StubLLM(),
+                {
+                    "market": _make_stub_tool_node(),
+                    "social": _make_stub_tool_node(),
+                },
+                conditional_logic=ConditionalLogic(),
+                analyst_parallel=True,
+                wall_time_tracker_provider=provider,
+            )
+            workflow = gs.setup_graph(("market", "social"))
+            compiled = workflow.compile()
+            # Nothing resolved at graph-BUILD time (no tracker is active yet).
+            self.assertEqual(provider_calls, [])
+
+            fanout = compiled.nodes["Analyst Fanout"]
+            fanout.invoke(_make_minimal_state())
+            # Resolved exactly once for the invoke, and every analyst marked
+            # started/completed on THAT tracker.
+            self.assertEqual(len(provider_calls), 1)
+            with calls_lock:
+                started = sorted(k for evt, k in calls if evt == "started")
+                completed = sorted(k for evt, k in calls if evt == "completed")
+            self.assertEqual(started, ["market", "social"])
+            self.assertEqual(completed, ["market", "social"])
+
+            # Second invoke resolves the provider AGAIN (per-invoke tracker,
+            # never frozen at construction time).
+            fanout.invoke(_make_minimal_state())
+            self.assertEqual(len(provider_calls), 2)
+
+    def test_serial_mode_never_consults_the_provider(self):
+        """Serial wiring (analyst_parallel off) keeps the historical topology
+        and never calls the provider — byte-identical to no wiring."""
+        from unittest.mock import patch
+
+        import yialpha.graph.setup as setup_module
+        from yialpha.graph.setup import GraphSetup
+
+        provider_calls: list[int] = []
+
+        def provider():
+            provider_calls.append(1)
+            return None
+
+        with (
+            patch.object(
+                setup_module,
+                "create_market_analyst",
+                lambda llm: _make_scripted_agent_factory("market_report", "M")(),
+            ),
+            patch.object(
+                setup_module,
+                "create_sentiment_analyst",
+                lambda llm: _make_scripted_agent_factory("sentiment_report", "S")(),
+            ),
+        ):
+            gs = GraphSetup(
+                self._StubLLM(),
+                self._StubLLM(),
+                self._StubLLM(),
+                {
+                    "market": _make_stub_tool_node(),
+                    "social": _make_stub_tool_node(),
+                },
+                conditional_logic=ConditionalLogic(),
+                analyst_parallel=False,
+                wall_time_tracker_provider=provider,
+            )
+            workflow = gs.setup_graph(("market", "social"))
+            compiled = workflow.compile()
+
+        self.assertNotIn("Analyst Fanout", compiled.nodes)
+        # The serial chain is intact (first analyst wired from START).
+        self.assertIn("Market Analyst", compiled.nodes)
+        self.assertIn("Sentiment Analyst", compiled.nodes)
+        self.assertEqual(provider_calls, [])
+
+
+# ---------------------------------------------------------------------------
+# Round-10: producer-side per-analyst perf telemetry rows
+# ---------------------------------------------------------------------------
+
+class FanoutPerfTelemetryRowsTests(unittest.TestCase):
+    def test_workers_record_per_analyst_wall_into_perf_tracker(self):
+        """Round-10: fan-out workers record each analyst's full subgraph wall
+        into the perf tracker under the analyst's SERIAL node name, so
+        ``--profile`` with YIALPHA_ANALYST_PARALLEL=true shows real per-analyst
+        rows instead of one wrapper row plus 0.0s."""
+        from yialpha.graph.perf_telemetry import NodePerfTracker
+
+        perf = NodePerfTracker()
+        plan = build_analyst_execution_plan(("market", "social"))
+        factories = {
+            "market": _make_scripted_agent_factory("market_report", "M"),
+            "social": _make_scripted_agent_factory("sentiment_report", "S"),
+        }
+        tools = {"market": _make_stub_tool_node(), "social": _make_stub_tool_node()}
+        fanout = create_analyst_fanout_node(
+            plan, factories, tools, ConditionalLogic(), perf_tracker=perf
+        )
+
+        fanout(_make_minimal_state())
+
+        nodes = perf.serialize()["nodes"]
+        self.assertIn("Market Analyst", nodes)
+        self.assertIn("Sentiment Analyst", nodes)
+        for name in ("Market Analyst", "Sentiment Analyst"):
+            self.assertEqual(nodes[name]["calls"], 1)
+            self.assertGreaterEqual(nodes[name]["wall_seconds"], 0.0)
+
+        # Rows accumulate per invoke (calls increments like a serial node).
+        fanout(_make_minimal_state())
+        nodes = perf.serialize()["nodes"]
+        self.assertEqual(nodes["Market Analyst"]["calls"], 2)
+
+    def test_no_perf_tracker_is_inert(self):
+        """Flag-off contract: with no perf_tracker the workers record
+        nothing (byte-identical; the run itself is unaffected)."""
+        from yialpha.graph.perf_telemetry import NodePerfTracker
+
+        # A tracker that exists but is NOT wired in must stay empty.
+        untouched = NodePerfTracker()
+        plan = build_analyst_execution_plan(("market",))
+        fanout = create_analyst_fanout_node(
+            plan,
+            {"market": _make_scripted_agent_factory("market_report", "M")},
+            {"market": _make_stub_tool_node()},
+            ConditionalLogic(),
+        )
+        result = fanout(_make_minimal_state())
+        self.assertEqual(result["market_report"], "M")
+        self.assertEqual(untouched.serialize()["nodes"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

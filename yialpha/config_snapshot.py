@@ -48,6 +48,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from yialpha.dataflows.utils import replace_retry_on_windows
+
 logger = logging.getLogger(__name__)
 
 #: Subdirectory under data_cache_dir for config history.
@@ -139,7 +141,12 @@ def record_config_snapshot(
         json.dumps(snapshot, indent=2, default=str, ensure_ascii=False),
         encoding="utf-8",
     )
-    tmp_path.replace(path)
+    # Round-10: ``yialpha analyze`` startup reads the latest snapshot back
+    # (load_last_snapshot) with no lock; on Windows a reader mid-read made
+    # Path.replace raise PermissionError and lose a recorded snapshot.
+    # Retry the race; append-only semantics are untouched (unique timestamped
+    # filename, publish via replace).
+    replace_retry_on_windows(tmp_path, path)
 
     logger.info(
         "Config snapshot recorded: %s (fingerprint %s, reason: %s)",

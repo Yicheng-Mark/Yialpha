@@ -44,6 +44,7 @@ from pathlib import Path
 
 from . import quality
 from .config import get_config
+from .utils import replace_retry_on_windows
 
 logger = logging.getLogger(__name__)
 
@@ -300,7 +301,11 @@ def cached_or_fetch(
         with open(tmp_path, "wb") as fh:
             fh.write(raw)
             fh.flush()
-        os.replace(tmp_path, validated)
+        # Round-10: retry-then-swallow — a lockless cross-process reader
+        # mid-read used to make this replace raise immediately and drop the
+        # cache write; the transient race is now ridden through, and a
+        # persistent denial still lands in the same best-effort handler.
+        replace_retry_on_windows(tmp_path, validated)
     except OSError as exc:  # noqa: BLE001 -- caching is best-effort
         logger.warning("%s: could not write cache %s: %s", vendor, validated, exc)
         with contextlib.suppress(OSError):

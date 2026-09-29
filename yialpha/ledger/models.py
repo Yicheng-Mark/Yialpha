@@ -181,7 +181,12 @@ def pit_latest_instant(ts: str) -> datetime:
     """
     instant, date_only = parse_timestamp(ts)
     if date_only:
-        return instant.replace(hour=23, minute=59, second=59, microsecond=0)
+        # Round-10: microsecond=999999, not 0 — "any instant of that day"
+        # (this function's own contract) must include 23:59:59.5; a
+        # sub-second available_at on the as-of day was wrongly rejected.
+        return instant.replace(
+            hour=23, minute=59, second=59, microsecond=999999
+        )
     return instant
 
 
@@ -528,7 +533,10 @@ def row_to_outcome(row: sqlite3.Row) -> OutcomeRecord:
         legs_missing=decode_json_list(row["legs_missing"]),
         outcome_available_at=row["outcome_available_at"],
         computed_at=row["computed_at"],
-        regime_id=row["regime_id"],
+        # Round-10: key-presence guard like scoring_context below — read-only
+        # connections never migrate, so a pre-regime_id ledger (older schema)
+        # raised IndexError here instead of yielding outcome rows.
+        regime_id=row["regime_id"] if "regime_id" in columns else None,
         scoring_context=(
             json.loads(row["scoring_context"])
             if "scoring_context" in columns and row["scoring_context"] is not None

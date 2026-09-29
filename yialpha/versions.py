@@ -28,12 +28,32 @@ Which constant versions what:
     notional, with funding PnL computed as ``-sign x notional x rate``.
     v1 had no consumers (reserved only).
 ``REGIME_VERSION``
-    v3 (v2 frozen at V2.2 Context; bumped in V2.4): the frozen
+    v4 (v3 since V2.4; bumped 2026-09-29 round-10): the frozen
     ``RegimeState`` classifier definitions in :mod:`yialpha.regime.state` —
     the contract this stamp protects. Changing ANY definition below bumps
     this so historical regime tags never silently mix definitions (the id
     preimage starts with the version string, so a bump also mints disjoint
     ids).
+
+    v3 -> v4 bump reason (2026-09-29, round-10): two id-preimage
+    redefinitions. (1) ``overnight_gap_bps`` re-scoped to the STOCK-PERP
+    field group per the frozen vocabulary (the state.py field-group
+    table) — v3 computed it in the COMMON block for every perp class, so
+    pure-crypto (and unknown-perp) ids carried a stock-perp session-gap
+    reading the contract lists as stock-perp-only; v4 leaves it ``None``
+    outside ``stock_perp`` (structural absence, not a missing input).
+    (2) The basis legs (``spot_perp_basis_bps`` /
+    ``index_mark_basis_bps``) now require the two legs' tails to quote
+    the SAME date — v3 paired the perp frame's last bar with each
+    denominator frame's own positional last bar, so a missing/lagged
+    final denominator bar fabricated a cross-date ratio (perp@D /
+    spot@D-1) into the id preimage and the ``_market_stress`` trigger;
+    v4 aligns on the perp tail date via the frames' date indexes and
+    degrades to the fail-soft missing-input path when the denominator has
+    no bar at that date. Ledger rows keep their v3 ids (accepted
+    regime_id discontinuity, same policy as v2 -> v3; the scoreboard
+    ``by_regime`` slice lists versions side by side as the disclosure).
+    No migration — old ids stay as-is.
 
     v2 -> v3 bump reason (2026-09-04): the stock_perp ``session_state``
     bucket switched from the V2.2 NYSE-equivalent ET approximation
@@ -85,7 +105,7 @@ SCHEMA_VERSION = "v1"
 COST_MODEL_VERSION = "v1"
 TICKET_VERSION = "v1"
 FEATURE_VERSION = "v2"
-REGIME_VERSION = "v3"
+REGIME_VERSION = "v4"
 
 # Daily reference-time/scoring semantics are independent of funding/return
 # FEATURE_VERSION. Missing prediction timing identifies historical v2 rows.

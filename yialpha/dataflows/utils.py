@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, date, datetime, timedelta
@@ -300,3 +301,44 @@ def safe_xml_root(raw: bytes | str, *, source: str):
             "(entity-expansion guard); not parsed"
         )
     return ET.fromstring(text)
+
+
+def replace_retry_on_windows(
+    tmp_path, target_path, *, attempts: int = 5, delay_s: float = 0.05
+) -> None:
+    """``os.replace`` that survives the Windows lockless-reader race.
+
+    CPython on Windows opens files WITHOUT ``FILE_SHARE_DELETE``, so while a
+    concurrent reader (``Path.read_text`` — the memory log's
+    ``get_past_context``, the web store reading ``full_states_log``) holds
+    the target open for the few milliseconds of its read, ``os.replace``
+    onto that target raises ``PermissionError``. The docstring promise "a
+    reader sees either the old or the new file, never a torn one" only
+    holds on POSIX; on Windows it needs this retry. The window is
+    milliseconds, so a handful of short sleeps is enough; exhaustion
+    re-raises so callers can apply their own fail-soft policy.
+
+    Round-10: previously the writer crashed and — through the unprotected
+    write legs — took a whole finished analysis run down with it.
+    """
+    last: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp_path, target_path)
+            return
+        except PermissionError as exc:  # Windows: target open in a reader
+            last = exc
+            # Round-10: escalating back-off WITHIN the same attempt budget —
+            # a flat 5 x 0.05s = 0.25s was thin for a web reader / AV scan
+            # holding a multi-MB full_states_log; 0.05/0.05/0.1/0.2/0.4
+            # (~0.8s total) rides out the same window without changing the
+            # attempts count or the re-raise-last-PermissionError contract.
+            time.sleep(delay_s * 2 ** max(0, attempt - 1))
+    if last is None:
+        # Unreachable for attempts >= 1, but honest under ``python -O`` where
+        # an ``assert`` would be stripped and ``raise None`` a TypeError.
+        raise RuntimeError(
+            "replace_retry_on_windows: exhausted without a single attempt "
+            f"(attempts={attempts!r})"
+        )
+    raise last

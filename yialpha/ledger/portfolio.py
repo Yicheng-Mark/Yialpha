@@ -37,10 +37,18 @@ def new_position_id(ticket_id: str, symbol: str) -> str:
     return "N" + hashlib.sha256(f"position|{ticket_id}|{symbol}".encode()).hexdigest()[:12]
 
 
-def open_positions() -> list[dict[str, Any]]:
-    """Every not-yet-closed position (the pre-candidate portfolio state)."""
+def open_positions_with_status() -> tuple[list[dict[str, Any]], bool]:
+    """``open_positions`` plus a read-status flag.
+
+    Returns ``(rows, ok)`` where ``ok=False`` means the read DEGRADED (an
+    exception was swallowed per the never-raise read-helper contract) —
+    ``rows == []`` is then "couldn't read the book", NOT evidence of a
+    legally empty one. Round-10: enforced-mode constraint evaluation used
+    to receive the degraded read as ``[]`` labeled ``"empty"``, approving
+    over-limit candidates against a phantom empty book with no audit trace.
+    """
     if not ledger_exists():
-        return []
+        return [], True
     try:
         rows = get_connection(readonly=True).execute(
             "SELECT position_id, ticket_id, run_id, symbol, side, signed_weight, "
@@ -48,8 +56,16 @@ def open_positions() -> list[dict[str, Any]]:
             "ORDER BY opened_at"
         ).fetchall()
     except Exception:  # noqa: BLE001 -- read helpers degrade, never raise
-        logger.warning("open_positions() read failed", exc_info=True)
-        return []
+        # Round-10: ONE line per degraded read — the consequence rides this
+        # message (which carries the traceback); load_positions_input no
+        # longer restates it, and the ledger-unreadable source label below is
+        # the durable audit trail.
+        logger.warning(
+            "open_positions() read failed; degraded to [] — callers receive "
+            "'book unreadable', not a legal empty book",
+            exc_info=True,
+        )
+        return [], False
     out: list[dict[str, Any]] = []
     for row in rows:
         try:
@@ -68,7 +84,13 @@ def open_positions() -> list[dict[str, Any]]:
                 "payload": payload,
             }
         )
-    return out
+    return out, True
+
+
+def open_positions() -> list[dict[str, Any]]:
+    """Every not-yet-closed position (the pre-candidate portfolio state)."""
+    rows, _ok = open_positions_with_status()
+    return rows
 
 
 def load_positions_input() -> tuple[list[dict[str, Any]], str]:
@@ -99,9 +121,17 @@ def load_positions_input() -> tuple[list[dict[str, Any]], str]:
       — the preview never fails on its input book, and nothing is silently
       swallowed: every dropped row and parse failure is counted and logged.
     """
-    ledger_rows = open_positions()
+    ledger_rows, ledger_ok = open_positions_with_status()
     rows = list(ledger_rows)
-    source = "ledger" if ledger_rows else "empty"
+    # Round-10: a DEGRADED ledger read must not masquerade as a legal empty
+    # book — label it (mirrors the file side's +unreadable contract) so every
+    # snapshot taken against it is auditable as "not a validated book". The
+    # label IS the audit trail; the read itself already logged its one
+    # warning-with-traceback in open_positions_with_status.
+    if ledger_rows:
+        source = "ledger"
+    else:
+        source = "empty" if ledger_ok else "ledger-unreadable"
 
     from yialpha.dataflows.config import get_config
 
@@ -171,7 +201,12 @@ def load_positions_input() -> tuple[list[dict[str, Any]], str]:
         by_symbol[file_row["symbol"]] = file_row
     rows = list(by_symbol.values())
     name = path.replace("\\", "/").rsplit("/", 1)[-1]
-    base = f"ledger+file:{name}" if ledger_rows else f"file:{name}"
+    if ledger_rows:
+        base = f"ledger+file:{name}"
+    elif not ledger_ok:
+        base = f"ledger-unreadable+file:{name}"
+    else:
+        base = f"file:{name}"
     if not entries:
         source = f"{base}+empty"
     elif bad_rows:

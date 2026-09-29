@@ -52,7 +52,7 @@ from yialpha.ledger.models import (
     SCOPE_UNDERLYING,
     decode_json_list,
 )
-from yialpha.ledger.sqlite import get_connection, ledger_exists
+from yialpha.ledger.sqlite import ledger_exists, optional_read_rows
 from yialpha.ledger.time_contract import (
     aware_utc,
     entry_boundary_admitted,
@@ -226,26 +226,37 @@ def _scored_rows() -> list[dict[str, Any]]:
     """
     if not ledger_exists():
         return []
-    connection = get_connection(readonly=True)
-    columns = {row["name"] for row in connection.execute("PRAGMA table_info(outcomes)")}
-    context_projection = "o.scoring_context" if "scoring_context" in columns else "NULL AS scoring_context"
-    prediction_columns = {row["name"] for row in connection.execute("PRAGMA table_info(predictions)")}
-    timing_projection = "p.timing AS prediction_timing" if "timing" in prediction_columns else "NULL AS prediction_timing"
-    rows = (
-        connection
-        .execute(
-            "SELECT o.prediction_id, o.horizon_days, o.net_return, o.contract_price_return, "
-            "o.funding_pnl, o.fees, o.slippage, o.legs_missing, o.outcome_available_at, "
-            f"{context_projection}, {timing_projection}, p.horizon_days AS prediction_horizon_days, "
-            "p.analyst, p.direction, p.prob_up, p.evidence_ids, p.regime_id, "
-            "p.prediction_scope, r.instrument_class, r.asset_type "
-            "FROM outcomes o "
-            "JOIN predictions p ON p.prediction_id = o.prediction_id "
-            "JOIN runs r ON r.run_id = p.run_id "
-            "WHERE o.status = 'complete' AND o.net_return IS NOT NULL "
-            "ORDER BY p.analysis_as_of, o.prediction_id"
+    # Round-10: the shared optional-read chokepoint — a corrupt/foreign
+    # ledger file (sqlite3.DatabaseError) or a table-less one must degrade
+    # the scoreboard render to empty-with-warning, never abort it.
+    columns = {
+        row["name"]
+        for row in optional_read_rows(
+            "PRAGMA table_info(outcomes)",
+            context="_scored_rows(outcomes table_info)",
         )
-        .fetchall()
+    }
+    context_projection = "o.scoring_context" if "scoring_context" in columns else "NULL AS scoring_context"
+    prediction_columns = {
+        row["name"]
+        for row in optional_read_rows(
+            "PRAGMA table_info(predictions)",
+            context="_scored_rows(predictions table_info)",
+        )
+    }
+    timing_projection = "p.timing AS prediction_timing" if "timing" in prediction_columns else "NULL AS prediction_timing"
+    rows = optional_read_rows(
+        "SELECT o.prediction_id, o.horizon_days, o.net_return, o.contract_price_return, "
+        "o.funding_pnl, o.fees, o.slippage, o.legs_missing, o.outcome_available_at, "
+        f"{context_projection}, {timing_projection}, p.horizon_days AS prediction_horizon_days, "
+        "p.analyst, p.direction, p.prob_up, p.evidence_ids, p.regime_id, "
+        "p.prediction_scope, r.instrument_class, r.asset_type "
+        "FROM outcomes o "
+        "JOIN predictions p ON p.prediction_id = o.prediction_id "
+        "JOIN runs r ON r.run_id = p.run_id "
+        "WHERE o.status = 'complete' AND o.net_return IS NOT NULL "
+        "ORDER BY p.analysis_as_of, o.prediction_id",
+        context="_scored_rows",
     )
     scored = []
     for row in rows:

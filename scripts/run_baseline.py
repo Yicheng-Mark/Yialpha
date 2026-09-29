@@ -74,11 +74,27 @@ from yialpha.risk.manager import RiskManager, build_backtest_weight_fn  # noqa: 
 
 def _rebalance_dates(start: str, end: str, step: int, n: int) -> list[str]:
     """从 [start,end] 里均匀抽 n 个交易日，间隔约 step 个交易日。"""
+    if step < 1:
+        raise SystemExit(
+            f"--step must be >= 1 (got {step}); step 0 would repeat the "
+            f"same rebalance date {n} times"
+        )
     idx = pd.bdate_range(start, end)
     if len(idx) < n:
         return [d.strftime("%Y-%m-%d") for d in idx]
     # 从末尾往前抽，保证有足够的"未来"价格做持仓 mark
     picked = [idx[-1 - step * i] for i in range(n) if i * step < len(idx)]
+    # Round-10: a narrow --start/--end window with a large step silently
+    # yielded FEWER than n dates (i*step >= len(idx) dropped picks) — the
+    # backtest ran on a shrunken calendar with no signal to the operator.
+    if len(picked) < n:
+        print(
+            f"⚠ rebalance calendar shrunk: requested {n} dates ~{step} "
+            f"business days apart over {start}..{end} "
+            f"({len(idx)} business days) but only {len(picked)} fit; "
+            f"widening the window or lowering --step/--rebalance",
+            file=sys.stderr, flush=True,
+        )
     picked.reverse()
     return [d.strftime("%Y-%m-%d") for d in picked]
 
@@ -440,6 +456,19 @@ def main():
                    help="（配合 --smoke）开启节点级耗时遥测，propagate 后打印 节点→墙钟占比 表（零影响，仅观测）")
     p.add_argument("--out", default="backtest_output")
     args = p.parse_args()
+    # Round-10: --runs 0 used to escape as a bare ValueError from
+    # evaluate_gate (or, on the baseline path, as a contradictory
+    # "all tickers failed" summary with failures=0); --rebalance 0 hit the
+    # step-0 repeat guard in _rebalance_dates only after the graph was
+    # built. Fail fast with a clean usage error instead.
+    if args.runs < 1:
+        p.error(f"--runs must be >= 1 (got {args.runs})")
+    if args.rebalance < 1:
+        p.error(f"--rebalance must be >= 1 (got {args.rebalance})")
+    if args.holding_days < 1:
+        p.error(f"--holding-days must be >= 1 (got {args.holding_days})")
+    if args.workers < 1:
+        p.error(f"--workers must be >= 1 (got {args.workers})")
 
     end = args.end or (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
     start = args.start or (datetime.strptime(end, "%Y-%m-%d")

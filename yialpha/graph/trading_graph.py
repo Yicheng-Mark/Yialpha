@@ -78,6 +78,7 @@ from yialpha.dataflows.binance import stock_perp_underlying, warm_equity_perp_ba
 from yialpha.dataflows.config import set_config
 from yialpha.dataflows.utils import (
     live_anchor_dates,
+    replace_retry_on_windows,
     safe_ticker_component,
     set_analysis_date,
 )
@@ -189,6 +190,62 @@ def _memoized_mark_close(ticker: str, trade_date: str) -> float:
     return float(frame[KLINE_CLOSE_COLUMN].iloc[-1])
 
 
+def _enforced_ledger_book_veto_reason(snapshot_source: str) -> str | None:
+    """Round-10: fail-closed book gate for ENFORCED portfolio control.
+
+    ``load_positions_input`` labels a degraded ledger read so it can never
+    masquerade as a legal empty book — but the label was only ever RECORDED,
+    never gated on, so enforced mode evaluated the five frozen constraints
+    against a phantom EMPTY book and could APPROVE over-limit candidates.
+    This helper maps that label space (``portfolio.load_positions_input`` is
+    its single source) to a veto reason, or ``None`` when a validated book
+    (possibly a legally empty one) fed the snapshot:
+
+    * ``empty`` / ``ledger`` / ``file:<name>`` / ``ledger+file:<name>`` — the
+      ledger read SUCCEEDED; validated. ``None`` (their ``+empty`` /
+      ``+invalid:<n>`` file-suffix variants inherit this: the ledger truth is
+      readable underneath, so no phantom book).
+    * ``ledger-unreadable`` — no overlay at all: constraints would evaluate
+      without the book. VETO.
+    * ``ledger-unreadable+file:<name>`` — ledger read failed BUT the
+      operator's positions-file overlay was readable with valid rows: the
+      file is the operator's current statement of the book, so proceed with
+      the ``snapshot_source`` disclosure. ``None``.
+    * ``ledger-unreadable+file:<name>+empty`` / ``...+invalid:<n>`` — the
+      overlay is itself empty/invalid per its OWN labels, so no layer
+      certifies the book. VETO.
+
+    Consulted in BOTH modes (like every other eligibility reason): shadow
+    renders the reason as a would-veto line and never alters its ticket;
+    enforced makes it binding.
+    """
+    source = str(snapshot_source or "")
+    if not source.startswith("ledger-unreadable"):
+        return None
+    overlay = source[len("ledger-unreadable"):]
+    if not overlay.startswith("+file:"):
+        # Plain "ledger-unreadable": no operator overlay at all.
+        return (
+            "ledger_unreadable: portfolio constraints cannot be evaluated "
+            "without the book — refusing"
+        )
+    # Operator overlay present while the ledger read degraded: it stands in
+    # for the book ONLY when its own labels certify it (valid, non-empty).
+    if overlay.endswith("+empty"):
+        return (
+            "ledger_unreadable: positions_file overlay is an explicit empty "
+            "book and the ledger read failed — constraints would evaluate "
+            "against a phantom empty book; refusing"
+        )
+    if "+invalid:" in overlay:
+        return (
+            "ledger_unreadable: positions_file overlay rows invalid and the "
+            "ledger read failed — constraints would evaluate without a "
+            "validated book; refusing"
+        )
+    return None
+
+
 class YiAlphaGraph:
     """Main class that orchestrates the trading agents framework."""
 
@@ -228,6 +285,15 @@ class YiAlphaGraph:
             self.callbacks = list(self.callbacks) + [
                 NodePerfTokenCallback(self.perf_tracker)
             ]
+
+        # Round-10 (G4): per-invoke wall-time tracker handoff for the parallel
+        # analyst fan-out. The graph is compiled ONCE while trackers are
+        # per-invoke (each _invoke_or_stream / interactive CLI streamed run
+        # builds one), so GraphSetup receives a PROVIDER resolving this
+        # attribute at node-run time. None unless a stream-telemetry invoke (or
+        # the CLI's live display) is actively running — serial mode and
+        # analyst-parallel-off never consult it (byte-identical).
+        self._active_wall_time_tracker: Any = None
 
         # Update the interface's config
         set_config(self.config)
@@ -310,6 +376,10 @@ class YiAlphaGraph:
             analyst_parallel_max_threads=self.config.get(
                 "analyst_parallel_max_threads", 16
             ),
+            # Round-10 (G4): provider (not instance) — the fan-out resolves
+            # the CURRENT invoke's tracker at node-run time; see the attribute
+            # note above. Inert in serial mode and when no tracker is active.
+            wall_time_tracker_provider=lambda: self._active_wall_time_tracker,
         )
 
         self.propagator = Propagator(
@@ -1529,6 +1599,16 @@ class YiAlphaGraph:
                     "present but no USDT conversion (fx unavailable or out "
                     "of band — never defaulted to 1.0)"
                 )
+            # Round-10: enforced-mode fail-closed book gate. A degraded
+            # ledger read used to pass "[]" into the snapshot with only a
+            # recorded label; the five constraints then evaluated against a
+            # phantom EMPTY book and could approve over-limit candidates.
+            # Appended in BOTH modes like every other eligibility reason —
+            # shadow renders it as a would-veto line (diffing is the point),
+            # enforced makes it binding. Shadow's ticket is never altered.
+            ledger_reason = _enforced_ledger_book_veto_reason(snapshot_source)
+            if ledger_reason is not None:
+                eligibility_reasons.append(ledger_reason)
             decisions = evaluate_constraints(candidate, snapshot, limits)
             if eligibility_reasons:
                 decisions = [
@@ -2261,11 +2341,22 @@ class YiAlphaGraph:
             # Unknown analyst shape — skip timing but still stream.
             tracker = None
 
+        # Round-10 (G4): publish THIS invoke's tracker so the parallel analyst
+        # fan-out's worker threads can mark per-analyst started/completed on
+        # the same tracker the chunk sync feeds. Without it, all analysts
+        # finish inside ONE wrapper node and the chunk sync marks everything
+        # completed at the same instant. Cleared in finally — never leaks to a
+        # later invoke. Observation only (the fan-out never writes graph
+        # state through the tracker).
+        self._active_wall_time_tracker = tracker
         final_state = None
-        for chunk in self.graph.stream(init_agent_state, **args):
-            final_state = chunk
-            if tracker is not None:
-                sync_analyst_tracker_from_chunk(tracker, chunk)
+        try:
+            for chunk in self.graph.stream(init_agent_state, **args):
+                final_state = chunk
+                if tracker is not None:
+                    sync_analyst_tracker_from_chunk(tracker, chunk)
+        finally:
+            self._active_wall_time_tracker = None
         if final_state is None:
             # A valid graph always emits at least one chunk. Treat zero chunks
             # as a hard failure rather than silently re-invoking the whole graph
@@ -2609,14 +2700,34 @@ class YiAlphaGraph:
             # Log state to disk. The returned quality block rides on
             # final_state so report writers / the web UI can render the
             # degraded-run banner from the same evidence the JSON log has.
-            final_state["data_quality"] = self._log_state(
-                trade_date, final_state, asset_type
-            )
+            # Round-10: fail-soft — full_states_log is consumed by the web
+            # store while we write it, so its os.replace can hit the Windows
+            # lockless-reader race; an IO hiccup at THIS seam used to
+            # propagate out of propagate() and discard a fully completed
+            # analysis (run_robust would then re-bill the whole graph). The
+            # quality block reads as None = unknown downstream.
+            try:
+                final_state["data_quality"] = self._log_state(
+                    trade_date, final_state, asset_type
+                )
+            except Exception as exc:  # noqa: BLE001 — logging must never kill the run
+                logger.warning(
+                    "full_states_log write failed for %s on %s (run result "
+                    "kept; quality block unknown): %s",
+                    company_name, trade_date, exc,
+                )
+                final_state["data_quality"] = None
 
             # T0: dump per-node perf telemetry next to full_states_log. No-op when
             # telemetry is off (perf_tracker is None).
             if self.perf_tracker is not None:
-                self._dump_perf(trade_date, asset_type)
+                try:
+                    self._dump_perf(trade_date, asset_type)
+                except Exception as exc:  # noqa: BLE001 — telemetry is advisory
+                    logger.warning(
+                        "node perf telemetry dump failed for %s on %s: %s",
+                        company_name, trade_date, exc,
+                    )
 
             # Store decision for deferred reflection on the next same-ticker
             # run. Every other field read here uses .get(); this was the one
@@ -2631,12 +2742,25 @@ class YiAlphaGraph:
                     company_name, trade_date,
                 )
                 decision_for_memory = ""
-            self.memory_log.store_decision(
-                ticker=company_name,
-                trade_date=trade_date,
-                final_trade_decision=decision_for_memory,
-                asset_type=asset_type,
-            )
+            # Round-10: fail-soft like the two seams above — a lock/disk
+            # failure here must not discard a completed analysis and trigger
+            # a full re-bill. The cost of a lost pending entry (this one
+            # decision never gets its reflection resolved) is strictly
+            # smaller than the cost of throwing away the run.
+            try:
+                self.memory_log.store_decision(
+                    ticker=company_name,
+                    trade_date=trade_date,
+                    final_trade_decision=decision_for_memory,
+                    asset_type=asset_type,
+                )
+            except Exception as exc:  # noqa: BLE001 — see note above
+                logger.warning(
+                    "memory store_decision failed for %s on %s (no pending "
+                    "entry recorded; reflection for this decision will not "
+                    "resolve): %s",
+                    company_name, trade_date, exc,
+                )
 
             # Clear checkpoint on successful completion to avoid stale state.
             if self.config.get("checkpoint_enabled"):
@@ -2683,7 +2807,7 @@ class YiAlphaGraph:
         return f"full_states_log_{trade_date}{suffix}"
 
     def _log_state(self, trade_date, final_state, asset_type: str = "stock"):
-        """Log the final state to a JSON file.
+        """Log the final state to a JSON file (fail-soft: returns None on IO).
 
         Includes the structured evidence block the self-improvement loop
         consumes: ``pm_rating`` (the Portfolio Manager's structured rating,
@@ -2701,6 +2825,33 @@ class YiAlphaGraph:
         had the collision). Readers glob the ``full_states_log_*`` pattern
         (accuracy scans every match; web/store keys runs by the filename
         stem) or resolve newest-by-mtime (run_robust).
+
+        Round-10: the fail-soft lives HERE, at the choke point, so EVERY
+        caller inherits it — ``finalize_streamed_run`` (the interactive
+        CLI's finish line) called this bare, and the final
+        ``os.replace`` routes through ``replace_retry_on_windows`` which
+        RE-RAISES after its retry budget. An IO hiccup at that seam must
+        cost the on-disk log only, never the finished run. On failure the
+        consumed quality block reads as ``None`` = unknown downstream (the
+        same contract ``_run_graph``'s outer guard established).
+        """
+        # Round-10: see docstring — one guard at the choke point instead of
+        # per-caller try/except that a new entry point could forget.
+        try:
+            return self._write_states_log(trade_date, final_state, asset_type)
+        except Exception as exc:  # noqa: BLE001 — logging must never kill the run
+            logger.warning(
+                "full_states_log write failed for %s on %s (run result kept; "
+                "quality block unknown): %s",
+                self.ticker, trade_date, exc,
+            )
+            return None
+
+    def _write_states_log(self, trade_date, final_state, asset_type: str = "stock"):
+        """Write the full_states_log entry (the guarded body of _log_state).
+
+        May raise on IO failure — callers reach this only through
+        :meth:`_log_state`, which applies the fail-soft policy.
         """
         from yialpha.dataflows import quality
         from yialpha.dataflows import tavily as tavily_vendor  # isort: skip
@@ -2845,7 +2996,10 @@ class YiAlphaGraph:
         tmp_path = directory / f".{self._states_log_stem(trade_date, asset_type)}.json.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(entry, f, indent=4)
-        os.replace(tmp_path, log_path)
+        # The web store reads this file live; on Windows the replace can hit
+        # a lockless reader mid-read — retry instead of crashing the run
+        # (round-10; see replace_retry_on_windows for the full rationale).
+        replace_retry_on_windows(tmp_path, log_path)
 
         # Return the consumed quality block so the caller can attach it to
         # final_state — the report writer and web UI render it as the

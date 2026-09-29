@@ -141,13 +141,18 @@ def test_enforced_execution_order_is_ticket_first(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tickets_module, "build_candidate_ticket", traced_build)
 
-    real_open = portfolio_module.open_positions
+    real_open = portfolio_module.open_positions_with_status
 
     def traced_open():
         trace.append("snapshot")
         return real_open()
 
-    monkeypatch.setattr(portfolio_module, "open_positions", traced_open)
+    # Round-10: the snapshot read seam is open_positions_with_status (the
+    # labeled read load_positions_input consumes); open_positions is now the
+    # compat wrapper around it and patching the wrapper no longer intercepts.
+    monkeypatch.setattr(
+        portfolio_module, "open_positions_with_status", traced_open
+    )
 
     real_eval = constraints_module.evaluate_constraints
 
@@ -279,6 +284,139 @@ def test_shadow_mode_shows_would_veto_lines_without_blocking(tmp_path, monkeypat
     assert "unknown_instrument_class" in md
     # Shadow never writes rows and never alters the ticket verdict.
     assert out["execution_ticket"]["status"] == TicketStatus.CANDIDATE.value
+    assert open_positions() == []
+
+
+# --------------------------------------------------------------------------- #
+# Round-10 — enforced-mode fail-closed gate on a ledger-unreadable book
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "source,expects_veto",
+    [
+        # Ledger read SUCCEEDED (possibly legally empty) — validated book.
+        ("empty", False),
+        ("ledger", False),
+        ("file:book.json", False),
+        ("ledger+file:book.json", False),
+        ("file:book.json+empty", False),
+        ("ledger+file:book.json+invalid:2", False),
+        # Ledger read DEGRADED — the label space load_positions_input emits.
+        ("ledger-unreadable", True),
+        # ...but a readable operator overlay with valid rows stands in.
+        ("ledger-unreadable+file:book.json", False),
+        # Overlay itself empty/invalid per its own labels — no validated
+        # book in ANY layer.
+        ("ledger-unreadable+file:book.json+empty", True),
+        ("ledger-unreadable+file:book.json+invalid:2", True),
+    ],
+)
+def test_enforced_book_veto_reason_label_space(source, expects_veto):
+    """The veto predicate maps load_positions_input's full label space:
+    veto exactly when no layer certifies the book."""
+    from yialpha.graph.trading_graph import _enforced_ledger_book_veto_reason
+
+    reason = _enforced_ledger_book_veto_reason(source)
+    if expects_veto:
+        assert reason is not None
+        assert reason.startswith("ledger_unreadable:")
+    else:
+        assert reason is None
+
+
+@pytest.mark.unit
+def test_enforced_ledger_unreadable_vetoes_final_ticket(tmp_path, monkeypatch):
+    """Round-10: a degraded ledger read (label ``ledger-unreadable``) must
+    not let enforced mode evaluate the five constraints against a phantom
+    EMPTY book — the Final Ticket is refused while the full rule/diagnosis
+    audit trail still renders."""
+    _bind_run()
+    monkeypatch.setattr(
+        portfolio_module, "load_positions_input",
+        lambda: ([], "ledger-unreadable"),
+    )
+    g = _make_graph(tmp_path, portfolio_control_mode="enforced")
+    _stub_prices(g, monkeypatch)
+    out = g._apply_risk_overlay(
+        "BTCUSDT", _TRADE_DATE, _perp_state(), {"equity": 100_000},
+        asset_type="crypto_perp",
+    )
+    ticket = out["execution_ticket"]
+    assert ticket["status"] == TicketStatus.VETOED.value
+    assert ticket["final_size"] == 0.0
+    assert any(
+        r.startswith("ledger_unreadable:") for r in ticket["veto_reasons"]
+    )
+    # Full rule/diagnosis still rendered for the audit trail (the frozen
+    # constraints ran; the eligibility VETO dominates via the resolver).
+    assert "VETOED (eligibility)" in out["final_trade_decision"]
+    assert "eligibility" in ticket["risk_decision_ids"]
+    assert "global_gross" in ticket["risk_decision_ids"]
+    # Refusing a trade never touches the book.
+    assert not [p for p in open_positions() if p["symbol"] == "BTCUSDT"]
+
+
+@pytest.mark.unit
+def test_enforced_ledger_unreadable_with_valid_overlay_proceeds(tmp_path, monkeypatch):
+    """A readable operator positions_file overlay (valid rows, no
+    ``+empty``/``+invalid`` suffix) IS the operator's current statement of
+    the book: enforced mode proceeds with the snapshot_source disclosure
+    instead of refusing."""
+    _bind_run()
+    overlay_row = {
+        "symbol": "ETHUSDT",
+        "side": "LONG",
+        "signed_weight": 0.10,
+        "payload": {
+            "instrument_class": "pure_crypto_perp",
+            "source": "positions_file",
+        },
+    }
+    monkeypatch.setattr(
+        portfolio_module, "load_positions_input",
+        lambda: ([overlay_row], "ledger-unreadable+file:book.json"),
+    )
+    g = _make_graph(tmp_path, portfolio_control_mode="enforced")
+    _stub_prices(g, monkeypatch)
+    out = g._apply_risk_overlay(
+        "BTCUSDT", _TRADE_DATE, _perp_state(), {"equity": 100_000},
+        asset_type="crypto_perp",
+    )
+    ticket = out["execution_ticket"]
+    assert ticket["status"] == TicketStatus.APPROVED.value
+    assert ticket["final_size"] > 0.0
+    assert not any(
+        str(r).startswith("ledger_unreadable:") for r in (ticket["veto_reasons"] or [])
+    )
+    # The degraded-ledger label rides the record (auditable disclosure).
+    assert (
+        out["portfolio_control"]["snapshot_source"]
+        == "ledger-unreadable+file:book.json"
+    )
+
+
+@pytest.mark.unit
+def test_shadow_ledger_unreadable_stays_disclose_only(tmp_path, monkeypatch):
+    """Shadow mode's purpose is diffing the resolver against whatever the
+    snapshot says — an unreadable ledger is DISCLOSED (would-veto line +
+    recorded label), never gated on."""
+    _bind_run()
+    monkeypatch.setattr(
+        portfolio_module, "load_positions_input",
+        lambda: ([], "ledger-unreadable"),
+    )
+    g = _make_graph(tmp_path, portfolio_control_mode="shadow")
+    _stub_prices(g, monkeypatch)
+    out = g._apply_risk_overlay(
+        "BTCUSDT", _TRADE_DATE, _perp_state(), {"equity": 100_000},
+        asset_type="crypto_perp",
+    )
+    assert out["execution_ticket"]["status"] == TicketStatus.CANDIDATE.value
+    assert "WOULD VETO (eligibility)" in out["final_trade_decision"]
+    assert "ledger_unreadable:" in out["final_trade_decision"]
+    assert out["portfolio_control_shadow"]["snapshot_source"] == "ledger-unreadable"
     assert open_positions() == []
 
 

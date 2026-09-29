@@ -17,6 +17,12 @@ for _stream in (sys.stdout, sys.stderr):
 # noqa: E402 — imports sit after the UTF-8 reconfigure guard above (Windows GBK shim).
 from pathlib import Path  # noqa: E402
 
+# Allow running as `python scripts/analyze_nvda.py` without an editable
+# install (sys.path[0] is scripts/, not the project root).
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from yialpha.default_config import DEFAULT_CONFIG  # noqa: E402
 from yialpha.graph.trading_graph import YiAlphaGraph  # noqa: E402
 

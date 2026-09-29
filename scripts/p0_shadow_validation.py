@@ -32,6 +32,15 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     project = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(project))
+    # GBK-console guard: the final json.dumps(ensure_ascii=False) below can
+    # carry non-GBK characters from cohort payloads — without this the LAST
+    # print dies on UnicodeEncodeError after every step already succeeded
+    # (and the script exits non-zero despite doing its job).
+    for _stream in (sys.stdout, sys.stderr):
+        _reconfigure = getattr(_stream, "reconfigure", None)
+        if callable(_reconfigure):
+            with __import__("contextlib").suppress(AttributeError, ValueError):
+                _reconfigure(encoding="utf-8", errors="replace")
     from scripts.p0_shadow.guard import GuardError
     from scripts.p0_shadow.runner import (
         capture_cohort,

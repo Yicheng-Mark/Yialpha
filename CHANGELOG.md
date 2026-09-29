@@ -40,6 +40,84 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Round-10 adversarial sweep (2026-09-29, four read-only shards — scripts /
+  graph / ledger+regime+instruments / test-gap map — followed by a nine-angle
+  adversarial self-review; every confirmed finding and all seven user-approved
+  known issues landed, each with a regression pin).**
+  - **Shard fixes (the round's original landing):** A/B-gate parallel-leg
+    speedup criterion un-deadened (reads the `Analyst Fanout` node wall) and
+    its fallback analyst list completed; run_robust kill-race evaluation,
+    kill-reason propagation and parameter guards; DEGRADED evidence anchored
+    to the child's actual results dir; prune CLI degenerate-arg and
+    empty-evidence refusals; export dedup + utf-8 guards; script bootstrap
+    hardening; graph-side memory-write fail-soft, the new
+    `replace_retry_on_windows` helper for the Windows lockless-reader
+    `os.replace` race (memory log ×2 / states log / node perf), finalize
+    three-seam fail-soft, fanout `max(1, ·)` clamp, reasoning-token
+    double-count fix; ledger-side `ledger-unreadable` labeling, rowid-DESC
+    tie-breaks, sub-second EOD, regime_id key guard, empty-as-of evidence
+    survival, optional-read degradation for table-less ledgers; listing_age
+    anchored to `analysis_as_of`; compact-ISO `available_at` rejection. Test
+    gaps closed: the Alpha-Vantage stock path (13 pins) and `fmt` (8 pins)
+    are executed by the suite for the first time.
+  - **Self-review P2s (nine parallel finder angles over the working diff,
+    each verified in code — several empirically — before fixing):** live-run
+    full-ISO `analysis_as_of` broke the `%Y-%m-%d` listing-age parse on EVERY
+    live stock-perp run — the swallowed ValueError silently nulled
+    `listing_age_days`, injected a phantom `onboard_date` missing input into
+    the regime id, and split live-vs-replay ids for the same day — fixed by
+    date-prefix normalization at the boundary; the three pasted ledger-read
+    guards caught only `sqlite3.OperationalError`, but a corrupt/foreign
+    ledger file raises the PARENT `sqlite3.DatabaseError` (and two
+    `get_connection` calls sat outside the try) — fixed at the chokepoint
+    with the new `optional_read_rows` helper in `ledger/sqlite.py`, adopted
+    by ten optional readers (three pasted guards deleted, seven missed
+    siblings covered); the streamed finish line was unguarded
+    (`finalize_streamed_run` / the CLI decision store could kill a
+    fully-billed run on an IO hiccup) — fail-soft moved inside `_log_state`
+    itself plus a matching CLI-side guard.
+  - **Self-review P3s:** truthy-but-unparseable evidence anchors no longer
+    drop the run's whole evidence chain (unanchored + WARNING); a blank
+    as-of no longer aborts the memory-resolve sweep (per-row `timing_error`
+    nomination); `--date` strict zero-padded ISO validation and a
+    single-source `_states_root` in run_robust; the A/B serial leg now sums
+    the full agent+tool+clear cluster the fanout replaces (was agents-only,
+    biasing the 2.5× criterion down) with names derived from
+    `ANALYST_NODE_SPECS` — the hand-maintained fallback list that had
+    already drifted once is gone; honest residual: serial ToolNode walls are
+    still not recorded by telemetry (documented setup behavior), so the
+    tool-HTTP share counts zero on the serial surface for now;
+    `replace_retry_on_windows` wired into nine more publish seams
+    (complete_report/decision, the OHLCV cache, vision manifest/partitions,
+    dashboard.html, config snapshots, disk cache, LLM response cache, the
+    backtest DecisionCache) with escalating backoff (~0.8s budget) and an
+    `-O`-safe exhaustion edge; per-field token reconciliation restores
+    input/output when only reasoning rides `usage_metadata`; the web
+    positions view reports `available: false` on a degraded read instead of
+    a phantom empty book; prune CLI diagnoses all-NaN forward columns
+    distinctly from header-only files; fanout workers now record per-analyst
+    walls (parallel `--profile` no longer shows 0.0s) and the stream
+    wall-time tracker is wired through GraphSetup via a per-invoke provider;
+    the debate-stage prompt builders (bull/bear + three risk debators) got
+    their first direct pins (23 tests, no production change); prune-CLI
+    guard tests run in-process (three interpreter spawns, ~3s, removed from
+    every full-suite run); `corporate_actions` derives its available_at
+    datetime contract from `_STRICT_ISO_DATE_RE` so the two cannot drift.
+  - **User-approved known issues landed:** `REGIME_VERSION` v3→v4 in one
+    bump (f4fecf8 precedent — no migration, scoreboard lists versions side
+    by side) carrying the frozen-vocabulary re-scope (`overnight_gap_bps` is
+    None outside stock_perp — structural absence, not a data gap) and the
+    basis tail-date alignment (spot-perp and last-index legs require a bar
+    at the common tail date; a misaligned tail degrades to the existing
+    missing-input path instead of computing a cross-date ratio that fed the
+    id preimage and the ±50 bps stress trigger); MACRO reference-path
+    outcomes now `skipped` without writing a row (docstring- and
+    legacy-consistent); enforced mode fails closed when no layer certifies
+    the book (label space enumerated: plain `ledger-unreadable` and
+    unreadable-with-invalid/empty overlays veto, a valid operator overlay
+    proceeds with disclosure, shadow stays disclose-only); the three
+    "silent serial fallback" doc promises were rewritten to the clamp
+    semantics the code actually implements.
 - **Round-9 USDT-perp adversarial sweep (2026-09-29, five read-only shards +
   runtime probes + coverage-gap map — 4 P2 and 9 P3 landed, each with a
   regression pin; the rest accepted as documented below).**

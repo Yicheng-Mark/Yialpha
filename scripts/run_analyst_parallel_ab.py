@@ -47,6 +47,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from random import Random
 
@@ -963,36 +964,53 @@ def _capture_run(graph, ticker: str, date: str) -> dict:
         rating = "?"
     wall_full = time.perf_counter() - t0
 
-    # Try to read per-node analyst wall times from the perf tracker. The
-    # graph currently does NOT expose ``perf_tracker`` as an attribute
-    # (perf_telemetry.py is new/unwired), so this is defensive: when None,
-    # we fall back to whole-propagate wall time and mark the speedup
-    # criterion N/A in the gate.
+    # Analyst-segment wall time, leg-aware (invariant only; the telemetry
+    # contract lives in graph/setup.py): the parallel leg records the whole
+    # analyst stage as ONE "Analyst Fanout" node; the serial leg records it
+    # as the per-analyst agent/tool/clear clusters the fanout replaces. Sum
+    # EXACTLY that replaced scope — agents-only undercounts the serial stage
+    # and biases the 2.5x criterion toward a false FAIL. Nodes absent from
+    # telemetry contribute nothing: unselected analysts never run, and
+    # serial ToolNode walls are not recorded today (setup.py._wrap_node
+    # skips ToolNode) — they start counting if that wrapping ever lands.
     analyst_segment = None
     tracker = getattr(graph, "perf_tracker", None)
     if tracker is not None and hasattr(tracker, "serialize"):
         try:
             data = tracker.serialize()
-            segs = []
             nodes = data.get("nodes", data) if isinstance(data, dict) else {}
-            # Per-analyst wall time is recorded under the agent node NAME
-            # ("Market Analyst", "Sentiment Analyst", ...), not the wire key,
-            # because perf_telemetry serializes by node name. Resolve the names
-            # via the spec table (the old ("market","social",...) keys never
-            # matched and silently left analyst_segment=None).
-            try:
-                from yialpha.graph.analyst_execution import ANALYST_NODE_SPECS
-                names = [spec.agent_node for spec in ANALYST_NODE_SPECS.values()]
-            except Exception:  # noqa: BLE001 -- keep the gate runnable
-                names = ["Market Analyst", "Sentiment Analyst",
-                         "News Analyst", "Fundamentals Analyst"]
-            for name in names:
+
+            def _wall(name: str) -> float | None:
                 node = nodes.get(name) if isinstance(nodes, dict) else None
                 if isinstance(node, dict):
-                    segs.append(float(node.get("wall_seconds",
-                                               node.get("duration", 0.0)) or 0.0))
-            if segs:
-                analyst_segment = sum(segs)
+                    return float(node.get("wall_seconds",
+                                          node.get("duration", 0.0)) or 0.0)
+                return None
+
+            fanout = _wall("Analyst Fanout")
+            if fanout is not None and fanout > 0:
+                # Parallel leg: the fanout node IS the analyst stage.
+                analyst_segment = fanout
+            else:
+                # Serial leg: per-analyst walls are recorded under the node
+                # NAME (perf_telemetry serializes by node name). Resolve the
+                # replaced cluster's names (agent + tool + clear per spec)
+                # from the spec table — unguarded import on purpose:
+                # _build_graph already imported yialpha.graph.trading_graph
+                # (which pulls this module) before _capture_run can run, so
+                # an except-branch could never fire and only masked drift
+                # (the deleted fallback list had 4 names vs 5 specs).
+                from yialpha.graph.analyst_execution import ANALYST_NODE_SPECS
+                names = [
+                    node_name
+                    for spec in ANALYST_NODE_SPECS.values()
+                    for node_name in (
+                        spec.agent_node, spec.tool_node, spec.clear_node,
+                    )
+                ]
+                segs = [w for w in (_wall(n) for n in names) if w is not None]
+                if segs:
+                    analyst_segment = sum(segs)
         except Exception:  # noqa: BLE001
             analyst_segment = None
 
@@ -1099,6 +1117,19 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
     if args.n < 1:
         print("--n must be >= 1", file=sys.stderr)
+        return 2
+    if args.max_threads is not None and args.max_threads < 1:
+        # 0 would reach ThreadPoolExecutor(max_workers=0) inside the fanout
+        # on FIRST INVOKE — mid-graph, after billing has started — as a bare
+        # ValueError, instead of failing fast here.
+        print("--max-threads must be >= 1", file=sys.stderr)
+        return 2
+    try:
+        datetime.strptime(args.date, "%Y-%m-%d")
+    except ValueError:
+        # A malformed date otherwise surfaces only after 2*n full LLM runs
+        # (propagate-level rejection), burning the entire gate budget.
+        print(f"--date must be YYYY-MM-DD (got {args.date!r})", file=sys.stderr)
         return 2
     if args.dry_run:
         return _dry_run(args)

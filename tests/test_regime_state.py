@@ -136,6 +136,23 @@ def _mock_live_seams(monkeypatch, calls: list[tuple[str, str]] | None = None) ->
     monkeypatch.setattr(rc, "_fetch_depth_bands", lambda s: dict(_DEPTH_OK))
 
 
+def _mock_stock_perp_registry(monkeypatch, onboard: str = "2024-06-01") -> None:
+    """PIT registry + equity-history seams for a stock_perp fixture."""
+    monkeypatch.setattr(
+        rc, "classify_perp",
+        lambda symbol, as_of=None: InstrumentRecord(
+            symbol="MUUSDT", instrument_class="stock_perp",
+            classification_source="binance_exchangeinfo",
+            classification_confidence=1.0,
+            underlying_symbol="MU", onboard_date=onboard,
+        ),
+    )
+    monkeypatch.setattr(
+        rc, "get_YFin_history_cached",
+        lambda symbol, start, end: _frame(_UPTREND),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 1. regime_id determinism + version isolation
 # --------------------------------------------------------------------------- #
@@ -160,9 +177,9 @@ def test_regime_id_deterministic_and_input_sensitive():
     later = replace(same, computed_at="2026-09-03T23:59:59+00:00")
     assert compute_regime_id(later) == first
     # the version prefix isolates definitions across a REGIME_VERSION bump
-    # (v3 default vs the retired v2 definitions -> disjoint ids)
+    # (v4 default vs the retired v3/v2 definitions -> disjoint ids)
+    assert compute_regime_id(same, "v3") != first
     assert compute_regime_id(same, "v2") != first
-    assert compute_regime_id(same, "v4") != first
     # a plain mapping (stored payload) re-derives the same id
     assert compute_regime_id(asdict(same)) == first
 
@@ -215,6 +232,9 @@ def test_pure_crypto_live_assembly(monkeypatch):
     assert state.spot_perp_basis_bps is not None and 0 < state.spot_perp_basis_bps < 50
     assert state.spread_depth_regime == "tight"
     assert state.contract_liquidity is None  # stock-perp field stays None
+    # v4 vocabulary: overnight_gap_bps is stock-perp-only — the COMMON
+    # perp frame would yield one, but the field stays structurally None.
+    assert state.overnight_gap_bps is None
     assert state.liquidity_regime == "ample"
     assert state.market_stress is False  # no trigger fired
     assert state.liquidation_cascade_risk == "low"
@@ -287,6 +307,78 @@ def test_stock_perp_assembly_with_known_gaps(monkeypatch):
     assert state.sector_index_trend is None and "sector_index" in state.missing_inputs
     # index leg came from the perp index klines (PIT)
     assert ("binance_perp", "index") in calls
+
+
+@pytest.mark.unit
+def test_stock_perp_full_iso_as_of_computes_listing_age(monkeypatch):
+    """P2 live-run regression (round-10): trading_graph hands live runs a
+    FULL ISO as-of (utc_now_iso) while end_date stays date-only. The
+    listing-age strptime used to reject the timestamp -> the family except
+    swallowed it -> a phantom missing ``onboard_date`` + listing_age_days
+    None on EVERY live stock_perp run, through no data gap. The [:10]
+    date-prefix normalization computes the age from the as-of day."""
+    _mock_live_seams(monkeypatch)
+    _mock_stock_perp_registry(monkeypatch)
+    as_of = "2026-09-29T21:15:30+00:00"
+    state = rc.compute_regime_state(
+        "MUUSDT", "crypto_perp", "stock_perp", as_of, end_date=_TODAY,
+    )
+    assert state is not None
+    assert "onboard_date" not in state.missing_inputs
+    assert state.listing_age_days == (
+        date.fromisoformat(as_of[:10]) - date(2024, 6, 1)
+    ).days
+    assert state.underlying_trend == "up"  # fixture sanity: the class ran
+
+
+@pytest.mark.unit
+def test_spot_basis_requires_same_date_tail(monkeypatch):
+    """L6: the spot-perp basis is a SAME-DATE ratio. The v3 pairing took the
+    perp frame's last bar over the spot frame's own last bar positionally —
+    a spot leg ending one day early fabricated perp@D / spot@D-1 into the
+    id preimage and the |basis| >= 50 stress trigger. v4 aligns on the
+    perp tail date via the frames' date indexes; no spot bar at that date
+    degrades to the fail-soft missing path."""
+    _mock_live_seams(monkeypatch)
+    perp = _frame(_UPTREND)
+    lagged_spot = _frame(_UPTREND[:-1])  # tail lands one day before the perp's
+
+    def fake_klines(symbol, start_date, end_date, interval="1d",
+                    venue="binance_perp", price_type="last", closed_as_of=None):
+        return lagged_spot if venue == "binance_spot" else perp
+
+    monkeypatch.setattr(rc, "binance_klines_frame", fake_klines)
+    state = rc.compute_regime_state(
+        "BTCUSDT", "crypto_perp", "pure_crypto_perp", _PAST, end_date=_PAST,
+    )
+    assert state is not None
+    assert state.spot_perp_basis_bps is None
+    assert "spot_klines" in state.missing_inputs
+
+
+@pytest.mark.unit
+def test_index_basis_requires_same_date_tail(monkeypatch):
+    """L6, stock-perp leg: the last-index basis needs the index frame to
+    carry a bar at the perp tail's own date — a lagged index tail (D-1 vs
+    D) used to mint a cross-date ratio; it now degrades fail-soft."""
+    _mock_live_seams(monkeypatch)
+    _mock_stock_perp_registry(monkeypatch)
+    perp = _frame(_UPTREND)
+    lagged_index = _frame(_UPTREND[:-1])
+
+    def fake_klines(symbol, start_date, end_date, interval="1d",
+                    venue="binance_perp", price_type="last", closed_as_of=None):
+        return lagged_index if price_type == "index" else perp
+
+    monkeypatch.setattr(rc, "binance_klines_frame", fake_klines)
+    state = rc.compute_regime_state(
+        "MUUSDT", "crypto_perp", "stock_perp", _PAST, end_date=_PAST,
+    )
+    assert state is not None
+    assert state.index_mark_basis_bps is None
+    assert "index_klines" in state.missing_inputs
+    # the perp-side legs still carry the class (degraded, not uncomputable)
+    assert state.trend_regime == "up"
 
 
 @pytest.mark.unit
@@ -914,6 +1006,11 @@ def test_overnight_gap_survives_isolated_open_nan(monkeypatch):
     close list, so ``opens[-1] / closes[-2]`` can pair bars from
     non-adjacent days. The row-aligned drop removes the offending ROW from
     both lists, keeping the gap a true adjacent-day overnight reading.
+
+    Round-10 v4: the fixture moved from pure_crypto_perp to stock_perp —
+    the frozen vocabulary scopes overnight_gap_bps to stock-perp, so a
+    pure-crypto run now carries None (structural absence) no matter how
+    clean its open/close alignment is.
     """
     closes = [100.0, 110.0, 120.0, 130.0, 140.0]
     opens = [99.0, 109.0, 119.0, 129.0, float("nan")]  # isolated NaN, last row
@@ -924,14 +1021,10 @@ def test_overnight_gap_survives_isolated_open_nan(monkeypatch):
         return frame
 
     monkeypatch.setattr(rc, "binance_klines_frame", fake_klines)
-    monkeypatch.setattr(rc, "get_binance_funding_rate", lambda s, a, b: _FUNDING_CSV)
-    monkeypatch.setattr(rc, "_fetch_open_interest", lambda s, d: dict(_OI_OK))
-    monkeypatch.setattr(rc, "_fetch_lsr", lambda s, d: dict(_LSR_OK))
-    monkeypatch.setattr(rc, "_fetch_taker", lambda s, d: dict(_TAKER_OK))
-    monkeypatch.setattr(rc, "_fetch_depth_bands", lambda s: dict(_DEPTH_OK))
+    _mock_stock_perp_registry(monkeypatch)
 
     state = rc.compute_regime_state(
-        "BTCUSDT", "crypto_perp", "pure_crypto_perp", _PAST,
+        "MUUSDT", "crypto_perp", "stock_perp", _PAST,
         end_date=_PAST,
     )
     assert state is not None
@@ -940,3 +1033,15 @@ def test_overnight_gap_survives_isolated_open_nan(monkeypatch):
     # — NOT the misaligned 129.0/130.0 same-row pairing the independent
     # dropna produced.
     assert state.overnight_gap_bps == pytest.approx((129.0 / 120.0 - 1.0) * 1e4)
+
+    # Same seams under pure_crypto: the field is structurally absent now
+    # (v3 computed it here; v4 leaves None per the field-group table).
+    monkeypatch.setattr(rc, "get_binance_funding_rate", lambda s, a, b: _FUNDING_CSV)
+    monkeypatch.setattr(rc, "_fetch_open_interest", lambda s, d: dict(_OI_OK))
+    monkeypatch.setattr(rc, "_fetch_lsr", lambda s, d: dict(_LSR_OK))
+    monkeypatch.setattr(rc, "_fetch_taker", lambda s, d: dict(_TAKER_OK))
+    crypto_state = rc.compute_regime_state(
+        "BTCUSDT", "crypto_perp", "pure_crypto_perp", _PAST, end_date=_PAST,
+    )
+    assert crypto_state is not None
+    assert crypto_state.overnight_gap_bps is None

@@ -121,10 +121,13 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--reports-root",
-        default=str(
-            Path(os.getenv("YIALPHA_RESULTS_DIR", Path.home() / ".yialpha" / "logs"))
-            / "reports"
-        ),
+        # Round-10: _states_root() is the single source for the child's
+        # results dir; the default reports root is its "reports" subdir.
+        # Byte-identical to the old inline expression
+        # ($YIALPHA_RESULTS_DIR/reports, falling back to
+        # ~/.yialpha/logs/reports) — the two had drifted into duplicated
+        # literals that must stay in sync by hand.
+        default=str(_states_root() / "reports"),
         help="报告根目录（默认 $YIALPHA_RESULTS_DIR/reports，回退 ~/.yialpha/logs/reports）",
     )
     p.add_argument(
@@ -141,6 +144,33 @@ def _parse_args() -> argparse.Namespace:
         help="（已默认开启，保留兼容；见 --allow-degraded）",
     )
     opts = p.parse_args()
+    # Lower-bound validation BEFORE any pool/loop is constructed: --workers 0
+    # used to escape as a bare ValueError from ThreadPoolExecutor (outside the
+    # per-ticker try), and --max-attempts 0 produced a zero-iteration retry
+    # loop that failed every ticker with an empty reason. p.error() exits 2
+    # with a clean usage message.
+    if opts.workers < 1:
+        p.error(f"--workers must be >= 1 (got {opts.workers})")
+    if opts.max_attempts < 1:
+        p.error(f"--max-attempts must be >= 1 (got {opts.max_attempts})")
+    if opts.per_ticker_timeout <= 0:
+        p.error(f"--per-ticker-timeout must be > 0 (got {opts.per_ticker_timeout})")
+    if opts.backoff < 0:
+        p.error(f"--backoff must be >= 0 (got {opts.backoff})")
+    if opts.stall_timeout < 0:
+        p.error(f"--stall-timeout must be >= 0 (got {opts.stall_timeout})")
+    # Round-10: a garbage --date (e.g. 2026/07/01) used to slip through as an
+    # opaque string and propagate a malformed as-of through the whole graph
+    # (evidence chain, regime as-of parsing) before failing mid-run. Same
+    # exit convention as the numeric guards above (p.error -> exit 2 + a
+    # clean usage message). The strftime round-trip enforces zero-padded ISO
+    # (bare strptime accepts "2026-7-1").
+    try:
+        _parsed_date = datetime.strptime(opts.date, "%Y-%m-%d")
+    except ValueError:
+        _parsed_date = None
+    if _parsed_date is None or _parsed_date.strftime("%Y-%m-%d") != opts.date:
+        p.error(f"--date must be YYYY-MM-DD (got {opts.date!r})")
     # Quality gate is ON by default now: the only way back to the old
     # "accept a degraded report" semantics is the explicit --allow-degraded
     # escape hatch. (--require-data-quality stays accepted as a no-op for
@@ -161,6 +191,21 @@ def _reports_root(reports_root: str) -> Path:
     root = Path(reports_root).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _states_root() -> Path:
+    """Where the CHILD actually writes ``<TICKER>/YiAlphaStrategy_logs``.
+
+    The child inherits this process's environment, so its results dir is this
+    process's ``YIALPHA_RESULTS_DIR`` (or the ``~/.yialpha/logs`` default) —
+    independent of any ``--reports-root`` override, which only redirects
+    report DISCOVERY. With the default flags this equals ``reports_root.parent``
+    (byte-identical to the old anchoring); with an override it stays pinned to
+    the run that was just executed.
+    """
+    return Path(
+        os.getenv("YIALPHA_RESULTS_DIR", str(Path.home() / ".yialpha" / "logs"))
+    )
 
 
 def _complete_mtime(reports_root: Path, ticker: str) -> float:
@@ -193,7 +238,9 @@ def _find_new_report(reports_root: Path, ticker: str, pre_mtime: float) -> Path 
     return best
 
 
-def _core_sentinel_count(reports_root: Path, ticker: str, date: str) -> int | None:
+def _core_sentinel_count(
+    states_root: Path, ticker: str, date: str
+) -> int | None:
     """Read the finished run's data_quality block; None when unavailable.
 
     ``full_states_log_<date>[_perp|_spot].json`` (written atomically by the
@@ -206,9 +253,17 @@ def _core_sentinel_count(reports_root: Path, ticker: str, date: str) -> int | No
     by glob and take the NEWEST match for the date instead of constructing
     the exact name. Returns None when no log is found/unreadable or predates
     the data_quality field (older runs) — unknown, not zero.
+
+    *states_root* is the child's ACTUAL results dir (where
+    ``<TICKER>/YiAlphaStrategy_logs`` lives), NOT derived from --reports-root:
+    an operator overriding --reports-root to a copied directory for offline
+    comparison must not decouple the DEGRADED evidence from the run that was
+    just executed — under the old ``reports_root.parent`` anchoring every
+    attempt read None and strict mode burned all retries on phantom DEGRADED
+    verdicts despite clean reports.
     """
     candidates = sorted(
-        (reports_root.parent / ticker / "YiAlphaStrategy_logs").glob(
+        (states_root / ticker / "YiAlphaStrategy_logs").glob(
             f"full_states_log_{date}*.json"
         ),
         key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
@@ -508,11 +563,29 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         rc = proc.returncode
         wall = time.time() - t0
 
+        if kill_reason and rc == 0:
+            # Race: the child finished (and flushed its artifacts) between
+            # the poll that saw it alive and the kill landing — taskkill on an
+            # exited pid is a no-op, so returncode is the child's own 0. A
+            # clean exit with a fresh report is a finished attempt, not a
+            # kill: evaluate it normally instead of retrying (the old code
+            # burned the attempt — and on the last one failed the ticker
+            # outright — while a complete report sat on disk).
+            print(
+                f"[{ticker}] ⚠️ kill raced with natural exit ({kill_reason}); "
+                f"rc=0 — evaluating attempt normally",
+                flush=True,
+            )
+            kill_reason = None
         if kill_reason:
             print(
                 f"[{ticker}] ⚠️ killed attempt {attempt}: {kill_reason} (wall {wall:.0f}s)",
                 flush=True,
             )
+            # The summary table prints result["reason"]; without this the row
+            # showed "" (first attempt) or the PREVIOUS attempt's stale reason
+            # while the decisive failure was the timeout/stall kill.
+            result["reason"] = f"killed: {kill_reason} (wall {wall:.0f}s)"
         elif rc == 0:
             new_report = _find_new_report(reports_root, ticker, pre_mtime)
             if new_report:
@@ -528,7 +601,9 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                 # data_quality field) — unknown, not zero. Strict mode cannot
                 # verify quality then, so it retries; default mode stays ok
                 # but says "unknown" instead of silently looking verified.
-                sentinels = _core_sentinel_count(reports_root, ticker, opts.date)
+                sentinels = _core_sentinel_count(
+                    _states_root(), ticker, opts.date
+                )
                 if sentinels is None:
                     if opts.require_data_quality:
                         result["degraded"] = True

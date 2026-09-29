@@ -22,12 +22,28 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
-from yialpha.agents.managers.portfolio_manager import create_portfolio_manager
-from yialpha.agents.managers.research_manager import create_research_manager
-from yialpha.agents.trader.trader import create_trader
-from yialpha.graph.signal_processing import SignalProcessor
-from yialpha.llm_clients import create_llm_client
+# Windows GBK console guard (CLAUDE.md entry-script contract): LLM markdown
+# printed by _print_section can carry characters GBK cannot encode — without
+# this the script dies mid-report on UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if callable(_reconfigure):
+        with __import__("contextlib").suppress(AttributeError, ValueError):
+            _reconfigure(encoding="utf-8", errors="replace")
+
+# Allow running as `python scripts/smoke_structured_output.py` without an
+# editable install (sys.path[0] is scripts/, not the project root).
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from yialpha.agents.managers.portfolio_manager import create_portfolio_manager  # noqa: E402
+from yialpha.agents.managers.research_manager import create_research_manager  # noqa: E402
+from yialpha.agents.trader.trader import create_trader  # noqa: E402
+from yialpha.graph.signal_processing import SignalProcessor  # noqa: E402
+from yialpha.llm_clients import create_llm_client  # noqa: E402
 
 PROVIDER_DEFAULTS = {
     "openai": ("gpt-5.4-mini", None),

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from yialpha.backtest.engine import BacktestResult
+from yialpha.dataflows.utils import replace_retry_on_windows
 from yialpha.fmt import fmt_num3, fmt_pct
 
 logger = logging.getLogger(__name__)
@@ -200,7 +201,10 @@ def write_dashboard(
             ),
             encoding="utf-8",
         )
-        os.replace(tmp, path)
+        # Round-10: browsers hold dashboard.html open while it re-renders —
+        # the classic Windows replace-vs-reader race; retry instead of
+        # failing the re-render.
+        replace_retry_on_windows(tmp, path)
     finally:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)

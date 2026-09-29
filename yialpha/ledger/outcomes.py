@@ -45,9 +45,9 @@ from yialpha.ledger.models import (
     validate_horizon_days,
 )
 from yialpha.ledger.sqlite import (
-    get_connection,
     ledger_exists,
     ledger_transaction,
+    optional_read_rows,
     utc_now_iso,
 )
 from yialpha.versions import OUTCOME_COMPUTE_VERSION
@@ -195,30 +195,40 @@ def pending_predictions(now_as_of: str) -> list[dict[str, Any]]:
     Revision rows appear as their own entries (carrying
     ``original_prediction_id`` / ``debate_revision``) so the scorer can
     prefer the latest link of a chain. Returns an empty list when no ledger
-    DB exists yet (optional read).
+    DB exists yet (optional read). A legacy row whose ``analysis_as_of``
+    cannot be parsed (blank / malformed hand-edited value) is nominated with
+    ``timing_error`` for a terminal scorer diagnosis — never allowed to
+    abort the whole sweep.
     """
     if not ledger_exists():
         return []
     now_dt = timestamp_as_utc(now_as_of)
-    connection = get_connection(readonly=True)
-    prediction_columns = {row["name"] for row in connection.execute("PRAGMA table_info(predictions)")}
-    timing_projection = "p.timing" if "timing" in prediction_columns else "NULL AS timing"
-    rows = (
-        connection
-        .execute(
-            "SELECT p.prediction_id, p.run_id, p.analyst, p.instrument_id, "
-            "p.prediction_scope, p.horizon_days, p.direction, p.prob_up, "
-            "p.expected_return, p.target_price, p.target_currency, "
-            "p.analysis_as_of, p.original_prediction_id, p.debate_revision, "
-            f"p.regime_id, {timing_projection}, "
-            "r.ticker, r.asset_type, r.instrument_class "
-            "FROM predictions p JOIN runs r ON r.run_id = p.run_id "
-            "WHERE NOT EXISTS (SELECT 1 FROM outcomes o "
-            "WHERE o.prediction_id = p.prediction_id "
-            "AND o.horizon_days = p.horizon_days) "
-            "ORDER BY p.analysis_as_of, p.prediction_id"
+    # Round-10: the shared optional-read chokepoint (sqlite3.Error, connect
+    # inside the try) replaces three pasted except-OperationalError guards —
+    # a corrupt/foreign file raises sqlite3.DatabaseError, OperationalError's
+    # PARENT, which those narrow guards let escape; 0-byte / table-less
+    # files raise plain OperationalError ("no such table").
+    prediction_columns = {
+        row["name"]
+        for row in optional_read_rows(
+            "PRAGMA table_info(predictions)",
+            context="pending_predictions(table_info)",
         )
-        .fetchall()
+    }
+    timing_projection = "p.timing" if "timing" in prediction_columns else "NULL AS timing"
+    rows = optional_read_rows(
+        "SELECT p.prediction_id, p.run_id, p.analyst, p.instrument_id, "
+        "p.prediction_scope, p.horizon_days, p.direction, p.prob_up, "
+        "p.expected_return, p.target_price, p.target_currency, "
+        "p.analysis_as_of, p.original_prediction_id, p.debate_revision, "
+        f"p.regime_id, {timing_projection}, "
+        "r.ticker, r.asset_type, r.instrument_class "
+        "FROM predictions p JOIN runs r ON r.run_id = p.run_id "
+        "WHERE NOT EXISTS (SELECT 1 FROM outcomes o "
+        "WHERE o.prediction_id = p.prediction_id "
+        "AND o.horizon_days = p.horizon_days) "
+        "ORDER BY p.analysis_as_of, p.prediction_id",
+        context="pending_predictions",
     )
     pending: list[dict[str, Any]] = []
     for row in rows:
@@ -242,9 +252,20 @@ def pending_predictions(now_as_of: str) -> list[dict[str, Any]]:
                 timing = timing if isinstance(timing, dict) else {}
                 timing_error = str(exc)
         else:
-            due_at = timestamp_as_utc(str(row["analysis_as_of"])) + timedelta(
-                days=int(row["horizon_days"])
-            )
+            # Round-10: a malformed legacy as-of (blank or unparseable
+            # value from a hand-edited/imported row) must degrade THIS ROW,
+            # not the sweep — the old unconditional timestamp_as_utc raised
+            # ValueError out of pending_predictions before compute_outcomes'
+            # per-row isolation could ever see it, killing every other row's
+            # batch. Same contract as the invalid-timing branch above.
+            try:
+                due_at = timestamp_as_utc(str(row["analysis_as_of"])) + timedelta(
+                    days=int(row["horizon_days"])
+                )
+            except ValueError as exc:
+                timing_error = (
+                    f"invalid analysis_as_of {row['analysis_as_of']!r}: {exc}"
+                )
         if due_at is not None and due_at > now_dt:
             continue
         pending.append(
@@ -278,14 +299,11 @@ def outcomes_for_prediction(prediction_id: str) -> list[OutcomeRecord]:
     """All outcome rows linked to one prediction (``horizon_days`` order)."""
     if not ledger_exists():
         return []
-    rows = (
-        get_connection(readonly=True)
-        .execute(
-            "SELECT * "
-            "FROM outcomes WHERE prediction_id = ? ORDER BY horizon_days",
-            (prediction_id,),
-        )
-        .fetchall()
+    rows = optional_read_rows(
+        "SELECT * "
+        "FROM outcomes WHERE prediction_id = ? ORDER BY horizon_days",
+        (prediction_id,),
+        context="outcomes_for_prediction",
     )
     return [row_to_outcome(row) for row in rows]
 
@@ -294,13 +312,10 @@ def all_outcomes(limit: int = 500) -> list[OutcomeRecord]:
     """Most recent outcome rows across all predictions (``computed_at`` order)."""
     if not ledger_exists():
         return []
-    rows = (
-        get_connection(readonly=True)
-        .execute(
-            "SELECT * "
-            "FROM outcomes ORDER BY computed_at DESC, outcome_id DESC LIMIT ?",
-            (limit,),
-        )
-        .fetchall()
+    rows = optional_read_rows(
+        "SELECT * "
+        "FROM outcomes ORDER BY computed_at DESC, outcome_id DESC LIMIT ?",
+        (limit,),
+        context="all_outcomes",
     )
     return [row_to_outcome(row) for row in rows]

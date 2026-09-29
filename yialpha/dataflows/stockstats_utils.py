@@ -14,7 +14,7 @@ from yialpha.batch.locks import FileLock
 
 from .config import get_config
 from .symbol_utils import NoMarketDataError, normalize_symbol
-from .utils import is_filing_public, safe_ticker_component
+from .utils import is_filing_public, replace_retry_on_windows, safe_ticker_component
 
 logger = logging.getLogger(__name__)
 
@@ -455,7 +455,11 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
             # never a half-written one (same pattern as disk_cache).
             tmp_file = f"{data_file}.{os.getpid()}.tmp"
             downloaded.to_csv(tmp_file, index=False, encoding="utf-8")
-            os.replace(tmp_file, data_file)
+            # Round-10: verify-history / ic-cycle read this cache
+            # CROSS-PROCESS with no lock; on Windows a reader mid-read made
+            # the replace raise PermissionError and drop the cache write of
+            # a download that already succeeded. Retry the race window.
+            replace_retry_on_windows(tmp_file, data_file)
             # The cache name is now fixed; drop this symbol's legacy dated
             # files (one per day under the old scheme) so they cannot pile up.
             _purge_legacy_ohlcv_caches(config, safe_symbol)

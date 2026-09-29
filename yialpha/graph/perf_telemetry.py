@@ -254,18 +254,29 @@ class NodePerfTokenCallback(BaseCallbackHandler):
                 reasoning_tokens += int(details.get("reasoning", 0) or 0)
 
         # Fallback: some providers put usage on llm_output rather than the
-        # AIMessage. Only consult it if we didn't already pick anything up
-        # from generations, to avoid double-counting.
-        if input_tokens == 0 and output_tokens == 0:
-            llm_output = getattr(response, "llm_output", None) or {}
-            token_usage = llm_output.get("token_usage") or llm_output.get(
-                "usage_metadata"
-            ) or {}
-            if token_usage:
+        # AIMessage. Consult it PER FIELD — fill each still-zero field from
+        # llm_output.token_usage, never ADD on top of a value the generations
+        # already provided. The round-10 G6 fix made the fallback require
+        # input==0 AND output==0 AND reasoning==0, which stopped the gateway
+        # double-write from double-counting reasoning; but in the gateway
+        # shape where generations carry ONLY reasoning
+        # (usage_metadata = {input:0, output:0, reasoning:N}) while
+        # llm_output.token_usage holds the FULL counts, the whole fallback
+        # was skipped and input/output were recorded as 0. Per-field merge
+        # preserves the no-double-count guarantee AND restores I/O.
+        llm_output = getattr(response, "llm_output", None) or {}
+        token_usage = llm_output.get("token_usage") or llm_output.get(
+            "usage_metadata"
+        ) or {}
+        if token_usage:
+            if input_tokens == 0:
                 input_tokens += int(token_usage.get("input_tokens", 0) or 0)
+            if output_tokens == 0:
                 output_tokens += int(token_usage.get("output_tokens", 0) or 0)
-                # OpenAI-style nested reasoning if present.
-                details = token_usage.get("output_token_details") or {}
+            # OpenAI-style nested reasoning if present — only when the
+            # generations didn't already supply reasoning (the G6 fix).
+            details = token_usage.get("output_token_details") or {}
+            if reasoning_tokens == 0:
                 reasoning_tokens += int(details.get("reasoning", 0) or 0)
 
         if input_tokens == 0 and output_tokens == 0 and reasoning_tokens == 0:
@@ -357,4 +368,8 @@ def dump_perf_report(
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
-    os.replace(tmp, path)
+    # Written next to full_states_log, which the web store reads live — the
+    # same Windows lockless-reader race applies (round-10).
+    from yialpha.dataflows.utils import replace_retry_on_windows
+
+    replace_retry_on_windows(tmp, path)

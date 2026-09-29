@@ -54,6 +54,8 @@ from langchain_core.messages import (
 )
 from langchain_core.outputs import ChatGeneration, Generation
 
+from yialpha.dataflows.utils import replace_retry_on_windows
+
 logger = logging.getLogger(__name__)
 
 # Bump to invalidate the whole cache if the on-disk Generation schema changes
@@ -197,7 +199,12 @@ class DiskLLMCache(BaseCache):
             with self._lock:
                 with tmp.open("w", encoding="utf-8") as fh:
                     json.dump(payload, fh, ensure_ascii=False)
-                os.replace(tmp, path)
+                # Round-10: retry-then-swallow — a concurrent lookup() reader
+                # mid-read used to make this replace raise immediately and
+                # drop a paid-for generation's cache entry; the transient
+                # race is now ridden through, and a persistent denial still
+                # lands in the same never-break-a-run handler.
+                replace_retry_on_windows(tmp, path)
         except Exception as exc:  # noqa: BLE001 -- caching must never break a run
             logger.warning("LLM cache: could not write %s (%s)", path, exc)
             with contextlib.suppress(OSError):

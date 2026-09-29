@@ -24,6 +24,12 @@ for _stream in (sys.stdout, sys.stderr):
 # noqa: E402 — imports sit after the UTF-8 reconfigure guard above (Windows GBK shim).
 from pathlib import Path  # noqa: E402
 
+# Allow running as `python scripts/analyze_window.py` without an editable
+# install (sys.path[0] is scripts/, not the project root).
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from yialpha.default_config import DEFAULT_CONFIG  # noqa: E402
 from yialpha.graph.overlay_fields import parse_overlay  # noqa: E402
 from yialpha.graph.trading_graph import YiAlphaGraph  # noqa: E402
@@ -80,6 +86,15 @@ def main() -> int:
         path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"   [增量落盘] 已写入第 {i} 天 → {path}", flush=True)
 
+    # Round-10: exit code must reflect failures — every day erroring used to
+    # still exit 0 (batch drivers treat this script's rc as the verdict).
+    failures = sum(1 for r in rows if r.get("rating") == "ERROR")
+    if failures:
+        print(
+            f"\n⚠ {failures}/{len(rows)} 天失败（rating=ERROR，详见 dump）：{path}",
+            file=sys.stderr, flush=True,
+        )
+        return 1
     print(f"\n全部完成，dump：{path}", flush=True)
     return 0
 

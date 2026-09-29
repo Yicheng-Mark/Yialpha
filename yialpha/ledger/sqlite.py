@@ -38,12 +38,14 @@ position_id``; Evidence is many-to-many and referenced back via
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 # Highest schema version this binary knows. Bump + add a migration block in
 # _migrate() whenever a ledger table is renamed/removed/redefined (additive
@@ -53,6 +55,8 @@ _KNOWN_SCHEMA_VERSION = 4
 _ledger_lock = threading.Lock()
 _local = threading.local()
 _migrated_paths: set[str] = set()
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now_iso() -> str:
@@ -411,6 +415,37 @@ def get_connection(*, readonly: bool = False) -> sqlite3.Connection:
                     _migrated_paths.add(path)
         conns[key] = conn
     return conn
+
+
+def optional_read_rows(
+    sql: str, params: Sequence[Any] = (), *, context: str
+) -> list[sqlite3.Row]:
+    """Rows of one optional ledger read, or ``[]`` plus one WARNING.
+
+    The single chokepoint for every optional reader (pending worklist,
+    scoreboard joins, evidence/prediction/outcome lookups, ticket mirrors):
+    it connects READ-ONLY with the connection INSIDE the try, executes, and
+    fetches; on ``sqlite3.Error`` it logs one WARNING naming ``context`` and
+    the exception and returns ``[]`` — the caller's optional read degrades
+    with a visible trace instead of aborting the sweep/render around it.
+    ``sqlite3.Error`` (the house pattern — regime_store / instrument
+    registry), deliberately NOT the narrower ``sqlite3.OperationalError``:
+    a corrupt/foreign file raises ``sqlite3.DatabaseError`` ("file is not a
+    database"), which is OperationalError's PARENT, not a subclass, and the
+    first round-10 cut's narrow guards let it escape every one of them.
+    This also deliberately conflates permanent errors ("no such table" on a
+    table-less file) with transient ones ("database is locked"): both
+    degrade-with-warning here, and the logged exception text distinguishes
+    them for operators. Callers wanting single-row semantics use
+    ``rows[0] if rows else None``; ``params`` are bound, never interpolated.
+    """
+    try:
+        return get_connection(readonly=True).execute(sql, params).fetchall()
+    except sqlite3.Error as exc:
+        logger.warning(
+            "%s: ledger read degraded (returning empty): %s", context, exc
+        )
+        return []
 
 
 @contextmanager

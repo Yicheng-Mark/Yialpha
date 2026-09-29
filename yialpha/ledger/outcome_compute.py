@@ -56,7 +56,7 @@ from yialpha.ledger.models import (
     timestamp_as_utc,
 )
 from yialpha.ledger.outcomes import pending_predictions, write_outcome
-from yialpha.ledger.sqlite import get_connection
+from yialpha.ledger.sqlite import optional_read_rows
 from yialpha.versions import LEGACY_OUTCOME_VERSION, OUTCOME_COMPUTE_VERSION
 
 logger = logging.getLogger(__name__)
@@ -417,15 +417,22 @@ def _ticket_cost_legs(
     the whole total under fees with slippage 0.0 — see module docstring. No
     usable row -> (None, None, None) and the caller marks ``ticket_cost``.
     """
-    row = (
-        get_connection(readonly=True)
-        .execute(
-            "SELECT ticket_id, payload FROM tickets WHERE run_id = ? "
-            "ORDER BY written_at DESC, ticket_id DESC LIMIT 1",
-            (run_id,),
-        )
-        .fetchone()
+    # Round-10: shared optional-read chokepoint (sqlite3.Error, connect
+    # inside the try) — a corrupt/foreign ledger file degrades the cost
+    # legs to missing-with-warning, never aborts the scoring batch.
+    rows = optional_read_rows(
+        # Round-10: tie-break on rowid (insertion order), NOT ticket_id —
+        # ticket_id is a content hash whose lexicographic order is
+        # unrelated to write order, so two same-second tickets could book
+        # cost legs from a DIFFERENT ticket than tickets_mirror's
+        # ticket_for_run (rowid DESC) discloses. "Latest" must mean the
+        # same row in both readers.
+        "SELECT ticket_id, payload FROM tickets WHERE run_id = ? "
+        "ORDER BY written_at DESC, rowid DESC LIMIT 1",
+        (run_id,),
+        context=f"_ticket_cost_legs({run_id})",
     )
+    row = rows[0] if rows else None
     if row is None:
         return None, None, None
     ticket_id = str(row["ticket_id"])
@@ -538,7 +545,14 @@ def _compute_reference_outcome(item: dict[str, Any], now_as_of: str) -> OutcomeC
         return result("incomplete" if terminal else "pending", reason, missing, **legs)
 
     if scope == SCOPE_MACRO:
-        return result("incomplete", "scope_not_price_scoreable")
+        # Round-10 (user-approved 口径): MACRO is deliberately NOT scored —
+        # the legacy path and both docstrings say no row is ever written.
+        # This reference path used to persist an incomplete
+        # "scope_not_price_scoreable" row via result(), silently RETIRING the
+        # prediction under a label the immutability story forbids rewriting.
+        # Bypass result() (no outcome row); like a legacy MACRO row, the
+        # prediction stays on the worklist and is re-skipped each batch.
+        return OutcomeComputeDetail(prediction_id, run_id, horizon, "skipped")
     if scope == SCOPE_POSITIONING:
         # Preserve the existing cumulative-funding label and its sign.
         context.update(window_start=formed.isoformat(), window_end=horizon_end.isoformat())

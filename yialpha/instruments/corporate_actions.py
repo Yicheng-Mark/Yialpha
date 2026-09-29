@@ -23,6 +23,14 @@ from yialpha.ledger.sqlite import utc_now_iso
 #: form both violate it).
 _STRICT_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
+#: Datetime-accepting variant of the same strict dashed shape — DERIVED
+#: from ``_STRICT_ISO_DATE_RE`` (round-10) so the dashed-ISO contract has
+#: ONE spelling instead of a second inline pattern: a strict date,
+#: optionally followed by a "T"-or-space-separated time part. ``re.match``
+#: anchors the start; the trailing ``$`` anchors the end (equivalent to
+#: the former inline ``^\d{4}-\d{2}-\d{2}([T ].+)?$``).
+_STRICT_ISO_DATETIME_RE = re.compile(_STRICT_ISO_DATE_RE.pattern + r"([T ].+)?$")
+
 #: The corporate-action vocabulary (record stage: dividends + splits are the
 #: V2.4 return-attribution drivers; merger/ticker_change cover identity
 #: drift; ``other`` is the explicit escape hatch).
@@ -91,7 +99,20 @@ def validate_corporate_action(record: CorporateActionRecord) -> None:
 
 
 def _require_iso_date_or_datetime(value: str) -> None:
-    """Raise ValueError unless ``value`` parses as an ISO date or datetime."""
+    """Raise ValueError unless ``value`` parses as an ISO date or datetime.
+
+    Round-10: the strict dashed form is required BEFORE parsing — on
+    Python >= 3.11 ``date.fromisoformat`` also accepts the compact
+    ``"20260922"`` form, which violates this module's lexicographic
+    date contract (the round-8 note; ``"20260922" < "2026-01-01"`` sorts
+    before every dashed date). ``event_date`` already enforces this via
+    strict regex; ``available_at`` must not be the leak around it.
+    """
+    if not _STRICT_ISO_DATETIME_RE.match(str(value)):
+        raise ValueError(
+            f"available_at must be an ISO date or datetime "
+            f"(YYYY-MM-DD[...]), got {value!r}"
+        )
     try:
         date.fromisoformat(value)
         return

@@ -372,12 +372,15 @@ def test_core_sentinel_count_newest_venue_file_wins(tmp_path):
     os.utime(plain, (1_000_000, 1_000_000))
     os.utime(perp, (2_000_000, 2_000_000))
 
-    reports_root = tmp_path / "reports"  # .parent is the ticker root
-    assert rr._core_sentinel_count(reports_root, "MU", "2026-09-19") == 2
+    # Round-10 signature: the first arg is the CHILD's states root itself
+    # (where <TICKER>/YiAlphaStrategy_logs lives), not a reports dir whose
+    # .parent anchors it.
+    states_root = tmp_path
+    assert rr._core_sentinel_count(states_root, "MU", "2026-09-19") == 2
     # Reverse the mtimes → the plain file wins with its own count.
     os.utime(plain, (3_000_000, 3_000_000))
     os.utime(perp, (2_000_000, 2_000_000))
-    assert rr._core_sentinel_count(reports_root, "MU", "2026-09-19") == 0
+    assert rr._core_sentinel_count(states_root, "MU", "2026-09-19") == 0
 
 
 @pytest.mark.unit
@@ -385,7 +388,7 @@ def test_core_sentinel_count_none_without_any_log(tmp_path):
     """No candidate files → None (unknown, not zero): a missing log must not
     be laundered into a clean quality verdict."""
     rr = _load_script("run_robust")
-    assert rr._core_sentinel_count(tmp_path / "reports", "MU", "2026-09-19") is None
+    assert rr._core_sentinel_count(tmp_path, "MU", "2026-09-19") is None
 
 
 # --------------------------------------------------------------------------- #

@@ -26,6 +26,7 @@ Rules enforced by this module:
 
 from __future__ import annotations
 
+import logging
 from hashlib import sha256
 
 from yialpha.ledger.models import (
@@ -37,12 +38,14 @@ from yialpha.ledger.models import (
     validate_scope,
 )
 from yialpha.ledger.sqlite import (
-    get_connection,
     ledger_exists,
     ledger_transaction,
+    optional_read_rows,
     utc_now_iso,
 )
 from yialpha.versions import SCHEMA_VERSION
+
+logger = logging.getLogger(__name__)
 
 #: Every ``evidence`` column, in INSERT/SELECT order (matches the v1 DDL).
 _EVIDENCE_COLUMNS = (
@@ -140,16 +143,41 @@ def record_evidence(
     ``analysis_as_of`` is given, a :class:`PITEvidenceViolation` (a
     ``ValueError`` subclass) is raised if the evidence became available
     after that instant (PIT violation); a date-only ``analysis_as_of``
-    admits any time on that UTC day. Foreign keys are enforced: an unknown
-    ``run_id`` raises ``sqlite3.IntegrityError``.
+    admits any time on that UTC day. A blank OR unparseable ``analysis_as_of``
+    is treated as unanchored (WARNING for the unparseable case) — the guard
+    degrades rather than dropping every evidence block of the run. Foreign
+    keys are enforced: an unknown ``run_id`` raises
+    ``sqlite3.IntegrityError``.
     """
     validate_scope(scope)
     validate_replayability(replayability)
     payload_hash = sha256(payload.encode("utf-8")).hexdigest()
     available = available_at or utc_now_iso()
-    if analysis_as_of is not None and pit_latest_instant(available) > (
-        pit_latest_instant(analysis_as_of)
-    ):
+    # Round-10: the as-of anchor degrades in TWO shapes, both UNANCHORED —
+    # blank ("" / whitespace, the degraded anchor a failed precise-as-of
+    # resolution leaves behind: no instant to violate) and truthy-but-
+    # unparseable ("2026/07/01" from a hand-edited row). The old check fed
+    # the latter into pit_latest_instant, whose plain ValueError (NOT
+    # PITEvidenceViolation) propagated and was swallowed upstream, dropping
+    # EVERY run-derived evidence block for the run. Losing the whole
+    # measurability chain over one malformed string is the worse failure:
+    # fail visible (WARNING) and keep the evidence flowing. A parseable
+    # anchor keeps the byte-identical PIT raise below.
+    anchor = str(analysis_as_of or "").strip()
+    if anchor:
+        try:
+            anchor_latest = pit_latest_instant(anchor)
+        except ValueError as exc:
+            logger.warning(
+                "record_evidence: unparseable analysis_as_of %r treated as "
+                "unanchored (PIT guard skipped): %s",
+                analysis_as_of,
+                exc,
+            )
+            anchor_latest = None
+    else:
+        anchor_latest = None
+    if anchor_latest is not None and pit_latest_instant(available) > anchor_latest:
         raise PITEvidenceViolation(
             "evidence available_at exceeds analysis_as_of (PIT violation)"
         )
@@ -188,16 +216,15 @@ def evidence_for_run(run_id: str) -> list[EvidenceRecord]:
     """
     if not ledger_exists():
         return []
-    rows = (
-        get_connection(readonly=True)
-        .execute(
-            "SELECT evidence_id, run_id, source, category, symbol, scope, "
-            "payload_hash, source_url, event_time, available_at, created_at, "
-            "replayability, quality_status "
-            "FROM evidence WHERE run_id = ? ORDER BY created_at, evidence_id",
-            (run_id,),
-        )
-        .fetchall()
+    # Round-10: shared optional-read chokepoint — a corrupt/foreign ledger
+    # file degrades to empty-with-warning instead of aborting the caller.
+    rows = optional_read_rows(
+        "SELECT evidence_id, run_id, source, category, symbol, scope, "
+        "payload_hash, source_url, event_time, available_at, created_at, "
+        "replayability, quality_status "
+        "FROM evidence WHERE run_id = ? ORDER BY created_at, evidence_id",
+        (run_id,),
+        context=f"evidence_for_run({run_id})",
     )
     return [row_to_evidence(row) for row in rows]
 
@@ -206,13 +233,10 @@ def evidence_ids_for_run(run_id: str) -> list[str]:
     """Just the deterministic evidence ids for ``run_id`` (same order as above)."""
     if not ledger_exists():
         return []
-    rows = (
-        get_connection(readonly=True)
-        .execute(
-            "SELECT evidence_id FROM evidence "
-            "WHERE run_id = ? ORDER BY created_at, evidence_id",
-            (run_id,),
-        )
-        .fetchall()
+    rows = optional_read_rows(
+        "SELECT evidence_id FROM evidence "
+        "WHERE run_id = ? ORDER BY created_at, evidence_id",
+        (run_id,),
+        context=f"evidence_ids_for_run({run_id})",
     )
     return [str(row["evidence_id"]) for row in rows]

@@ -31,6 +31,7 @@ from __future__ import annotations
 import concurrent.futures
 import copy
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -175,6 +176,15 @@ def _invoke_analyst_subgraph(
     worker thread's thread-local slot starts empty. Using the analyst's
     serial node name (``spec.agent_node``) keeps parallel-leg telemetry
     directly comparable with the serial leg.
+
+    Round-10: the worker also RECORDS the wall of the analyst's full subgraph
+    invoke into the perf tracker under ``perf_node_name``. Producer-side rows:
+    without them the parallel leg pinned every per-analyst wall at 0.0 (the
+    whole stage hides inside one ``Analyst Fanout`` wrapper row), and every
+    future tracker consumer re-inherited the trap. ``finally`` (not
+    ``except``) so a failed subgraph still books its wall — the same contract
+    ``wrap_node`` applies to parent nodes. Observation only; inert when
+    ``perf_tracker`` is None.
     """
     if wall_time_tracker is not None:
         wall_time_tracker.mark_started(spec_key)
@@ -183,6 +193,7 @@ def _invoke_analyst_subgraph(
     )
     if perf_tracker is not None and perf_node_name is not None:
         perf_tracker.set_active_node(perf_node_name)
+    invoke_started = time.monotonic() if perf_tracker is not None else None
     # Per-subgraph prediction-capture isolation: the worker context is a
     # copy, so binding a fresh registry here confines the __active__ slot
     # (and this analyst's captures) to this subgraph — without it, four
@@ -199,6 +210,10 @@ def _invoke_analyst_subgraph(
     finally:
         if perf_tracker is not None and perf_node_name is not None:
             perf_tracker.set_active_node(previous_active_node)
+            if invoke_started is not None:
+                perf_tracker.record(
+                    perf_node_name, time.monotonic() - invoke_started
+                )
         if wall_time_tracker is not None:
             wall_time_tracker.mark_completed(spec_key)
 
@@ -212,6 +227,7 @@ def create_analyst_fanout_node(
     wall_time_tracker: Any | None = None,
     recursion_limit: int | None = None,
     perf_tracker: Any | None = None,
+    wall_time_tracker_provider: Callable[[], Any] | None = None,
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
     """Return a LangGraph node fn that runs all analyst subgraphs in parallel.
 
@@ -249,6 +265,17 @@ def create_analyst_fanout_node(
             with ``mark_started(key)`` / ``mark_completed(key)``. If provided,
             each subgraph invoke is timed so ``stream_telemetry=true`` can show
             per-analyst wall time in the parallel leg. Inert when ``None``.
+            Takes precedence over ``wall_time_tracker_provider`` when both are
+            supplied (the direct instance is the more specific override).
+        wall_time_tracker_provider: Round-10 (G4) — zero-arg factory resolved
+            to a tracker at NODE-RUN time (once per invoke). The compiled
+            graph outlives many invokes while trackers are per-invoke
+            (``trading_graph._invoke_or_stream`` builds one per invoke; the
+            interactive CLI builds its own around its stream loop), so an
+            instance frozen at graph-construction time would be ``None``
+            forever. Only consulted when ``wall_time_tracker`` is None; inert
+            when both are None (parallel-off / telemetry-off is
+            byte-identical).
         recursion_limit: Per-subgraph recursion limit, applied at invoke time.
             ``None`` (default) derives it from the thread-local config's
             ``max_recur_limit`` (the same serial whole-graph budget
@@ -327,7 +354,25 @@ def create_analyst_fanout_node(
 
     def fanout_node(state: dict[str, Any]) -> dict[str, Any]:
         subgraphs = _ensure_subgraphs()
-        workers = max_threads if max_threads is not None else len(plan.specs)
+        # Clamp at 1: a configured max_threads <= 0 (env typo) used to reach
+        # ThreadPoolExecutor(max_workers=0) on FIRST INVOKE — mid-graph, as a
+        # bare ValueError — instead of failing predictably here.
+        workers = (
+            max(1, max_threads) if max_threads is not None else len(plan.specs)
+        )
+        # Round-10 (G4): resolve the tracker PER INVOKE — the provider returns
+        # whatever tracker is active for THIS invoke (None when nothing is).
+        # An instance captured at construction time would pin the build-time
+        # value (always None) for the compiled graph's whole lifetime.
+        effective_wall_tracker = (
+            wall_time_tracker
+            if wall_time_tracker is not None
+            else (
+                wall_time_tracker_provider()
+                if wall_time_tracker_provider is not None
+                else None
+            )
+        )
         invoke_config = {"recursion_limit": recursion_limit}
         # One independent clone per spec, with the placeholder rule applied.
         clones = [
@@ -348,7 +393,7 @@ def create_analyst_fanout_node(
                     clone,
                     spec.key,
                     invoke_config,
-                    wall_time_tracker,
+                    effective_wall_tracker,
                     perf_tracker,
                     spec.agent_node,
                 )

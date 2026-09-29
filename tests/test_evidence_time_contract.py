@@ -213,7 +213,14 @@ def _run_shell_mode(mode: str, is_historical: bool, forbidden):
             patch("yialpha.ledger.regime_store.upsert_regime"),
             patch("yialpha.ledger.sqlite.utc_now_iso", return_value=_ANCHOR),
             patch("yialpha.ledger.evidence.utc_now_iso", return_value=_INJECTED_AT),
-            patch("yialpha.ledger.evidence.get_connection", side_effect=forbidden),
+            # Round-10: evidence.py's DB touchpoints are now ledger_transaction
+            # (writes) + optional_read_rows (reads, the sqlite chokepoint) —
+            # the old get_connection patch target was removed from the module's
+            # import surface by that refactor. Forbid BOTH current seams; the
+            # record stage is fail-soft, so the forbidden raise surfaces as the
+            # generic record_evidence_block warning, never a PIT rejection.
+            patch("yialpha.ledger.evidence.ledger_transaction", side_effect=forbidden),
+            patch("yialpha.ledger.evidence.optional_read_rows", side_effect=forbidden),
             patch("sqlite3.connect", side_effect=forbidden),
         ):
             graph._run_graph("BTCUSDT", _DAY, asset_type="crypto_perp")

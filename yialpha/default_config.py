@@ -659,9 +659,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # yialpha/llm_clients/response_cache.py docstring.
     "llm_cache": False,
     # T2: parallel analysts inside one wrapper node. OFF by default = today's
-    # serial analyst chain verbatim. max_threads caps nested concurrency
-    # (batch_workers * 4); above the cap the runner silently falls back to
-    # serial analysts per graph so total in-flight LLM calls stay predictable.
+    # serial analyst chain verbatim. max_threads caps nested concurrency: the
+    # fanout node's ThreadPoolExecutor runs at most max_workers =
+    # max(1, max_threads) analyst sub-graphs at once (None = one per spec);
+    # a value <= 0 clamps to 1 — the cap only reduces concurrency, it never
+    # falls back to the serial chain.
     "analyst_parallel": False,
     "analyst_parallel_max_threads": 16,
     # News / data fetching parameters

@@ -340,3 +340,127 @@ def test_serialize_shape_for_empty_tracker():
             "tokens_reasoning": 0,
         },
     }
+
+
+def test_token_callback_reasoning_only_generations_skip_llm_output_fallback():
+    """Round-10: generations carrying ONLY reasoning tokens (input=0,
+    output=0, reasoning=N — some providers report just that) plus a gateway
+    that double-writes usage on llm_output must count N ONCE. The old
+    input==0-and-output==0 fallback test consulted llm_output anyway and
+    added N a second time."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    tracker = NodePerfTracker()
+    cb = NodePerfTokenCallback(tracker)
+
+    message = AIMessage(content="thought")
+    message.usage_metadata = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "output_token_details": {"reasoning": 17},
+    }
+    result = LLMResult(
+        generations=[[ChatGeneration(message=message)]],
+        llm_output={
+            "token_usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "output_token_details": {"reasoning": 17},
+            }
+        },
+    )
+
+    tracker.set_active_node("Market Analyst")
+    try:
+        cb.on_llm_end(result)
+    finally:
+        tracker.set_active_node(None)
+
+    node = tracker.serialize()["nodes"]["Market Analyst"]
+    assert node["tokens_reasoning"] == 17  # not 34
+
+
+def test_token_callback_reasoning_only_metadata_recovers_io_from_llm_output():
+    """Round-10 (G6 follow-up): the gateway shape where generations carry
+    ONLY reasoning (usage_metadata = {input:0, output:0, reasoning:N}) while
+    llm_output.token_usage holds the FULL counts must recover input/output
+    from llm_output AND keep reasoning from the generations — the strict
+    all-zero fallback gate recorded input/output as 0 here, while per-field
+    merge preserves both the G6 no-double-count fix and the I/O counts."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    tracker = NodePerfTracker()
+    cb = NodePerfTokenCallback(tracker)
+
+    message = AIMessage(content="thought")
+    message.usage_metadata = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "output_token_details": {"reasoning": 17},
+    }
+    result = LLMResult(
+        generations=[[ChatGeneration(message=message)]],
+        llm_output={
+            "token_usage": {
+                "input_tokens": 120,
+                "output_tokens": 80,
+                "output_token_details": {"reasoning": 17},
+            }
+        },
+    )
+
+    tracker.set_active_node("Market Analyst")
+    try:
+        cb.on_llm_end(result)
+    finally:
+        tracker.set_active_node(None)
+
+    node = tracker.serialize()["nodes"]["Market Analyst"]
+    # Input/output recovered from llm_output (previously recorded as 0)...
+    assert node["tokens_in"] == 120
+    assert node["tokens_out"] == 80
+    # ...while reasoning stays the generations' count — not added on top of
+    # llm_output's copy (17, not 34): the G6 double-count fix survives.
+    assert node["tokens_reasoning"] == 17
+
+
+def test_token_callback_partial_generation_usage_not_overwritten_by_llm_output():
+    """Per-field means per-field: generations carrying real input/output keep
+    them even when llm_output.double-writes different values — the fallback
+    fills ONLY still-zero fields, never overrides a generation-provided one."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    tracker = NodePerfTracker()
+    cb = NodePerfTokenCallback(tracker)
+
+    message = AIMessage(content="ok")
+    message.usage_metadata = {
+        "input_tokens": 7,
+        "output_tokens": 0,
+        "output_token_details": {"reasoning": 3},
+    }
+    result = LLMResult(
+        generations=[[ChatGeneration(message=message)]],
+        llm_output={
+            "token_usage": {
+                "input_tokens": 999,
+                "output_tokens": 42,
+                "output_token_details": {"reasoning": 9},
+            }
+        },
+    )
+
+    tracker.set_active_node("Trader")
+    try:
+        cb.on_llm_end(result)
+    finally:
+        tracker.set_active_node(None)
+
+    node = tracker.serialize()["nodes"]["Trader"]
+    # Generation-provided input/reasoning win; only the zero output is filled.
+    assert node["tokens_in"] == 7
+    assert node["tokens_out"] == 42
+    assert node["tokens_reasoning"] == 3

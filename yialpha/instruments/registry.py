@@ -360,8 +360,17 @@ def _asof_bound(as_of: str | None) -> str | None:
             parsed = parsed.replace(tzinfo=UTC)
         return parsed.astimezone(UTC).isoformat(timespec="seconds")
     except ValueError:
-        logger.warning("classify_perp: unparseable as_of %r; comparing raw", as_of)
-        return raw
+        # Round-10: an unparseable as-of degrades to UNBOUNDED (None), never
+        # to the raw string — the old passthrough fed `bound[:10]` garbage
+        # into date comparisons, minting meaningless listed_asof True/False.
+        # None is already the caller's first-class "no anchor" state: the
+        # unbounded query runs and listed_asof stays None (no claim made).
+        logger.warning(
+            "classify_perp: unparseable as_of %r; querying unbounded "
+            "(listed_asof will be None, not garbage)",
+            as_of,
+        )
+        return None
 
 
 def _max_available_at(candidates: list[str]) -> str | None:

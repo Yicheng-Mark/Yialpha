@@ -51,7 +51,15 @@ from yialpha.dataflows.binance_vision import (  # noqa: E402
 
 
 def _csv_rows(out: str) -> pd.DataFrame:
-    return pd.read_csv(io.StringIO(out.split("\n\n", 1)[1]))
+    # Round-10: an error string / unexpected shape used to surface as a
+    # bare IndexError from the [1] slice — name the real problem instead.
+    parts = out.split("\n\n", 1)
+    if len(parts) < 2 or not parts[1].strip():
+        raise ValueError(
+            f"vendor output has no CSV body after the notes block; first "
+            f"200 chars: {out[:200]!r}"
+        )
+    return pd.read_csv(io.StringIO(parts[1]))
 
 
 print("== 1. vision metrics: BTCUSDT 2024-01 (31 daily archives, 1d resample) ==")

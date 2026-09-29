@@ -43,9 +43,9 @@ from yialpha.ledger.models import (
     validate_scope,
 )
 from yialpha.ledger.sqlite import (
-    get_connection,
     ledger_exists,
     ledger_transaction,
+    optional_read_rows,
     utc_now_iso,
 )
 from yialpha.ledger.time_contract import encode_timing
@@ -309,15 +309,14 @@ def predictions_for_run(run_id: str) -> list[AnalystPrediction]:
     """
     if not ledger_exists():
         return []
-    rows = (
-        get_connection(readonly=True)
-        .execute(
-            "SELECT * FROM predictions "
-            "WHERE run_id = ? "
-            "ORDER BY horizon_days, debate_revision, prediction_id",
-            (run_id,),
-        )
-        .fetchall()
+    # Round-10: shared optional-read chokepoint — a corrupt/foreign ledger
+    # file degrades to empty-with-warning instead of aborting the caller.
+    rows = optional_read_rows(
+        "SELECT * FROM predictions "
+        "WHERE run_id = ? "
+        "ORDER BY horizon_days, debate_revision, prediction_id",
+        (run_id,),
+        context=f"predictions_for_run({run_id})",
     )
     return [row_to_prediction(row) for row in rows]
 
@@ -326,30 +325,24 @@ def prediction_by_id(prediction_id: str) -> AnalystPrediction | None:
     """One prediction row by id, or ``None`` when absent."""
     if not ledger_exists():
         return None
-    row = (
-        get_connection(readonly=True)
-        .execute(
-            "SELECT * FROM predictions "
-            "WHERE prediction_id = ?",
-            (prediction_id,),
-        )
-        .fetchone()
+    rows = optional_read_rows(
+        "SELECT * FROM predictions "
+        "WHERE prediction_id = ?",
+        (prediction_id,),
+        context=f"prediction_by_id({prediction_id})",
     )
-    return row_to_prediction(row) if row is not None else None
+    return row_to_prediction(rows[0]) if rows else None
 
 
 def revisions_of(original_prediction_id: str) -> list[AnalystPrediction]:
     """All revision rows linked to a chain root, in ``debate_revision`` order."""
     if not ledger_exists():
         return []
-    rows = (
-        get_connection(readonly=True)
-        .execute(
-            "SELECT * FROM predictions "
-            "WHERE original_prediction_id = ? "
-            "ORDER BY debate_revision, horizon_days",
-            (original_prediction_id,),
-        )
-        .fetchall()
+    rows = optional_read_rows(
+        "SELECT * FROM predictions "
+        "WHERE original_prediction_id = ? "
+        "ORDER BY debate_revision, horizon_days",
+        (original_prediction_id,),
+        context=f"revisions_of({original_prediction_id})",
     )
     return [row_to_prediction(row) for row in rows]

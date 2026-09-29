@@ -19,6 +19,8 @@ Prior review verified but never pinned, on small synthetic close series:
 All hermetic: hand-built pd.Series, no vendors, no network.
 """
 
+import re
+
 import pandas as pd
 import pytest
 
@@ -339,3 +341,72 @@ def test_split_ratio_parsing_precedence_and_rejections():
     assert _split_ratio(rec(ratio=None, to=None, **{"from": 2})) is None
     assert _split_ratio(rec(to=1, **{"from": 0})) is None
     assert _split_ratio(rec()) is None
+
+
+# --------------------------------------------------------------------------- #
+# available_at shape gate: derived from the pinned strict-date contract
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_available_at_shape_is_derived_from_strict_date_contract():
+    """Round-10: the available_at guard's datetime-tolerant shape is DERIVED
+    from ``_STRICT_ISO_DATE_RE`` (one spelling of the dashed-ISO contract),
+    not a second inline pattern. Pinned two ways: the derivation is literal
+    pattern composition, and the derived regex accepts/rejects exactly what
+    the former inline pattern did over the edge corpus."""
+    from yialpha.instruments.corporate_actions import (
+        _STRICT_ISO_DATE_RE,
+        _STRICT_ISO_DATETIME_RE,
+        _require_iso_date_or_datetime,
+    )
+
+    legacy_inline = re.compile(r"^\d{4}-\d{2}-\d{2}([T ].+)?$")
+    assert _STRICT_ISO_DATETIME_RE.pattern == (
+        _STRICT_ISO_DATE_RE.pattern + r"([T ].+)?$"
+    )
+    accept = [
+        "2026-07-01",  # date-only
+        "2026-07-01T21:15:30+00:00",  # "T"-separated instant
+        "2026-07-01 21:15:30",  # space-separated
+        "2026-07-01T21:15:30.123456",  # fractional seconds
+    ]
+    reject = [
+        "",  # empty
+        "20260701",  # compact — the round-8 lexicographic-sort leak
+        "20260701T21:15:30",  # compact + time
+        "2026-7-1",  # non-padded
+        "2026-07-01X21:15:30",  # separator is neither T nor space
+        "2026-07-01Z",  # trailing garbage with no T/space separator
+        "12026-07-01",  # extra leading digit
+    ]
+    for value in accept + reject:
+        assert bool(_STRICT_ISO_DATETIME_RE.match(value)) == bool(
+            legacy_inline.match(value)
+        ), value
+    for value in accept:
+        _require_iso_date_or_datetime(value)  # shape + fromisoformat both pass
+    for value in reject:
+        with pytest.raises(ValueError):
+            _require_iso_date_or_datetime(value)
+    # Two-stage honesty: a shape-tolerated but unparseable tail still dies
+    # at the fromisoformat stage, not only at the shape gate.
+    with pytest.raises(ValueError):
+        _require_iso_date_or_datetime("2026-07-01 garbage")
+
+
+@pytest.mark.unit
+def test_validate_corporate_action_available_at_boundary():
+    """The validator exposes the same contract through validate_corporate_action:
+    a full-ISO available_at passes; the compact form is refused."""
+    from yialpha.instruments.corporate_actions import validate_corporate_action
+
+    validate_corporate_action(CorporateActionRecord(
+        symbol="MUUSDT", action_type="dividend", event_date="2024-01-05",
+        available_at="2026-07-01T21:15:30+00:00",
+    ))
+    with pytest.raises(ValueError, match="available_at"):
+        validate_corporate_action(CorporateActionRecord(
+            symbol="MUUSDT", action_type="dividend", event_date="2024-01-05",
+            available_at="20260701",
+        ))

@@ -465,3 +465,170 @@ class TestComputeMetricsSpeedup:
         ok, reasons = ab.summarize_gate(m)
         # speedup_na=True -> the 2.5x rule is not enforced; no speedup reason.
         assert "speedup" not in " ".join(reasons).lower()
+
+
+# ---------------------------------------------------------------------------
+# _capture_run: leg-aware analyst-segment extraction from perf telemetry.
+# Round-10 fix: the parallel leg exposes the analyst stage as ONE
+# "Analyst Fanout" node; per-analyst names exist only as token-attribution
+# slots with wall_seconds=0.0. The old per-analyst-only sum therefore read
+# 0.0 for every parallel run → speedup_na=True → the 2.5x gate criterion
+# was structurally never enforced. Second round-10 fix: the serial leg must
+# sum the WHOLE replaced cluster (agent + tool + clear per analyst), not
+# the agent nodes alone — agents-only undercounts the serial stage and
+# biases criterion ④ toward a false FAIL that blocks the default flip.
+# ---------------------------------------------------------------------------
+
+class _FakeTracker:
+    def __init__(self, nodes: dict):
+        self._nodes = nodes
+
+    def serialize(self):
+        return {"nodes": self._nodes, "totals": {}}
+
+
+class _FakeGraph:
+    def __init__(self, nodes: dict | None):
+        self.perf_tracker = _FakeTracker(nodes) if nodes is not None else None
+
+    def propagate(self, ticker: str, date: str):
+        return {"final_trade_decision": "HOLD"}, "Hold"
+
+
+def _slot(wall: float) -> dict:
+    return {"wall_seconds": wall, "calls": 1, "tokens_in": 0,
+            "tokens_out": 0, "tokens_reasoning": 0}
+
+
+#: The full serial analyst chain the "Analyst Fanout" node replaces — for
+#: every spec in ANALYST_NODE_SPECS: agent + tool + clear node names, in the
+#: exact spelling setup.py registers (perf telemetry keys on node name).
+_SERIAL_CLUSTER_NODES: tuple[str, ...] = (
+    "Market Analyst", "tools_market", "Msg Clear Market",
+    "Positioning Analyst", "tools_positioning", "Msg Clear Positioning",
+    "Sentiment Analyst", "tools_social", "Msg Clear Sentiment",
+    "News Analyst", "tools_news", "Msg Clear News",
+    "Fundamentals Analyst", "tools_fundamentals", "Msg Clear Fundamentals",
+)
+
+
+class TestCaptureRunAnalystSegment:
+    def test_parallel_leg_reads_fanout_node_not_zero_slots(self):
+        nodes = {
+            # What the parallel leg actually records: one fanout node with
+            # the stage wall, per-analyst slots only carry token attribution.
+            "Analyst Fanout": _slot(100.0),
+            "Market Analyst": _slot(0.0),
+            "Sentiment Analyst": _slot(0.0),
+            "News Analyst": _slot(0.0),
+            "Fundamentals Analyst": _slot(0.0),
+        }
+        run = ab._capture_run(_FakeGraph(nodes), "AAPL", "2026-07-01")
+        assert run["analyst_segment"] == 100.0
+
+    def test_serial_leg_sums_per_analyst_nodes(self):
+        nodes = {
+            "Market Analyst": _slot(120.0),
+            "tools_market": _slot(60.0),
+            "Msg Clear Market": _slot(1.0),
+            "Positioning Analyst": _slot(30.0),
+            "tools_positioning": _slot(10.0),
+            "Msg Clear Positioning": _slot(1.0),
+            "Sentiment Analyst": _slot(80.0),
+            "tools_social": _slot(45.0),
+            "Msg Clear Sentiment": _slot(1.0),
+            "News Analyst": _slot(90.0),
+            "tools_news": _slot(55.0),
+            "Msg Clear News": _slot(1.0),
+            "Fundamentals Analyst": _slot(110.0),
+            "tools_fundamentals": _slot(50.0),
+            "Msg Clear Fundamentals": _slot(1.0),
+            "Trader": _slot(45.0),  # downstream — must NOT be counted
+            "Bull Researcher": _slot(20.0),  # downstream — must NOT be counted
+        }
+        run = ab._capture_run(_FakeGraph(nodes), "AAPL", "2026-07-01")
+        # Agent walls alone would give 430; the tool/clear walls of the SAME
+        # replaced cluster (220 + 5) must be included too.
+        assert run["analyst_segment"] == 430.0 + 220.0 + 5.0
+
+    def test_serial_leg_missing_tool_nodes_degrades_to_agents(self):
+        # Today's real serial telemetry records NO ToolNode walls
+        # (setup.py._wrap_node skips ToolNode), so the tool names are simply
+        # absent — they contribute zero, and the segment degrades to the
+        # agent+clear sum rather than None (honest partial, not N/A).
+        nodes = {
+            "Market Analyst": _slot(120.0),
+            "Sentiment Analyst": _slot(80.0),
+            "News Analyst": _slot(90.0),
+            "Fundamentals Analyst": _slot(110.0),
+        }
+        run = ab._capture_run(_FakeGraph(nodes), "AAPL", "2026-07-01")
+        assert run["analyst_segment"] == 400.0
+
+    def test_no_tracker_yields_none(self):
+        run = ab._capture_run(_FakeGraph(None), "AAPL", "2026-07-01")
+        assert run["analyst_segment"] is None
+
+    def test_all_cluster_nodes_absent_yields_none(self):
+        # One-legged-missing → honest N/A: with none of the replaced nodes
+        # recorded the segment is None (→ speedup_na), never a fabricated 0.
+        run = ab._capture_run(_FakeGraph({"Trader": _slot(45.0)}),
+                              "AAPL", "2026-07-01")
+        assert run["analyst_segment"] is None
+
+    def test_tool_wall_inclusion_flips_false_fail_to_pass(self):
+        """The measurement-validity pin: tool/clear walls are a large share
+        of the serial stage. Summing agents only undercounts serial → the
+        2.5x criterion false-FAILs and blocks the parallel default flip;
+        with the full replaced cluster it passes."""
+        agents = {n: _slot(20.0) for n in _SERIAL_CLUSTER_NODES
+                  if not n.startswith(("tools_", "Msg Clear"))}
+        tools_and_clears = {
+            "tools_market": _slot(70.0), "Msg Clear Market": _slot(1.0),
+            "tools_positioning": _slot(25.0), "Msg Clear Positioning": _slot(1.0),
+            "tools_social": _slot(65.0), "Msg Clear Sentiment": _slot(1.0),
+            "tools_news": _slot(60.0), "Msg Clear News": _slot(1.0),
+            "tools_fundamentals": _slot(70.0), "Msg Clear Fundamentals": _slot(1.0),
+        }
+        serial_nodes = {**agents, **tools_and_clears}
+        # Serial stage: 5*20 agents + 290 tools + 5 clears = 395s;
+        # parallel fanout does the same work in 140s → 2.82x.
+        serial_run = ab._capture_run(_FakeGraph(serial_nodes), "AAPL",
+                                     "2026-07-01")
+        assert serial_run["analyst_segment"] == 395.0
+        par_run = ab._capture_run(_FakeGraph({"Analyst Fanout": _slot(140.0)}),
+                                  "AAPL", "2026-07-01")
+        # Give both runs non-empty reports so only the speedup criterion is
+        # under test here (empty reports fail criterion 4 regardless).
+        for r in (serial_run, par_run):
+            r.update(market_report="m", sentiment_report="s",
+                     news_report="n", fundamentals_report="f")
+        metrics = ab._compute_metrics([serial_run], [par_run], dry_run=False)
+        assert metrics["speedup"] == pytest.approx(395.0 / 140.0)
+        ok, reasons = ab.summarize_gate(metrics)
+        assert ok, reasons  # agents-only (100/140 = 0.71x) would have failed
+
+    def test_fanout_gate_uses_real_parallel_segment(self):
+        """End-to-end pin: a parallel leg slower than the 2.5x bar must FAIL
+        the criterion (the old wiring marked it N/A and passed)."""
+        serial_nodes = {n: _slot(100.0) for n in _SERIAL_CLUSTER_NODES}
+        serial_run = ab._capture_run(_FakeGraph(serial_nodes), "AAPL", "2026-07-01")
+        par_nodes = {"Analyst Fanout": _slot(700.0)}
+        par_run = ab._capture_run(_FakeGraph(par_nodes), "AAPL", "2026-07-01")
+        metrics = ab._compute_metrics([serial_run], [par_run], dry_run=False)
+        assert metrics["speedup_na"] is False
+        assert metrics["speedup"] == pytest.approx(1500.0 / 700.0)
+        _overall, reasons = ab.summarize_gate(metrics)
+        assert any("2.5x" in r or "speedup" in r.lower() for r in reasons)
+
+
+class TestArgValidation:
+    def test_max_threads_zero_rejected(self, capsys):
+        rc = ab.main(["--tickers", "AAPL", "--date", "2026-07-01",
+                      "--max-threads", "0"])
+        assert rc == 2
+
+    def test_bad_date_rejected_before_any_llm_run(self, capsys):
+        rc = ab.main(["--tickers", "AAPL", "--date", "20260701"])
+        assert rc == 2
+        assert "YYYY-MM-DD" in capsys.readouterr().err

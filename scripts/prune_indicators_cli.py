@@ -158,6 +158,54 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error loading CSV: {exc}", file=sys.stderr)
         return 1
 
+    # Round-10: degenerate-argument / empty-evidence guards. --window <= 0
+    # makes rolling_ic all-NaN (everything "kept", exit 0 with zero
+    # evidence); --min-consecutive 0 makes longest_low_run >= 0 trivially
+    # true (everything pruned). A header-only CSV has indicators but ZERO
+    # data rows — a verdict manufactured from no evidence is worse than a
+    # failure (the exporter side is already fail-closed; the CLI reading a
+    # hand-made CSV was the leak).
+    if args.window < 1:
+        print(
+            f"Error: --window must be >= 1 (got {args.window})",
+            file=sys.stderr,
+        )
+        return 1
+    if args.min_consecutive < 1:
+        print(
+            f"Error: --min-consecutive must be >= 1 (got {args.min_consecutive})",
+            file=sys.stderr,
+        )
+        return 1
+    if args.min_observations < 1:
+        print(
+            f"Error: --min-observations must be >= 1 (got {args.min_observations})",
+            file=sys.stderr,
+        )
+        return 1
+    # Round-10: distinguish the two zero-evidence shapes (both refuse with
+    # exit 1, but the diagnosis must point at the right fix): counting only
+    # non-NaN forward_return values misdiagnosed a CSV WITH rows whose
+    # forward column is entirely NaN (exporter horizon bug) as "header
+    # only". Report the row count vs the usable-forward count separately.
+    total_rows = int(len(forward))
+    usable_rows = int(forward.count()) if hasattr(forward, "count") else 0
+    if usable_rows == 0:
+        if total_rows > 0:
+            print(
+                f"Error: CSV has {total_rows} rows but forward_return has 0 "
+                "non-NaN values — forward-return construction is broken; "
+                "refusing to emit a keep/prune verdict built on zero evidence",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "Error: CSV carries no data rows (header only) — refusing to "
+                "emit a keep/prune verdict built on zero evidence",
+                file=sys.stderr,
+            )
+        return 1
+
     # Compute rolling IC for each indicator.
     ic_by_indicator: dict[str, pd.Series] = {}
     for name, values in indicators.items():

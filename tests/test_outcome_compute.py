@@ -411,6 +411,7 @@ def test_entry_bar_missing_writes_incomplete(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.unit
 def test_macro_scope_is_skipped_not_scored(seams: _Seams):
+    """Legacy path (no timing): MACRO is never scored and never written."""
     _seed(scope=SCOPE_MACRO)
     report = compute_outcomes(_NOW)
     assert (report.considered, report.completed, report.incomplete, report.failed) == (
@@ -419,6 +420,52 @@ def test_macro_scope_is_skipped_not_scored(seams: _Seams):
     (detail,) = report.details
     assert detail.status == "skipped"
     assert all_outcomes() == []
+
+
+@pytest.mark.unit
+def test_macro_scope_reference_path_skips_without_writing_row():
+    """Round-10 口径: the REFERENCE path (a timing-carrying MACRO prediction)
+    used to persist an incomplete ``scope_not_price_scoreable`` row via
+    result(), silently RETIRING the prediction — against the module docstring
+    and the legacy path. It must return ``skipped`` with NO outcome row, so
+    the row stays on the worklist exactly like a legacy MACRO row."""
+    from yialpha.versions import PREDICTION_TIME_VERSION
+
+    timing = {
+        "version": PREDICTION_TIME_VERSION,
+        "prediction_formed_at": "2026-08-25T00:00:00+00:00",
+        "reference_price_at": None,
+        "reference_available_at": None,
+        "reference_observed_at": None,
+        "reference_price": None,
+        "reference_source": None,
+        "reference_error": None,
+    }
+    register_run(_RUN, "BTCUSDT", "crypto_perp", "pure_crypto_perp", "2026-08-25")
+    (prediction_id,) = submit_predictions(
+        _RUN,
+        "macro_analyst",
+        "BTCUSDT",
+        SCOPE_MACRO,
+        [{"horizon_days": 5, "direction": "up", "prob_up": 0.6}],
+        "2026-08-25",
+        timing=timing,
+    )
+
+    report = compute_outcomes(_NOW)
+    assert (report.considered, report.completed, report.incomplete, report.failed) == (
+        1, 0, 0, 0,
+    )
+    (detail,) = report.details
+    assert detail.status == "skipped"
+    assert detail.outcome_id is None
+    assert outcomes_for_prediction(prediction_id) == []  # no row ever written
+    assert all_outcomes() == []
+    # No row -> nothing retired: the MACRO row stays on the worklist (the
+    # same forever-revisited contract as the legacy path).
+    assert [item["prediction_id"] for item in pending_predictions(_NOW)] == [
+        prediction_id
+    ]
 
 
 # --------------------------------------------------------------------------- #

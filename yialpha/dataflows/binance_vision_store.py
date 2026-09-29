@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -42,6 +41,7 @@ import pandas as pd
 
 from ..batch.locks import FileLock
 from .disk_cache import sanitize_cache_filename, vendor_cache_dir
+from .utils import replace_retry_on_windows
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +128,10 @@ class VisionStore:
         tmp.write_text(
             json.dumps(manifest, sort_keys=True), encoding="utf-8"
         )
-        os.replace(tmp, path)
+        # Round-10: sync writers hold the FileLock, but load()/qa() readers
+        # take none — on Windows a reader mid-read made the replace raise
+        # and fail a sync whose downloads already succeeded. Retry the race.
+        replace_retry_on_windows(tmp, path)
 
     # ---- frame normalization (same semantics as the pre-store loader) -----
 
@@ -352,7 +355,9 @@ class VisionStore:
         merged["_ts"] = merged["_ts"].dt.strftime("%Y-%m-%d %H:%M:%S")
         tmp = path.with_suffix(".csv.gz.tmp")
         merged.to_csv(tmp, index=False, compression="gzip")
-        os.replace(tmp, path)
+        # Round-10: same lockless-reader race as _write_manifest — the load()
+        # path reads this partition with no lock. Retry the replace.
+        replace_retry_on_windows(tmp, path)
 
     # ---- load / QA ---------------------------------------------------------
 

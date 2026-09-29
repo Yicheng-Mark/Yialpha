@@ -328,7 +328,7 @@ def compute_regime_state(
 ) -> RegimeState | None:
     """Assemble the run's :class:`RegimeState`, or ``None`` when uncomputable.
 
-    Per-class field groups (frozen with REGIME_VERSION v3):
+    Per-class field groups (frozen with REGIME_VERSION v4):
     ``pure_crypto_perp`` → COMMON + PURE-CRYPTO; ``stock_perp`` → COMMON +
     STOCK-PERP; ``unknown_perp`` (or an unset class on a perp run) → COMMON
     only, conservative. Non-perp asset types return ``None`` — the regime
@@ -348,6 +348,7 @@ def compute_regime_state(
     realized_vol: float | None = None
     overnight_gap_bps: float | None = None
     closes: list[float] = []
+    perp_tail: Any = None
     try:
         # closed bars only: this frame freezes into the run's RegimeState
         # record — a forming bar would bake an intraday partial close into
@@ -362,6 +363,10 @@ def compute_regime_state(
         oc = frame[["Open", "Close"]].dropna()
         closes = [float(v) for v in oc["Close"].tolist()]
         opens = [float(v) for v in oc["Open"].tolist()]
+        # Round-10: the tail DATE behind closes[-1] — the basis legs below
+        # must quote their denominator AT this date (through the frames'
+        # date indexes), never their own positional last bar.
+        perp_tail = oc.index[-1]
         trend = _trend_from_closes(closes)
         realized_vol = _realized_vol_pct(closes)
         if len(opens) >= 2 and closes[-2] > 0:
@@ -457,8 +462,18 @@ def compute_regime_state(
                     ticker, _window_start(end_date, 8), end_date, "1d",
                     "binance_spot", closed_as_of=_now_ms(),
                 )
-                spot_close = float(spot["Close"].dropna().iloc[-1])
-                if spot_close > 0:
+                # Round-10: the basis is a SAME-DATE ratio — the spot leg
+                # must carry a bar at the perp tail's own date (date-index
+                # lookup), never its own positional last bar: a missing or
+                # lagged final spot bar used to fabricate perp@D /
+                # spot@D-1 straight into the id preimage and the stress
+                # trigger. No spot bar at the tail date -> fail-soft leg.
+                spot_closes = spot["Close"].dropna()
+                if perp_tail is not None and perp_tail in spot_closes.index:
+                    spot_close = float(spot_closes.loc[perp_tail])
+                else:
+                    spot_close = None
+                if spot_close is not None and spot_close > 0:
                     spot_basis_bps = (closes[-1] / spot_close - 1.0) * 1e4
                 else:
                     missing.add("spot_klines")
@@ -487,7 +502,20 @@ def compute_regime_state(
             underlying_symbol = record.underlying_symbol or None
             if record.onboard_date:
                 onboard = datetime.strptime(record.onboard_date, "%Y-%m-%d").date()
-                as_of_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+                # Round-10: age is measured to the ANALYSIS day (the frozen
+                # contract in state.py), not the data window's end — a
+                # replay whose window terminates before/after the as-of day
+                # used to shift the age (and with it the regime id). The
+                # [:10] date prefix keeps the date-only strptime fed by
+                # EITHER form: live runs pass a FULL ISO as-of (utc_now_iso
+                # out of trading_graph), which the strict strptime rejected
+                # — the swallowed ValueError turned into a phantom missing
+                # onboard_date + listing_age_days None on every live
+                # stock_perp run through no data gap (classify_perp above
+                # already tolerates full instants via registry._asof_bound).
+                as_of_date = datetime.strptime(
+                    (analysis_as_of or end_date)[:10], "%Y-%m-%d"
+                ).date()
                 listing_age_days = (as_of_date - onboard).days
             else:
                 missing.add("onboard_date")
@@ -533,8 +561,16 @@ def compute_regime_state(
                     ticker, _window_start(end_date, 35), end_date, "1d",
                     "binance_perp", "index", closed_as_of=_now_ms(),
                 )
-                index_close = float(index_frame["Close"].dropna().iloc[-1])
-                if index_close > 0:
+                # Round-10: same-date tail alignment as the spot leg — the
+                # index leg must carry a bar at the perp tail's own date;
+                # a lagged index tail degrades fail-soft, never a
+                # cross-date perp@D / index@D-1 ratio.
+                index_closes = index_frame["Close"].dropna()
+                if perp_tail is not None and perp_tail in index_closes.index:
+                    index_close = float(index_closes.loc[perp_tail])
+                else:
+                    index_close = None
+                if index_close is not None and index_close > 0:
                     index_basis_bps = (closes[-1] / index_close - 1.0) * 1e4
                 else:
                     missing.add("index_klines")
@@ -595,7 +631,12 @@ def compute_regime_state(
         liquidation_cascade_risk=liquidation_cascade_risk,
         underlying_trend=underlying_trend,
         session_state=session_state,
-        overnight_gap_bps=overnight_gap_bps,
+        # Round-10: overnight_gap_bps is a STOCK-PERP field by the frozen
+        # vocabulary (state.py field-group table); the COMMON-block reading
+        # must not leak into non-stock ids — structural absence stays None
+        # (mirrors the contract_liquidity gate above; stress and the
+        # all-missing guard read it only inside the stock_perp branch).
+        overnight_gap_bps=overnight_gap_bps if klass == "stock_perp" else None,
         index_mark_basis_bps=index_basis_bps,
         contract_liquidity=contract_liquidity,
         listing_age_days=listing_age_days,

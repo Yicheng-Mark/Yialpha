@@ -6,9 +6,10 @@ CLI and ``YiAlphaGraph.save_reports`` both call this, so a headless / API
 run produces the same on-disk report tree a CLI run does.
 """
 
-import os
 from datetime import datetime
 from pathlib import Path
+
+from yialpha.dataflows.utils import replace_retry_on_windows
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -24,7 +25,11 @@ def _atomic_write_text(path: Path, text: str) -> None:
     """
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    # Round-10: the report tree is read live by the web store / trade_ticket
+    # with no lock; on Windows a reader mid-read made the replace raise
+    # PermissionError and kill the child AFTER the full LLM spend —
+    # run_robust would re-bill the whole attempt. Retry the race window.
+    replace_retry_on_windows(tmp, path)
 
 
 def _render_data_quality(quality: dict) -> str:

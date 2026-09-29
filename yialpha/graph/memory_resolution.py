@@ -165,5 +165,21 @@ def resolve_pending_entries(
         })
 
     if updates:
-        memory_log.batch_update_with_outcomes(updates)
+        # Round-10: the final durable write must be fail-soft too. The LLM
+        # leg above already is (round-6: one 429 killed the WHOLE analysis
+        # run before any node executed) — but a write failure here (disk
+        # error, lock acquisition, Windows replace race vs a lockless
+        # reader) propagated out of propagate() exactly the same way. The
+        # entries stay pending on disk, so the next sweep retries them;
+        # returning 0 keeps the CLI's "resolved" count honest (nothing was
+        # durably resolved).
+        try:
+            memory_log.batch_update_with_outcomes(updates)
+        except Exception as exc:  # noqa: BLE001 — never abort the run/scan
+            logger.warning(
+                "memory outcome write failed for %s (%d entries left "
+                "pending for the next sweep): %s",
+                ticker, len(updates), exc,
+            )
+            return 0
     return len(updates)

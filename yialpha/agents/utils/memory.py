@@ -9,6 +9,7 @@ from typing import Any
 
 from yialpha.agents.utils.rating import parse_rating
 from yialpha.batch.locks import FileLock
+from yialpha.dataflows.utils import replace_retry_on_windows
 
 logger = logging.getLogger(__name__)
 
@@ -303,7 +304,7 @@ class TradingMemoryLog:
             new_text = self._SEPARATOR.join(new_blocks)
             tmp_path = self._log_path.with_suffix(".tmp")
             tmp_path.write_text(new_text, encoding="utf-8")
-            tmp_path.replace(self._log_path)
+            replace_retry_on_windows(tmp_path, self._log_path)
 
     def batch_update_with_outcomes(self, updates: list[dict]) -> None:
         """Apply multiple outcome updates in a single read + atomic write.
@@ -407,7 +408,7 @@ class TradingMemoryLog:
             new_text = self._SEPARATOR.join(new_blocks)
             tmp_path = self._log_path.with_suffix(".tmp")
             tmp_path.write_text(new_text, encoding="utf-8")
-            tmp_path.replace(self._log_path)
+            replace_retry_on_windows(tmp_path, self._log_path)
 
     # --- Helpers ---
 

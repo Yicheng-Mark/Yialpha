@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from yialpha.dataflows.utils import replace_retry_on_windows
+
 logger = logging.getLogger(__name__)
 
 # Version 2 invalidated decisions produced before the historical-source and
@@ -194,7 +196,9 @@ class DecisionCache:
         try:
             with tmp.open("w", encoding="utf-8") as fh:
                 json.dump(decision.to_dict(), fh, ensure_ascii=False, indent=2)
-            os.replace(tmp, path)
+            # Round-10: same Windows lockless-reader race as the other publish
+            # seams — retry before the best-effort swallow below gives up.
+            replace_retry_on_windows(tmp, path)
         except OSError as exc:
             logger.warning("Could not write backtest cache entry %s (%s)", path, exc)
 

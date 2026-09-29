@@ -344,12 +344,16 @@ def load_portfolio_snapshot(snapshot_id: str) -> dict | None:
 
 def load_positions() -> dict:
     """Open positions + the resolver/pipeline state they came from."""
-    from yialpha.ledger.portfolio import open_positions
+    from yialpha.ledger.portfolio import open_positions_with_status
     from yialpha.ledger.sqlite import ledger_exists
 
     if not ledger_exists():
         return {"available": False, "positions": []}
-    return {"available": True, "positions": open_positions()}
+    rows, ok = open_positions_with_status()
+    # Round-10: a DEGRADED read used to be served as available=True with
+    # positions=[] — the phantom empty book; reflect the read status in the
+    # flag (same honesty contract as load_outcomes / load_calibration).
+    return {"available": ok, "positions": rows}
 
 
 def load_run(ticker: str, date: str) -> dict | None:

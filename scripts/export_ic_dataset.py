@@ -32,6 +32,20 @@ import logging
 import sys
 from pathlib import Path
 
+# GBK-console guard (CLAUDE.md entry-script contract): package-side loggers
+# carry CJK exception text; without this the final prints can die on
+# UnicodeEncodeError after all the work is done (prune CLI has the same
+# guard via _ensure_unicode_stdout).
+# Round-10: harmonized to the getattr/callable + suppress(AttributeError,
+# ValueError) + errors="replace" spelling used by run_robust.py /
+# p0_shadow_validation.py — the old suppress(Exception) form swallowed
+# everything and dropped the errors= replacement policy.
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if callable(_reconfigure):
+        with __import__("contextlib").suppress(AttributeError, ValueError):
+            _reconfigure(encoding="utf-8", errors="replace")
+
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -91,6 +105,16 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--extra-horizons must be positive; got {bad}")
 
     indicators = args.indicators or sorted(INDICATOR_NAMES)
+    # Round-10: a repeated ticker (typo: "NVDA NVDA") wrote one CSV but
+    # counted two requested — exit 1 despite a fully successful export.
+    # Dedupe order-preservingly; the success contract compares against the
+    # UNIQUE ticker set.
+    unique_tickers = list(dict.fromkeys(args.tickers))
+    if len(unique_tickers) < len(args.tickers):
+        print(
+            f"note: duplicate tickers in argv collapsed to {unique_tickers}",
+            file=sys.stderr,
+        )
     unknown = [n for n in indicators if n not in INDICATOR_NAMES]
     if unknown:
         parser.error(
@@ -101,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     # Package-side implementation (shared with `yialpha ic-cycle`); this
     # wrapper keeps the script's argv contract and per-ticker "next:" hints.
     written = export_ic_datasets(
-        args.tickers,
+        unique_tickers,
         horizon=args.horizon,
         indicators=args.indicators,
         as_of=args.as_of,
@@ -121,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
             f"--window 60 --json-out {out_path}.prune.json"
         )
 
-    return 0 if len(written) == len(args.tickers) else 1
+    return 0 if len(written) == len(unique_tickers) else 1
 
 
 if __name__ == "__main__":

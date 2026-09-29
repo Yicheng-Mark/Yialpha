@@ -20,11 +20,12 @@ answer. This module is that answer:
   fields render; ``missing_inputs`` is always listed — a partial regime
   never masquerades as a complete one).
 
-Frozen classifier definitions (REGIME_VERSION v3 — bump
+Frozen classifier definitions (REGIME_VERSION v4 — bump
 :data:`yialpha.versions.REGIME_VERSION` when ANY of these changes, so
 historical regime tags never silently mix definitions; v3 redefined ONLY
 the stock-perp ``session_state`` bucket to the klines-verified 24/7
-calendar):
+calendar; v4 re-scoped ``overnight_gap_bps`` to the stock-perp field
+group and required same-date tails on the two basis legs):
 
 * **trend_regime / underlying_trend** — daily close vs SMA50/SMA200 on the
   series' own candles: ``up`` when close > SMA50 AND close > SMA200,
@@ -43,11 +44,16 @@ calendar):
 * **taker_aggression** — latest daily taker buy/sell volume ratio (>1 =
   aggressive buying).
 * **spot_perp_basis_bps** — (perp close / Binance spot close − 1) × 1e4 on
-  the same 8-day window.
+  the same 8-day window, both legs quoting the SAME tail date (v4: a
+  missing/lagged final spot bar leaves the field ``None`` with a
+  ``spot_klines`` missing input, never a cross-date ratio).
 * **index_mark_basis_bps** — (last close / index close − 1) × 1e4 from the
-  perp's own last/index kline legs.
+  perp's own last/index kline legs, both legs quoting the same tail date
+  (v4: a lagged index tail degrades to ``None`` with an ``index_klines``
+  missing input).
 * **overnight_gap_bps** — (latest open / prior close − 1) × 1e4 on the perp
-  series (stock-perp session-gap reading).
+  series (stock-perp session-gap reading; ``None`` outside ``stock_perp``
+  since v4 — v3 computed it for every perp class against this table).
 * **spread_depth_regime** — live top-of-book spread: ``tight`` ≤ 2 bps,
   ``normal`` ≤ 10 bps, ``wide`` above.
 * **contract_liquidity** — combined ±50 bps band notional (live book):
@@ -99,7 +105,14 @@ from typing import Any
 from yialpha.versions import REGIME_VERSION
 
 #: Fields excluded from the regime-id preimage (identity/meta, not inputs).
-_NON_INPUT_FIELDS = frozenset({"regime_id", "regime_version", "computed_at"})
+#: ``ticker`` / ``instrument_class`` are the ledger STORE's context keys
+#: (regime_store.upsert_regime adds them alongside the state fields); a
+#: stored payload re-derived through this function must reproduce its own
+#: id, which the docstring already promises — round-10 makes it true.
+_NON_INPUT_FIELDS = frozenset({
+    "regime_id", "regime_version", "computed_at",
+    "ticker", "instrument_class",
+})
 
 
 @dataclass(frozen=True)

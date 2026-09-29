@@ -1,6 +1,6 @@
 # yialpha/graph/setup.py
 
-from typing import Any
+from typing import Any, Callable
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -42,6 +42,7 @@ class GraphSetup:
         perf_tracker: Any = None,
         analyst_parallel: bool = False,
         analyst_parallel_max_threads: int = 16,
+        wall_time_tracker_provider: Callable[[], Any] | None = None,
     ):
         """Initialize with required components.
 
@@ -51,7 +52,7 @@ class GraphSetup:
         ``debate_llm or deep_think_llm`` fallback, so this is always a real LLM
         instance.
 
-        The three keyword-only opts are all OFF/disjoint by default so the
+        The keyword-only opts are all OFF/disjoint by default so the
         compiled graph is byte-identical to the historical serial one:
 
         * ``perf_tracker`` — when not None, every node handler is wrapped with
@@ -61,6 +62,12 @@ class GraphSetup:
           serially exactly as before. When True they collapse into a single
           ``Analyst Fanout`` node (see ``analyst_fanout.py``).
         * ``analyst_parallel_max_threads`` — cap on the fan-out thread pool.
+        * ``wall_time_tracker_provider`` — Round-10 (G4) zero-arg factory
+          forwarded into the fan-out node, which resolves it at NODE-RUN time
+          (once per invoke) so per-analyst wall display works in parallel
+          mode. The tracker is per-INVOKE while the graph is compiled once,
+          so a PROVIDER is injected, never an instance. Never consulted in
+          serial mode; ``None`` (default) keeps parallel-off byte-identical.
         """
         self.quick_thinking_llm = quick_thinking_llm
         self.deep_thinking_llm = deep_thinking_llm
@@ -70,6 +77,7 @@ class GraphSetup:
         self.perf_tracker = perf_tracker
         self.analyst_parallel = analyst_parallel
         self.analyst_parallel_max_threads = analyst_parallel_max_threads
+        self.wall_time_tracker_provider = wall_time_tracker_provider
 
     def _wrap_node(self, handler, name: str):
         """Wrap a node handler with perf timing when a tracker is configured,
@@ -141,6 +149,14 @@ class GraphSetup:
                 # comparable with the serial leg instead of collapsing into
                 # ``_unattributed_``. Inert when telemetry is off (None).
                 perf_tracker=self.perf_tracker,
+                # Round-10 (G4): forwarded as a PROVIDER, deliberately NOT
+                # evaluated here — setup_graph runs once at graph-construction
+                # time, when no tracker is active yet; the fan-out resolves it
+                # at node-run time (see create_analyst_fanout_node). Without
+                # this wiring, all parallel analysts finish inside ONE wrapper
+                # node and the stream-display tracker marks everything
+                # completed at the same instant (per-analyst wall garbage).
+                wall_time_tracker_provider=self.wall_time_tracker_provider,
             )
 
         # Create researcher and manager nodes. Bull/bear researchers do

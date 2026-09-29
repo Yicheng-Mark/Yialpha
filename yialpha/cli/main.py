@@ -1157,12 +1157,24 @@ def _store_cli_decision(
             ticker,
             trade_date,
         )
-    graph.memory_log.store_decision(
-        ticker=ticker,
-        trade_date=trade_date,
-        final_trade_decision=decision,
-        asset_type=asset_type,
-    )
+    # Round-10: fail-soft like _run_graph's memory seam — store_decision does
+    # raw file IO (read scan + append) with no internal guard, and this is
+    # the streamed run's finish line, AFTER the whole graph is billed: an IO
+    # failure here must cost one pending entry (never resolved), never the
+    # completed analysis and report display.
+    try:
+        graph.memory_log.store_decision(
+            ticker=ticker,
+            trade_date=trade_date,
+            final_trade_decision=decision,
+            asset_type=asset_type,
+        )
+    except Exception as exc:  # noqa: BLE001 — finish-line fail-soft
+        logger.warning(
+            "memory store_decision failed for %s on %s (no pending entry "
+            "recorded; reflection for this decision will not resolve): %s",
+            ticker, trade_date, exc,
+        )
 
 
 def run_analysis(checkpoint: bool | None = None, asset_type: str = "auto"):
@@ -1363,6 +1375,12 @@ def run_analysis(checkpoint: bool | None = None, asset_type: str = "auto"):
 
         # Stream the analysis
         trace = []
+        # Round-10 (G4): publish this run's display tracker to the graph so
+        # the parallel analyst fan-out's worker threads mark per-analyst
+        # started/completed on the SAME tracker the live display reads. In
+        # serial mode nothing consults it; analyst-parallel-off is
+        # byte-identical. Cleared after the loop — one run per tracker.
+        graph._active_wall_time_tracker = analyst_wall_time_tracker  # noqa: SLF001 -- shared seam with _invoke_or_stream
         for chunk in graph.graph.stream(init_agent_state, **args):
             # Process all messages in chunk, deduplicating by message ID
             for message in chunk.get("messages", []):
@@ -1470,6 +1488,9 @@ def run_analysis(checkpoint: bool | None = None, asset_type: str = "auto"):
         final_state = {}
         for chunk in trace:
             final_state.update(chunk)
+        # Round-10 (G4): drop the run's tracker handoff (mirrors
+        # _invoke_or_stream's finally clear — see the pre-loop note).
+        graph._active_wall_time_tracker = None  # noqa: SLF001
 
         if not final_state:
             raise RuntimeError("graph.stream emitted no chunks for this run")
