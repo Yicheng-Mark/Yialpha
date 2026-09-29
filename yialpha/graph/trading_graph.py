@@ -115,6 +115,7 @@ _SIGNATURE_CONFIG_KEYS = (
     "indicator_battery",
     "indicator_ic_context",
     "market_regime",
+    "crypto_fear_greed",
     "instrument_registry",
     "data_vendors",
 )

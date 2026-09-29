@@ -197,6 +197,18 @@ _ENV_OVERRIDES = {
     # complementary to the portfolio-level reactive DrawdownBreaker. Advisory and
     # fail-soft; it changes agent input only when explicitly enabled.
     "YIALPHA_MARKET_REGIME":                "market_regime",
+    # Crypto Fear & Greed Index (alternative.me, keyless; see
+    # yialpha.dataflows.fear_greed). Off by default = the conservative risk
+    # debater's prompt is byte-for-byte unchanged (same opt-in contract as
+    # market_regime). When on, crypto-family runs append a one-line
+    # market-sentiment band reading (0-100 + label + prior day) to the
+    # conservative debater's data sources — an outside-view crowding cue
+    # complementing the exchange-native long/short ratio with survey and
+    # composite components. Stock runs and tokenized-stock perps are out of
+    # scope (never fetch, never show). Advisory + fail-soft; PIT is a
+    # client-side timestamp filter and the rendered line always discloses
+    # its own as-of date.
+    "YIALPHA_CRYPTO_FEAR_GREED":            "crypto_fear_greed",
     # Composite regime context (see yialpha.dataflows.market_regime.
     # format_regime_context): one structured line — ticker trend state
     # (close vs 50/200 SMA + ADX), volatility state (rvol_20 percentile vs
@@ -444,6 +456,16 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # squared-z, FinRL-derived) is appended to the conservative debater's data
     # sources. Advisory + fail-soft; only the conservative debater sees it.
     "market_regime": False,
+    # Crypto Fear & Greed Index (env: YIALPHA_CRYPTO_FEAR_GREED). Off by
+    # default = the conservative risk debater's prompt is unchanged
+    # (byte-equivalent). When on, crypto-family runs (pure crypto_perp /
+    # crypto_spot / legacy crypto — tokenized-stock perps and stock runs
+    # never enter the branch) append a one-line market-sentiment reading:
+    # alternative.me keyless API, disk-cached 1 day, client-side PIT filter
+    # with the entry's own date disclosed in the line, honest "unavailable"
+    # for dates older than the ~1500-day fetched coverage. Advisory +
+    # fail-soft; only the conservative debater sees it.
+    "crypto_fear_greed": False,
     # Composite regime context (env: YIALPHA_REGIME_CONTEXT). ON by default:
     # the market analyst's prompt gains one structured regime line (trend
     # state + volatility state + benchmark turbulence +, on A-share live

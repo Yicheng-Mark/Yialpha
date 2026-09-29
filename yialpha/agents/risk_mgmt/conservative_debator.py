@@ -4,6 +4,10 @@ from yialpha.agents.utils.agent_utils import (
     get_language_instruction,
 )
 from yialpha.dataflows.config import get_config
+from yialpha.dataflows.fear_greed import (
+    fear_greed_applicable,
+    format_fear_greed_line,
+)
 from yialpha.dataflows.market_regime import format_regime_context
 
 
@@ -50,6 +54,33 @@ def create_conservative_debator(llm):
                         "insufficient history)\n"
                     )
 
+        # Opt-in crypto Fear & Greed reading (env: YIALPHA_CRYPTO_FEAR_GREED,
+        # default off). Same contract as market_regime above: off = prompt
+        # byte-identical; on = exactly one appended line. Applicability is
+        # decided BEFORE any fetch (crypto-family runs only — tokenized-stock
+        # perps keep the equity risk narrative, stock runs are out of scope),
+        # so a non-applicable run never hits the network and never shows a
+        # line. Applicable-but-unavailable (fetch failed / analysis date
+        # older than index coverage) shows an explicit "unavailable" line —
+        # the same fail-visible rule as the market-regime cue.
+        fear_greed_line = ""
+        if get_config().get("crypto_fear_greed"):
+            fg_trade_date = state.get("trade_date")
+            if fg_trade_date and fear_greed_applicable(
+                state.get("asset_type"), state["company_of_interest"]
+            ):
+                try:
+                    fg_reading = format_fear_greed_line(fg_trade_date)
+                except Exception:  # noqa: BLE001 — fail-soft advisory cue
+                    fg_reading = None
+                if fg_reading:
+                    fear_greed_line = f"Fear & Greed: {fg_reading}\n"
+                else:
+                    fear_greed_line = (
+                        "Fear & Greed: unavailable (fetch failed or date "
+                        "outside index coverage)\n"
+                    )
+
         trader_decision = state["trader_investment_plan"]
 
         prompt = f"""As the Conservative Risk Analyst, your primary objective is to protect assets, minimize volatility, and ensure steady, reliable growth. You prioritize stability, security, and risk mitigation, carefully assessing potential losses, economic downturns, and market volatility. When evaluating the trader's decision or plan, critically examine high-risk elements, pointing out where the decision may expose the firm to undue risk and where more cautious alternatives could secure long-term gains. Here is the trader's decision:
@@ -63,7 +94,7 @@ Market Research Report: {market_research_report}
 Social Media Sentiment Report: {sentiment_report}
 Latest World Affairs Report: {news_report}
 Company Fundamentals Report: {fundamentals_report}
-{market_regime_line}Here is the current conversation history: {history} Here is the last response from the aggressive analyst: {current_aggressive_response} Here is the last response from the neutral analyst: {current_neutral_response}. If there are no responses from the other viewpoints yet, present your own argument based on the available data.
+{market_regime_line}{fear_greed_line}Here is the current conversation history: {history} Here is the last response from the aggressive analyst: {current_aggressive_response} Here is the last response from the neutral analyst: {current_neutral_response}. If there are no responses from the other viewpoints yet, present your own argument based on the available data.
 
 Engage by questioning their optimism and emphasizing the potential downsides they may have overlooked. Address each of their counterpoints to showcase why a conservative stance is ultimately the safest path for the firm's assets. Focus on debating and critiquing their arguments to demonstrate the strength of a low-risk strategy over their approaches. Output conversationally as if you are speaking without any special formatting.""" + get_language_instruction()
 
