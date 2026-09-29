@@ -40,6 +40,124 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Round-9 USDT-perp adversarial sweep (2026-09-29, five read-only shards +
+  runtime probes + coverage-gap map — 4 P2 and 9 P3 landed, each with a
+  regression pin; the rest accepted as documented below).**
+  - **Self-review of the landing diff (P2 × 1, P3 × 5 — all processed):**
+    the P2 closed a hole in the new vision-store remediation itself — the
+    load error's "delete it" advice led to a state where the manifest kept
+    claiming days whose partition was gone and `pending` never re-opened
+    them (empirically demonstrated by the reviewer); sync now re-opens
+    claims for any year whose partition is missing at lock time, making
+    delete-then-resync the complete remediation (pinned end-to-end, zero
+    network cost via the byte cache), and the report's `already_synced` is
+    recomputed after same-call drops so it never counts coverage the call
+    itself removed. P3s landed: the ATR regex boundary uses
+    `(?<![A-Za-z])` so Chinese-adjacent "当前ATR：$7.29" still parses (a
+    bare `\b` killed it — `\w` includes CJK) while NATR stays excluded; the
+    blocked-ticket render attributes the refusal to its actual cause
+    (normal-regime blocked no longer claims the drawdown breaker fired);
+    the `_futures_data_window` boundary date is refused consistently all
+    day (was a clear refusal for part of the day, a muddy head-clamped
+    empty serve for the rest); one vacuous pin made discriminating
+    (`pd.Timestamp` parses slash-form dates — "not-a-date" doesn't).
+  - **Test hermeticity (P2):** a dev-box `.env` with
+    `YIALPHA_CRYPTO_NATIVE=true` is baked into `DEFAULT_CONFIG` at import, so
+    `reset_config()` restored the *dev* defaults — 15 tests pinning the
+    flag-off routing contract (crypto runs drop the fundamentals analyst)
+    went red locally while CI stayed green, and `test_crypto_native.py`'s
+    own `set_config(True)` never restored. New autouse fixture
+    `_optional_crypto_categories_off` pins both crypto optional categories to
+    their production defaults per test (`tests/conftest.py`); opt-in tests
+    still win via `set_config` merge. Pre-fix full suite: 15 failed / 3838
+    passed; post-fix 3853 / 0.
+  - **Derivatives-stress OI/LSR retention anchor (P2, S2):**
+    `derivatives_stress_series` clamped its `/futures/data` head to 30 days
+    back from the PAST `end_ms`, but the server rejects a `startTime` older
+    than the ABSOLUTE now−30d horizon (HTTP 400 −1130 — the same probe-backed
+    semantics `perp_bundle._futures_data_start_ms` recorded): every analysis
+    date 1–3 days back silently lost the OI and global-LSR stress legs.
+    Head now anchors on now (the server's own horizon), matching the proven
+    sibling; the existing pin (which had pinned the buggy anchor) is updated
+    to the corrected contract with a frozen clock.
+  - **Vision store manifest/partition desync (P2, S3):** an unreadable year
+    partition (Windows AV lock, external truncation) could desync the store
+    two ways — a rebuild dropped partition rows while `manifest["days"]`
+    kept claiming them (silently truncated deep history, QA blind because it
+    is manifest-driven), and `load` skipped the year with a warning while
+    coverage accounting still counted its days (and never repaired: pending
+    was empty). Now a rebuild that finds the partition unreadable RE-OPENS
+    that year's old manifest days (keeping this call's freshly merged days;
+    re-opened days re-download from the byte-level zip cache with zero
+    network cost — pinned end-to-end), `load` fails closed with a typed error
+    naming the partition, and EOFError (byte-truncated gzip, which previously
+    bricked every later sync against the same dead read) joins the repair
+    path.
+  - **Indicator-tool empty-`curr_date` escape (P2, S4):**
+    `binance_indicator_tools` was missed in round-8's 10-file clamp sweep —
+    `pd.Timestamp("")` is NaT and its strftime raised a raw ValueError BEFORE
+    the try, escaping the tool with no typed degrade and no ledger event
+    (empirically reproduced). Same fallback idiom as the 10 siblings, plus
+    the window computation moved inside the try so a degenerate live-mode
+    date still degrades typed.
+  - **Trade-ticket blocked gate (P2, S4):** the breaker gate keyed only on
+    `Drawdown Regime`, but `action=blocked` has two causes that render a
+    NORMAL regime (sector cap reached, invalid equity) — a report the
+    framework refused to deploy still got a full leveraged entry ticket, and
+    `rank_signals` didn't even flag it ⚠️熔断. Both scripts now honor
+    `Action: blocked` whatever the regime line says.
+  - **P3 batch:** the OI live-snapshot leg catches raw transport errors under
+    `retries=0` (one blip no longer discards the already-fetched history
+    through the router's generic catch); `_futures_data_window`'s retention
+    check compares calendar dates (a window ending exactly 30 days back was
+    refused for most of every UTC day); `find_report` discovery skips
+    crashed/incomplete runs (`complete_report.md` parity with
+    `rank_signals.latest_for_ticker` — a newer broken run no longer shadows
+    the last complete report); rank tie-breaks fall to ticker order
+    (was filesystem enumeration order); the ATR regexes carry a `\b` left
+    boundary ("NATR: 12" no longer feeds 12 in as the ATR); a stop within
+    1bp of entry is refused as degenerate (was a ~1e11-USDT notional ticket);
+    `liquidation_price` renders only for `crypto_perp` (the Binance USDT-M
+    MMR estimate on a margined-equity ticket was a misleading advisory row);
+    fear-greed PIT selection sorts by timestamp instead of trusting the
+    API's newest-first ordering; the CoinGecko/DefiLlama parse memos never
+    memo-hit on the mtime −1.0 sentinel (a persistently failing cache write
+    froze the first parse for the process lifetime); CLAUDE.md's stale
+    "crypto→SPY proxy" regime-benchmark wording corrected (pure-crypto
+    families use the BTCUSDT native benchmark, disclosed in the rendered
+    line). Ruff clean restored (16 lint findings the two feature commits had
+    introduced, incl. two in this batch).
+  - **Coverage-gap map (S5) → new pins:** the perp path is well covered
+    overall (perp_bundle the best-pinned module in the repo); the gaps were
+    plumbing seams. New `tests/test_binance_perp_tools.py` pins all 10
+    `@tool` wrappers' exact vendor-name + positional/keyword mapping and the
+    klines `_qualifier` threading (a silently swapped positional served the
+    wrong window's crowding data with no error anywhere — only tool NAMES
+    were pinned before). Remaining mapped gaps (vision `_fetch` status
+    mapping 404-vs-429, accuracy crypto cutoff/venue replay, intraday
+    klines interval threading, onchain PIT boundary, direct
+    `crypto_native_fundamentals_run` matrix) are recorded below for the next
+    pass.
+  - **Accepted as documented (no code change):** the live indicator battery
+    computing on the still-forming bar (deliberate freshness for the analyst;
+    the risk overlay's completed-bar basis is the deterministic seam);
+    `spot_perp_basis` structurally degrading for multiplier-scaled pairs
+    (dual-leg canonical resolution is a feature, the degradation is an
+    honest sentinel); the funding-cadence `fundingInfo` cross-check request
+    (load-bearing for the cadence-change disclosure, not waste); the
+    vision-sync lock spanning downloads and the per-sync full-year partition
+    rewrite (perf, correctness unaffected); unbounded vision cache growth
+    (deliberate immutability); OI bundle `limit:30` zero headroom (safe only
+    under the current head-clamp invariant — noted fragile in code review);
+    bundle text sliding across UTC day boundaries (LLM-cache cost on
+    midnight-crossing retries, disclosed span); CoinGecko wrapper-symbol
+    preemption and quote-suffix coverage (USDT/USDC only — external catalog
+    state, honest sentinels); DefiLlama historical titles carrying today's
+    catalog identity (pinned intended-with-caveat); integer protocol slugs
+    (per-leg fail-soft); fear-greed applicability for `unknown_perp`
+    (advisory noise, one line); rating-less ticket strength disclosure and
+    the standalone bracket cap being operator-optional.
+
 - **crypto_native adversarial review batch (2026-09-29, /code-review high —
   14 findings landed, 5 accepted as documented):** two PIT leaks (the DefiLlama
   protocol title rendered the catalog's TODAY TVL into historical runs — now

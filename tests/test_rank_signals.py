@@ -66,6 +66,7 @@ def make_report(
     pm_target: str | None = None,
     ovl_stop: str | None = None,
     ovl_regime: str | None = None,
+    ovl_action: str | None = None,
     action: str | None = None,
     entry: str | None = None,
     stop: str | None = None,
@@ -93,6 +94,8 @@ def make_report(
         decision.append(f"- **Stop Loss**: {ovl_stop}")
     if ovl_regime:
         decision.append(f"- **Drawdown Regime**: {ovl_regime}")
+    if ovl_action:
+        decision.append(f"- **Action**: {ovl_action}")
     _write(d / "5_portfolio" / "decision.md", "\n".join(decision) + "\n")
 
     trader = []
@@ -338,6 +341,23 @@ def test_blocked_regime_is_ranked_but_never_the_top_pick(reports_root):
     assert "最强多头" in free_row
     # The handoff section must recommend the unblocked one.
     assert "最强多头 `FREE`" in rendered
+
+
+@pytest.mark.unit
+def test_blocked_action_with_normal_regime_flags_circuit_breaker(reports_root):
+    # Round-9 S4: action=blocked with a NORMAL regime (sector cap reached /
+    # invalid equity) is still a framework refusal to deploy — the regime-only
+    # gate left such rows unflagged (no ⚠️熔断) and eligible as 最强多头.
+    make_report(reports_root, "SECTORCAP", rating="Buy", pm_target="120.00",
+                entry="100.00", stop="92.00", sentiment=9.8,
+                ovl_regime="normal", ovl_action="blocked")
+    rows = [rs.analyze_ticker("SECTORCAP")]
+    assert rows[0]["conviction"] == 84
+    assert rows[0]["blocked"] is True
+
+    rendered = rs.render_rank(rows, ["SECTORCAP"], top=10)
+    assert "熔断" in rendered
+    assert "最强多头" not in rendered
 
 
 @pytest.mark.unit

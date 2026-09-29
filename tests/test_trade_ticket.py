@@ -373,6 +373,44 @@ def _write_report(
 
 
 @pytest.mark.unit
+def test_find_report_skips_incomplete_runs(tmp_path, monkeypatch):
+    # Round-9 S4: discovery must skip crashed/incomplete runs (no
+    # complete_report.md) — a newer broken dir must not shadow the last
+    # complete report (rank_signals.latest_for_ticker parity).
+    import os
+
+    good = _write_report(tmp_path, "**Rating**: Buy\n")
+    (good / "complete_report.md").write_text("done\n", encoding="utf-8")
+    broken = _write_report(
+        tmp_path, "**Rating**: Sell\n", name="BTCUSDT_20260920_090000",
+    )
+    newer = broken.stat().st_mtime + 100
+    os.utime(broken, (newer, newer))  # the incomplete dir is the newest
+    monkeypatch.setattr(tt, "_results_dir", lambda: tmp_path)
+
+    assert tt.find_report("BTCUSDT") == good
+    # Explicit --report-dir still points exactly where the user said,
+    # complete or not — only discovery filters.
+    assert tt.find_report(None, str(broken)) == broken
+
+
+@pytest.mark.unit
+def test_near_degenerate_stop_refuses_instead_of_absurd_notional(tmp_path):
+    # Round-9 S4: a stop 1e-7 below entry passed the equality-only guard and
+    # printed a ~1e11-USDT notional ticket; < 1bp stop distance is
+    # untradeable on any venue (fees alone exceed it) — refuse.
+    # Bare report (no overlay) so the trader's own stop is the resolved one.
+    decision = "**Rating**: Buy\n\nMomentum continuation.\n"
+    trader = TRADER_MD.replace("62,100", "64,194")  # 6/64,200 ≈ 0.9bp
+    report_dir = _write_report(tmp_path, decision, trader_md=trader)
+
+    t = tt.build_ticket(report_dir, capital=10_000.0, profile="moderate")
+
+    assert t["status"] == "degenerate_levels"
+    assert "notional" not in t
+
+
+@pytest.mark.unit
 def test_build_ticket_perp_report_keeps_perp_semantics(tmp_path):
     decision = "**Rating**: Buy\n\nMomentum continuation.\n\n" + PERP_OVERLAY
     report_dir = _write_report(tmp_path, decision)
@@ -485,6 +523,37 @@ def test_build_ticket_breaker_regime_blocks_entry(tmp_path):
     assert "leverage" not in t
     out = tt.render_ticket(t)
     assert "熔断器" in out
+
+
+@pytest.mark.unit
+def test_build_ticket_blocked_action_with_normal_regime_refuses(tmp_path):
+    # Round-9 S4: risk manager action=blocked has two causes that render a
+    # NORMAL regime (sector cap reached / invalid equity). The regime-only
+    # gate let a full leveraged entry ticket through on a report the
+    # framework itself refused to deploy — blocked means refused, whatever
+    # the regime line says.
+    decision = (
+        "**Rating**: Buy\n\nThesis.\n\n" + PERP_OVERLAY.replace(
+            "- **Action**: enter", "- **Action**: blocked"
+        ).replace(
+            "- **Target Weight**: 8.0% (960)", "- **Target Weight**: 0.0% (0)"
+        )
+    )
+    report_dir = _write_report(tmp_path, decision)
+
+    t = tt.build_ticket(report_dir, capital=10_000.0, profile="moderate")
+
+    assert t["direction"] == "long"
+    assert t["drawdown_regime"] == "normal"  # the gate must not key on this
+    assert t["blocked_by_breaker"] is True
+    assert t["status"] == "no_trade_breaker"
+    assert "leverage" not in t
+    # Round-9 self-review R3: the render must attribute the refusal to its
+    # actual cause — the normal-regime blocked copy must not claim the
+    # drawdown breaker fired.
+    out = tt.render_ticket(t)
+    assert "Action = **blocked**" in out
+    assert "熔断器" not in out
 
 
 @pytest.mark.unit

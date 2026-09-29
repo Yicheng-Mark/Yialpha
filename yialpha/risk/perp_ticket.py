@@ -145,7 +145,11 @@ def liquidation_price(
     旧公式 entry × (1 − 1/L) 忽略 MMR/费用，估出的爆仓价比实际更远，
     系统性低估爆仓风险。
     """
-    if asset_type == "crypto_spot" or L <= 1.0:
+    # Round-9 S4: the formula is Binance-USDT-M-specific (isolated margin +
+    # USDT-M MMR ladder + fee estimate). Rendering it for margined equities
+    # (Reg-T / 两融担保比 — entirely different maintenance math) was a
+    # misleading advisory row; only crypto_perp gets an estimate.
+    if asset_type != "crypto_perp" or L <= 1.0:
         return None
     if direction not in ("long", "short"):
         return None

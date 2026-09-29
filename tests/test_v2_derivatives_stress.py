@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
@@ -291,29 +290,37 @@ def _end_of_day_ms(end_date: str) -> int:
 def test_futures_data_start_clamped_to_retention_window(monkeypatch):
     """Regression pin for the live -1130 ``parameter 'startTime' is invalid``.
 
-    ``/futures/data/*`` retains only the last 30 days AND rejects a wider
-    startTime/endTime span with HTTP 400 — it does NOT silently truncate. The
-    caller's default window is 90 days, so the data layer must clamp the two
-    ``/futures/data/*`` stress requests into the retention window, while the
-    full-history funding endpoint keeps the whole 90 days.
+    ``/futures/data/*`` retains only the last 30 days AND rejects a
+    ``startTime`` older than that ABSOLUTE horizon (anchored on server now —
+    live probes 2026-09-19/23, same semantics perp_bundle.
+    ``_futures_data_start_ms`` recorded) with HTTP 400 — it does NOT silently
+    truncate. Round-9 S2: the clamp used to anchor retention on the PAST
+    ``end_ms``, so a replay 1-3 days back asked for rows aged out of the
+    server's window and the OI/global_lsr stress legs degraded to ``None``
+    on every recent-date replay. The head now anchors on NOW (the server's
+    own horizon), while the full-history funding endpoint keeps the whole
+    90 days.
 
-    Doubles as the PIT pin: ``end_date`` here is in the PAST, so ``end_ms`` is
-    already below now and the now-clamp must be a no-op — a replay window is
-    never dragged forward to the real present.
+    Doubles as the PIT pin: ``end_date`` here is in the PAST, so ``end_ms``
+    is already below now and the end-clamp must be a no-op — a replay window
+    is never dragged forward to the real present.
     """
     cap = _Capture()
     klines = _KlinesCapture()
     monkeypatch.setattr(bn, "_http_get", cap)
     monkeypatch.setattr(bn, "binance_klines_frame", klines)
 
-    # Historical replay: 5 days back from the real clock, computed at run time.
+    # Historical replay: 5 days back, with the clock frozen so the
+    # now-anchored head is exactly reproducible.
     end_dt = (datetime.now(UTC) - timedelta(days=5)).replace(
         hour=0, minute=0, second=0, microsecond=0,
     )
     end_date = end_dt.strftime("%Y-%m-%d")
     end_ms = _end_of_day_ms(end_date)
     start_ms = int((end_dt - timedelta(days=90)).timestamp() * 1000)
-    assert end_ms < int(time.time() * 1000)  # a replay window is strictly past
+    now_ms = end_ms + 5 * 86_400_000 - 3_600_000  # ~5d after end-of-day
+    assert end_ms < now_ms  # a replay window is strictly past
+    monkeypatch.setattr(bn, "_now_ms", lambda: now_ms)
 
     bn.derivatives_stress_series("BTCUSDT", end_date)
 
@@ -321,7 +328,9 @@ def test_futures_data_start_clamped_to_retention_window(monkeypatch):
     for path in _FUTURES_DATA_STRESS_PATHS:
         params = cap.params_for(path)
         assert params["endTime"] == end_ms  # NOT dragged to now — PIT intact
-        assert params["startTime"] == end_ms - retention_ms
+        # Head anchored on NOW (the server's horizon), not on the past end.
+        assert params["startTime"] == now_ms - retention_ms
+        assert params["startTime"] > end_ms - retention_ms  # the round-9 bug
         # The endpoint hard-rejects (400 -1130) a span beyond retention.
         assert params["endTime"] - params["startTime"] <= retention_ms
         assert params["period"] == "1d"

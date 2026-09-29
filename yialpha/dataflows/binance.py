@@ -963,11 +963,15 @@ def get_binance_open_interest(
                         "openInterestValue": None,
                     }
                 )
-        except (NoMarketDataError, VendorRateLimitError) as exc:
+        except (NoMarketDataError, VendorRateLimitError, requests.RequestException) as exc:
             # History is the analytically useful part; a missing live snapshot is
             # logged but does not fail the call (the series still carries value).
             # The header notes it so a missing "latest" row reads as "fetch
-            # failed", not "no current open interest".
+            # failed", not "no current open interest". Round-9 S2: with
+            # retries=0 a dropped connection re-raises the RAW transport
+            # error (not wrapped in NoMarketDataError) — without it in the
+            # tuple, one blip on the snapshot leg discarded the already-
+            # fetched history through the router's generic catch.
             live_unavailable = True
             logger.info("Binance live openInterest unavailable for %s: %s", canonical, exc)
 
@@ -1088,13 +1092,22 @@ def _futures_data_window(
     else:
         start_dt = end_dt - timedelta(days=max(1, int(look_back_days)))
 
-    horizon = datetime.now(UTC) - timedelta(days=_FUTURES_DATA_RETENTION_DAYS)
-    if end_dt < horizon:
+    # Round-9 S2 + self-review R5: compare calendar DATES — end_dt is 00:00
+    # UTC of the end date while a datetime horizon carried now's
+    # time-of-day, refusing a 30-day-back window for most of every UTC day.
+    # The boundary DATE itself is refused too (<=, consistently all day):
+    # its rows are already mostly aged out server-side, and letting it
+    # through just traded the clear retention refusal for a muddy
+    # head-clamped ~empty serve downstream.
+    horizon_date = (
+        datetime.now(UTC) - timedelta(days=_FUTURES_DATA_RETENTION_DAYS)
+    ).date()
+    if end_dt.date() <= horizon_date:
         raise NoMarketDataError(
             symbol, canonical,
             f"/futures/data endpoints retain only the last "
             f"{_FUTURES_DATA_RETENTION_DAYS} days; window ends "
-            f"{end_dt.date()}, before the retention horizon",
+            f"{end_dt.date()}, at or before the retention horizon",
         )
 
     start_ms = int(start_dt.timestamp() * 1000)
@@ -2193,17 +2206,16 @@ def derivatives_stress_series(
     is PIT-clamped to ``end_date`` via :func:`current_pit_end`.
 
     Live-run practicality (why the REST paths, not the vision archive):
-    ``/futures/data/*`` retains only the last 30 days AND rejects a request
-    whose ``startTime``/``endTime`` span exceeds that horizon with HTTP 400
-    ``-1130`` ("parameter 'startTime' is invalid") — the server does NOT
-    silently truncate — so the OI/LSR window is clamped client-side before the
-    request: ``endTime`` to ``min(end_ms, now)``, ``startTime`` to
-    ``_FUTURES_DATA_RETENTION_DAYS`` back from that anchor. The ``min`` is
-    deliberate, not a typo — ``end_ms`` is the LOCAL end-of-day, so a run after
-    local midnight would otherwise measure retention back from an instant still
-    in the future and lose a daily row that already exists (29 points, one
-    short of ``MIN_WINDOW``); a replay's ``end_ms`` is already below now and is
-    left exactly where PIT put it. The two typically arrive as ~30 points,
+    ``/futures/data/*`` retains only the last 30 days AND rejects a
+    ``startTime`` older than that ABSOLUTE horizon (anchored on server now,
+    not on the request's own span) with HTTP 400 ``-1130`` ("parameter
+    'startTime' is invalid") — the server does NOT silently truncate — so the
+    OI/LSR window is clamped client-side before the request: ``endTime`` to
+    ``min(end_ms, now)``, ``startTime`` to at least
+    ``_FUTURES_DATA_RETENTION_DAYS`` back from NOW (same proven anchor as
+    ``perp_bundle._futures_data_start_ms``; anchoring on the past ``end_ms``
+    aged the window out on recent-date replays — round-9 S2). The two
+    typically arrive as ~30 points,
     enough for the score's ``MIN_WINDOW`` while the report carries the
     ``thin_history`` flag; funding (full-history ``/fapi/v1/fundingRate``) and
     the klines-based basis cover the full requested window. Downloading ~90
@@ -2241,15 +2253,21 @@ def derivatives_stress_series(
         out["funding"] = None
 
     # /futures/data/* retains only the last _FUTURES_DATA_RETENTION_DAYS days
-    # and rejects a wider startTime/endTime span with HTTP 400 -1130 ("parameter
-    # 'startTime' is invalid") — no silent truncation — so clamp client-side;
+    # and rejects a startTime older than that ABSOLUTE horizon with HTTP 400
+    # -1130 ("parameter 'startTime' is invalid" — startTime-anchored, not
+    # span-anchored; live probes 2026-09-19/23, see perp_bundle.
+    # _futures_data_start_ms) — no silent truncation — so clamp client-side;
     # funding (/fapi full history) and basis (klines) keep the full start_ms.
-    # Anchor on min(end_ms, now) because end_ms is the LOCAL end-of-day: past
-    # local midnight it lies in the FUTURE, and measuring retention back from a
-    # future instant drops a daily row that already exists (29 < MIN_WINDOW 30).
+    # Retention anchors on NOW, not on data_end: a replay whose end_ms is 1-3
+    # days in the past would otherwise measure the horizon back from the past
+    # day and ask for rows the server has already aged out (round-9 S2 — the
+    # OI/global_lsr legs degraded on every recent-date replay). The END still
+    # anchors on min(end_ms, now): end_ms is the LOCAL end-of-day, past local
+    # midnight it lies in the FUTURE, and rows past the analysis date must
+    # never be requested.
     data_end_ms = min(end_ms, _now_ms())
     data_start_ms = max(
-        start_ms, data_end_ms - _FUTURES_DATA_RETENTION_DAYS * 86_400_000
+        start_ms, _now_ms() - _FUTURES_DATA_RETENTION_DAYS * 86_400_000
     )
 
     def _trim_to_end(rows: list, bound_ms: int) -> list:

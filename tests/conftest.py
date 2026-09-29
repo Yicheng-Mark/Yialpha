@@ -129,6 +129,25 @@ def _runtime_prefetch_bundles_off():
 
 
 @pytest.fixture(autouse=True)
+def _optional_crypto_categories_off():
+    """Hermetic tests: optional crypto categories default OFF in production,
+    but a dev-box ``.env`` (``YIALPHA_CRYPTO_NATIVE=true`` /
+    ``YIALPHA_CRYPTO_FEAR_GREED=true``) is baked into ``DEFAULT_CONFIG`` at
+    import time, so ``reset_config`` restores the *dev* defaults, not the
+    production ones — and flag-off contracts (e.g. crypto runs drop the
+    fundamentals analyst) go red locally while CI stays green. Pin both to
+    the production default; tests opt in with ``set_config`` in the body
+    (set_config merges, so the opt-in wins over this fixture). Named to
+    sort AFTER ``_isolate_config`` (alphabetical autouse order): the reset
+    there re-bakes the .env values, so this fixture must run later.
+    """
+    from yialpha.dataflows.config import set_config
+
+    set_config({"crypto_native": False, "crypto_fear_greed": False})
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _runtime_ledger_isolated(tmp_path):
     """Point the V2 ledger DB at a per-test tmp file and hold the V2.1/V2.2
     record/shadow flags OFF (production defaults are ON).

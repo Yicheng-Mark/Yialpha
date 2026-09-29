@@ -198,6 +198,27 @@ class VisionStore:
         lock = FileLock(str(directory / "sync.lock"))
         with lock:
             manifest = self._read_manifest(dataset, symbol)
+            # Round-9 self-review R1: claims whose year partition has
+            # vanished (the load error's "delete it" remediation, or manual
+            # cleanup) would never re-sync — pending only considers days
+            # ABSENT from the manifest, so the account would keep claiming
+            # coverage nothing can serve. Re-open claims with no backing
+            # partition here, BEFORE pending is computed, so this call
+            # re-downloads them (byte-level zip cache: zero network cost).
+            for year in sorted({int(d[:4]) for d in manifest["days"]}):
+                if not self._year_path(dataset, symbol, year).exists():
+                    orphaned = [
+                        d for d in manifest["days"]
+                        if d.startswith(f"{year}-")
+                    ]
+                    for d in orphaned:
+                        del manifest["days"][d]
+                    logger.warning(
+                        "vision store: manifest claims %d day(s) for %d but "
+                        "partition %s is gone; re-opening them for re-sync",
+                        len(orphaned), year,
+                        self._year_path(dataset, symbol, year).name,
+                    )
             # Pre-sync coverage: days already in the store BEFORE this call
             # (counted here — after the loop they would include this call's
             # downloads and double-report coverage).
@@ -217,6 +238,7 @@ class VisionStore:
                 if d not in manifest["days"] and _due(d)
             ]
             buckets: dict[int, list[pd.DataFrame]] = {}
+            new_days: dict[int, list[str]] = {}
             touched_years: set[int] = set()
             for day in pending:
                 if report.downloaded + report.missing >= budget:
@@ -240,6 +262,7 @@ class VisionStore:
                     continue
                 year = int(day[:4])
                 buckets.setdefault(year, []).append(frame)
+                new_days.setdefault(year, []).append(day)
                 touched_years.add(year)
                 manifest["days"][day] = int(len(frame))
                 manifest["missing"].pop(day, None)
@@ -250,7 +273,19 @@ class VisionStore:
                 else 0
             )
             for year in sorted(touched_years):
-                self._merge_year(dataset, symbol, year, buckets[year])
+                self._merge_year(
+                    dataset, symbol, year, buckets[year], manifest,
+                    new_days[year],
+                )
+            # Round-9 self-review R4: a merge that found an unreadable
+            # partition drops that year's OLD claims — recompute the
+            # already-synced count from the post-merge manifest so the
+            # report never claims coverage this very call removed.
+            report.already_synced = max(
+                0,
+                sum(1 for d in window if d in manifest["days"])
+                - report.downloaded,
+            )
             manifest["updated"] = _now_iso()
             self._write_manifest(dataset, symbol, manifest)
 
@@ -264,6 +299,8 @@ class VisionStore:
         symbol: str,
         year: int,
         new_frames: list[pd.DataFrame],
+        manifest: dict,
+        merged_days: list[str],
     ) -> None:
         """Merge parsed day frames into the year partition (idempotent)."""
         path = self._year_path(dataset, symbol, year)
@@ -271,10 +308,29 @@ class VisionStore:
         if path.exists():
             try:
                 frames.append(pd.read_csv(path, compression="gzip"))
-            except (OSError, ValueError) as exc:  # noqa: BLE001 — rebuild over crash
+            except (OSError, ValueError, EOFError) as exc:  # noqa: BLE001 — rebuild over crash
+                # Round-9 S3: rebuilding from this call's frames alone while
+                # manifest["days"] keeps claiming the old rows would serve
+                # silently truncated deep history with zero disclosure (qa
+                # is manifest-driven). Drop the year's OLD manifest days —
+                # this call's freshly parsed days (merged_days) survive, the
+                # rest become unsynced and re-download from the byte-level
+                # zip cache on later syncs, and every absence flows through
+                # the normal disclosure chain. EOFError joins the catch: a
+                # byte-truncated gzip previously escaped uncaught and bricked
+                # every later sync against the same dead read; it now takes
+                # this same rebuild-from-cache repair path.
+                keep = set(merged_days)
+                dropped = [
+                    d for d in manifest["days"]
+                    if d.startswith(f"{year}-") and d not in keep
+                ]
+                for d in dropped:
+                    del manifest["days"][d]
                 logger.warning(
                     "vision store: unreadable partition %s (%s); rebuilding "
-                    "from fresh downloads", path, exc,
+                    "from fresh downloads (%d manifest day(s) re-opened)",
+                    path, exc, len(dropped),
                 )
                 path.unlink(missing_ok=True)
         if not frames:
@@ -307,6 +363,8 @@ class VisionStore:
 
         Empty (no columns) when nothing is synced — the caller raises the
         typed no-data error with the sync report's reasons."""
+        from .errors import NoMarketDataError
+
         frames: list[pd.DataFrame] = []
         for year in range(start_dt.year, end_dt.year + 1):
             path = self._year_path(dataset, symbol, year)
@@ -314,8 +372,22 @@ class VisionStore:
                 continue
             try:
                 frames.append(pd.read_csv(path, compression="gzip"))
-            except (OSError, ValueError) as exc:
-                logger.warning("vision store: skipping unreadable %s: %s", path, exc)
+            except (OSError, ValueError, EOFError) as exc:
+                # Round-9 S3: this used to skip the year with a warning while
+                # the manifest (and qa/headers driven by it) still counted
+                # the partition's days — multi-year windows silently served
+                # less than the account claimed, and the hole never repaired
+                # (pending was empty, so sync never re-merged). Fail closed
+                # instead: the typed error names the partition; deleting it
+                # (or the next sync, which rebuilds from the byte-level zip
+                # cache) restores coverage honestly.
+                raise NoMarketDataError(
+                    symbol, symbol,
+                    f"vision store partition {path} unreadable "
+                    f"({type(exc).__name__}: {exc}); delete it — the next "
+                    "sync re-opens its manifest claims and rebuilds from "
+                    "the cached archives",
+                ) from exc
         if not frames:
             return pd.DataFrame()
         df = pd.concat(frames, ignore_index=True)

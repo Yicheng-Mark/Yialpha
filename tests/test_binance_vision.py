@@ -367,6 +367,103 @@ def test_sync_budget_bounds_new_downloads_not_reads(archive, monkeypatch):
     assert list(df["time"]) == ["2024-05-01", "2024-05-02", "2024-05-03"]
 
 
+# ---- store integrity (round 9 S3) --------------------------------------------
+
+
+@pytest.mark.unit
+def test_corrupt_partition_fails_closed_and_repairs_from_zip_cache(
+    archive, monkeypatch,
+):
+    """Round-9 S3: an unreadable year partition (AV lock / external
+    truncation) used to desync manifest and partition — ``load`` skipped the
+    year with a warning while the manifest-driven QA still counted its days
+    (silently truncated deep history), and a rebuild dropped rows without
+    re-opening the manifest claims. Pins the repaired contract:
+
+    * ``load`` FAILS CLOSED (typed error naming the partition, no partial
+      serve);
+    * a later merge that finds the partition unreadable RE-OPENS that
+      year's manifest days (the account never claims rows the partition
+      lost);
+    * re-opened days re-download from the byte-level zip cache (no network)
+      and coverage is fully restored."""
+    import yialpha.dataflows.binance_vision_store as bvs
+
+    monkeypatch.setattr(bnv, "_SYNC_BUDGET_FILES", 400)
+    w = lambda d1, d2: (  # noqa: E731 — local readability
+        datetime.fromisoformat(d1).replace(tzinfo=UTC),
+        datetime.fromisoformat(d2 + "T23:59:59").replace(tzinfo=UTC),
+    )
+    for day in ("2024-05-01", "2024-05-02", "2024-05-03", "2024-05-04"):
+        _add_metrics_day(archive, "BTCUSDT", day, [_metrics_row(day, "00:00", 1, 1, 1, 1)])
+
+    store = bvs.VisionStore()
+    store.sync("metrics", "BTCUSDT", *w("2024-05-01", "2024-05-03"), budget=400)
+    assert len(archive.zip_fetches()) == 3
+
+    # Corrupt the parsed partition: garbage bytes raise BadGzipFile (an
+    # OSError) on read — the exact external-corruption class.
+    partition = store._year_path("metrics", "BTCUSDT", 2024)
+    assert partition.exists()
+    partition.write_bytes(b"not a gzip stream")
+
+    # 1. Load fails CLOSED — typed, names the partition, serves nothing.
+    with pytest.raises(NoMarketDataError, match="unreadable"):
+        store.load("metrics", "BTCUSDT", *w("2024-05-01", "2024-05-03"))
+
+    # 2. A sync touching that year rebuilds and re-opens the manifest
+    #    claims — coverage is disclosed as 1 of 4, NOT 3 silent holes.
+    store.sync("metrics", "BTCUSDT", *w("2024-05-01", "2024-05-04"), budget=400)
+    qa_partial = store.qa("metrics", "BTCUSDT", *w("2024-05-01", "2024-05-04"))
+    assert qa_partial["present_days"] == 1  # only the newly synced 05-04
+
+    # 3. The re-opened days come back from the byte cache: full coverage,
+    #    still exactly one network fetch per day.
+    store.sync("metrics", "BTCUSDT", *w("2024-05-01", "2024-05-04"), budget=400)
+    qa_restored = store.qa("metrics", "BTCUSDT", *w("2024-05-01", "2024-05-04"))
+    assert qa_restored["present_days"] == 4
+    assert len(archive.zip_fetches()) == 4
+
+
+@pytest.mark.unit
+def test_deleted_partition_claims_reopen_on_next_sync(archive, monkeypatch):
+    """Round-9 self-review R1: the load error tells the user to DELETE the
+    unreadable partition. That must be the COMPLETE remediation: a sync
+    after the delete re-opens the orphaned manifest claims (partition gone,
+    days still claimed) and rebuilds from the byte cache — not a permanent
+    state where the manifest claims coverage nothing can serve."""
+    import yialpha.dataflows.binance_vision_store as bvs
+
+    monkeypatch.setattr(bnv, "_SYNC_BUDGET_FILES", 400)
+    w = lambda d1, d2: (  # noqa: E731 — local readability
+        datetime.fromisoformat(d1).replace(tzinfo=UTC),
+        datetime.fromisoformat(d2 + "T23:59:59").replace(tzinfo=UTC),
+    )
+    for day in ("2024-05-01", "2024-05-02"):
+        _add_metrics_day(archive, "BTCUSDT", day, [_metrics_row(day, "00:00", 1, 1, 1, 1)])
+
+    store = bvs.VisionStore()
+    rep1 = store.sync("metrics", "BTCUSDT", *w("2024-05-01", "2024-05-02"), budget=400)
+    assert rep1.synced_days_count == 2
+
+    # The load error's remediation: delete the (pretend-corrupt) partition.
+    partition = store._year_path("metrics", "BTCUSDT", 2024)
+    partition.unlink()
+
+    rep2 = store.sync("metrics", "BTCUSDT", *w("2024-05-01", "2024-05-02"), budget=400)
+    # Claims were re-opened AND re-downloaded (from the byte cache — the
+    # fetch counter does not move).
+    assert rep2.downloaded == 2
+    assert rep2.synced_days_count == 2
+    assert len(archive.zip_fetches()) == 2
+
+    qa = store.qa("metrics", "BTCUSDT", *w("2024-05-01", "2024-05-02"))
+    assert qa["present_days"] == 2
+    assert partition.exists()
+    df = store.load("metrics", "BTCUSDT", *w("2024-05-01", "2024-05-02"))
+    assert len(df) == 2
+
+
 @pytest.mark.unit
 def test_invalid_interval_rejected(archive):
     with pytest.raises(ValueError, match="interval"):

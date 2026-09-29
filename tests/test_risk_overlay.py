@@ -530,6 +530,10 @@ def test_perp_ticket_math_module_pinned():
     assert liquidation_price(100.0, 5.0, "short", "crypto_perp") == pytest.approx(119.45)
     assert liquidation_price(100.0, 1.0, "long", "crypto_perp") is None
     assert liquidation_price(100.0, 5.0, "long", "crypto_spot") is None
+    # Round-9 S4: margined equities have entirely different maintenance math
+    # (Reg-T / 两融) — the Binance USDT-M estimate must not render for them.
+    for stock_type in ("us_stock", "hk_stock", "cn_stock"):
+        assert liquidation_price(100.0, 3.0, "long", stock_type) is None
 
     assert take_profits(100.0, 96.0, "long") == pytest.approx([106.0, 112.0, 120.0])
     assert take_profits(100.0, 104.0, "short") == pytest.approx([94.0, 88.0, 80.0])

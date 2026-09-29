@@ -87,15 +87,22 @@ def find_report(ticker: str | None = None, report_dir: str | None = None) -> Pat
 
     dirs = sorted([d for d in root.iterdir() if d.is_dir()],
                   key=lambda d: d.stat().st_mtime, reverse=True)
+    # Round-9 S4：跳过没有 complete_report.md 的半截/中断 run（rank_signals
+    # 的 latest_for_ticker 同款过滤）——一个崩溃的较新 run 否则会遮住最后
+    # 一份完整报告，让票据退化为 missing_levels 而不是出单。
+    complete = [d for d in dirs if (d / "complete_report.md").is_file()]
     if ticker:
         tk = ticker.upper()
-        for d in dirs:
+        for d in complete:
             if d.name.upper().startswith(tk + "_") or d.name.upper() == tk:
                 return d
         raise FileNotFoundError(f"在 {root} 下未找到 ticker={ticker} 的报告。")
-    if not dirs:
-        raise FileNotFoundError(f"{root} 下没有任何报告。")
-    return dirs[0]
+    if not complete:
+        raise FileNotFoundError(
+            f"{root} 下没有任何完整报告（均缺 complete_report.md，"
+            "疑似全部中断；用 --report-dir 显式指定）。"
+        )
+    return complete[0]
 
 
 def detect_asset_type(ticker: str) -> str:
@@ -232,9 +239,13 @@ def parse_market(md: str) -> dict:
     if not md:
         return out
 
-    # ATR：多种写法 —— "ATR(14): $7.29" / "ATR at $7.29" / "ATR为 7.29"
-    for pat in [r"ATR\(?\d*\)?\s*(?:\(14\))?\s*[:：]\s*\$?\s*([\d,]+\.?\d*)",
-                r"ATR\s+(?:at|is|为)?\s*\$?\s*([\d,]+\.?\d*)",
+    # ATR：多种写法 —— "ATR(14): $7.29" / "ATR at $7.29" / "ATR为 7.29"。
+    # 左边界用 (?<![A-Za-z])（round-9 S4 + 自审 R2）：裸 ATR 会命中
+    # "NATR: 12" 这类拉丁词内子串；\b 则反过来杀掉中文紧贴的「当前ATR：
+    # 7.29」（\w 含 CJK，中文与 A 之间无边界）。负向后行只挡拉丁字母，
+    # 两侧都保住。
+    for pat in [r"(?<![A-Za-z])ATR\(?\d*\)?\s*(?:\(14\))?\s*[:：]\s*\$?\s*([\d,]+\.?\d*)",
+                r"(?<![A-Za-z])ATR\s+(?:at|is|为)?\s*\$?\s*([\d,]+\.?\d*)",
                 r"14[日天]ATR[^\d]{0,6}([\d,]+\.?\d*)"]:
         m = re.search(pat, md, re.I)
         if m:
@@ -350,9 +361,16 @@ def build_ticket(report_dir: Path, capital: float, profile: str) -> dict:
 
     entry, stop, atr = resolve_levels(parsed_trader, parsed_pm, parsed_market, direction)
 
-    # 熔断器护栏：回撤体制 no_new / hard_stop → 拒绝进场
+    # 熔断器护栏：回撤体制 no_new / hard_stop → 拒绝进场。round-9 S4：
+    # risk manager 的 action=blocked 另有两个 regime 渲染为 normal 的成因
+    # （sector cap 满 / invalid equity）——只认 regime 会给一张框架已拒绝
+    # 部署新资金的报告照常出满杠杆进场单。blocked 的语义就是「拒绝部署」，
+    # 票据必须同义拒绝，不区分成因。
     regime = parsed_pm["ovl_drawdown_regime"]
-    blocked = regime in ("no_new", "hard_stop")
+    blocked = (
+        regime in ("no_new", "hard_stop")
+        or parsed_pm["ovl_action"] == "blocked"
+    )
 
     ticket = {
         "ticker": ticker,
@@ -383,8 +401,10 @@ def build_ticket(report_dir: Path, capital: float, profile: str) -> dict:
         return ticket
     # 退化位价防护（与 render 路径的突破空序列防护同一缺陷类）：止损 = 入场
     # → stop_dist = 0 → 名义仓位除零掀翻整张单；入场 ≤ 0 是无效价（解析出
-    # 的 0 / 负数）。都如实降级为不可出单，而不是崩或给无穷仓位。
-    if entry <= 0 or stop == entry:
+    # 的 0 / 负数）。Round-9 S4：止损距入场 < 1bp 同样不可交易（任何 venue
+    # 的吃单费率都吞掉这个距离，名义仓位会爆到 1e11 USDT 级）——按退化拒出，
+    # 不给一张荒谬数字的单。
+    if entry <= 0 or stop == entry or abs(entry - stop) / entry < 1e-4:
         ticket["status"] = "degenerate_levels"
         return ticket
     # 侧向校验（round-6）：overlay 只在 legacy 权重为正时渲染 LONG 形止损
@@ -487,10 +507,19 @@ def render_ticket(t: dict) -> str:
         "no_trade_hold", "no_trade_breaker", "missing_levels", "degenerate_levels",
     ):
         if t["status"] == "no_trade_breaker":
-            lines.append("## ⛔ 不建议进场 —— 风控熔断器触发")
-            lines.append(f"回撤体制 = **{t['drawdown_regime']}**（no_new/hard_stop）。"
-                         "框架的 Kelly×Breaker×CVaR 层已主动拒绝部署新资金。"
-                         "此时硬上杠杆等于在回撤中接刀，应空仓等体制回到 normal/caution。")
+            lines.append("## ⛔ 不建议进场 —— 框架风控拒绝部署")
+            if t["drawdown_regime"] in ("no_new", "hard_stop"):
+                lines.append(f"回撤体制 = **{t['drawdown_regime']}**（no_new/hard_stop）。"
+                             "框架的 Kelly×Breaker×CVaR 层（回撤熔断器）已主动拒绝部署新资金。"
+                             "此时硬上杠杆等于在回撤中接刀，应空仓等体制回到 normal/caution。")
+            else:
+                # Round-9 自审 R3：action=blocked 的另两个成因（sector cap
+                # 满 / invalid equity）渲染 normal 体制——按成因如实措辞，
+                # 不冒称回撤熔断。
+                lines.append(
+                    f"风控 Action = **blocked**（体制 {t['drawdown_regime']}；"
+                    "常见成因：板块仓位上限已满 / 账户权益数据无效）。"
+                    "框架已拒绝为该标的部署新资金，票据同义拒绝。")
         elif t["status"] == "degenerate_levels":
             lines.append("## ⚠️ 无法生成交易单 —— 价位退化")
             if t.get("status_reason"):

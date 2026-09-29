@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .disk_cache import MinIntervalThrottle, cached_or_fetch, vendor_cache_dir
 from .errors import NoMarketDataError, VendorRateLimitError
@@ -143,7 +143,7 @@ def _select_pit(entries: list[dict], curr_date: str) -> tuple[dict, dict | None]
     the series is that old (analysis date precedes index coverage).
     """
     cutoff = (
-        datetime.strptime(curr_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        datetime.strptime(curr_date, "%Y-%m-%d").replace(tzinfo=UTC)
         + timedelta(days=1)
         - timedelta(seconds=1)
     )
@@ -151,6 +151,11 @@ def _select_pit(entries: list[dict], curr_date: str) -> tuple[dict, dict | None]
     visible = [e for e in entries if e["ts"] <= cutoff_ts]
     if not visible:
         return None
+    # Round-9 S1: the API serves newest-first today, but that ordering is an
+    # external property — select by timestamp, not by position, so an
+    # oldest-first or shuffled payload cannot silently serve a 2022 value
+    # for a 2026 analysis date.
+    visible.sort(key=lambda e: e["ts"], reverse=True)
     return visible[0], (visible[1] if len(visible) > 1 else None)
 
 
@@ -197,7 +202,7 @@ def format_fear_greed_line(curr_date: str) -> str | None:
     if selected is None:
         return None
     cur, prev = selected
-    asof = datetime.fromtimestamp(cur["ts"], tz=timezone.utc).date().isoformat()
+    asof = datetime.fromtimestamp(cur["ts"], tz=UTC).date().isoformat()
     line = f"alternative.me crypto Fear & Greed, as of {asof}: {cur['value']} ({cur['label']}"
     if prev is not None:
         line += f"; prior day {prev['value']} ({prev['label']})"

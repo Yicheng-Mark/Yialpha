@@ -225,7 +225,13 @@ def analyze_ticker(ticker: str) -> dict | None:
         "target": target,
         "price_target_pm": parsed_pm.get("price_target"),
         "drawdown_regime": regime,
-        "blocked": regime in BLOCKED_REGIMES,
+        # round-9 S4：action=blocked 有两个 regime=normal 的成因（sector cap
+        # 满 / invalid equity）——只认 regime 会漏标 ⚠️熔断。blocked 语义 =
+        # 框架拒绝部署，与成因无关。
+        "blocked": (
+            regime in BLOCKED_REGIMES
+            or parsed_pm.get("ovl_action") == "blocked"
+        ),
     }
 
 
@@ -259,10 +265,13 @@ def render_rank(rows: list[dict], tickers: list[str], top: int, capital=None) ->
     ok = [r for r in rows if r.get("status") == "ok"]
     missing = [r for r in rows if r.get("status") != "ok"]
 
+    # Round-9 S4：同分 tie-break 落到 ticker 字典序——原先稳定排序继承
+    # 发现序（discovery 模式 = 目录枚举序），同一批数据在不同机器/重建后
+    # 「最强多头」可能换人。
     longs = sorted([r for r in ok if r["direction"] == "long"],
-                   key=lambda r: (r["conviction"] or 0), reverse=True)
+                   key=lambda r: (-(r["conviction"] or 0), r["ticker"]))
     shorts = sorted([r for r in ok if r["direction"] == "short"],
-                    key=lambda r: (r["conviction"] or 0), reverse=True)
+                    key=lambda r: (-(r["conviction"] or 0), r["ticker"]))
     holds = [r for r in ok if r["direction"] == "hold"]
 
     lines = []

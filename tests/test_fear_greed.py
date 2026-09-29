@@ -14,7 +14,7 @@ on+inapplicable = byte-identical and zero fetches). All ``@pytest.mark.unit``.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -24,7 +24,7 @@ import yialpha.dataflows.fear_greed as fg
 
 
 def _ts(iso_date: str) -> str:
-    dt = datetime.strptime(iso_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    dt = datetime.strptime(iso_date, "%Y-%m-%d").replace(tzinfo=UTC)
     return str(int(dt.timestamp()))
 
 
@@ -59,6 +59,30 @@ class TestFormatFearGreedLine:
             == "alternative.me crypto Fear & Greed, as of 2026-09-29: "
             "73 (Greed; prior day 74 (Greed))"
         )
+
+    def test_selection_is_order_independent(self, monkeypatch):
+        # Round-9 S1: newest-first is the API's CURRENT shape, not a
+        # contract — an oldest-first or shuffled payload must still select
+        # by timestamp, never serve a 2022 value for a 2026 date.
+        newest_first = _series_bytes(
+            [("2026-09-29", 73, "Greed"),
+             ("2026-09-28", 74, "Greed"),
+             ("2026-09-27", 71, "Greed")]
+        )
+        oldest_first = _series_bytes(
+            [("2026-09-27", 71, "Greed"),
+             ("2026-09-28", 74, "Greed"),
+             ("2026-09-29", 73, "Greed")]
+        )
+        outs = []
+        for raw in (newest_first, oldest_first):
+            monkeypatch.setattr(
+                fg, "cached_or_fetch",
+                (lambda payload: (lambda *a, **k: payload))(raw),
+            )
+            outs.append(fg.format_fear_greed_line("2026-09-29"))
+        assert outs[0] == outs[1]
+        assert "73 (Greed; prior day 74 (Greed))" in outs[1]
 
     def test_entries_after_analysis_date_never_leak(self, monkeypatch):
         raw = _series_bytes(

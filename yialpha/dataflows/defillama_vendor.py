@@ -43,13 +43,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from .coingecko_vendor import (
     _MULTIPLIER_PREFIXES,
     _end_of_day_ts,
-    _fmt_num,
     _fmt_usd,
     perp_base_symbol,
 )
@@ -139,7 +138,10 @@ def _cached_json(filename: str, fetch, ttl_days: float) -> Any:
     except OSError:
         mtime = -1.0
     hit = _PARSE_MEMO.get(key)
-    if hit is not None and hit[0] == mtime:
+    # Round-9 S1: -1.0 is the no-file sentinel — memo-hitting on it would
+    # freeze the first parse for the process lifetime while cache writes
+    # keep failing; only a real mtime may serve from the memo.
+    if mtime != -1.0 and hit is not None and hit[0] == mtime:
         return hit[1]
     parsed = json.loads(raw)
     _PARSE_MEMO[key] = (mtime, parsed)
@@ -258,7 +260,7 @@ def _pit_window(
     upper = _end_of_day_ts(as_of)
     lower = (date.fromisoformat(as_of) - timedelta(days=look_back_days))
     lower_ts = int(datetime(lower.year, lower.month, lower.day,
-                            tzinfo=timezone.utc).timestamp())
+                            tzinfo=UTC).timestamp())
     out: list[tuple[str, float]] = []
     for p in points if isinstance(points, list) else []:
         if not isinstance(p, dict):
@@ -269,7 +271,7 @@ def _pit_window(
             continue
         if lower_ts <= ts <= upper:
             out.append((
-                datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d"),
+                datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d"),
                 val,
             ))
     return out
@@ -368,7 +370,7 @@ def get_crypto_network_fundamentals(
     # Live runs (curr_date empty/today) anchor the window at today — DefiLlama
     # daily points are end-of-day so today's row is at most the running value.
     as_of = str(
-        curr_date or datetime.now(timezone.utc).date().isoformat()
+        curr_date or datetime.now(UTC).date().isoformat()
     )[:10]
     as_of_note = f"as-of {as_of}" if curr_date else "live, current data"
 

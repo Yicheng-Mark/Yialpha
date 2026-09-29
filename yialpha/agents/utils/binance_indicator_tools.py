@@ -95,14 +95,25 @@ def _indicators_core(
     if venue not in ("perp", "spot"):
         return "ERROR: venue must be 'perp' or 'spot'."
 
+    # PIT clamp + empty-LLM-date fallback (round-8 pattern; this file was
+    # missed in the original 10-file sweep): pd.Timestamp("") is NaT and its
+    # strftime raises a raw ValueError BEFORE the try below — no typed
+    # degrade, no ledger event. The pinned analysis date is the authority.
+    from yialpha.dataflows.utils import current_pit_end, get_analysis_date
+
+    curr_date = str(
+        current_pit_end(curr_date) or get_analysis_date() or curr_date)
+
     # Warm-up margin: SMA-200 needs 200 rows; ~260 calendar days of crypto
     # bars covers it, multiplied for safety on longer batteries.
     fetch_days = max(int(400 * _FETCH_MARGIN), int(look_back_days * 3))
-    start = (
-        pd.Timestamp(curr_date) - pd.Timedelta(days=fetch_days)
-    ).strftime("%Y-%m-%d")
-
+    # start is computed INSIDE the try: in live mode get_analysis_date() is
+    # None, so a degenerate empty curr_date still reaches pd.Timestamp —
+    # NaT.strftime must degrade through the typed path, not escape raw.
     try:
+        start = (
+            pd.Timestamp(curr_date) - pd.Timedelta(days=fetch_days)
+        ).strftime("%Y-%m-%d")
         frame = binance_klines_frame(
             symbol,
             start,

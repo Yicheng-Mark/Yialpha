@@ -43,7 +43,7 @@ import json
 import logging
 import os
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from .disk_cache import MinIntervalThrottle, cached_or_fetch, vendor_cache_dir
@@ -130,7 +130,11 @@ def _cached_json(filename: str, fetch, ttl_days: float) -> Any:
     except OSError:
         mtime = -1.0
     hit = _PARSE_MEMO.get(key)
-    if hit is not None and hit[0] == mtime:
+    # Round-9 S1: -1.0 is the no-file sentinel (cache write failing — AV
+    # lock / read-only mount). Memo-hitting on it would freeze the first
+    # successful parse for the process lifetime even as fresh bytes arrive
+    # on every call; only a real mtime may serve from the memo.
+    if mtime != -1.0 and hit is not None and hit[0] == mtime:
         return hit[1]
     parsed = json.loads(raw)
     _PARSE_MEMO[key] = (mtime, parsed)
@@ -216,7 +220,7 @@ def _resolve_coin_id(ticker: str) -> tuple[str, str] | None:
 def _end_of_day_ts(curr_date: str) -> int:
     """Epoch seconds at END of the as-of UTC day (inclusive row filter)."""
     d = date.fromisoformat(str(curr_date)[:10])
-    return int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    return int(datetime(d.year, d.month, d.day, tzinfo=UTC)
                .timestamp()) + 86_400 - 1
 
 
@@ -304,7 +308,7 @@ def _market_chart_series(coin_id: str) -> dict[str, list[tuple[str, float]]]:
                 ts //= 1000
             per_day[ts // 86_400] = val
         return [
-            (datetime.fromtimestamp(day * 86_400, tz=timezone.utc).strftime("%Y-%m-%d"), v)
+            (datetime.fromtimestamp(day * 86_400, tz=UTC).strftime("%Y-%m-%d"), v)
             for day, v in sorted(per_day.items())
         ]
 

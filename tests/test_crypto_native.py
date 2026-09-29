@@ -19,7 +19,7 @@ Pins the a_share_native-style contract on the crypto side:
 """
 
 import unittest
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -31,9 +31,7 @@ from yialpha.agents.analysts.fundamentals_analyst import (
     create_fundamentals_analyst,
 )
 from yialpha.agents.utils import crypto_native_tools as cnt
-from yialpha.dataflows import config as cfgmod
-from yialpha.dataflows import coingecko_vendor as cg
-from yialpha.dataflows import defillama_vendor as dl
+from yialpha.dataflows import coingecko_vendor as cg, config as cfgmod, defillama_vendor as dl
 from yialpha.dataflows.errors import NoMarketDataError, VendorRateLimitError
 from yialpha.dataflows.interface import OPTIONAL_CATEGORIES, route_to_vendor
 from yialpha.graph.trading_graph import YiAlphaGraph
@@ -295,7 +293,7 @@ class CoinGeckoVendorTests(unittest.TestCase):
 
     @staticmethod
     def _ms(d: date, hours: int = 0) -> int:
-        return int(datetime(d.year, d.month, d.day, hours, tzinfo=timezone.utc)
+        return int(datetime(d.year, d.month, d.day, hours, tzinfo=UTC)
                    .timestamp() * 1000)
 
     def test_historical_pit_filters_and_daily_resamples(self):
@@ -418,13 +416,13 @@ class CoinGeckoVendorTests(unittest.TestCase):
         fake = MagicMock()
         fake.status_code = 429
         fake.text = "rate limited"
-        import requests as _requests  # noqa: F401 — ensure module import path
-
         from unittest.mock import patch
 
-        with patch("requests.get", return_value=fake):
-            with self.assertRaises(VendorRateLimitError):
-                cg._http_get_json("https://api.coingecko.com/api/v3/x")
+        import requests as _requests  # noqa: F401 — ensure module import path
+
+        with patch("requests.get", return_value=fake), \
+                self.assertRaises(VendorRateLimitError):
+            cg._http_get_json("https://api.coingecko.com/api/v3/x")
 
 
 # --------------------------------------------------------------------------- #
@@ -465,7 +463,7 @@ class DefiLlamaVendorTests(unittest.TestCase):
 
     @staticmethod
     def _ts(d: date) -> int:
-        return int(datetime(d.year, d.month, d.day, 12, tzinfo=timezone.utc)
+        return int(datetime(d.year, d.month, d.day, 12, tzinfo=UTC)
                    .timestamp())
 
     def test_network_fundamentals_protocol_chain_and_pit(self):
