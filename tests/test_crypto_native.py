@@ -587,6 +587,63 @@ class DefiLlamaVendorTests(unittest.TestCase):
         self.assertIn("Chain TVL — Bitcoin", out)
 
 
+@pytest.mark.unit
+def test_defillama_slugless_catalog_entry_normalizes_id_to_str(monkeypatch):
+    """Round-11: a /protocols catalog entry without a ``slug`` falls back to
+    its NUMERIC ``id``. The projection now normalizes to str at the source;
+    the int used to flow into ``_chain_cache_key``, whose ``chain.lower()``
+    raised AttributeError and degraded the whole protocol leg for a catalog
+    entry that was perfectly resolvable."""
+    from datetime import UTC as _UTC, datetime as _dt
+
+    from yialpha.dataflows.disk_cache import MinIntervalThrottle
+
+    def _ts(d: date) -> int:
+        return int(_dt(d.year, d.month, d.day, 12, tzinfo=_UTC).timestamp())
+
+    monkeypatch.setattr(dl, "_throttler", MinIntervalThrottle(0.0))
+    # Pass-through cache: the REAL projection builder must run so the pin
+    # exercises its str() normalization (the shared on-disk projection
+    # cache would otherwise serve whatever catalog another test wrote).
+    monkeypatch.setattr(
+        dl, "_cached_json",
+        lambda filename, fetch, ttl_days=None: fetch(),
+    )
+
+    def fake(url):
+        if url.endswith("/protocols"):
+            return [
+                {"id": 987654, "name": "Odd Protocol", "symbol": "ODD",
+                 "tvl": 5.0e8, "chains": ["Ethereum"], "gecko_id": None,
+                 "category": "Other"},  # no slug — id fallback path
+            ]
+        if "/protocol/987654" in url:
+            return {"tvl": [
+                {"date": _ts(date(2026, 9, 1)), "totalLiquidityUSD": 5.0e8},
+                {"date": _ts(date(2026, 9, 2)), "totalLiquidityUSD": 5.1e8},
+            ]}
+        if url.endswith("/v2/chains"):
+            return [{"name": "Ethereum", "tvl": 5.2e10}]
+        if "/historicalChainTvl/" in url:
+            return [{"date": _ts(date(2026, 9, 1)), "tvl": 5.2e10}]
+        raise AssertionError(url)
+
+    monkeypatch.setattr(dl, "_http_get_json", fake)
+    resolved = dl._resolve_protocol("ODD")
+    assert resolved is not None
+    assert isinstance(resolved["slug"], str)  # the round-11 normalization
+    assert resolved["slug"] == "987654"
+    assert dl._chain_cache_key(resolved["slug"]) == "987654"
+
+    # End-to-end: the protocol leg renders (no AttributeError at the cache
+    # key seam) and discloses the id-derived slug.
+    out = dl.get_crypto_network_fundamentals(
+        "ODDUSDT", curr_date="2026-09-02", look_back_days=30,
+    )
+    assert "slug '987654'" in out
+    assert "Protocol TVL — Odd Protocol" in out
+
+
 # --------------------------------------------------------------------------- #
 # Router boundary + analyst selection + tool-layer PIT clamp
 # --------------------------------------------------------------------------- #

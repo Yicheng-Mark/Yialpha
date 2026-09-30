@@ -42,6 +42,26 @@ def is_valid_ticker_input(value: str) -> bool:
     )
 
 
+def is_canonical_ymd(value: str) -> bool:
+    """Whether ``value`` is a zero-padded canonical ``YYYY-MM-DD`` date.
+
+    Bare ``strptime`` accepts non-canonical forms (``"2026-9-1"``); the
+    strftime round-trip rejects them. Shared by the entry points that hand a
+    date to a ``run_robust``/``run_batch`` subprocess (``run_robust --date``
+    and the web ``/api/analyze`` endpoint): the child's own guard exits 2 on
+    a non-canonical value, so the parents must reject exactly the same set —
+    a task accepted upstream would flip to an error seconds later inside the
+    subprocess (round-11: the two parents each kept a private copy of this
+    check that could drift).
+    """
+    from datetime import datetime
+
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d") == value
+    except (ValueError, TypeError):
+        return False
+
+
 def get_ticker() -> str:
     """Prompt the user to enter a ticker symbol, preserving exchange suffixes.
 
@@ -161,6 +181,33 @@ def filter_analysts_for_asset_type(
         if get_config().get("positioning_split"):
             filtered.append(AnalystType.POSITIONING)
     return filtered
+
+
+def resolve_run_analysts(
+    selected: list[AnalystType], asset_type: AssetType, ticker: str = ""
+) -> list[str]:
+    """Analyst keys for graph construction: user selection + asset filter.
+
+    Normalizes the user's checkbox selection to ANALYST_ORDER (the fixed
+    ordering semantics run_analysis has always applied), then RE-APPLIES
+    filter_analysts_for_asset_type. The checkbox's option set is the fixed
+    four-key ANALYST_ORDER by design (POSITIONING is never user-selectable),
+    so the filter's flag-appended POSITIONING cannot reach the user-selection
+    funnel — callers must re-apply the single-source filter right before the
+    graph is built, or the appended analyst is silently dropped and
+    positioning_split runs dead end to end. The filter is idempotent on a
+    user selection: it only drops the inapplicable FUNDAMENTALS and only
+    appends POSITIONING — it never re-adds an analyst the user left
+    unchecked. The appended analyst lands at the tail;
+    build_analyst_execution_plan pins the real run order (positioning
+    directly after market).
+    """
+    selected_set = {analyst.value for analyst in selected}
+    normalized = [value for _, value in ANALYST_ORDER if value.value in selected_set]
+    return [
+        analyst.value
+        for analyst in filter_analysts_for_asset_type(normalized, asset_type, ticker)
+    ]
 
 
 def select_analysts(

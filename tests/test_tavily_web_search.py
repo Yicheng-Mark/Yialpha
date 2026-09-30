@@ -307,6 +307,50 @@ def test_malformed_split_env_falls_back(monkeypatch):
         assert "budget exhausted" in tavily.get_web_search("n8")
 
 
+def test_budget_gate_atomic_under_concurrent_same_scope(monkeypatch):
+    """Round-11: check-and-charge share one _state_lock critical section. The
+    old read-outside / charge-inside split let N concurrent same-scope calls
+    all read 7/8 and all pass, overselling the cap — ToolNode runs a batch's
+    tools in parallel worker threads sharing one run context (counters dict
+    included), so the race was reachable in production. Real threads + a
+    barrier; each thread runs under its own copy of the run context, exactly
+    the propagation contract the ToolNode tests pin."""
+    import threading
+    from contextvars import copy_context
+
+    _fresh(monkeypatch, split="news:8")  # news cap 8; total default 15
+    n = 12
+    barrier = threading.Barrier(n)
+    passed = [False] * n
+
+    def _post(url, json=None, headers=None, timeout=None):  # noqa: A002
+        return _FakeResponse({"results": []})
+
+    def run_in(ctx, i):
+        def call():
+            try:
+                barrier.wait(timeout=10)
+            except threading.BrokenBarrierError:  # pragma: no cover
+                return
+            out = tavily.get_web_search(f"q{i}", scope="news")
+            passed[i] = "budget exhausted" not in out
+        ctx.run(call)
+
+    # Copies taken AFTER reset_run_budget share the run's counters dict.
+    contexts = [copy_context() for _ in range(n)]
+    threads = [
+        threading.Thread(target=run_in, args=(ctx, i))
+        for i, ctx in enumerate(contexts)
+    ]
+    with requests_mock_post(_post):
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    assert sum(passed) == 8                       # exactly the cap served
+    assert sum(tavily.run_usage().values()) == 8  # charged == served: no oversell
+
+
 def test_parse_budget_split():
     assert tavily.parse_budget_split("news:3,market:2,fundamentals:1") == {
         "news": 3, "market": 2, "fundamentals": 1,

@@ -90,6 +90,53 @@ def test_analyze_rejects_future_date_before_spawn(client, monkeypatch):
 
 
 @pytest.mark.unit
+def test_analyze_rejects_non_padded_date_before_spawn(client, monkeypatch):
+    """Round-11: bare strptime accepts "2026-9-1" but run_robust's own --date
+    guard exits 2 on it — a task accepted here would flip to error seconds
+    later in the subprocess. The endpoint must reject what the child rejects
+    (strftime round-trip, zero-padded ISO only)."""
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("non-padded date reached process spawn")
+
+    monkeypatch.setattr(runner, "spawn", fail_if_called)
+    response = client.post(
+        "/api/analyze",
+        json={"ticker": "AAPL", "date": "2026-9-1", "asset_type": "stock"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "bad date: '2026-9-1'"
+
+
+@pytest.mark.unit
+def test_analyze_accepts_zero_padded_past_date(client, monkeypatch):
+    """The round-trip must not over-reject: a zero-padded ISO date the child
+    accepts still reaches spawn unchanged."""
+    observed = {}
+
+    async def fake_spawn(ticker, analysis_date, asset_type, language):
+        observed["date"] = analysis_date
+        task_id = "padded-task"
+        runner.registry.tasks[task_id] = runner.TaskState(
+            task_id=task_id,
+            ticker=ticker,
+            date=analysis_date,
+            asset_type=asset_type,
+            started_at=time.time(),
+            language=language,
+        )
+        return task_id
+
+    monkeypatch.setattr(runner, "spawn", fake_spawn)
+    response = client.post(
+        "/api/analyze",
+        json={"ticker": "AAPL", "date": "2026-09-01", "asset_type": "stock"},
+    )
+    assert response.status_code == 200
+    assert response.json()["task_id"] == "padded-task"
+    assert observed["date"] == "2026-09-01"
+
+
+@pytest.mark.unit
 def test_reports_root_created_on_startup_not_import(monkeypatch, tmp_path):
     """The reports-root mkdir runs at app startup (lifespan), never at import.
 

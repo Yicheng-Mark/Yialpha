@@ -19,6 +19,8 @@ All hermetic: providers injected, no network, no LLM.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pandas as pd
 import pytest
 
@@ -158,6 +160,73 @@ def test_funding_gap_override_runs():
         funding_provider=_funding(0.001), **_PERP_KW,
     )
     assert res.metrics.total_return > full.metrics.total_return
+
+
+def _funding_dropping(rate: float, drop_dates: set[str]):
+    """Full bday funding coverage minus explicit calendar dates."""
+
+    def provider(ticker, start, end):
+        idx = pd.bdate_range(start, end)
+        keep = [d for d in idx.strftime("%Y-%m-%d") if d not in drop_dates]
+        return pd.Series([rate] * len(keep), index=keep, dtype=float)
+
+    return provider
+
+
+@pytest.mark.unit
+def test_funding_gap_after_mark_end_is_not_a_coverage_gap():
+    """Round-11: funding missing only AFTER the marking boundary — inside the
+    fetch buffer the charge loop never touches (mark_end = 2024-01-16, fetch
+    end_date = 2024-01-18) — must not reject the run; the same-size gap
+    INSIDE the charge domain still fails closed."""
+    buffer_only = run_backtest(
+        FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],
+        asset_type="crypto_perp",
+        funding_provider=_funding_dropping(
+            0.001, {"2024-01-16", "2024-01-17", "2024-01-18"}),
+        **_PERP_KW,
+    )
+    assert buffer_only.metrics.funding_paid_total > 0.0  # ran and charged
+
+    with pytest.raises(ValueError, match="missing .* priced day"):
+        run_backtest(
+            FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],
+            asset_type="crypto_perp",
+            funding_provider=_funding_dropping(0.001, {"2024-01-10"}),
+            **_PERP_KW,
+        )
+
+
+@pytest.mark.unit
+def test_funding_drag_denominator_is_the_marking_domain():
+    """Round-11: annualized drag = paid / capital / bars-in-[first decision,
+    mark_end) × periods_per_year — the charge loop's exact domain, not the
+    wider fetch window whose buffer bars systematically understated it."""
+    served: dict[str, list[str]] = {}
+
+    def recording_prices(ticker, start, end):
+        idx = pd.bdate_range(start, end)
+        served["index"] = list(idx.strftime("%Y-%m-%d"))
+        values = [100.0 * (1 + 0.001 * i) for i in range(len(idx))]
+        return pd.Series(values, index=idx.strftime("%Y-%m-%d"), dtype=float)
+
+    res = run_backtest(
+        FakeGraph({"2024-01-01": "Buy"}), "BTCUSDT", ["2024-01-01"],
+        asset_type="crypto_perp", funding_provider=_funding(0.001),
+        price_provider=recording_prices,
+        initial_capital=100_000.0, holding_days=5, compute_index_alpha=False,
+        periods_per_year=365,
+    )
+    # The engine's documented marking rule: last decision + h + 10 days.
+    mark_end = (
+        datetime.strptime("2024-01-01", "%Y-%m-%d") + timedelta(days=5 + 10)
+    ).strftime("%Y-%m-%d")
+    domain = [d for d in served["index"] if "2024-01-01" <= d < mark_end]
+    # The premise of the pin: the fetch window DOES carry buffer bars past
+    # mark_end that the old denominator wrongly counted.
+    assert len(domain) < len(served["index"])
+    expected = res.metrics.funding_paid_total / 100_000.0 / len(domain) * 365
+    assert res.metrics.funding_drag_annualized == pytest.approx(expected, rel=1e-4)
 
 
 # --------------------------------------------------------------------------- #

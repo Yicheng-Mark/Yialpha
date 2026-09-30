@@ -9,7 +9,7 @@ run produces the same on-disk report tree a CLI run does.
 from datetime import datetime
 from pathlib import Path
 
-from yialpha.dataflows.utils import replace_retry_on_windows
+from yialpha.dataflows.utils import atomic_write_text
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -22,14 +22,16 @@ def _atomic_write_text(path: Path, text: str) -> None:
     (trade_ticket, ``errors="ignore"``) parse as missing levels or
     garbage-derived numbers instead of failing loudly. Same pattern the
     states log and the memory log already use.
+
+    Round-10: the report tree is read live by the web store / trade_ticket
+    with no lock; on Windows a reader mid-read made the replace raise
+    PermissionError and kill the child AFTER the full LLM spend —
+    run_robust would re-bill the whole attempt. Retry the race window.
+    Round-11: delegated to the canonical ``atomic_write_text`` (fixed-name
+    ``<name>.tmp`` sibling; the old dot-prefixed ``.{name}.tmp`` spelling is
+    unified away — the published bytes are unchanged).
     """
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    # Round-10: the report tree is read live by the web store / trade_ticket
-    # with no lock; on Windows a reader mid-read made the replace raise
-    # PermissionError and kill the child AFTER the full LLM spend —
-    # run_robust would re-bill the whole attempt. Retry the race window.
-    replace_retry_on_windows(tmp, path)
+    atomic_write_text(path, text)
 
 
 def _render_data_quality(quality: dict) -> str:

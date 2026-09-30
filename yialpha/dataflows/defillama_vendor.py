@@ -163,7 +163,14 @@ def _protocols_projection() -> list[dict[str, Any]]:
         "protocols_projection.json",
         lambda: [
             {
-                "slug": p.get("slug") or p.get("id"),
+                # Round-11: catalog entries without a slug fall back to the
+                # NUMERIC ``id`` — normalize to str HERE, at the type leak's
+                # source, so every consumer (cache key, /protocol/<slug>
+                # URL, the rendered slug disclosure) holds the documented
+                # string contract. The int used to reach
+                # ``_chain_cache_key``, whose ``chain.lower()`` raised
+                # AttributeError and degraded the whole protocol leg.
+                "slug": str(p.get("slug") or p.get("id")),
                 "name": p.get("name"),
                 "symbol": str(p.get("symbol") or "").upper(),
                 "tvl": p.get("tvl") or 0.0,

@@ -70,32 +70,44 @@ def resample_weekly(daily: pd.DataFrame, curr_date: str | None = None) -> pd.Dat
             # a live run dated the bin's own Friday, the label == cutoff so
             # the comparison above keeps it, yet the day's bar is still
             # intraday (load_ohlcv deliberately includes the current day).
-            # A bin is complete only when a daily row exists BEYOND its
-            # label (a Saturday row lands in the NEXT bin); historical
-            # replays skip the check — their bars are closed by PIT.
+            # Historical replays skip the check — their bars are closed by
+            # PIT.
             from .utils import is_historical_date
 
             cutoff_str = str(curr_date)[:10]
             if not is_historical_date(cutoff_str) and len(weekly) > 0 and len(df) > 0:
-                # A bin is still forming when its label day's bar does not
-                # yet exist as a PAST day: either the label lies beyond the
-                # last daily row (mid-week), or the last daily row is dated
-                # today (that day's bar can still extend). Equities never
-                # print a Saturday row, so the old ``label >= last_daily``
-                # heuristic deleted every completed Friday bin on weekend /
-                # Monday-premarket live runs; a crypto run whose Saturday
-                # row had not landed in the cache yet hit the same false
-                # positive.
+                # Round-11: TWO independent drop clauses, either firing alone.
+                #
+                # (a) Calendar clause — ``last_label.normalize() >=
+                #     today_utc``: the bin's own interval extends to today (a
+                #     W-FRI label L covers (L-6, L]), so a live run dated the
+                #     bin's own Friday is still inside the bin and the
+                #     trailing bin may still gain rows. This REPLACES the
+                #     round-8 ``last_day >= today`` criterion, which asked
+                #     "has TODAY's bar arrived?" — a question about the NEXT
+                #     bin, which the cutoff filter above had already dropped:
+                #     on any Tue–Thu live run the crypto feed (and intraday
+                #     equities) carries a today-dated row, so the round-8
+                #     guard deleted the last COMPLETED Friday bin and weekly
+                #     pivots read the week BEFORE last (the round-5 symptom).
+                # (b) Cache-truncation clause — ``last_label > last_daily``:
+                #     the cache lacks the label day's own bar (round-5
+                #     doctrine: the label-day bar must be in the cache for
+                #     the bin to count as complete). A Saturday-early live
+                #     run whose feed still ends Thursday serves a Mon–Thu bin
+                #     wearing Friday's label — Thursday's close quoted as a
+                #     weekly close. Kept when ``last_label == last_daily``
+                #     (label day IS the cache tail): a pre-open Monday
+                #     equities run has no weekend rows, so Friday's bar is
+                #     legitimately the tail and the completed bin survives.
                 last_label = weekly.index[-1]
+                if last_label.tzinfo is not None:
+                    last_label = last_label.tz_convert("UTC").tz_localize(None)
                 last_daily = df["Date"].max()
-                last_day = last_daily
-                if last_day.tzinfo is not None:
-                    last_day = last_day.tz_convert("UTC").tz_localize(None)
+                if getattr(last_daily, "tzinfo", None) is not None:
+                    last_daily = last_daily.tz_convert("UTC").tz_localize(None)
                 today_utc = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
-                if (
-                    last_label > last_daily
-                    or last_day.normalize() >= today_utc
-                ):
+                if last_label.normalize() >= today_utc or last_label > last_daily:
                     weekly = weekly.iloc[:-1]
         else:
             # Fail-visible: an unparseable curr_date must not silently keep

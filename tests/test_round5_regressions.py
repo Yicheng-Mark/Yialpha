@@ -804,13 +804,14 @@ def _live_week_days() -> tuple[date, date, date]:
 
 @pytest.mark.unit
 def test_resample_weekly_drops_forming_trailing_week_on_live_date():
-    """Round-8 contract: the trailing bin is forming (and dropped) only when
-    its label day's daily bar is dated TODAY (that bar can still extend) or
-    the label lies beyond the last daily row (mid-week). A Friday bin whose
-    bar is a PAST day is complete — equities never print a Saturday row, so
-    the round-5 "complete only when a row exists BEYOND the label" doctrine
-    silently deleted every completed Friday bin on weekend / Monday-
-    premarket equity live runs."""
+    """Round-11 contract: the trailing bin is forming (and dropped) only
+    when its own interval extends to TODAY — i.e. its Friday label IS
+    today (that day's bar can still extend). Any earlier label means every
+    day of the bin is past and the bin is complete, whether or not the
+    feed has printed today's (next bin's) bar yet. (Round-8's
+    "label day's bar dated today" phrasing asked about the NEXT bin's bar:
+    on Tue-Thu live runs it deleted the completed Friday bin — the
+    "Wednesday analysis returned week-before-last" symptom.)"""
     prev_friday, last_friday, today = _live_week_days()
     days = [prev_friday] + [
         last_friday - timedelta(days=k) for k in (4, 3, 2, 1, 0)
@@ -832,7 +833,15 @@ def test_resample_weekly_keeps_week_when_row_beyond_label_exists():
     """A past Saturday daily row beyond the Friday label proves the bin
     closed -> the week is KEPT (exactly what load_ohlcv serves on a crypto
     venue after the UTC day rolls). The synthetic Saturday row must already
-    be a past day for the scenario to describe a real feed."""
+    be a past day for the scenario to describe a real feed.
+
+    Round-11 note: this test RUNS on a real Saturday (saturday == today
+    clears the skip) and used to FAIL there — the round-8 forming-guard
+    (``last_day >= today``) deleted exactly this completed bin. The
+    round-11 bin-interval criterion keeps it; the skip below fires only on
+    Fridays, where the synthetic beyond-label row would be future-dated
+    (an ill-formed feed, not a real scenario). TestWeeklyPit's sibling in
+    test_weekly_timeframe pins the same verdict with a frozen clock."""
     prev_friday, last_friday, today = _live_week_days()
     saturday = last_friday + timedelta(days=1)
     if saturday > today:

@@ -621,6 +621,9 @@
 
     const analysts = [
       [t("sub_market"), s.market_report],
+      // Positioning Analyst only exists for crypto_perp runs with
+      // positioning_split on; the filter hides it for every other run.
+      [t("sub_positioning"), s.positioning_report],
       [t("sub_sentiment"), s.sentiment_report],
       [t("sub_news"), s.news_report],
       [t("sub_fundamentals"), s.fundamentals_report],

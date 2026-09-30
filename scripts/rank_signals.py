@@ -19,20 +19,24 @@ rank_signals.py — YiAlpha 多标的信心排名。
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import re
 import sys
 from pathlib import Path
 
-# Windows 控制台是 GBK(cp936)，打印中文/符号会 UnicodeEncodeError —— 强制 UTF-8
-# （stderr 同样：✗/中文错误信息也走错误流，单改 stdout 不够）
-with contextlib.suppress(Exception):
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
-    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+# Allow running as `python scripts/rank_signals.py` without an editable install, and
+# make scripts/_bootstrap importable under importlib-based test loading too
+# (spec_from_file_location does not put scripts/ on sys.path).
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+import _bootstrap  # noqa: E402
+
+_bootstrap.bootstrap()  # project-root sys.path + UTF-8 console (Windows GBK)
+# （stderr 同样：✗/中文错误信息也走错误流，单改 stdout 不够——bootstrap 两个流都改）
 
 # 复用 trade_ticket.py 的全部解析（scripts/ 不是包，sys.path 注入）
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from trade_ticket import (  # noqa: E402
     _results_dir,
     decide_direction,

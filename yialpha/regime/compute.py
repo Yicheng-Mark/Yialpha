@@ -328,7 +328,7 @@ def compute_regime_state(
 ) -> RegimeState | None:
     """Assemble the run's :class:`RegimeState`, or ``None`` when uncomputable.
 
-    Per-class field groups (frozen with REGIME_VERSION v4):
+    Per-class field groups (frozen with REGIME_VERSION v5):
     ``pure_crypto_perp`` → COMMON + PURE-CRYPTO; ``stock_perp`` → COMMON +
     STOCK-PERP; ``unknown_perp`` (or an unset class on a perp run) → COMMON
     only, conservative. Non-perp asset types return ``None`` — the regime

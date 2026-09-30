@@ -299,3 +299,90 @@ def test_api_accuracy_unavailable_is_honest(client, monkeypatch, tmp_path):
     body = client.get("/api/accuracy").json()
     assert body["available"] is False
     assert body["hint"] == "yialpha verify-history"
+
+
+# --------------------------------------------------------------------------- #
+# Round-11: non-finite forward closes are unscorable, never a NaN / 500
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_nonfinite_endpoint_is_unscorable_not_missed(monkeypatch):
+    """A NaN forward close must be excluded as unscorable — not scored as a
+    miss (``NaN > 0`` compares False) and not conflated with pending."""
+    nan_rec = DecisionRecord(
+        "NANX", "2026-01-05", "Buy", "stock", None, "legacy", "inferred", "p")
+    ok_rec = DecisionRecord(
+        "A", "2026-01-05", "Buy", "stock", None, "legacy", "inferred", "p")
+    series = {
+        # Horizon elapsed but the endpoint bar is a NaN vendor hole.
+        "NANX": _series([100, 105, 106, 107, 108, float("nan")]),
+        "A": _series([100, 110, 120, 130, 140, 150]),  # +50% → hit
+    }
+    monkeypatch.setattr(
+        accuracy, "_dated_close",
+        lambda ticker, asset_type, start, end: series[ticker],
+    )
+
+    out = accuracy.forward_outcome(nan_rec, holding_days=5)
+    assert out is not None and out["raw_return"] is None
+    assert out.get("unscorable")  # reason shipped for the report
+
+    report = accuracy.build_accuracy_report([nan_rec, ok_rec], holding_days=5)
+    assert report["direction"] == {"n": 1, "hits": 1, "hit_rate": 1.0}
+    assert report["excluded_unscorable"] == 1
+    assert report["pending"] == 0  # unscorable is not pending
+    assert report["scored"] == 1
+    # No bucket at all for the unscorable ticker — it never entered any
+    # aggregate (n / directional_n / mean_return).
+    assert "NANX" not in report["by_ticker"]
+    assert "NANX" not in report["by_rating"]
+    row = report["records"][0]
+    assert row["outcome"] == "unscorable"
+    assert row["forward_return"] is None
+    assert "unscorable 1" in accuracy.render_markdown(report)
+
+
+@pytest.mark.unit
+def test_verify_history_artifact_never_contains_nan_literal(history, monkeypatch):
+    """End-to-end write side: every decision's endpoint NaN → the artifact
+    still serializes under strict JSON (no bare NaN/Infinity literals)."""
+    monkeypatch.setattr(
+        accuracy, "_dated_close",
+        lambda ticker, asset_type, start, end: _series(
+            [100, 102, 104, 106, 108, float("nan")]
+        ),
+    )
+    report, json_path, _md_path = accuracy.verify_history(history, holding_days=5)
+
+    assert report["excluded_unscorable"] == 4  # all four fixture records
+    text = json_path.read_text(encoding="utf-8")
+    assert "NaN" not in text and "Infinity" not in text
+    # Strict re-serialization — the web response renderer's contract — passes.
+    assert json.dumps(json.loads(text), allow_nan=False)
+
+
+@pytest.mark.unit
+def test_store_serves_legacy_nan_artifact_without_500(client, monkeypatch, tmp_path):
+    """Read-side belt-and-suspenders: a pre-fix artifact carrying bare
+    NaN/Infinity literals (json.loads accepts them) serves as 200 with the
+    non-finite floats nulled — never a renderer 500."""
+    acc_dir = tmp_path / "accuracy"
+    acc_dir.mkdir()
+    (acc_dir / "accuracy_report.json").write_text(
+        '{"scored": 1, "pending": 0, "hold_mean_return": NaN, '
+        '"records": [{"forward_return": NaN, "nested": {"alpha": Infinity}}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(store, "LOGS_ROOT", tmp_path)
+
+    payload = store.load_accuracy_report()
+    assert payload["available"] is True
+    assert payload["hold_mean_return"] is None
+    assert payload["records"][0]["forward_return"] is None
+    assert payload["records"][0]["nested"]["alpha"] is None
+    json.dumps(payload, allow_nan=False)
+
+    resp = client.get("/api/accuracy")
+    assert resp.status_code == 200
+    assert resp.json()["available"] is True

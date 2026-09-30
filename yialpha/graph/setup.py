@@ -83,19 +83,23 @@ class GraphSetup:
         """Wrap a node handler with perf timing when a tracker is configured,
         otherwise pass it through untouched (byte-identical to no telemetry).
 
-        ``ToolNode`` is deliberately NOT wrapped: it is a Runnable that
-        LangGraph invokes via ``.invoke()``, not a plain callable, so wrapping
-        it in a function (which then calls ``tool_node(state)``) raises
-        ``'ToolNode' object is not callable``. Tool-call wall time is small and
-        folds into the surrounding analyst node's flow; the dominant LLM cost
-        is captured by the (wrapped) agent nodes. Every other node handler is a
-        plain ``def fn(state)`` closure and wraps safely."""
+        ``ToolNode`` gets the Runnable-aware wrapper: LangGraph invokes
+        Runnables via ``.invoke()``, never as a plain function, so the generic
+        ``handler(*args)`` closure would raise ``'ToolNode' object is not
+        callable`` (the 2026-07-05 --profile smoke failure that originally
+        excluded ToolNode from telemetry). Wrapping the serial tool nodes
+        closes the A/B speedup gate's systematic undercount of the serial leg
+        — tool HTTP wall time previously counted as zero, biasing the 2.5x
+        criterion toward a false FAIL. Every other node handler is a plain
+        ``def fn(state)`` closure and wraps via the generic wrapper. Parallel
+        mode is untouched: the fanout subgraphs add their tool nodes raw, so
+        their walls fold into the (wrapped) parent "Analyst Fanout" node."""
         if self.perf_tracker is None:
             return handler
-        if isinstance(handler, ToolNode):
-            return handler
-        from .perf_telemetry import wrap_node
+        from .perf_telemetry import wrap_node, wrap_runnable_node
 
+        if isinstance(handler, ToolNode):
+            return wrap_runnable_node(handler, name, self.perf_tracker)
         return wrap_node(handler, name, self.perf_tracker)
 
     def setup_graph(

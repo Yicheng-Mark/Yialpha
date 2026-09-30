@@ -33,7 +33,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import queue
 import sys
 import tempfile
@@ -41,19 +40,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# Allow running as `python scripts/run_baseline.py` without an editable install:
-# ensure the project root (parent of this scripts/ dir) is on sys.path.
-_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+# Allow running as `python scripts/run_baseline.py` without an editable install, and
+# make scripts/_bootstrap importable under importlib-based test loading too
+# (spec_from_file_location does not put scripts/ on sys.path).
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-# Windows 控制台默认 GBK(cp936)，打印 ✅/❌ 等 Unicode 会触发 UnicodeEncodeError；
-# 强制标准输出/错误流用 utf-8（Python 3.7+），让所有模式的中文与符号都能正常显示。
-for _stream in (sys.stdout, sys.stderr):
-    _reconfigure = getattr(_stream, "reconfigure", None)
-    if callable(_reconfigure):
-        with contextlib.suppress(ValueError):
-            _reconfigure(encoding="utf-8", errors="replace")
+import _bootstrap  # noqa: E402
+
+_bootstrap.bootstrap()  # project-root sys.path + UTF-8 console (Windows GBK)
 
 from yialpha.logging_config import setup_logging  # noqa: E402
 
@@ -103,6 +99,8 @@ def _build_graph(
     debug: bool = False,
     risk_enabled: bool | None = None,
     node_perf_telemetry: bool = False,
+    asset_type: str = "stock",
+    tickers: tuple | list = (),
 ) -> YiAlphaGraph:
     config = DEFAULT_CONFIG.copy()
     # Validation runs must not depend on persistent lessons written by an
@@ -119,10 +117,26 @@ def _build_graph(
     # breakdown without changing any agent's input/depth.
     if node_perf_telemetry:
         config["node_perf_telemetry"] = True
-    return YiAlphaGraph(debug=debug, config=config)
+    # Round-11 C1: route the analyst set through the single-source batch
+    # filter so the crypto fundamentals drop AND the positioning_split
+    # flag-on append reach the backtest graphs too (this builder used to
+    # hand the bare 4-analyst default, silently excluding the Positioning
+    # analyst from --full). Stock runs (and flag-off runs of any class)
+    # return the input unchanged — byte-equivalent graph.
+    selected_analysts: tuple = ("market", "social", "news", "fundamentals")
+    if tickers:
+        from yialpha.batch.runner import batch_selected_analysts
+
+        selected_analysts = batch_selected_analysts(asset_type, tickers)
+    return YiAlphaGraph(
+        selected_analysts=selected_analysts, debug=debug, config=config,
+    )
 
 
-def _map_tickers(tickers, task, workers: int = 1, risk_enabled: bool | None = None):
+def _map_tickers(
+    tickers, task, workers: int = 1, risk_enabled: bool | None = None,
+    asset_type: str = "stock",
+):
     """Run ``task(ticker, graph) -> result`` for each ticker; concurrent across tickers.
 
     Each ticker borrows ONE graph instance from a pool of K (one graph per worker).
@@ -138,7 +152,10 @@ def _map_tickers(tickers, task, workers: int = 1, risk_enabled: bool | None = No
     (baseline forces it off, full forces it on); ``None`` inherits the default.
     """
     if workers <= 1:
-        graph = _build_graph(debug=False, risk_enabled=risk_enabled)
+        graph = _build_graph(
+            debug=False, risk_enabled=risk_enabled,
+            asset_type=asset_type, tickers=tickers,
+        )
         # Isolate per-ticker failures: one bad ticker (yfinance 404, a single
         # propagate error, ...) must not abort the whole batch and discard the
         # other tickers' already-computed results. A failed ticker becomes a
@@ -155,7 +172,10 @@ def _map_tickers(tickers, task, workers: int = 1, risk_enabled: bool | None = No
 
     pool: queue.Queue = queue.Queue()
     for _ in range(workers):
-        pool.put(_build_graph(debug=False, risk_enabled=risk_enabled))
+        pool.put(_build_graph(
+            debug=False, risk_enabled=risk_enabled,
+            asset_type=asset_type, tickers=tickers,
+        ))
 
     results: dict = {}
 
@@ -249,7 +269,10 @@ def smoke(ticker: str, date: str, profile: bool = False, asset_type: str = "stoc
         f"{(' + --profile') if profile else ''} [{asset_type}] ==="
     )
     try:
-        ta = _build_graph(debug=False, node_perf_telemetry=profile)
+        ta = _build_graph(
+            debug=False, node_perf_telemetry=profile,
+            asset_type=asset_type, tickers=(ticker,),
+        )
         final_state, rating = ta.propagate(ticker, date, asset_type=asset_type)
         print(f"评级: {rating}")
         decision = (final_state or {}).get("final_trade_decision", "")
@@ -295,7 +318,10 @@ def baseline_backtest(tickers, start, end, step, n_dates, holding_days, cost_bps
 
     # Pure baseline: force the quantitative overlay OFF at the graph layer so
     # this mode stays the clean Phase-0 reference regardless of the default.
-    nested = _map_tickers(tickers, per_ticker, workers, risk_enabled=False)
+    nested = _map_tickers(
+        tickers, per_ticker, workers, risk_enabled=False,
+        asset_type=asset_type,
+    )
     # _map_tickers yields None for any ticker whose task raised; skip those so
     # one failure does not crash the report step.
     all_results = [r for sub in nested if sub for r in sub]
@@ -383,7 +409,10 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
     # reusing an older experiment's LLM outputs.
     with tempfile.TemporaryDirectory(prefix="yialpha_ab_decisions_") as cache_dir:
         decision_cache = DecisionCache(cache_dir, enabled=True)
-        gate_inputs = _map_tickers(tickers, per_ticker, workers, risk_enabled=False)
+        gate_inputs = _map_tickers(
+            tickers, per_ticker, workers, risk_enabled=False,
+            asset_type=asset_type,
+        )
 
     # 每只票独立判定闸门（串行，确定性顺序）。_map_tickers 对失败的 ticker
     # 返回 None 占位 —— 跳过它（无 base/improved 可判定），并计入整体失败。

@@ -41,7 +41,7 @@ from typing import Any
 
 from .disk_cache import MinIntervalThrottle, cached_or_fetch, vendor_cache_dir
 from .errors import NoMarketDataError, VendorRateLimitError
-from .utils import is_filing_public, proxy_map
+from .utils import current_pit_end, is_filing_public, proxy_map
 
 logger = logging.getLogger(__name__)
 
@@ -386,6 +386,11 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
     backtests), this is built from as-reported XBRL facts whose ``filed`` date
     is ``<= curr_date`` — genuinely point-in-time.
     """
+    # PIT clamp (round-11, mirrors y_finance's statement entries): a direct
+    # caller passing a date beyond the run's pinned analysis date (e.g. an
+    # LLM echoing a cached header's "today") must not widen the PIT window —
+    # ``_period_public`` trusts curr_date verbatim. No-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
     cik = _cik_for_ticker(ticker)
     facts = _fetch_company_facts(cik)
     entity = facts.get("entityName", ticker)
@@ -429,18 +434,26 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
 
 
 def get_balance_sheet(ticker: str, freq: str = "quarterly", curr_date: str | None = None) -> str:
+    # PIT clamp (round-11, mirrors y_finance's statement entries): a direct
+    # caller passing a date beyond the run's pinned analysis date must not
+    # widen the PIT window. No-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
     cik = _cik_for_ticker(ticker)
     facts = _fetch_company_facts(cik)
     return _render_statement("Balance Sheet", ticker, freq, _BALANCE_CONCEPTS, facts, curr_date)
 
 
 def get_cashflow(ticker: str, freq: str = "quarterly", curr_date: str | None = None) -> str:
+    # PIT clamp (round-11): see get_balance_sheet.
+    curr_date = current_pit_end(curr_date) or curr_date
     cik = _cik_for_ticker(ticker)
     facts = _fetch_company_facts(cik)
     return _render_statement("Cash Flow Statement", ticker, freq, _CASHFLOW_CONCEPTS, facts, curr_date)
 
 
 def get_income_statement(ticker: str, freq: str = "quarterly", curr_date: str | None = None) -> str:
+    # PIT clamp (round-11): see get_balance_sheet.
+    curr_date = current_pit_end(curr_date) or curr_date
     cik = _cik_for_ticker(ticker)
     facts = _fetch_company_facts(cik)
     return _render_statement("Income Statement", ticker, freq, _INCOME_CONCEPTS, facts, curr_date)

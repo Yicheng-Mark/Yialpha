@@ -20,7 +20,7 @@ import contextlib
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 # Windows console is GBK (cp936); printing ✅/❌ would raise UnicodeEncodeError.
@@ -52,7 +52,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from web import health, runner, store  # noqa: E402
-from yialpha.cli.utils import normalize_ticker_symbol  # noqa: E402
+from yialpha.cli.utils import is_canonical_ymd, normalize_ticker_symbol  # noqa: E402
 from yialpha.dataflows.utils import safe_ticker_component  # noqa: E402
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -344,11 +344,16 @@ async def api_analyze(req: AnalyzeReq):
         raise HTTPException(status_code=400, detail="ticker is required")
     # Validate the date inline (400, not _validate_date's 404) — this is a body
     # param submitted by the user, so a malformed value is a 400 bad-request,
-    # not a missing resource.
-    try:
-        analysis_date = datetime.strptime(req.date, "%Y-%m-%d").date()
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"bad date: {req.date!r}") from None
+    # not a missing resource. Round-trip pin (round-11): bare strptime accepts
+    # non-zero-padded forms ("2026-9-1") that run_robust's own --date guard
+    # rejects with exit 2 — a task accepted here would flip to error seconds
+    # later in the subprocess. Accept exactly what the child accepts via the
+    # SHARED canonical-ymd predicate (yialpha.cli.utils.is_canonical_ymd —
+    # strftime round-trip, zero-padded ISO; the same function run_robust's
+    # --date guard calls).
+    if not is_canonical_ymd(req.date):
+        raise HTTPException(status_code=400, detail=f"bad date: {req.date!r}")
+    analysis_date = date.fromisoformat(req.date)
     if analysis_date > datetime.now().date():
         raise HTTPException(status_code=400, detail="analysis date cannot be in the future")
     if req.asset_type not in ("auto", "stock", "crypto", "crypto_spot", "crypto_perp"):

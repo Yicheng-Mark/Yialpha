@@ -47,6 +47,7 @@ from yialpha.graph.analyst_execution import (  # noqa: E402
 from yialpha.graph.trading_graph import YiAlphaGraph  # noqa: E402
 from yialpha.reporting import write_report_tree  # noqa: E402
 
+from .models import AssetType  # noqa: E402
 from .stats_handler import StatsCallbackHandler  # noqa: E402
 from .utils import (  # noqa: E402
     ask_anthropic_effort,
@@ -62,6 +63,7 @@ from .utils import (  # noqa: E402
     get_ticker,
     prompt_openai_compatible_url,
     resolve_backend_url,
+    resolve_run_analysts,
     select_analysts,
     select_deep_thinking_agent,
     select_llm_provider,
@@ -96,6 +98,12 @@ class MessageBuffer:
         "social": "Sentiment Analyst",
         "news": "News Analyst",
         "fundamentals": "Fundamentals Analyst",
+        # V2.3 positioning split: the key appears in a run's analyst list
+        # only when resolve_run_analysts re-applied the asset filter for a
+        # flag-on crypto_perp run, so the status row shows exactly when the
+        # analyst actually runs; flag-off runs never carry the key and stay
+        # byte-identical.
+        "positioning": "Positioning Analyst",
     }
 
     # Report section mapping: section -> (analyst_key for filtering, finalizing_agent)
@@ -106,6 +114,11 @@ class MessageBuffer:
         "sentiment_report": ("social", "Sentiment Analyst"),
         "news_report": ("news", "News Analyst"),
         "fundamentals_report": ("fundamentals", "Fundamentals Analyst"),
+        # V2.3 positioning split: init_for_analysis filters sections by the
+        # run's selected keys, so the section is created only when the
+        # positioning analyst is actually in the run (flag-on crypto_perp);
+        # every other run never creates it.
+        "positioning_report": ("positioning", "Positioning Analyst"),
         "investment_plan": (None, "Research Manager"),
         "trader_investment_plan": (None, "Trader"),
         "final_trade_decision": (None, "Portfolio Manager"),
@@ -214,6 +227,12 @@ class MessageBuffer:
                 "sentiment_report": "Social Sentiment",
                 "news_report": "News Analysis",
                 "fundamentals_report": "Fundamentals Analysis",
+                # V2.3 positioning split: without this entry a flag-on run
+                # whose latest updated section is positioning_report would
+                # KeyError here (init_for_analysis creates the section from
+                # REPORT_SECTIONS, so the lookup set is wider than this
+                # literal was). Flag-off runs never produce the section.
+                "positioning_report": "Positioning Analysis",
                 "investment_plan": "Research Team Decision",
                 "trader_investment_plan": "Trading Team Plan",
                 "final_trade_decision": "Portfolio Management Decision",
@@ -229,12 +248,26 @@ class MessageBuffer:
         report_parts = []
 
         # Analyst Team Reports - use .get() to handle missing sections
-        analyst_sections = ["market_report", "sentiment_report", "news_report", "fundamentals_report"]
+        analyst_sections = [
+            "market_report",
+            "sentiment_report",
+            "news_report",
+            "fundamentals_report",
+            # V2.3 positioning split: present only in flag-on crypto_perp
+            # runs (.get() stays None otherwise — byte-identical report).
+            "positioning_report",
+        ]
         if any(self.report_sections.get(section) for section in analyst_sections):
             report_parts.append("## Analyst Team Reports")
             if self.report_sections.get("market_report"):
                 report_parts.append(
                     f"### Market Analysis\n{self.report_sections['market_report']}"
+                )
+            if self.report_sections.get("positioning_report"):
+                # Rendered right after the market block, matching the
+                # execution plan's pinned order (market -> positioning).
+                report_parts.append(
+                    f"### Positioning Analysis\n{self.report_sections['positioning_report']}"
                 )
             if self.report_sections.get("sentiment_report"):
                 report_parts.append(
@@ -321,8 +354,13 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
 
     # Group agents by team - filter to only include agents in agent_status
     all_teams = {
+        # V2.3 positioning split: listed right after Market to mirror the
+        # pinned execution order; the team filter keeps the row out unless
+        # the run's agent_status actually carries the analyst (flag-on
+        # crypto_perp only), so other runs render identically.
         "Analyst Team": [
             "Market Analyst",
+            "Positioning Analyst",
             "Sentiment Analyst",
             "News Analyst",
             "Fundamentals Analyst",
@@ -858,6 +896,11 @@ def display_complete_report(final_state):
     analysts = []
     if final_state.get("market_report"):
         analysts.append(("Market Analyst", final_state["market_report"]))
+    # V2.3 positioning split: rendered only when the flag actually ran the
+    # analyst (positioning_report present, right after the market block per
+    # the pinned execution order); other runs are byte-identical.
+    if final_state.get("positioning_report"):
+        analysts.append(("Positioning Analyst", final_state["positioning_report"]))
     if final_state.get("sentiment_report"):
         analysts.append(("Sentiment Analyst", final_state["sentiment_report"]))
     if final_state.get("news_report"):
@@ -935,16 +978,21 @@ def update_research_team_status(status):
         message_buffer.update_agent_status(agent, status)
 
 
-# Ordered list of analysts for status transitions
-ANALYST_ORDER = ["market", "social", "news", "fundamentals"]
+# Ordered list of analysts for status transitions. "positioning" (V2.3 split,
+# flag-appended for crypto_perp runs — never user-selected) sits directly
+# after "market", matching the execution plan's pinned order; the loop below
+# skips keys absent from the run's selection, so flag-off runs are unchanged.
+ANALYST_ORDER = ["market", "positioning", "social", "news", "fundamentals"]
 ANALYST_AGENT_NAMES = {
     "market": "Market Analyst",
+    "positioning": "Positioning Analyst",
     "social": "Sentiment Analyst",
     "news": "News Analyst",
     "fundamentals": "Fundamentals Analyst",
 }
 ANALYST_REPORT_MAP = {
     "market": "market_report",
+    "positioning": "positioning_report",
     "social": "sentiment_report",
     "news": "news_report",
     "fundamentals": "fundamentals_report",
@@ -1194,9 +1242,17 @@ def run_analysis(checkpoint: bool | None = None, asset_type: str = "auto"):
     # Create stats callback handler for tracking LLM/tool calls
     stats_handler = StatsCallbackHandler()
 
-    # Normalize analyst selection to predefined order (selection is a 'set', order is fixed)
-    selected_set = {analyst.value for analyst in selections["analysts"]}
-    selected_analyst_keys = [a for a in ANALYST_ORDER if a in selected_set]
+    # Normalize analyst selection to predefined order (selection is a 'set',
+    # order is fixed), then RE-APPLY the single-source asset filter: the
+    # checkbox's option set is the fixed four-key ANALYST_ORDER, so the
+    # filter's flag-appended POSITIONING (positioning_split) never reaches
+    # the user-selection funnel — without this re-application it is dropped
+    # before the graph is built and the switch runs dead end to end.
+    selected_analyst_keys = resolve_run_analysts(
+        selections["analysts"],
+        AssetType(selections["asset_type"]),
+        selections["ticker"],
+    )
     analyst_execution_plan = build_analyst_execution_plan(selected_analyst_keys)
     analyst_wall_time_tracker = AnalystWallTimeTracker(analyst_execution_plan)
 
@@ -1780,6 +1836,7 @@ def scoreboard_cmd(
     import json as _json
     from datetime import UTC as _UTC, datetime as _datetime
 
+    from yialpha.dataflows.utils import atomic_write_text as _atomic_write_text
     from yialpha.ledger.outcome_compute import compute_outcomes as _compute_outcomes
     from yialpha.ledger.scoreboard import (
         build_scoreboard as _build_scoreboard,
@@ -1801,9 +1858,13 @@ def scoreboard_cmd(
         (json_path, _json.dumps(board, indent=2, ensure_ascii=False)),
         (md_path, markdown),
     ):
-        tmp_path = path.with_name(path.name + ".tmp")
-        tmp_path.write_text(text, encoding="utf-8")
-        tmp_path.replace(path)
+        # Round-11: routed through the canonical atomic_write_text — the tmp
+        # name is the same ``<name>.tmp`` this loop already used; the bare
+        # ``Path.replace`` becomes replace_retry_on_windows, so a lockless
+        # reader (web store / a second ``yialpha scoreboard``) holding the
+        # target open mid-read no longer kills the write (the only behavior
+        # change of this migration; every other publish seam already had it).
+        _atomic_write_text(path, text)
 
     console.print(markdown)
     console.print(

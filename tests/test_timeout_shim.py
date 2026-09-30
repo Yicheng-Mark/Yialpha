@@ -119,12 +119,18 @@ def test_non_positive_timeout_rejected():
 
 @pytest.mark.unit
 def test_akshare_direct_connect_applies_timeout(monkeypatch):
-    """The akshare vendor's _direct_connect window fills missing timeouts."""
+    """The akshare vendor's _direct_connect window fills missing timeouts.
+
+    Round-11 remediation: pinned with the curl_cffi env-pop fallback OFF
+    (``_HAS_CURL_CFFI = False``) so this stays a pure timeout-shim test —
+    with curl_cffi present the window additionally pops the proxy env vars
+    (documented libcurl behavior, pinned in test_a_share_native)."""
     import os
 
     from yialpha.dataflows import akshare_vendor as akv
 
     monkeypatch.setenv("HTTP_PROXY", "socks5h://127.0.0.1:1080")
+    monkeypatch.setattr(akv, "_HAS_CURL_CFFI", False)
     original = _session_request_original()
     seen = {}
 
@@ -135,11 +141,15 @@ def test_akshare_direct_connect_applies_timeout(monkeypatch):
     requests.sessions.Session.request = fake  # before the window: shim wraps it
     try:
         with akv._direct_connect():
-            assert "HTTP_PROXY" not in os.environ  # popped inside the window
+            # Round-11: the requests-level bypass is thread-scoped — the env
+            # vars STAY set (other threads keep their proxied environment);
+            # this thread's requests ignore them via the patched
+            # merge_environment_settings instead.
+            assert os.environ.get("HTTP_PROXY") == "socks5h://127.0.0.1:1080"
             s = requests.Session()
             s.get("http://example.invalid/x")
     finally:
         requests.sessions.Session.request = original
-    assert os.environ.get("HTTP_PROXY") == "socks5h://127.0.0.1:1080"  # restored
+    assert os.environ.get("HTTP_PROXY") == "socks5h://127.0.0.1:1080"  # untouched
     assert requests.sessions.Session.request is original
     assert seen.get("timeout") == akv._TIMEOUT_S

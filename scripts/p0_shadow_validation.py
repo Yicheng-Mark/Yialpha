@@ -30,17 +30,21 @@ def main(argv=None) -> int:
     score.add_argument("--root", required=True, type=Path)
     score.add_argument("--cohort-id", required=True)
     args = parser.parse_args(argv)
-    project = Path(__file__).resolve().parent.parent
-    sys.path.insert(0, str(project))
-    # GBK-console guard: the final json.dumps(ensure_ascii=False) below can
-    # carry non-GBK characters from cohort payloads — without this the LAST
-    # print dies on UnicodeEncodeError after every step already succeeded
-    # (and the script exits non-zero despite doing its job).
-    for _stream in (sys.stdout, sys.stderr):
-        _reconfigure = getattr(_stream, "reconfigure", None)
-        if callable(_reconfigure):
-            with __import__("contextlib").suppress(AttributeError, ValueError):
-                _reconfigure(encoding="utf-8", errors="replace")
+    # Unified bootstrap (scripts/_bootstrap.py) — kept INSIDE main(), not
+    # hoisted to module level: this CLI defers every project import until
+    # after argument parsing (see the module docstring), and module level
+    # sets sys.dont_write_bytecode before any import could write __pycache__.
+    # Only the spelling is unified; position and laziness are preserved.
+    # GBK-console note: the final json.dumps(ensure_ascii=False) below can
+    # carry non-GBK characters from cohort payloads — without the UTF-8
+    # reconfigure the LAST print dies on UnicodeEncodeError after every step
+    # already succeeded (and the script exits non-zero despite doing its job).
+    _here = str(Path(__file__).resolve().parent)
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+    import _bootstrap
+
+    _bootstrap.bootstrap()  # project-root sys.path + UTF-8 console (Windows GBK)
     from scripts.p0_shadow.guard import GuardError
     from scripts.p0_shadow.runner import (
         capture_cohort,

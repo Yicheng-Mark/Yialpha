@@ -55,6 +55,7 @@ from datetime import date, timedelta
 from .config import get_config
 from .disk_cache import safe_cache_component
 from .errors import NoMarketDataError
+from .utils import current_pit_end
 
 # Reuse sec_edgar's transport verbatim (CIK resolution, GET, cache, throttle).
 from .sec_edgar import (
@@ -271,11 +272,24 @@ def _scan_form4_segment(
             fd_d = date.fromisoformat(fd) if fd else None
         except ValueError:
             fd_d = None
+        if fd_d is None:
+            # Fail-closed like the 13F path below: a filing with a missing or
+            # malformed filingDate cannot prove it was public by curr_date
+            # (nor that it is inside the lookback window). The old
+            # `if fd_d and ...` guards skipped BOTH bounds when fd_d was None
+            # and rendered the filing's trades unfiltered — a PIT leak (the
+            # exact failure mode the 13F `if fd:` fix closed; the parallel
+            # `[:10]` short-array branch above yields "" here too).
+            logger.debug(
+                "sec_ownership: dropping Form 4 with missing/malformed "
+                "filingDate %r (PIT gate) for CIK %s", fd, cik,
+            )
+            continue
         # PIT: filingDate must be public by curr_date (ground truth).
-        if upper and fd_d and fd_d > upper_d:
+        if upper and fd_d > upper_d:
             continue
         # Lower bound only applies when we have a parseable filing date.
-        if fd_d and fd_d < lower_d:
+        if fd_d < lower_d:
             continue
         if fetched >= _MAX_FORM4:
             break
@@ -324,6 +338,11 @@ def get_form4_insider_trading(
     cik = _cik_for_ticker(ticker)
     subs = _fetch_submissions(cik)
 
+    # PIT clamp (round-11 remediation, same guard as sec_edgar/AV statements):
+    # a curr_date beyond the run's pinned analysis date (an LLM echoing a
+    # cached header's "today") must not widen the filingDate window — filings
+    # made after the pinned date stay invisible. No-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
     # Live mode: no as-of upper bound; anchor the look-back window at today.
     # A malformed LLM date ("2026/08/01") fails closed via the helper
     # (NoMarketDataError -> NO_DATA sentinel), never guesses an as-of bound.
@@ -582,6 +601,8 @@ def get_ftd_data(
     no rows -> an informative "no fails reported" string (it does NOT resolve a
     CIK, unlike Form 4).
     """
+    # PIT clamp (round-11 remediation): see get_form4_insider_trading.
+    curr_date = current_pit_end(curr_date) or curr_date
     upper_d = _as_of_date(curr_date)   # malformed input fails closed, never guesses
     look_back_days = int(look_back_days)
     if look_back_days > _FTD_MAX_LOOKBACK_DAYS:
@@ -903,6 +924,10 @@ def get_institutional_holdings(
     ~45-day window after quarter-end) -> an honest 'not yet published' string.
     CUSIP with no matching holders -> an honest empty string.
     """
+    # PIT clamp (round-11 remediation): see get_form4_insider_trading. Fires
+    # before BOTH consumers (the CUSIP's filed-at gate and the ZIP visibility
+    # window) so neither can be widened past the pinned analysis date.
+    curr_date = current_pit_end(curr_date) or curr_date
     cik = _cik_for_ticker(ticker)
     facts = _fetch_company_facts(cik)
     cusip = _extract_cusip(facts, curr_date)

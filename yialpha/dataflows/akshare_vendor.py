@@ -32,11 +32,19 @@ domestic Eastmoney/Sina request through that SOCKS5 VPN **hangs forever** (the
 VPN does not forward domestic traffic) — exactly the trap
 :func:`eastmoney._session` documents. Unlike eastmoney.py (which owns its
 ``requests.Session`` and can set ``trust_env=False``), AKShare owns its sessions
-internally, so the bypass is done at the **environment** level: the
-:func:`_direct_connect` context manager snapshots and pops the proxy env vars
-around the AKShare call and restores them in a ``finally``, serialized by a
-module lock so concurrent (analyst-parallel) calls cannot clobber each other's
-env state.
+internally, so the bypass is done at the **thread** level (round-11): the
+:func:`_direct_connect` context manager sets a thread-local flag that a small
+idempotent ``requests`` patch (``Session.merge_environment_settings``) consumes,
+so THIS thread's requests get a proxies-only settings override (no env proxies;
+trust_env / verify / CA-bundle semantics untouched) for the duration of the
+call while every other thread's proxied traffic (FRED / tavily / sec_edgar /
+AV, which read env per call) keeps seeing the intact environment. akshare's
+news leg rides curl_cffi/libcurl (which reads os.environ natively, invisible to
+the requests patch); when curl_cffi is installed the window additionally
+pops/restores the proxy env vars process-wide for its (serialized) duration —
+see the bypass section below for the honest scope. The original implementation
+popped the env vars process-wide unconditionally — reachable collateral under
+ToolNode's parallel tool workers.
 
 Free, keyless. ``akshare`` is an **optional dependency**: imported lazily, so a
 default-off run never imports it — zero overhead, byte-equivalent. ``curl_cffi``
@@ -65,7 +73,6 @@ from __future__ import annotations
 import io
 import logging
 import math
-import os
 import threading
 import time
 from datetime import date, timedelta
@@ -77,26 +84,20 @@ from .utils import is_historical_date
 
 logger = logging.getLogger(__name__)
 
-# AKShare calls are serialized so the proxy-env pop/restore in _direct_connect
-# cannot interleave under analyst-parallel mode (one call's "popped" window must
-# not overlap another's). Serial mode (the default) is unaffected.
+# AKShare calls are serialized so the library itself is never entered
+# concurrently (its internal session handling is not documented as
+# thread-safe). Serial mode (the default) is unaffected.
 #
-# Scope of this lock (kept honest after audit): it serializes every
-# _direct_connect user in THIS process — all the AKShare calls above, plus the
-# tushare_vendor, which borrows _direct_connect for its own domestic HTTP calls
-# and therefore also contends here. It is NOT split per-endpoint: the protected
-# critical section is the process-wide os.environ mutation (a few dict ops
-# around the network call), whose cost is negligible next to the HTTP round
-# trip itself, so per-endpoint locks would add complexity without reducing
-# any real contention. Serializing unrelated domestic calls costs at most one
-# call's latency under analyst-parallel mode (they are already throttled
-# upstream); splitting would only matter with many concurrent domestic vendors,
-# which this project does not have.
+# Scope of this lock (kept honest after the round-11 audit): it serializes
+# every _direct_connect user in THIS process — all the AKShare calls above,
+# plus the tushare_vendor, which borrows _direct_connect for its own domestic
+# HTTP calls and therefore also contends here. The proxy bypass itself is
+# THREAD-SCOPED (see _direct_connect), so the lock no longer protects process
+# env state; it only keeps one vendor's domestic call from interleaving with
+# another's inside the library. It is NOT split per-endpoint: the serialized
+# section is one HTTP round trip, so per-endpoint locks would add complexity
+# without reducing any real contention.
 _call_lock = threading.Lock()
-_PROXY_ENV_KEYS = (
-    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-    "http_proxy", "https_proxy", "all_proxy",
-)
 _TIMEOUT_S = 20
 
 
@@ -113,17 +114,135 @@ def _require_akshare():
         ) from exc
 
 
+# ---------------------------------------------------------------------------
+# Thread-scoped proxy bypass (round-11)
+# ---------------------------------------------------------------------------
+# The OLD _direct_connect popped HTTP_PROXY/HTTPS_PROXY from os.environ around
+# the call — process-global state, so any OTHER thread making a proxied request
+# in that window (FRED/tavily/sec_edgar/AV via proxy_map() or requests'
+# trust_env, which read env per call) saw a proxy-less environment and went
+# direct. ToolNode executes a batch's tools in parallel worker threads, so the
+# window was reachable in production, not theoretical.
+#
+# The replacement marks the CALLING THREAD only: a thread-local depth flag plus
+# an idempotent patch on requests.sessions.Session.merge_environment_settings
+# (installed on first use, never uninstalled — with the flag at 0 the wrapper
+# delegates to the original, byte-equivalent). While the flag is set, that
+# thread's request settings get a PROXIES-ONLY override: ``settings["proxies"]``
+# is cleared after the original merge, and NOTHING else is touched — the
+# instance's trust_env flag is never flipped (a non-atomic instance mutation
+# that could leak across threads sharing a Session) and REQUESTS_CA_BUNDLE /
+# verify / cert semantics stay exactly what the environment says.
+#
+# curl_cffi caveat (round-11 remediation): akshare 1.18.83's news leg goes
+# through curl_cffi/libcurl, which reads os.environ NATIVELY and never passes
+# through Session.merge_environment_settings — the requests patch is silently
+# ineffective for it, and a VPN env would still hang the domestic news call.
+# When curl_cffi is importable, the window therefore ADDITIONALLY pops
+# HTTP_PROXY/HTTPS_PROXY from os.environ and restores them on exit (libcurl
+# has only the one global lever). Honest cost: with curl_cffi present, other
+# threads' DIRECT env readers (proxy_map()-style) lose the proxy for the
+# duration of the serialized domestic call window — narrower than the old
+# always-on global pop (it is confined to the _call_lock window), and on
+# hosts without curl_cffi it does not happen at all.
+try:  # pragma: no cover - import outcome depends on the host's extras
+    import curl_cffi  # noqa: F401
+
+    _HAS_CURL_CFFI = True
+except ImportError:
+    _HAS_CURL_CFFI = False
+
+# Env vars popped inside the window when curl_cffi is present (libcurl's lever).
+_PROXY_ENV_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+
+_proxy_bypass_state = threading.local()
+_proxy_patch_lock = threading.Lock()
+_proxy_patch_installed = False
+
+
+def _bypass_depth() -> int:
+    """Whether (and how deeply) the calling thread is inside bypass windows."""
+    return getattr(_proxy_bypass_state, "depth", 0)
+
+
+def _pop_proxy_env() -> dict[str, str]:
+    """Pop the proxy env vars; returns the saved values for restore.
+
+    Only reached when ``_HAS_CURL_CFFI`` — see the module comment above for
+    why libcurl needs the env lever that plain ``requests`` does not. Only
+    keys actually present are popped (and later restored): on Windows
+    ``os.environ`` case-folds to upper, so a blanket ``pop(key, None)`` for
+    the lowercase aliases would delete the restored uppercase entry.
+    """
+    import os
+
+    saved: dict[str, str] = {}
+    for key in _PROXY_ENV_VARS:
+        if key in os.environ:
+            saved[key] = os.environ[key]
+            del os.environ[key]
+    return saved
+
+
+def _restore_proxy_env(saved: dict[str, str]) -> None:
+    """Restore exactly the env vars :func:`_pop_proxy_env` removed."""
+    import os
+
+    for key, val in saved.items():
+        os.environ[key] = val
+
+
+def _install_proxy_bypass_patch() -> None:
+    """Idempotently wrap ``Session.merge_environment_settings`` (once per process)."""
+    global _proxy_patch_installed
+    with _proxy_patch_lock:
+        if _proxy_patch_installed:
+            return
+        import requests.sessions
+
+        original = requests.sessions.Session.merge_environment_settings
+
+        def merge_environment_settings_thread_local(
+            self, url, proxies, stream, verify, cert,
+        ):
+            if _bypass_depth() > 0:
+                # This thread is inside a _direct_connect window: run the
+                # ORIGINAL merge (trust_env / verify / certs untouched — the
+                # instance is never mutated, so a Session shared across
+                # threads cannot observe a flipped flag), then clear ONLY the
+                # proxies: this thread's requests go direct while env CA /
+                # verify semantics are preserved exactly.
+                settings = original(self, url, proxies, stream, verify, cert)
+                settings["proxies"] = {}
+                return settings
+            return original(self, url, proxies, stream, verify, cert)
+
+        requests.sessions.Session.merge_environment_settings = (
+            merge_environment_settings_thread_local
+        )
+        _proxy_patch_installed = True
+
+
 class _direct_connect:
-    """Context manager: pop proxy env vars + default timeout around a domestic call.
+    """Context manager: thread-scoped proxy bypass + default read timeout.
 
     AKShare's internal ``requests`` calls read ``HTTP_PROXY``/``HTTPS_PROXY``
     from the environment; if those point at the SOCKS5 VPN, requests to
-    domestic Eastmoney/Sina hang forever. Popping them for the duration of
-    the call forces a direct connection; they are always restored in ``finally``
-    (even on error) and the whole window is serialized by ``_call_lock`` so
-    concurrent calls are safe. Mirrors the proxy-bypass *intent* of
-    :func:`eastmoney._session` (``trust_env=False``) but at the env level, since
-    AKShare owns its sessions internally.
+    domestic Eastmoney/Sina hang forever. THIS thread's requests must ignore
+    env proxies for the duration of the call: the window raises a thread-local
+    depth flag that the patched ``Session.merge_environment_settings``
+    consumes (round-11 — the old implementation popped the env vars
+    process-wide, which also hit other threads' proxied vendor traffic; see
+    :func:`_install_proxy_bypass_patch`). ``_call_lock`` still serializes the
+    akshare/tushare calls themselves (library thread-safety). Mirrors the
+    proxy-bypass *intent* of :func:`eastmoney._session` (``trust_env=False``),
+    but thread-scoped, since AKShare owns its sessions internally.
+
+    When ``curl_cffi`` is installed (akshare's news leg rides libcurl, which
+    reads os.environ natively and bypasses the requests patch), the window
+    additionally pops the proxy env vars process-wide for its duration and
+    restores them on exit — see the module comment for the honest scope of
+    that fallback.
 
     The same window also applies :data:`_TIMEOUT_S` as a default read timeout:
     AKShare exposes no per-call timeout parameter, so without this a half-open
@@ -132,32 +251,45 @@ class _direct_connect:
     :mod:`yialpha.dataflows.timeout_shim`).
     """
 
-    def __init__(self):
-        self._saved: dict[str, str] = {}
-
     def __enter__(self):
         _call_lock.acquire()
-        for key in _PROXY_ENV_KEYS:
-            if key in os.environ:
-                self._saved[key] = os.environ.pop(key)
-        # Inner import keeps module import light; the patch window is strictly
-        # inside the popped-proxy + call-lock window.
-        from .timeout_shim import default_request_timeout
+        try:
+            _install_proxy_bypass_patch()
+        except BaseException:
+            _call_lock.release()
+            raise
+        _proxy_bypass_state.depth = _bypass_depth() + 1
+        self._saved_env: dict[str, str] | None = None
+        try:
+            if _HAS_CURL_CFFI:
+                # libcurl's only lever is os.environ (see module comment);
+                # inside the _call_lock window so the pop/restore cannot
+                # interleave with another _direct_connect user.
+                self._saved_env = _pop_proxy_env()
+            # Inner import keeps module import light; the timeout patch
+            # window is strictly inside the bypass-flag + call-lock window.
+            from .timeout_shim import default_request_timeout
 
-        self._timeout_ctx = default_request_timeout(_TIMEOUT_S)
-        self._timeout_ctx.__enter__()
+            self._timeout_ctx = default_request_timeout(_TIMEOUT_S)
+            self._timeout_ctx.__enter__()
+        except BaseException:
+            if self._saved_env is not None:
+                _restore_proxy_env(self._saved_env)
+            _proxy_bypass_state.depth = _bypass_depth() - 1
+            _call_lock.release()
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        # Restore every popped var (unset ones are left unset, matching the
-        # pre-call state). Timeout shim unwinds first so the requests patch
-        # window is strictly inside the popped-proxy window.
+        # Timeout shim unwinds first so the requests patch window is strictly
+        # inside the bypass-flag window, then the curl_cffi env vars restore,
+        # the flag drops, and the serial lock releases (mirror of enter).
         try:
             self._timeout_ctx.__exit__(exc_type, exc, tb)
         finally:
-            for key, val in self._saved.items():
-                os.environ[key] = val
-            self._saved.clear()
+            if self._saved_env is not None:
+                _restore_proxy_env(self._saved_env)
+            _proxy_bypass_state.depth = _bypass_depth() - 1
             _call_lock.release()
         return False
 

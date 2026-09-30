@@ -48,7 +48,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from yialpha.dataflows.utils import replace_retry_on_windows
+from yialpha.dataflows.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -136,17 +136,18 @@ def record_config_snapshot(
     path = target_dir / filename
 
     # Atomic write: temp file + os.replace so a crash never leaves a partial file.
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_text(
-        json.dumps(snapshot, indent=2, default=str, ensure_ascii=False),
-        encoding="utf-8",
-    )
     # Round-10: ``yialpha analyze`` startup reads the latest snapshot back
     # (load_last_snapshot) with no lock; on Windows a reader mid-read made
     # Path.replace raise PermissionError and lose a recorded snapshot.
     # Retry the race; append-only semantics are untouched (unique timestamped
-    # filename, publish via replace).
-    replace_retry_on_windows(tmp_path, path)
+    # filename, publish via replace). Round-11: delegated to the canonical
+    # ``atomic_write_text`` (fixed-name ``<name>.tmp`` sibling; the old
+    # ``with_suffix(".tmp")`` spelling is unified away, published bytes
+    # unchanged).
+    atomic_write_text(
+        path,
+        json.dumps(snapshot, indent=2, default=str, ensure_ascii=False),
+    )
 
     logger.info(
         "Config snapshot recorded: %s (fingerprint %s, reason: %s)",

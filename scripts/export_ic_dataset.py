@@ -32,30 +32,21 @@ import logging
 import sys
 from pathlib import Path
 
-# GBK-console guard (CLAUDE.md entry-script contract): package-side loggers
-# carry CJK exception text; without this the final prints can die on
-# UnicodeEncodeError after all the work is done (prune CLI has the same
-# guard via _ensure_unicode_stdout).
-# Round-10: harmonized to the getattr/callable + suppress(AttributeError,
-# ValueError) + errors="replace" spelling used by run_robust.py /
-# p0_shadow_validation.py — the old suppress(Exception) form swallowed
-# everything and dropped the errors= replacement policy.
-for _stream in (sys.stdout, sys.stderr):
-    _reconfigure = getattr(_stream, "reconfigure", None)
-    if callable(_reconfigure):
-        with __import__("contextlib").suppress(AttributeError, ValueError):
-            _reconfigure(encoding="utf-8", errors="replace")
+# Allow running as `python scripts/export_ic_dataset.py` without an editable install, and
+# make scripts/_bootstrap importable under importlib-based test loading too
+# (spec_from_file_location does not put scripts/ on sys.path).
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-import pandas as pd
+import _bootstrap  # noqa: E402
+
+_bootstrap.bootstrap()  # project-root sys.path + UTF-8 console (Windows GBK)
+
+import pandas as pd  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("export_ic_dataset")
-
-# Allow running as `python scripts/export_ic_dataset.py` without an editable
-# install.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from yialpha.agents.analysts.market_analyst import INDICATOR_NAMES  # noqa: E402
 from yialpha.backtest.ic_dataset import export_ic_datasets  # noqa: E402

@@ -6,23 +6,21 @@
 import argparse
 import json
 import sys
+from pathlib import Path
 
-# Windows 控制台默认 GBK，打印 ❌/✅ 会触发 UnicodeEncodeError；强制 utf-8。
-for _stream in (sys.stdout, sys.stderr):
-    _reconfigure = getattr(_stream, "reconfigure", None)
-    if callable(_reconfigure):
-        with __import__("contextlib").suppress(AttributeError, ValueError):
-            _reconfigure(encoding="utf-8", errors="replace")
+# Allow running as `python scripts/analyze_nvda.py` without an editable install, and
+# make scripts/_bootstrap importable under importlib-based test loading too
+# (spec_from_file_location does not put scripts/ on sys.path).
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-# noqa: E402 — imports sit after the UTF-8 reconfigure guard above (Windows GBK shim).
-from pathlib import Path  # noqa: E402
+import _bootstrap  # noqa: E402
 
-# Allow running as `python scripts/analyze_nvda.py` without an editable
-# install (sys.path[0] is scripts/, not the project root).
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+_bootstrap.bootstrap()  # project-root sys.path + UTF-8 console (Windows GBK)
 
+# noqa: E402 — imports sit after the bootstrap shim above (project-root
+# sys.path + Windows GBK UTF-8 reconfigure).
 from yialpha.default_config import DEFAULT_CONFIG  # noqa: E402
 from yialpha.graph.trading_graph import YiAlphaGraph  # noqa: E402
 

@@ -41,9 +41,20 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pandas as pd
+# Allow running as `python scripts/prune_indicators_cli.py` without an editable install, and
+# make scripts/_bootstrap importable under importlib-based test loading too
+# (spec_from_file_location does not put scripts/ on sys.path).
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-from yialpha.backtest.ic import (
+import _bootstrap  # noqa: E402
+
+_bootstrap.bootstrap()  # project-root sys.path + UTF-8 console (Windows GBK)
+
+import pandas as pd  # noqa: E402
+
+from yialpha.backtest.ic import (  # noqa: E402
     build_ic_report,
     consecutive_below_threshold,
     factor_turnover,

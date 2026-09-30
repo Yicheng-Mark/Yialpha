@@ -206,10 +206,22 @@ def load_accuracy_report() -> dict:
     handler. Until the operator runs it, the honest payload is
     ``available=False`` plus the command hint (never a fabricated empty
     report that would read as "100% accuracy with no data").
+
+    Non-finite read guard (round-11): ``json.loads`` happily parses the bare
+    ``NaN`` / ``Infinity`` literals a pre-fix artifact may contain, and this
+    app's JSON responses render with ``allow_nan=False`` — serving such an
+    artifact as-is turned /api/accuracy into a 500. ``parse_constant`` maps
+    those literals to ``None`` IN THE SAME PASS as the parse (json.loads
+    can only produce a non-finite float from these constants), replacing
+    the old post-parse recursive walk — one pass, no deep copy, same
+    nulling semantics as the write side's ``sanitize_nonfinite``.
     """
     path = LOGS_ROOT / "accuracy" / "accuracy_report.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=lambda _literal: None,
+        )
     except (OSError, json.JSONDecodeError):
         return {"available": False, "hint": "yialpha verify-history"}
     return {"available": True, **data}
@@ -385,6 +397,9 @@ def load_run(ticker: str, date: str) -> dict | None:
         "company_of_interest": state.get("company_of_interest", "") or "",
         "sections": {
             "market_report": state.get("market_report", "") or "",
+            # Positioning Analyst only runs for crypto_perp with positioning_split
+            # on (default off); null (not "") hides the card when absent.
+            "positioning_report": state.get("positioning_report") or None,
             "sentiment_report": state.get("sentiment_report", "") or "",
             "news_report": state.get("news_report", "") or "",
             # Fundamentals Analyst is dropped for crypto (spot + perp); null hides

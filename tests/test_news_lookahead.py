@@ -225,3 +225,148 @@ def test_av_news_time_to_clamped_to_pinned_analysis_date(monkeypatch):
 
     av_news.get_news("AAPL", "2025-05-01", "2030-01-01")
     assert captured["time_to"] == "20300101T0000"  # live: no-op pass-through
+
+
+# --------------------------------------------------------------------------- #
+# Round-11 — soft-miss logging + window filter at accumulation time
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_stock_news_soft_miss_not_logged_as_error(monkeypatch, caplog):
+    """The designed NoMarketDataError soft-miss (empty feed / nothing in the
+    window) passes through silently — no ERROR-level stack trace. The generic
+    branch (real faults) keeps its logger.exception."""
+    import logging
+
+    from yialpha.dataflows.errors import NoMarketDataError
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            pass
+
+        def get_news(self, count):
+            return []
+
+    monkeypatch.setattr(ynews.yf, "Ticker", FakeTicker)
+    monkeypatch.setattr(ynews, "yf_retry", lambda fn, **kw: fn())
+    with caplog.at_level(logging.ERROR,
+                         logger="yialpha.dataflows.yfinance_news"):
+        with pytest.raises(NoMarketDataError):
+            ynews.get_news_yfinance("AAPL", "2025-05-01", "2025-05-09")
+    assert not caplog.records  # the soft-miss is not a fault
+
+
+@pytest.mark.unit
+def test_global_news_soft_miss_not_logged_as_error(monkeypatch, caplog):
+    import logging
+
+    from yialpha.dataflows.errors import NoMarketDataError
+
+    class FakeSearch:
+        def __init__(self, *a, **k):
+            self.news = []
+
+    monkeypatch.setattr(ynews.yf, "Search", FakeSearch)
+    with caplog.at_level(logging.ERROR,
+                         logger="yialpha.dataflows.yfinance_news"):
+        with pytest.raises(NoMarketDataError):
+            ynews.get_global_news_yfinance("2025-05-09", look_back_days=7,
+                                           limit=10)
+    assert not caplog.records
+
+
+@pytest.mark.unit
+def test_global_news_datetime_form_curr_date_normalized(monkeypatch):
+    """Round-11 remediation: a datetime-form curr_date ("… 16:00:00") is
+    normalized to its ISO date at the entry — the old entry parsed it with a
+    strptime OUTSIDE the try and raised a bare, unlogged ValueError."""
+    article = {"title": "PAST EVENT", "publisher": "P", "link": "l",
+               "providerPublishTime": _epoch("2025-05-05")}
+
+    class FakeSearch:
+        def __init__(self, *a, **k):
+            self.news = [article]
+
+    monkeypatch.setattr(ynews.yf, "Search", FakeSearch)
+    out = ynews.get_global_news_yfinance(
+        "2025-05-09 16:00:00", look_back_days=7, limit=10)
+    assert "PAST EVENT" in out
+    assert "from 2025-05-02 to 2025-05-09:" in out
+
+
+@pytest.mark.unit
+def test_global_news_malformed_curr_date_is_a_logged_fault(monkeypatch, caplog):
+    """A malformed curr_date still raises ValueError (the router's view is
+    unchanged) but now surfaces through the generic except with an
+    ERROR-level stack trace instead of a bare unlogged raise."""
+    import logging
+
+    with caplog.at_level(
+        logging.ERROR, logger="yialpha.dataflows.yfinance_news",
+    ):
+        with pytest.raises(ValueError):
+            ynews.get_global_news_yfinance("2025/05/09", look_back_days=7)
+    assert caplog.records
+
+
+@pytest.mark.unit
+def test_global_news_titleless_flat_entries_excluded(monkeypatch):
+    """Round-11 remediation: flat entries without a title (the extractor's
+    "No title" placeholder) are excluded at the accumulation gate — they
+    used to consume the ``limit`` quota ahead of real headlines and
+    dedup-collapse into a single "No title" row."""
+    titled = {"title": "REAL HEADLINE", "publisher": "P", "link": "l",
+              "providerPublishTime": _epoch("2025-05-05")}
+    titleless = [
+        {"publisher": "P", "link": "l",
+         "providerPublishTime": _epoch("2025-05-05")}
+        for _ in range(3)  # no title key -> "No title"
+    ]
+
+    class FakeSearch:
+        def __init__(self, *a, **k):
+            self.news = titleless + [titled]
+
+    monkeypatch.setattr(ynews.yf, "Search", FakeSearch)
+    # limit=1: the titleless rows must not consume the quota ahead of the
+    # titled headline.
+    out = ynews.get_global_news_yfinance(
+        "2025-05-09", look_back_days=7, limit=1)
+    assert "REAL HEADLINE" in out
+    assert "No title" not in out
+
+
+@pytest.mark.unit
+def test_global_news_out_of_window_quota_does_not_mask_later_queries(monkeypatch):
+    """Round-11: the accumulation loop window-filters each query's candidates
+    BEFORE counting them toward ``limit`` — a first query that fills the quota
+    with out-of-window (here: too old + undated) headlines must not stop the
+    later queries from being consulted. The old loop broke after query #1 and
+    reported a false NoMarketDataError even though query #2 had in-window
+    headlines."""
+    from yialpha.dataflows import config as cfgmod
+
+    q1 = (
+        [{"title": f"OLD-{i}", "publisher": "P", "link": "l",
+          "providerPublishTime": _epoch("2025-03-0" + str(i + 1))}
+         for i in range(3)]
+        + [{"title": f"UNDATED-{i}", "publisher": "P", "link": "l"}
+           for i in range(2)]  # undated: excluded in a backtest window
+    )
+    q2 = [{"title": "Q2 HEADLINE", "publisher": "P", "link": "l",
+           "providerPublishTime": _epoch("2025-05-05")}]
+
+    class FakeSearch:
+        def __init__(self, query, **k):
+            self.news = q1 if query == "q1" else q2
+
+    monkeypatch.setattr(ynews.yf, "Search", FakeSearch)
+    orig = cfgmod.get_config()
+    try:
+        cfgmod.set_config({**orig, "global_news_queries": ["q1", "q2"]})
+        out = ynews.get_global_news_yfinance("2025-05-09", look_back_days=7,
+                                             limit=5)
+    finally:
+        cfgmod.set_config(orig)
+    assert "Q2 HEADLINE" in out
+    assert "OLD-0" not in out
+    assert "UNDATED-0" not in out

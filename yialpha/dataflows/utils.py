@@ -5,6 +5,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -342,3 +343,19 @@ def replace_retry_on_windows(
             f"(attempts={attempts!r})"
         )
     raise last
+
+
+def atomic_write_text(path, text, *, encoding="utf-8"):
+    """Atomic text publish: write sibling tmp + replace_retry_on_windows.
+
+    Canonical fixed-name tmp form is ``<name>.tmp`` (plain suffix). Writers
+    that NEED per-writer unique tmp names (concurrent writers to the same
+    target: response_cache, disk_cache, dashboard) must not use this —
+    they keep their pid/uuid-suffixed names.
+    """
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding=encoding) as fh:
+        fh.write(text)
+    replace_retry_on_windows(tmp, path)
+    return path

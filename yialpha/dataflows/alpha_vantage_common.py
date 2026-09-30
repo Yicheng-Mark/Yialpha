@@ -174,6 +174,9 @@ def _make_api_request(function_name: str, params: dict) -> dict | str:
             retry_on=(
                 requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout,
+                # Conditionally transient inside netretry: only a 5xx response
+                # is retried; 4xx re-raises immediately (round-11).
+                requests.exceptions.HTTPError,
             ),
         )
         # _raw_api_request's declared type is dict | str (its legacy contract);

@@ -93,6 +93,78 @@ class VendorRoutingTests(unittest.TestCase):
             result = interface.route_to_vendor("get_stock_data", "AAPL", "2026-01-01", "2026-01-10")
         self.assertEqual(result, "AV_DATA")
 
+    def test_default_fallback_chain_puts_yfinance_first(self):
+        # Round-11: the "default" sentinel used VENDOR_METHODS dict insertion
+        # order, which put alpha_vantage FIRST for prices/indicators/news —
+        # violating the T0-3 chain contract (yfinance, keyless and unthrottled,
+        # leads; AV's rate-limited free tier trails). The order now comes from
+        # DEFAULT_CONFIG's data_vendors value for the category.
+        for method in ("get_stock_data", "get_indicators", "get_news",
+                       "get_global_news", "get_insider_transactions"):
+            order = []
+
+            def impl(name, order=order):
+                def f(symbol, *a, **k):
+                    order.append(name)
+                    raise NoMarketDataError(symbol, symbol, "no rows")
+                return f
+
+            category = interface.get_category_for_method(method)
+            set_config({"data_vendors": {category: "default"}})
+            with mock.patch.dict(interface.VENDOR_METHODS, {
+                method: {
+                    "alpha_vantage": impl("alpha_vantage"),
+                    "yfinance": impl("yfinance"),
+                },
+            }, clear=False):
+                interface.route_to_vendor(method, "AAPL")
+            self.assertEqual(order, ["yfinance", "alpha_vantage"], method)
+
+    def test_default_fallback_fundamentals_chain_sec_first(self):
+        order = []
+
+        def impl(name, order=order):
+            def f(symbol, *a, **k):
+                order.append(name)
+                raise NoMarketDataError(symbol, symbol, "no rows")
+            return f
+
+        set_config({"data_vendors": {"fundamental_data": "default"}})
+        with mock.patch.dict(interface.VENDOR_METHODS, {
+            "get_balance_sheet": {
+                "alpha_vantage": impl("alpha_vantage"),
+                "yfinance": impl("yfinance"),
+                "sec_edgar": impl("sec_edgar"),
+            },
+        }, clear=False):
+            interface.route_to_vendor("get_balance_sheet", "AAPL")
+        # Default chain for fundamental_data: sec_edgar,yfinance,alpha_vantage.
+        self.assertEqual(order, ["sec_edgar", "yfinance", "alpha_vantage"])
+
+    def test_default_chain_order_helper_single_source(self):
+        # The helper reads DEFAULT_CONFIG (not the live config — the fallback
+        # only fires when the live value IS "default"); vendors not named in
+        # the documented chain keep their dict order after it (the
+        # fundamentals_overview aggregate), and categories without a
+        # documented chain are left untouched.
+        self.assertEqual(
+            interface._default_chain_order(
+                "fundamental_data",
+                ["alpha_vantage", "yfinance", "sec_edgar",
+                 "fundamentals_overview"]),
+            ["sec_edgar", "yfinance", "alpha_vantage",
+             "fundamentals_overview"],
+        )
+        self.assertEqual(
+            interface._default_chain_order("a_share_native",
+                                           ["baostock", "tushare"]),
+            ["baostock", "tushare"],
+        )
+        self.assertEqual(
+            interface._default_chain_order("binance_perp", ["binance"]),
+            ["binance"],
+        )
+
     def _route_method(self, method, vendors):
         return mock.patch.dict(interface.VENDOR_METHODS, {method: vendors}, clear=False)
 

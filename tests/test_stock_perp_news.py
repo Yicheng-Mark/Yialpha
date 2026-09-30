@@ -538,5 +538,15 @@ class GenericNewsToolRoutingTests(unittest.TestCase):
         self.assertEqual(calls, [("get_insider_transactions", "MU", None)])
 
 
+@pytest.mark.unit
+def test_lookback_start_accepts_full_iso_timestamp():
+    # Round-11: trade_date is dual-form (live runs / programmatic propagate()
+    # entries carry a full ISO timestamp, replays a date-only string). The old
+    # bare strptime("%Y-%m-%d") ValueError'd on the live form and killed the
+    # node before any LLM call.
+    assert news._lookback_start("2026-08-01 16:00:00") == "2026-07-25"
+    assert news._lookback_start("2026-08-01") == "2026-07-25"
+
+
 if __name__ == "__main__":
     unittest.main()

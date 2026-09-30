@@ -30,7 +30,7 @@ import yialpha.dataflows.perp_bundle as pb
 from yialpha.agents.schemas import PositioningReport
 from yialpha.agents.utils import prediction_tools as pt
 from yialpha.cli.models import AnalystType, AssetType
-from yialpha.cli.utils import filter_analysts_for_asset_type
+from yialpha.cli.utils import filter_analysts_for_asset_type, resolve_run_analysts
 from yialpha.dataflows import quality
 from yialpha.dataflows.config import set_config
 from yialpha.graph.analyst_execution import build_analyst_execution_plan
@@ -235,6 +235,42 @@ def test_cli_filter_appends_positioning_only_for_perp_flag_on():
 
 
 @pytest.mark.unit
+def test_run_baseline_build_routes_through_batch_filter(monkeypatch):
+    """Round-11 C1: run_baseline's graph builder routes its analyst set through
+    the single-source batch filter, so a flag-on crypto_perp backtest includes
+    the Positioning analyst (it used to hand the bare 4-analyst default)."""
+    import importlib.util
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "run_baseline.py"
+    spec = importlib.util.spec_from_file_location("run_baseline_under_test", script)
+    assert spec is not None and spec.loader is not None
+    rb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rb)
+
+    seen: dict = {}
+
+    class _FakeGraph:
+        def __init__(self, selected_analysts=None, debug=False, config=None):
+            seen["selected"] = tuple(selected_analysts or ())
+
+    monkeypatch.setattr(rb, "YiAlphaGraph", _FakeGraph)
+    monkeypatch.setattr(
+        "yialpha.batch.runner.batch_selected_analysts",
+        lambda at, tk: ("market", "positioning", "social", "news"),
+    )
+    rb._build_graph(asset_type="crypto_perp", tickers=("BTCUSDT",))
+    assert seen["selected"] == ("market", "positioning", "social", "news")
+    # No tickers (legacy callers): bare default tuple, no filter call.
+    monkeypatch.setattr(
+        "yialpha.batch.runner.batch_selected_analysts",
+        lambda *a, **k: pytest.fail("filter must not run without tickers"),
+    )
+    rb._build_graph()
+    assert seen["selected"] == ("market", "social", "news", "fundamentals")
+
+
+@pytest.mark.unit
 def test_execution_plan_pins_positioning_right_after_market():
     plan = build_analyst_execution_plan(
         ["market", "news", "positioning", "social"]
@@ -245,6 +281,58 @@ def test_execution_plan_pins_positioning_right_after_market():
     assert [spec.key for spec in build_analyst_execution_plan(
         ["market", "news", "social"]
     ).specs] == ["market", "news", "social"]
+
+
+# ---- round-11: the interactive funnel re-applies the filter ------------------
+#
+# The checkbox's option set is the fixed four-key ANALYST_ORDER, so the
+# filter's flag-appended POSITIONING never reaches the user selection;
+# run_analysis must go through resolve_run_analysts (normalize, then
+# re-apply the single-source filter) or the switch runs dead end to end.
+
+
+@pytest.mark.unit
+def test_resolve_run_analysts_reappends_positioning_for_flag_on_perp():
+    set_config({"positioning_split": True})
+    try:
+        keys = resolve_run_analysts(
+            list(_BASE_ANALYSTS), AssetType.CRYPTO_PERP, "BTCUSDT"
+        )
+        # Set assertion, not order: the execution-plan builder pins the run
+        # order (test_execution_plan_pins_positioning_right_after_market).
+        assert set(keys) == {"market", "social", "news", "positioning"}
+        assert keys[-1] == "positioning"  # appended at the tail
+    finally:
+        set_config({"positioning_split": False})
+
+
+@pytest.mark.unit
+def test_resolve_run_analysts_flag_off_stays_pre_v23():
+    # conftest holds positioning_split OFF: the resolved keys are exactly the
+    # historical normalization (pure-crypto perp drops FUNDAMENTALS and gains
+    # nothing; stock keeps the full four in order) — byte-equivalent chain.
+    perp = resolve_run_analysts(list(_BASE_ANALYSTS), AssetType.CRYPTO_PERP, "BTCUSDT")
+    assert perp == ["market", "social", "news"]
+    stock = resolve_run_analysts(list(_BASE_ANALYSTS), AssetType.STOCK, "AAPL")
+    assert stock == [a.value for a in _BASE_ANALYSTS]
+
+
+@pytest.mark.unit
+def test_resolve_run_analysts_never_readds_unselected(monkeypatch):
+    import yialpha.graph.routing as routing
+
+    # Tokenized-stock perp so FUNDAMENTALS stays applicable — the only shape
+    # where a user-checked FUNDAMENTALS meets the flag-on append.
+    monkeypatch.setattr(routing, "stock_perp_underlying", lambda t: "MU")
+    set_config({"positioning_split": True})
+    try:
+        user_picks = [AnalystType.MARKET, AnalystType.FUNDAMENTALS]
+        keys = resolve_run_analysts(user_picks, AssetType.CRYPTO_PERP, "MUUSDT")
+        # User selection + the flag-appended POSITIONING, and nothing that
+        # the user left unchecked comes back.
+        assert set(keys) == {"market", "fundamentals", "positioning"}
+    finally:
+        set_config({"positioning_split": False})
 
 
 # ---- flag-on node integration ------------------------------------------------

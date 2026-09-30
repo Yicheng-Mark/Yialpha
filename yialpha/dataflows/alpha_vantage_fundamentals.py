@@ -2,7 +2,7 @@ import json
 
 from .alpha_vantage_common import _make_api_request
 from .symbol_utils import NoMarketDataError, normalize_symbol
-from .utils import is_filing_public, overview_would_leak_future
+from .utils import current_pit_end, is_filing_public, overview_would_leak_future
 
 
 def _filter_reports_by_date(result: dict | str, curr_date: str | None) -> dict | str:
@@ -22,6 +22,11 @@ def _filter_reports_by_date(result: dict | str, curr_date: str | None) -> dict |
     consumed downstream exactly like a dict response (the tool layer
     JSON-serializes non-str tool outputs).
     """
+    # PIT clamp (round-11, same defense as y_finance's statement entries):
+    # is_filing_public trusts curr_date verbatim, so a curr_date beyond the
+    # run's pinned analysis date (e.g. an LLM echoing a cached header's
+    # "today") must be clamped before it filters. No-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
     if not curr_date:
         return result
     if isinstance(result, str):

@@ -93,6 +93,19 @@ def test_cap_keys_on_recent_count_not_stale_total():
 
 
 # ---------------------------------------------------------------------------
+# Round-11: dual-form trade_date must not break the 7-day lookback
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+def test_seven_days_back_accepts_full_iso_timestamp():
+    # trade_date is dual-form (live runs / programmatic propagate() entries
+    # carry a full ISO timestamp, replays a date-only string). The old bare
+    # strptime("%Y-%m-%d") ValueError'd on the live form and killed the node
+    # before any LLM call.
+    assert sent._seven_days_back("2026-08-01 16:00:00") == "2026-07-25"
+    assert sent._seven_days_back("2026-08-01") == "2026-07-25"
+
+
+# ---------------------------------------------------------------------------
 # Confidence cap: enforcement on the rendered report
 # ---------------------------------------------------------------------------
 @pytest.mark.unit

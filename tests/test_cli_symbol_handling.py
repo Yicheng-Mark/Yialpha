@@ -6,7 +6,12 @@ stock), #982 (BTC-USDT accepted but unpriceable on Yahoo).
 import pytest
 
 from yialpha.cli.models import AssetType
-from yialpha.cli.utils import detect_asset_type, is_valid_ticker_input, normalize_ticker_symbol
+from yialpha.cli.utils import (
+    detect_asset_type,
+    is_canonical_ymd,
+    is_valid_ticker_input,
+    normalize_ticker_symbol,
+)
 from yialpha.dataflows.symbol_utils import normalize_symbol
 
 
@@ -40,6 +45,23 @@ def test_normalize_symbol_crypto_and_passthrough(raw, expected):
 ])
 def test_ticker_input_validation(value, ok):
     assert is_valid_ticker_input(value) is ok
+
+
+# --- round-11: shared canonical-ymd gate (run_robust --date + /api/analyze) ---
+@pytest.mark.parametrize("value,ok", [
+    ("2026-09-01", True),
+    ("2026-9-1", False),       # non-zero-padded: bare strptime accepts it
+    ("2026/09/01", False),     # wrong separator
+    ("garbage", False),
+    ("2026-09-31", False),     # strptime rejects the impossible day
+    ("", False),
+])
+def test_is_canonical_ymd(value, ok):
+    """The predicate both parents of the run_robust subprocess apply: accept
+    exactly what the child's --date guard accepts (strftime round-trip,
+    zero-padded ISO) — a task accepted upstream would flip to exit 2 seconds
+    later in the subprocess."""
+    assert is_canonical_ymd(value) is ok
 
 
 # --- #981/#982: asset-type classified on the canonical symbol ---

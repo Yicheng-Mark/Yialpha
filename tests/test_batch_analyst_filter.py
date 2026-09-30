@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from yialpha.batch.runner import batch_selected_analysts
+from yialpha.dataflows.config import set_config
 
 _BASE = ("market", "social", "news", "fundamentals")
 _THREE = ("market", "social", "news")
@@ -82,3 +83,25 @@ def test_crypto_perp_warms_before_filtering(_no_network):
     # Ordering contract: the live EQUITY-perp listing is warm BEFORE the
     # per-ticker filter consults it (fresh listings are recognized).
     assert _no_network == ["warm", "filter"]
+
+
+@pytest.mark.unit
+def test_flag_on_perp_union_includes_positioning(_no_network):
+    """Round-11: the union half of the positioning_split dead switch.
+
+    filter_analysts_for_asset_type APPENDS POSITIONING for flag-on perp runs,
+    but the union used to intersect against the four-key ``base`` universe —
+    the appended analyst never survived into the shared batch graph.
+    """
+    set_config({"positioning_split": True})
+    try:
+        result = batch_selected_analysts("crypto_perp", ["BTCUSDT"])
+        # Set assertion, not order: the execution-plan builder pins the run
+        # order (test_positioning_analyst.py). Deterministic tail append.
+        assert set(result) == {"market", "social", "news", "positioning"}
+        assert result[-1] == "positioning"
+    finally:
+        set_config({"positioning_split": False})
+    # Flag off (conftest default): the byte-equivalent three-key union —
+    # restating the dead-switch's off-state next to its on-state.
+    assert batch_selected_analysts("crypto_perp", ["BTCUSDT"]) == _THREE

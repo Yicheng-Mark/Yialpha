@@ -552,9 +552,11 @@ class TestCaptureRunAnalystSegment:
         assert run["analyst_segment"] == 430.0 + 220.0 + 5.0
 
     def test_serial_leg_missing_tool_nodes_degrades_to_agents(self):
-        # Today's real serial telemetry records NO ToolNode walls
-        # (setup.py._wrap_node skips ToolNode), so the tool names are simply
-        # absent — they contribute zero, and the segment degrades to the
+        # Since round-11 serial telemetry records ToolNode walls too
+        # (setup.py._wrap_node wraps them via the Runnable-aware wrapper),
+        # but tool names can still be absent — e.g. analysts whose agent
+        # never requested tools, or telemetry captured before round-11.
+        # Absent names contribute zero and the segment degrades to the
         # agent+clear sum rather than None (honest partial, not N/A).
         nodes = {
             "Market Analyst": _slot(120.0),

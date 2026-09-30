@@ -290,3 +290,91 @@ def test_indicator_ic_context_config_key_default_off():
 
     assert DEFAULT_CONFIG["indicator_ic_context"] is False
     assert _ENV_OVERRIDES["YIALPHA_INDICATOR_IC_CONTEXT"] == "indicator_ic_context"
+
+
+# --------------------------------------------------------------------------- #
+# round-11: fail-visible when the flag is on but nothing is loadable
+# --------------------------------------------------------------------------- #
+_MA_LOGGER = "yialpha.agents.analysts.market_analyst"
+
+
+@pytest.mark.unit
+def test_indicator_ic_context_warns_when_on_and_no_verdict(tmp_path, monkeypatch, caplog):
+    """Flag on + nothing loadable -> one WARNING naming the path and remedy.
+
+    The flag used to no-op silently (missing ic_data dir, empty dir, or
+    nothing catalog-known inside it) — inconsistent with config-check's
+    posture toward indicator_battery.
+    """
+    import logging
+
+    from yialpha.agents.analysts.market_analyst import _format_indicator_ic_context
+    from yialpha.dataflows.config import set_config
+
+    monkeypatch.chdir(tmp_path)  # no ic_data at all
+    set_config({"indicator_ic_context": True})
+    try:
+        with caplog.at_level(logging.WARNING, logger=_MA_LOGGER):
+            assert _format_indicator_ic_context() is None
+        assert "ic-cycle" in caplog.text
+        assert "ic_data" in caplog.text
+        caplog.clear()
+        # Directory present but no loadable verdict inside: same warning.
+        (tmp_path / "ic_data").mkdir()
+        with caplog.at_level(logging.WARNING, logger=_MA_LOGGER):
+            assert _format_indicator_ic_context() is None
+        assert "ic-cycle" in caplog.text
+    finally:
+        set_config({"indicator_ic_context": False})
+
+
+@pytest.mark.unit
+def test_indicator_ic_context_no_warning_when_flag_off(tmp_path, monkeypatch, caplog):
+    """Flag off: a direct lookup returns None with zero warnings."""
+    import logging
+
+    from yialpha.agents.analysts.market_analyst import _format_indicator_ic_context
+
+    monkeypatch.chdir(tmp_path)
+    # conftest/reset_config holds indicator_ic_context OFF here.
+    with caplog.at_level(logging.WARNING, logger=_MA_LOGGER):
+        assert _format_indicator_ic_context() is None
+    assert caplog.text == ""
+
+
+@pytest.mark.unit
+def test_indicator_ic_context_node_gate_skips_lookup_when_flag_off(monkeypatch):
+    """Flag off: the node-level gate never invokes the IC lookup at all.
+
+    Pins the run-path half of the byte-equivalence: with the flag off the
+    ic_data directory is not even read (the call-site gate predates round-11
+    and is unchanged by it).
+    """
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.runnables import Runnable
+
+    import yialpha.agents.analysts.market_analyst as ma
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        ma, "_format_indicator_ic_context",
+        lambda *a, **k: calls.append(a) or "SHOULD NOT APPEAR",
+    )
+
+    class _CaptureLLM(Runnable):
+        def invoke(self, inp, config=None, **kwargs):  # noqa: ARG002
+            return AIMessage(content="R", tool_calls=[])
+
+        def bind_tools(self, tools, **kwargs):  # noqa: ARG002
+            return self
+
+    ma.create_market_analyst(_CaptureLLM())(
+        {
+            "trade_date": "2026-08-01",
+            "company_of_interest": "AAPL",
+            "asset_type": "stock",
+            "instrument_context": "CTX",
+            "messages": [HumanMessage(content="analyze")],
+        }
+    )
+    assert calls == []

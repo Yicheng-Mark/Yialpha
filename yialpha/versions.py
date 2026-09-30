@@ -28,12 +28,27 @@ Which constant versions what:
     notional, with funding PnL computed as ``-sign x notional x rate``.
     v1 had no consumers (reserved only).
 ``REGIME_VERSION``
-    v4 (v3 since V2.4; bumped 2026-09-29 round-10): the frozen
-    ``RegimeState`` classifier definitions in :mod:`yialpha.regime.state` —
-    the contract this stamp protects. Changing ANY definition below bumps
-    this so historical regime tags never silently mix definitions (the id
-    preimage starts with the version string, so a bump also mints disjoint
-    ids).
+    v5 (v4 since 2026-09-29 round-10; bumped 2026-09-29 round-11): the
+    frozen ``RegimeState`` classifier definitions in
+    :mod:`yialpha.regime.state` — the contract this stamp protects.
+    Changing ANY definition below bumps this so historical regime tags
+    never silently mix definitions (the id preimage starts with the version
+    string, so a bump also mints disjoint ids).
+
+    v4 -> v5 bump reason (2026-09-29, round-11): one id-preimage input
+    redefinition. ``oi_pct`` is computed by the perp bundle's
+    ``_fetch_open_interest`` (regime/compute.py imports it — single
+    source), and its percentile now ranks the latest OI against the PRIOR
+    window with the latest itself EXCLUDED from the denominator
+    (``sum(v < latest) / (n - 1)``; a single-row window serves 100.0 with
+    the vacuous span disclosed via ``days``). The v4 formula divided by
+    ``n``, counting the latest as its own comparison base, so a monotonic
+    new high on a full 30-row window could never exceed 29/30 (~97th pct)
+    — ``oi_pct`` (and with it the ``_market_stress`` "OI >= 90th pct"
+    trigger's scale) was systematically compressed exactly when it mattered
+    most. Same policy as v3 -> v4 / v2 -> v3: ledger rows keep their v4
+    ids (accepted regime_id discontinuity; the scoreboard ``by_regime``
+    slice lists versions side by side as the disclosure). No migration.
 
     v3 -> v4 bump reason (2026-09-29, round-10): two id-preimage
     redefinitions. (1) ``overnight_gap_bps`` re-scoped to the STOCK-PERP
@@ -105,7 +120,7 @@ SCHEMA_VERSION = "v1"
 COST_MODEL_VERSION = "v1"
 TICKET_VERSION = "v1"
 FEATURE_VERSION = "v2"
-REGIME_VERSION = "v4"
+REGIME_VERSION = "v5"
 
 # Daily reference-time/scoring semantics are independent of funding/return
 # FEATURE_VERSION. Missing prediction timing identifies historical v2 rows.

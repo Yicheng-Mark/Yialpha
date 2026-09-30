@@ -31,15 +31,17 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import LLMResult
+from langchain_core.runnables import RunnableConfig
 
 __all__ = [
     "NodePerfTracker",
     "wrap_node",
+    "wrap_runnable_node",
     "NodePerfTokenCallback",
     "dump_perf_report",
 ]
@@ -178,8 +180,10 @@ def wrap_node(
 ) -> Callable[..., Any]:
     """Return a new callable that wraps ``handler`` with timing + active-node
     bookkeeping. The wrapper is signature-agnostic (forwards ``*args,
-    **kwargs``) so it works for plain ``fn(state)`` node handlers AND callable
-    ``ToolNode`` instances (LangGraph invokes both as ``fn(state)``).
+    **kwargs``) so it works for any plain-callable node handler (``fn(state)``
+    closures and callable objects). Langgraph Runnable nodes such as
+    ``ToolNode`` are NOT plain callables — use ``wrap_runnable_node`` for
+    those.
 
     Guarantees:
     * Same return value as ``handler``.
@@ -197,6 +201,60 @@ def wrap_node(
         finally:
             # ``finally`` (not ``except``) so exceptions still propagate and
             # we still book the time spent before the failure.
+            tracker.record(node_name, time.monotonic() - t0)
+            tracker.set_active_node(previous)
+
+    return wrapper
+
+
+def wrap_runnable_node(
+    runnable: Any,
+    node_name: str,
+    tracker: NodePerfTracker,
+) -> Callable[..., Any]:
+    """Return a callable node wrapping a langgraph Runnable (``ToolNode``)
+    with the same timing + active-node bookkeeping as ``wrap_node``.
+
+    LangGraph invokes Runnable nodes via ``runnable.invoke(state, config)``,
+    never as a plain function, so ``wrap_node``'s ``handler(*args)`` call
+    would raise ``'ToolNode' object is not callable`` (the 2026-07-05
+    --profile smoke failure that originally excluded ToolNode from
+    telemetry). This wrapper names its second parameter ``config`` and types
+    it ``Optional[RunnableConfig]`` so LangGraph's RunnableCallable detects
+    it and passes the real run config through to ``invoke`` —
+    callback/tracing propagation into tool execution is preserved.
+    (Round-11 remediation: the previous ``config: Any`` annotation made
+    langgraph emit a UserWarning per serial ToolNode at graph-compile time —
+    "'config' parameter should be typed as 'RunnableConfig'". The spelling
+    matters: this module's ``from __future__ import annotations`` leaves the
+    annotation as a STRING, and langgraph 1.2.6's accepted set contains
+    ``"Optional[RunnableConfig]"`` but not the stringified
+    ``"RunnableConfig | None"`` — the modern union spelling still warns.)
+    Serial tool-node walls therefore land in telemetry, closing the A/B
+    speedup gate's systematic undercount of the serial leg (tool HTTP
+    previously counted as zero).
+
+    Guarantees mirror ``wrap_node``: same return value, same exceptions
+    propagate, active node restored to its previous value in ``finally``.
+
+    Sync-only (E4, recorded not fixed): the wrapper is a plain function, so
+    an async graph call (``ainvoke`` / ``astream``) falls back to SYNC
+    execution inside it. The repo has no async callers today; introducing
+    one would need an ``async def`` wrapper variant here.
+    """
+
+    def wrapper(
+        state: Any, config: Optional[RunnableConfig] = None, **kwargs: Any
+    ) -> Any:
+        previous = tracker.get_active_node()
+        tracker.set_active_node(node_name)
+        t0 = time.monotonic()
+        try:
+            # Config forwards positionally: Runnable.invoke(input, config).
+            # When LangGraph calls the wrapper with state only, config is
+            # None — identical to invoke's own default.
+            return runnable.invoke(state, config, **kwargs)
+        finally:
             tracker.record(node_name, time.monotonic() - t0)
             tracker.set_active_node(previous)
 
@@ -365,11 +423,11 @@ def dump_perf_report(
     # node_perf_<date>.json is written next to full_states_log and can be
     # interrupted by run_robust's taskkill /F /T; a half-written file would
     # crash the next json.load. Mirrors the atomic pattern in memory.py.
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2)
     # Written next to full_states_log, which the web store reads live — the
-    # same Windows lockless-reader race applies (round-10).
-    from yialpha.dataflows.utils import replace_retry_on_windows
+    # same Windows lockless-reader race applies (round-10). Round-11: the
+    # publish seam is the canonical ``atomic_write_text``; the rendered
+    # bytes are unchanged (json.dumps defaults == json.dump's: indent=2,
+    # ensure_ascii=True).
+    from yialpha.dataflows.utils import atomic_write_text
 
-    replace_retry_on_windows(tmp, path)
+    atomic_write_text(path, json.dumps(payload, indent=2))

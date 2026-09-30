@@ -207,6 +207,12 @@ def get_news_yfinance(
 
         return f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n{news_str}"
 
+    except NoMarketDataError:
+        # Typed soft-miss (empty feed / nothing in the window): re-raise
+        # untouched — this is the designed degradation path (the router tries
+        # the next vendor in the chain), not a fault worth an ERROR-level
+        # stack trace (same contract as alpha_vantage_indicator, round-11).
+        raise
     except Exception:
         # Raise instead of returning an "Error fetching news…" string: news_data
         # is a core category, so the router (route_to_vendor) must see the
@@ -245,67 +251,80 @@ def get_global_news_yfinance(
     # run's pinned analysis date so a backtest cannot receive today's headlines
     # (same guard as get_news_yfinance above; no-op in live mode).
     curr_date = current_pit_end(curr_date) or curr_date
+    # Double-form guard (round-11 remediation, same normalize as the
+    # sentiment/news tools): curr_date may arrive as "2026-09-30 16:00:00" —
+    # reduce to the ISO date so the strptime below never sees a bare
+    # ValueError on a datetime-form value.
+    curr_date = str(curr_date)[:10]
 
     all_news = []
     seen_titles = set()
 
     try:
+        # Date range BEFORE accumulating (round-11): the per-query candidates
+        # are window-filtered as they accumulate. The old loop counted
+        # out-of-window articles toward ``limit`` and broke before the later
+        # queries were ever consulted — a first query full of out-window
+        # headlines masked the rest and ended in a false NoMarketDataError.
+        # Parsed INSIDE the try (round-11 remediation): a malformed date is a
+        # real fault worth an ERROR-level stack trace, and the re-raise keeps
+        # the router's view (a raw ValueError) unchanged.
+        curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+        start_dt = curr_dt - relativedelta(days=look_back_days)
+        start_date = start_dt.strftime("%Y-%m-%d")
+
         for query in search_queries:
             for article in _cached_search_news(query, limit):
-                # Handle both flat and nested structures
-                if "content" in article:
-                    data = _extract_article_data(article)
-                    title = data["title"]
-                else:
-                    title = article.get("title", "")
-
+                # Extract uniformly (flat + nested) and window-filter AT
+                # ACCUMULATION (round-11): an out-of-window candidate must not
+                # consume the ``limit`` quota.
+                data = _extract_article_data(article)
+                if not _in_news_window(data["pub_date"], start_dt, curr_dt):
+                    continue
+                # Titleless flat entries carry no signal ("No title" is the
+                # extractor's placeholder): they used to consume the ``limit``
+                # quota and dedup-collapse into a single "No title" row —
+                # exclude them at the gate (nested entries always carry a
+                # real title; an empty nested summary is already skipped by
+                # the renderer).
+                if not data["title"] or data["title"] == "No title":
+                    continue
                 # Deduplicate by title
-                if title and title not in seen_titles:
-                    seen_titles.add(title)
-                    all_news.append(article)
+                if data["title"] not in seen_titles:
+                    seen_titles.add(data["title"])
+                    all_news.append(data)
 
             if len(all_news) >= limit:
                 break
 
         if not all_news:
-            # Typed soft-miss (same contract as get_news_yfinance): an empty
-            # result must reach the router's vendor chain, not count as a
-            # successful fetch that masks the fallback.
+            # Typed soft-miss (same contract as get_news_yfinance): nothing
+            # in-window (or nothing at all) must reach the router's vendor
+            # chain, not count as a successful fetch that masks the fallback.
             raise NoMarketDataError(
-                curr_date, curr_date, "yfinance Search returned no news items",
+                curr_date, curr_date,
+                f"no yfinance global news within {start_date}..{curr_date}",
             )
 
-        # Calculate date range
-        curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
-        start_dt = curr_dt - relativedelta(days=look_back_days)
-        start_date = start_dt.strftime("%Y-%m-%d")
-
+        # Render reuses the extraction results accumulated above — the old
+        # loop re-extracted every article (and re-applied a dead window
+        # filter that the accumulation gate had already made unreachable).
         news_str = ""
-        kept = 0
-        for article in all_news[:limit]:
-            # Extract uniformly (flat + nested) and apply the same look-ahead-safe
-            # window filter, so flat articles can't leak future news (#1007).
-            data = _extract_article_data(article)
-            if not _in_news_window(data["pub_date"], start_dt, curr_dt):
-                continue
+        for data in all_news[:limit]:
             news_str += f"### {data['title']} (source: {data['publisher']})\n"
             if data["summary"]:
                 news_str += f"{data['summary']}\n"
             if data["link"]:
                 news_str += f"Link: {data['link']}\n"
             news_str += "\n"
-            kept += 1
-
-        # All candidates fell outside the window -> typed soft-miss, not an
-        # empty-bodied report (#993): the next vendor may cover the window.
-        if kept == 0:
-            raise NoMarketDataError(
-                curr_date, curr_date,
-                f"no yfinance global news within {start_date}..{curr_date}",
-            )
 
         return f"## Global Market News, from {start_date} to {curr_date}:\n\n{news_str}"
 
+    except NoMarketDataError:
+        # Typed soft-miss: re-raise untouched — the designed degradation path
+        # (the router tries the next vendor), not a fault worth an ERROR-level
+        # stack trace (same contract as alpha_vantage_indicator, round-11).
+        raise
     except Exception:
         # Same contract as get_news_yfinance above: global_news is a core
         # category, so failures must reach the router rather than masquerade

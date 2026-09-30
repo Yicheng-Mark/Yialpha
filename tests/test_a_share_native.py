@@ -303,6 +303,256 @@ def test_transient_retry_session_scoped_nmd_retried(monkeypatch):
     assert calls["n"] == 2
 
 
+# --------------------------------------------------------------------------- #
+# Round-11 — deterministic "package not installed" stays OUTSIDE the retry ring
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+@pytest.mark.parametrize("fn", [
+    bsv.get_a_share_ohlc_native,
+    bsv.get_a_share_fundamentals_native,
+    bsv.get_a_share_income_statement_native,
+    bsv.get_a_share_balance_sheet_native,
+    bsv.get_a_share_cashflow_statement_native,
+])
+def test_missing_dependency_raises_once_outside_retry_ring(
+    monkeypatch, tmp_path, fn,
+):
+    """Round-11: the deterministic 'baostock not installed' NoMarketDataError
+    fires AFTER the cache decision but BEFORE the transient retry ring. It used
+    to surface only inside _BaostockSession (i.e. inside
+    _with_transient_retry), so an uninstalled machine under run_robust's
+    default retries re-raised the same ImportError 3 times and slept 2s+4s
+    between them, with the log mislabelling it a transient failure."""
+    calls = {"require": 0, "sleeps": 0}
+    monkeypatch.setattr(bsv, "BS_TRANSIENT_RETRIES", 2)
+
+    def _fake_require():
+        calls["require"] += 1
+        raise NoMarketDataError(
+            "baostock", detail="baostock package not installed")
+
+    def _fake_sleep(_s):
+        calls["sleeps"] += 1
+
+    monkeypatch.setattr(bsv, "_require_baostock", _fake_require)
+    monkeypatch.setattr(bsv.time, "sleep", _fake_sleep)
+    # Force the cache MISS on both paths (round-11 remediation: the guard now
+    # lives after the cache decision): an empty tmp dir for the daily disk
+    # cache, a cleared lru for the statement cache — otherwise a machine with
+    # a warm baostock cache serves rows and never reaches the guard.
+    monkeypatch.setattr(bsv, "_cache_dir", lambda: str(tmp_path))
+    bsv._statement_rows_cached.cache_clear()
+    with pytest.raises(NoMarketDataError):
+        fn("600519.SS", "2024-06-15", 180)
+    assert calls["require"] == 1   # raised exactly once — never entered the ring
+    assert calls["sleeps"] == 0    # no backoff sleeps
+
+
+@pytest.mark.unit
+def test_warm_daily_cache_serves_without_baostock_import(monkeypatch, tmp_path):
+    """Round-11 remediation: the dependency guard fires only on a cache MISS.
+    A machine that ran with baostock installed (warm on-disk cache) and later
+    removed the package keeps serving the cached rows — the head-of-function
+    guard would have hard-failed those cache-servable calls."""
+    monkeypatch.setattr(bsv, "_cache_dir", lambda: str(tmp_path))
+    rows = [_row("2024-06-14", close="104.0")]
+    (tmp_path / "daily_sh_600519.json").write_bytes(json.dumps(rows).encode())
+
+    def _no_require():
+        raise AssertionError("cache hit must not import baostock")
+
+    monkeypatch.setattr(bsv, "_require_baostock", _no_require)
+    monkeypatch.setattr(bsv, "_BaostockSession", _no_require)
+    out = bsv.get_a_share_ohlc_native("600519.SS", "2024-06-15", 180)
+    assert "2024-06-14" in out
+
+
+@pytest.mark.unit
+def test_warm_statement_cache_serves_without_baostock_import(monkeypatch):
+    """Same contract for the lru-cached statement path: once the rows are
+    primed, a removed baostock package never blocks the render (the guard
+    lives in the uncached fetch body, not in the public entry point)."""
+
+    class _FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(bsv, "_require_baostock", lambda: None)
+    monkeypatch.setattr(bsv, "_BaostockSession", _FakeSession)
+    monkeypatch.setattr(
+        bsv, "_query_statement",
+        lambda bs, code, fn, anchor=None: bsv.StatementFetch(_profit_rows(), []),
+    )
+    bsv._statement_rows_cached.cache_clear()
+    bsv.get_a_share_income_statement_native("600519.SS", "2024-06-15", 540)
+
+    def _no_require():
+        raise AssertionError("lru-cache hit must not import baostock")
+
+    monkeypatch.setattr(bsv, "_require_baostock", _no_require)
+    monkeypatch.setattr(bsv, "_BaostockSession", _no_require)
+    out = bsv.get_a_share_income_statement_native("600519.SS", "2024-06-15", 540)
+    assert "# A-share Income Statement" in out
+
+
+@pytest.mark.unit
+def test_statement_curr_date_clamped_to_pinned_analysis_date(monkeypatch):
+    """Round-11 remediation (C2): an LLM-supplied curr_date beyond the run's
+    pinned analysis date must not widen the pubDate window — the 2024-10-30
+    and 2025-04-15 statements stay invisible at the pinned 2024-09-30 in both
+    the clamped and the direct call (byte-identical output)."""
+    from yialpha.dataflows.utils import set_analysis_date
+
+    class _FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(bsv, "_BaostockSession", _FakeSession)
+    monkeypatch.setattr(
+        bsv, "_query_statement",
+        lambda bs, code, fn, anchor=None: bsv.StatementFetch(_profit_rows(), []),
+    )
+    bsv._statement_rows_cached.cache_clear()
+    set_analysis_date("2024-09-30")
+    try:
+        clamped = bsv.get_a_share_income_statement_native(
+            "600519.SS", "2030-01-01", 540)
+        direct = bsv.get_a_share_income_statement_native(
+            "600519.SS", "2024-09-30", 540)
+    finally:
+        set_analysis_date(None)
+    assert clamped == direct
+    assert "2024-08-29" in clamped    # published before the pinned date
+    assert "2024-10-30" not in clamped
+    assert "2025-04-15" not in clamped
+
+
+# --------------------------------------------------------------------------- #
+# Round-11 — thread-scoped proxy bypass in _direct_connect
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_direct_connect_bypass_is_thread_scoped(monkeypatch):
+    """Inside the window THIS thread's requests build transport settings with
+    no env proxies (the proxies-only override), while — on a curl_cffi-less
+    host — the env vars stay visible to every other thread. The old env-pop
+    was process-global and leaked into concurrent proxied vendor calls
+    (FRED/tavily/sec_edgar/AV)."""
+    import os
+    import threading
+
+    import requests
+
+    monkeypatch.setenv("HTTP_PROXY", "socks5h://127.0.0.1:1080")
+    monkeypatch.setenv("HTTPS_PROXY", "socks5h://127.0.0.1:1080")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    # Pin the NO-curl_cffi state explicitly: the env-pop fallback only runs
+    # when curl_cffi is importable (libcurl reads os.environ natively).
+    monkeypatch.setattr(akv, "_HAS_CURL_CFFI", False)
+
+    session = requests.Session()
+    other_thread: dict = {}
+    try:
+        with akv._direct_connect():
+            inside = session.merge_environment_settings(
+                "http://domestic.example/x", {}, None, None, None)
+            # ② env intact inside the window (no pop) — proven in THIS thread
+            # and from another thread started while the window is open.
+            env_intact = (
+                os.environ.get("HTTP_PROXY") == "socks5h://127.0.0.1:1080")
+            t = threading.Thread(target=lambda: other_thread.update(
+                {"http_proxy": os.environ.get("HTTP_PROXY")}))
+            t.start()
+            t.join()
+            assert env_intact
+        outside = session.merge_environment_settings(
+            "http://domestic.example/x", {}, None, None, None)
+    finally:
+        session.close()
+
+    assert other_thread["http_proxy"] == "socks5h://127.0.0.1:1080"
+    # ① this thread's settings inside the window carry no env proxies.
+    assert not ({"http", "https", "all"} & set(inside.get("proxies") or {}))
+    # ③ after the window, the same thread reads the env proxies again.
+    assert {"http", "https"} & set(outside.get("proxies") or {})
+
+
+@pytest.mark.unit
+def test_direct_connect_curl_cffi_window_pops_proxy_env(monkeypatch):
+    """Round-11 remediation: akshare's news leg rides curl_cffi/libcurl,
+    which reads os.environ NATIVELY — the requests patch never reaches it.
+    When curl_cffi is present, the _direct_connect window pops the proxy env
+    vars (documented behavior) and restores them on exit; other threads'
+    direct env readers lose the proxy only inside the serialized window."""
+    import os
+
+    monkeypatch.setenv("HTTP_PROXY", "socks5h://127.0.0.1:1080")
+    monkeypatch.setenv("HTTPS_PROXY", "socks5h://127.0.0.1:1080")
+    monkeypatch.setattr(akv, "_HAS_CURL_CFFI", True)
+
+    with akv._direct_connect():
+        assert os.environ.get("HTTP_PROXY") is None
+        assert os.environ.get("HTTPS_PROXY") is None
+    assert os.environ.get("HTTP_PROXY") == "socks5h://127.0.0.1:1080"
+    assert os.environ.get("HTTPS_PROXY") == "socks5h://127.0.0.1:1080"
+
+
+@pytest.mark.unit
+def test_direct_connect_override_is_proxies_only(monkeypatch):
+    """Round-11 remediation: the patched merge clears ONLY ``proxies`` —
+    trust_env / verify / cert are whatever the original merge computed (the
+    instance attribute is never flipped, so a Session shared across threads
+    cannot observe a mutated trust_env, and env CA-bundle semantics survive
+    the bypass)."""
+    import requests
+
+    monkeypatch.setenv("HTTP_PROXY", "socks5h://127.0.0.1:1080")
+    monkeypatch.setenv("HTTPS_PROXY", "socks5h://127.0.0.1:1080")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.setattr(akv, "_HAS_CURL_CFFI", False)
+
+    session = requests.Session()
+    try:
+        outside = session.merge_environment_settings(
+            "http://domestic.example/x", {}, None, None, None)
+        with akv._direct_connect():
+            inside = session.merge_environment_settings(
+                "http://domestic.example/x", {}, None, None, None)
+        # The Session instance was never mutated across the window.
+        assert session.trust_env is True
+
+        assert inside["proxies"] == {}
+        assert outside.get("proxies")
+        # Everything else in the settings dict is the ORIGINAL merge's output.
+        for key in ("stream", "verify", "cert"):
+            assert inside.get(key) == outside.get(key), key
+    finally:
+        session.close()
+
+
+@pytest.mark.unit
+def test_direct_connect_patch_install_is_idempotent():
+    """Repeated windows install the merge_environment_settings patch exactly
+    once (module-level flag); with no window active the method delegates to
+    the original — byte-equivalent for every other requests caller."""
+    import requests
+
+    with akv._direct_connect():
+        first = requests.sessions.Session.merge_environment_settings
+    assert akv._proxy_patch_installed is True
+    with akv._direct_connect():
+        second = requests.sessions.Session.merge_environment_settings
+    assert first is second                    # installed once, never re-wrapped
+    assert akv._bypass_depth() == 0           # flag down outside the window
+
+
 @pytest.mark.unit
 def test_statement_rows_cached_per_code_fn_anchor(monkeypatch):
     """One statement fetch costs a TCP login + up to 12 quarter queries; the

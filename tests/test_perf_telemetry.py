@@ -26,6 +26,7 @@ from yialpha.graph.perf_telemetry import (
     NodePerfTracker,
     dump_perf_report,
     wrap_node,
+    wrap_runnable_node,
 )
 
 
@@ -89,19 +90,132 @@ def test_wrap_node_restores_previous_active_node_on_exception():
     assert tracker.get_active_node() == "outer"
 
 
-def test_wrap_node_works_for_callable_object_like_toolnode():
-    """ToolNode is a callable instance, not a function. The wrapper must be
-    signature-agnostic and work for it too."""
+def test_wrap_node_works_for_callable_objects():
+    """Callable instances (``__call__`` defined) wrap fine under the generic
+    wrapper. langgraph Runnables such as ToolNode are NOT plain callables —
+    see wrap_runnable_node tests below (round-11)."""
     tracker = NodePerfTracker()
 
-    class FakeToolNode:
+    class FakeCallableNode:
         def __call__(self, state):
             return {"tools_ran": True}
 
-    wrapped = wrap_node(FakeToolNode(), "tools_market", tracker)
+    wrapped = wrap_node(FakeCallableNode(), "tools_market", tracker)
     out = wrapped({"some": "state"})
     assert out == {"tools_ran": True}
     assert tracker.serialize()["nodes"]["tools_market"]["calls"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# 1b. wrap_runnable_node (round-11: ToolNode telemetry)
+# --------------------------------------------------------------------------- #
+class _RecordingRunnable:
+    """Minimal stand-in for a langgraph Runnable (e.g. ToolNode): records the
+    config it was invoked with; raises when asked to."""
+
+    def __init__(self, *, boom: bool = False) -> None:
+        self.seen_config = "unset"
+        self.boom = boom
+
+    def invoke(self, state, config=None, **kwargs):
+        self.seen_config = config
+        if self.boom:
+            raise ValueError("boom")
+        return {"invoked": True}
+
+
+def test_wrap_runnable_node_returns_value_and_records():
+    tracker = NodePerfTracker()
+    runnable = _RecordingRunnable()
+    wrapped = wrap_runnable_node(runnable, "tools_market", tracker)
+
+    out = wrapped({"messages": []}, {"recursion_limit": 25})
+    assert out == {"invoked": True}
+    node = tracker.serialize()["nodes"]["tools_market"]
+    assert node["calls"] == 1
+    assert node["wall_seconds"] >= 0.0
+
+
+def test_wrap_runnable_node_forwards_config_to_invoke():
+    """The wrapper's 2nd parameter is named ``config`` so LangGraph's
+    RunnableCallable hands it the real run config; it must reach
+    ``invoke`` (callback propagation into tool execution)."""
+    tracker = NodePerfTracker()
+    runnable = _RecordingRunnable()
+    wrapped = wrap_runnable_node(runnable, "tools_market", tracker)
+
+    cfg = {"recursion_limit": 25, "tags": ["x"]}
+    wrapped({"messages": []}, cfg)
+    assert runnable.seen_config is cfg
+
+
+def test_wrap_runnable_node_state_only_call_defaults_config():
+    """Called with state only: config=None forwards as invoke's own default."""
+    tracker = NodePerfTracker()
+    runnable = _RecordingRunnable()
+    wrapped = wrap_runnable_node(runnable, "tools_market", tracker)
+
+    wrapped({"messages": []})
+    assert runnable.seen_config is None
+    assert tracker.serialize()["nodes"]["tools_market"]["calls"] == 1
+
+
+def test_wrap_runnable_node_propagates_exceptions_and_restores_context():
+    tracker = NodePerfTracker()
+    tracker.set_active_node("Market Analyst")
+    wrapped = wrap_runnable_node(
+        _RecordingRunnable(boom=True), "tools_market", tracker
+    )
+    with pytest.raises(ValueError):
+        wrapped({"messages": []})
+    # Timing sample booked despite the failure, context restored.
+    assert tracker.serialize()["nodes"]["tools_market"]["calls"] == 1
+    assert tracker.get_active_node() == "Market Analyst"
+
+
+def test_wrap_runnable_node_sets_active_node_during_invoke():
+    """While the runnable runs, the tracker's active node is the tool node —
+    so any LLM call a tool triggers mid-flight attributes to it."""
+    tracker = NodePerfTracker()
+
+    class _NestedRunnable:
+        def invoke(self, state, config=None, **kwargs):
+            tracker.record_tokens("probe", input_tokens=1)
+            return tracker.get_active_node(), True
+
+    wrapped = wrap_runnable_node(_NestedRunnable(), "tools_market", tracker)
+    active_inside, _ = wrapped({"messages": []})
+    assert active_inside == "tools_market"
+
+
+def test_wrap_runnable_node_compiles_without_config_type_warning():
+    """Round-11 remediation: the wrapper's ``config`` parameter is typed
+    ``Optional[RunnableConfig]`` — compiling a graph that carries the
+    wrapped node must not emit langgraph's "'config' parameter should be
+    typed as 'RunnableConfig'" UserWarning (the previous ``config: Any``
+    annotation fired it once per serial ToolNode at compile time; the
+    spelling matters because this module stringifies annotations via
+    ``from __future__ import annotations`` and langgraph only accepts the
+    ``Optional[RunnableConfig]`` string form, not ``RunnableConfig | None``)."""
+    import warnings
+
+    from langgraph.graph import END, START, StateGraph
+
+    tracker = NodePerfTracker()
+    wrapped = wrap_runnable_node(_RecordingRunnable(), "tools_market", tracker)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        graph = StateGraph(dict)
+        graph.add_node("tools_market", wrapped)
+        graph.add_edge(START, "tools_market")
+        graph.add_edge("tools_market", END)
+        graph.compile()
+    offending = [
+        w for w in caught
+        if "should be typed as 'RunnableConfig'" in str(w.message)
+    ]
+    assert offending == []
 
 
 # --------------------------------------------------------------------------- #

@@ -51,20 +51,16 @@ from datetime import datetime
 from pathlib import Path
 from random import Random
 
-# Allow running as ``python scripts/run_analyst_parallel_ab.py`` without an
-# editable install: ensure the project root (parent of this scripts/ dir) is
-# on sys.path. Done before any yialpha import (those are lazy, below).
-_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+# Allow running as `python scripts/run_analyst_parallel_ab.py` without an editable install, and
+# make scripts/_bootstrap importable under importlib-based test loading too
+# (spec_from_file_location does not put scripts/ on sys.path).
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-# Windows console defaults to GBK (cp936); printing the ✅/❌ glyphs or CJK
-# triggers UnicodeEncodeError. Force utf-8 on stdout/stderr (Python 3.7+).
-for _stream in (sys.stdout, sys.stderr):
-    _reconfigure = getattr(_stream, "reconfigure", None)
-    if callable(_reconfigure):
-        with contextlib.suppress(AttributeError, ValueError):
-            _reconfigure(encoding="utf-8", errors="replace")
+import _bootstrap  # noqa: E402
+
+_bootstrap.bootstrap()  # project-root sys.path + UTF-8 console (Windows GBK)
 
 # Centralised logging: make INFO/DEBUG from agents/dataflows visible at runtime
 # (otherwise Python's default WARNING-only root logger silently swallows them).
@@ -970,9 +966,13 @@ def _capture_run(graph, ticker: str, date: str) -> dict:
     # as the per-analyst agent/tool/clear clusters the fanout replaces. Sum
     # EXACTLY that replaced scope — agents-only undercounts the serial stage
     # and biases the 2.5x criterion toward a false FAIL. Nodes absent from
-    # telemetry contribute nothing: unselected analysts never run, and
-    # serial ToolNode walls are not recorded today (setup.py._wrap_node
-    # skips ToolNode) — they start counting if that wrapping ever lands.
+    # telemetry contribute nothing: unselected analysts never run. Serial
+    # ToolNode walls count since round-11 (setup.py._wrap_node wraps
+    # ToolNode via the Runnable-aware wrapper — tool HTTP previously read
+    # as zero on the serial leg, systematically biasing the 2.5x criterion
+    # toward a false FAIL); the parallel leg's subgraph tool nodes still
+    # fold into the parent "Analyst Fanout" node, so both legs now cover
+    # agent + tool + clear over the same replaced scope.
     analyst_segment = None
     tracker = getattr(graph, "perf_tracker", None)
     if tracker is not None and hasattr(tracker, "serialize"):

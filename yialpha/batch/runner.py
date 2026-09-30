@@ -151,7 +151,17 @@ def batch_selected_analysts(
         tuple(filter_analysts_for_asset_type(analysts, at, t)) for t in tickers
     }
     union = [a for a in base if any(AnalystType(a) in kept for kept in per_ticker)]
-    return tuple(union)
+    # V2.3 positioning split: filter_analysts_for_asset_type APPENDS the
+    # never-user-selected Positioning Analyst for flag-on crypto_perp runs,
+    # but `union` above intersects against the four-key `base` universe, so
+    # the appended analyst would be silently dropped here (end-to-end dead
+    # switch). Merge any per-ticker extras (in practice only POSITIONING)
+    # back in, deterministically appended at the tail in a stable order —
+    # the execution-plan builder re-pins the run position right after
+    # "market", so the tail order here carries no semantics. Flag-off /
+    # stock runs keep extras empty and return exactly the pre-V2.3 union.
+    extras = sorted({a.value for kept in per_ticker for a in kept} - set(base))
+    return tuple(union) + tuple(extras)
 
 
 @contextmanager

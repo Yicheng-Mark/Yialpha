@@ -96,6 +96,114 @@ class TestWeeklyPit:
 
 
 @pytest.mark.unit
+class TestLiveFormingGuardRound11:
+    """Round-11: the still-forming judgment asks whether the BIN's own
+    interval extends to today (a W-FRI label L covers (L-6, L]; today > L
+    means no new row can ever land in it), not whether the feed has printed
+    today's bar — that bar belongs to the NEXT bin, which the cutoff filter
+    already dropped. The round-8 criterion (``last_day >= today``) deleted
+    the last COMPLETED Friday bin on every Tue-Thu live run (crypto always
+    carries a today-dated bar; intraday equities too), so weekly pivots /
+    weekly indicators read the week BEFORE last — the exact "Wednesday
+    analysis returned week-before-last" symptom round-5 chased while its
+    Saturday test path never ran on a real Saturday.
+
+    All three scenarios pin the clock (pd.Timestamp.now) and the live gate
+    (is_historical_date) so they are deterministic on any host date."""
+
+    _WEEK_A = pd.date_range("2026-09-14", "2026-09-18")  # label Fri 09-18
+    _WEEK_B = pd.date_range("2026-09-21", "2026-09-25")  # label Fri 09-25
+
+    def _patch_live_clock(self, monkeypatch, today: str):
+        import yialpha.dataflows.ohlcv_resample as mod
+
+        monkeypatch.setattr(
+            "yialpha.dataflows.utils.is_historical_date", lambda d: False,
+        )
+        monkeypatch.setattr(
+            mod.pd.Timestamp, "now",
+            staticmethod(lambda *a, **k: pd.Timestamp(today, tz="UTC")),
+        )
+        return mod
+
+    def test_tuesday_live_keeps_completed_friday_bin(self, monkeypatch):
+        """Crypto Tuesday live run (today's bar present in the feed): the
+        last completed Friday bin must survive — the round-8 guard deleted
+        it because ``last_day >= today`` held for the today-dated bar."""
+        mod = self._patch_live_clock(monkeypatch, "2026-09-29")
+        days = list(self._WEEK_A) + list(self._WEEK_B) + [
+            pd.Timestamp("2026-09-28"), pd.Timestamp("2026-09-29"),
+        ]
+        weekly = mod.resample_weekly(
+            _daily_frame(days, range(1, len(days) + 1)), curr_date="2026-09-29",
+        )
+        labels = [ts.date().isoformat() for ts in weekly["Date"]]
+        assert labels == ["2026-09-18", "2026-09-25"]
+
+    def test_friday_live_drops_same_day_bin(self, monkeypatch):
+        """Live ON the bin's own Friday: the day's bar is still intraday —
+        the trailing bin is forming and must drop (unchanged behavior)."""
+        mod = self._patch_live_clock(monkeypatch, "2026-09-25")
+        days = list(self._WEEK_A) + list(self._WEEK_B)
+        weekly = mod.resample_weekly(
+            _daily_frame(days, range(1, len(days) + 1)), curr_date="2026-09-25",
+        )
+        labels = [ts.date().isoformat() for ts in weekly["Date"]]
+        assert labels == ["2026-09-18"]
+
+    def test_saturday_live_keeps_completed_friday_bin(self, monkeypatch):
+        """True-Saturday crypto run (Saturday row landed, UTC rolled): the
+        Friday bin is complete and must survive. The round-8 guard deleted
+        it (``last_day >= today`` for the Saturday row) — round-5's suite
+        never exercised this path on a real Saturday."""
+        mod = self._patch_live_clock(monkeypatch, "2026-09-26")
+        days = (
+            list(self._WEEK_A) + list(self._WEEK_B)
+            + [pd.Timestamp("2026-09-26")]  # the rolled-UTC Saturday row
+        )
+        weekly = mod.resample_weekly(
+            _daily_frame(days, range(1, len(days) + 1)), curr_date="2026-09-26",
+        )
+        labels = [ts.date().isoformat() for ts in weekly["Date"]]
+        assert labels == ["2026-09-18", "2026-09-25"]
+
+    def test_saturday_live_cache_missing_friday_bar_drops_truncated_bin(
+        self, monkeypatch,
+    ):
+        """Round-11 remediation: the calendar clause alone cannot judge a
+        bin whose label day is past but whose CACHE never received the
+        label-day bar — a Saturday-early live run against a feed still
+        ending Thursday serves a Mon–Thu bin wearing Friday's label
+        (Thursday's close quoted as a weekly close). The restored
+        ``last_label > last_daily`` clause drops it (round-5 doctrine: the
+        label-day bar must be in the cache)."""
+        mod = self._patch_live_clock(monkeypatch, "2026-09-26")
+        truncated_week_b = [
+            pd.Timestamp("2026-09-21"), pd.Timestamp("2026-09-22"),
+            pd.Timestamp("2026-09-23"), pd.Timestamp("2026-09-24"),
+        ]  # Mon–Thu only — Friday 09-25's bar never landed in the cache
+        days = list(self._WEEK_A) + truncated_week_b
+        weekly = mod.resample_weekly(
+            _daily_frame(days, range(1, len(days) + 1)), curr_date="2026-09-26",
+        )
+        labels = [ts.date().isoformat() for ts in weekly["Date"]]
+        assert labels == ["2026-09-18"]  # truncated Fri-labelled bin dropped
+
+    def test_monday_preopen_live_friday_tail_bin_kept(self, monkeypatch):
+        """The truncation clause must not over-drop: on a pre-open Monday
+        equities live run there are no weekend rows, so Friday's bar IS the
+        cache tail (``last_label == last_daily``) and the completed bin
+        survives."""
+        mod = self._patch_live_clock(monkeypatch, "2026-09-28")
+        days = list(self._WEEK_A) + list(self._WEEK_B)  # tail = Fri 09-25
+        weekly = mod.resample_weekly(
+            _daily_frame(days, range(1, len(days) + 1)), curr_date="2026-09-28",
+        )
+        labels = [ts.date().isoformat() for ts in weekly["Date"]]
+        assert labels == ["2026-09-18", "2026-09-25"]
+
+
+@pytest.mark.unit
 class TestWeeklyTool:
     def test_tool_renders_table_and_summary(self, monkeypatch):
         import yialpha.dataflows.ohlcv_resample as mod

@@ -169,6 +169,13 @@ def _source_profile(asset_type: str | None, ticker: str) -> tuple[str, str]:
 
 
 def _seven_days_back(trade_date: str) -> str:
+    # trade_date is dual-form (live runs carry a full ISO timestamp, replays
+    # a date-only string — the round-10 lesson from regime/compute.py), so
+    # normalize to the date part before strptime (same idiom as
+    # dataflows/utils.is_historical_date). A bare strptime would ValueError
+    # on a programmatic live entry like propagate(t, "2026-08-01 16:00:00")
+    # and kill the whole run before any LLM call.
+    trade_date = str(trade_date)[:10]
     return (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
 
 

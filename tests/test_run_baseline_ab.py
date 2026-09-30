@@ -35,7 +35,9 @@ def test_full_ab_pairs_decision_tapes_and_fresh_risk_managers(monkeypatch, tmp_p
 
     monkeypatch.setattr(runner, "_rebalance_dates", lambda *args: ["2024-01-02"])
 
-    def fake_map(tickers, task, workers, risk_enabled=None):
+    def fake_map(tickers, task, workers, risk_enabled=None, asset_type="stock"):
+        # asset_type kwarg: round-11 C1 threads the asset class into
+        # _map_tickers so _build_graph can route through the analyst filter.
         map_modes.append(risk_enabled)
         return [task(ticker, object()) for ticker in tickers]
 

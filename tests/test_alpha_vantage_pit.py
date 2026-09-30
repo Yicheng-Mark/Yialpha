@@ -114,3 +114,30 @@ def test_filtered_dict_is_json_serializable(monkeypatch):
     result = avf.get_income_statement("AAPL", curr_date=CURR)
     round_trip = json.loads(json.dumps(result))
     assert round_trip == result
+
+
+# --------------------------------------------------------------------------- #
+# Round-11 — current_pit_end clamp before the report filter (mirrors y_finance)
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+@pytest.mark.parametrize("getter", [avf.get_balance_sheet, avf.get_cashflow,
+                                    avf.get_income_statement])
+def test_future_curr_date_clamped_to_pinned_analysis_date(monkeypatch, getter):
+    """A curr_date beyond the run's pinned analysis date (e.g. an LLM echoing
+    a cached header's "today") is clamped before is_filing_public filters —
+    identical output to passing the pinned date itself, so the not-yet-public
+    2024-06-30 reports stay invisible in both calls."""
+    from yialpha.dataflows.utils import set_analysis_date
+
+    monkeypatch.setattr(
+        avf, "_make_api_request",
+        lambda _fn, _params: json.dumps(STATEMENTS_JSON))
+    set_analysis_date("2024-06-15")
+    try:
+        clamped = getter("AAPL", curr_date="2030-01-01")
+        direct = getter("AAPL", curr_date=CURR)
+    finally:
+        set_analysis_date(None)
+    assert clamped == direct
+    assert "9999" not in json.dumps(clamped)   # future report invisible in both
+    assert "8888" not in json.dumps(clamped)

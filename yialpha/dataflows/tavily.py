@@ -211,15 +211,6 @@ def run_usage() -> dict[str, int]:
     return {scope: calls.get(scope, 0) for scope in DEFAULT_BUDGET_SPLIT}
 
 
-def _charge(scope: str) -> None:
-    # In-place mutation only — never rebind. A rebind inside a ToolNode
-    # worker's context copy is invisible to the run root (see the
-    # MUTATION CONTRACT note at ``_calls_var``).
-    with _state_lock:
-        calls = _calls_map()
-        calls[scope] = calls.get(scope, 0) + 1
-
-
 def parse_budget_split(raw: str) -> dict[str, int] | None:
     """Parse a ``"scope:count,scope:count"`` budget-split string.
 
@@ -363,31 +354,49 @@ def get_web_search(
         )
 
     total_cap = _max_calls_per_run()
-    calls = _calls_map()
     split = _budget_split(total_cap)
-    scope_cap = split.get(scope)
-    if scope_cap is None:
-        return _sentinel(
-            f"scope '{scope}' has no budget allocation in "
-            f"YIALPHA_TAVILY_BUDGET_SPLIT (allocated scopes: "
-            f"{', '.join(sorted(split))}); ask the operator to allocate it."
-        )
-    scope_used = calls.get(scope, 0)
-    if scope_used >= scope_cap:
-        return _sentinel(
-            f"per-run search budget exhausted for the {scope} analyst "
-            f"({scope_used}/{scope_cap} calls used; raise "
-            "YIALPHA_TAVILY_BUDGET_SPLIT or YIALPHA_TAVILY_MAX_CALLS_PER_RUN "
-            "if more angles are needed)."
-        )
-    total_used = sum(calls.values())
-    if total_used >= total_cap:
-        return _sentinel(
-            f"per-run total search budget exhausted ({total_used}/{total_cap} "
-            "calls used across analysts; raise "
-            "YIALPHA_TAVILY_MAX_CALLS_PER_RUN if more angles are needed)."
-        )
-    _charge(scope)
+    # Check-and-charge ATOMICALLY under _state_lock (round-11): the old
+    # read-outside / charge-inside split let two concurrent same-scope calls
+    # both read 7/8 and both pass, overselling the cap — ToolNode runs a
+    # batch's tools in parallel worker threads that share one run context,
+    # counters dict included, so the race was reachable in production. The
+    # counters are mutated in place only (never rebound — the MUTATION
+    # CONTRACT at ``_calls_var``); the denial text is rendered after the lock
+    # so ``record_sentinel`` never runs inside it.
+    denial: str | None = None
+    with _state_lock:
+        calls = _calls_map()
+        scope_cap = split.get(scope)
+        if scope_cap is None:
+            denial = (
+                f"scope '{scope}' has no budget allocation in "
+                f"YIALPHA_TAVILY_BUDGET_SPLIT (allocated scopes: "
+                f"{', '.join(sorted(split))}); ask the operator to allocate it."
+            )
+        else:
+            scope_used = calls.get(scope, 0)
+            if scope_used >= scope_cap:
+                denial = (
+                    f"per-run search budget exhausted for the {scope} analyst "
+                    f"({scope_used}/{scope_cap} calls used; raise "
+                    "YIALPHA_TAVILY_BUDGET_SPLIT or "
+                    "YIALPHA_TAVILY_MAX_CALLS_PER_RUN if more angles are "
+                    "needed)."
+                )
+            else:
+                total_used = sum(calls.values())
+                if total_used >= total_cap:
+                    denial = (
+                        f"per-run total search budget exhausted "
+                        f"({total_used}/{total_cap} calls used across "
+                        "analysts; raise YIALPHA_TAVILY_MAX_CALLS_PER_RUN if "
+                        "more angles are needed)."
+                    )
+                else:
+                    # Charge inside the same critical section that checked.
+                    calls[scope] = scope_used + 1
+    if denial is not None:
+        return _sentinel(denial)
 
     n_results = max(1, min(int(max_results), MAX_RESULTS_CEILING))
     payload = {

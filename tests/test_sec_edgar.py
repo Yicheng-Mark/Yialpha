@@ -108,6 +108,49 @@ def test_no_public_period_raises_no_market_data(monkeypatch, tmp_path):
         sec_edgar.get_balance_sheet("AAPL", "annual", "2020-01-01")
 
 
+# --------------------------------------------------------------------------- #
+# Round-11 — current_pit_end clamp on the statement entries (mirrors y_finance)
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_future_curr_date_clamped_to_pinned_analysis_date(monkeypatch, tmp_path):
+    """A curr_date beyond the run's pinned analysis date (e.g. an LLM echoing
+    a cached header's "today") is clamped before the PIT filter: identical
+    output to passing the pinned date itself — the Q3 filing (filed
+    2024-08-01) stays invisible at the pinned 2024-07-01 in both calls."""
+    from yialpha.dataflows.utils import set_analysis_date
+
+    _patch_fetch(monkeypatch, tmp_path)
+    set_analysis_date("2024-07-01")
+    try:
+        clamped = sec_edgar.get_balance_sheet("AAPL", "quarterly", "2030-01-01")
+        direct = sec_edgar.get_balance_sheet("AAPL", "quarterly", "2024-07-01")
+    finally:
+        set_analysis_date(None)
+    assert clamped == direct
+    assert "2024-06-29" not in clamped   # not-yet-filed Q3 invisible in both
+    assert "2024-03-30" in clamped       # Q2 (filed 2024-05-02) visible
+
+
+@pytest.mark.unit
+def test_fundamentals_future_curr_date_clamped_to_pinned_analysis_date(
+    monkeypatch, tmp_path,
+):
+    from yialpha.dataflows.utils import set_analysis_date
+
+    _patch_fetch(monkeypatch, tmp_path)
+    set_analysis_date("2024-07-01")
+    try:
+        clamped = sec_edgar.get_fundamentals("AAPL", "2030-01-01")
+        direct = sec_edgar.get_fundamentals("AAPL", "2024-07-01")
+    finally:
+        set_analysis_date(None)
+    assert clamped == direct
+    # The latest public period at the pinned date is Q2 (end 2024-03-30) —
+    # unclamped, the 2030 date would have surfaced the FY/Q3 filings.
+    assert "2024-03-30" in clamped
+    assert "2024-06-29" not in clamped
+
+
 @pytest.mark.unit
 def test_format_contract_header_and_source(monkeypatch, tmp_path):
     _patch_fetch(monkeypatch, tmp_path)

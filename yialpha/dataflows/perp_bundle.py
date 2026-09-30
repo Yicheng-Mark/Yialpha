@@ -36,6 +36,7 @@ without its price book is not a GOOD-tier decision.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -73,6 +74,42 @@ _OI_WINDOW_DAYS = 30
 #: LSR/taker window: latest value + a 7d change is enough.
 _LSR_WINDOW_DAYS = 9
 
+#: Per-leg LABELING threshold for the assembler's ``future.result`` waits.
+#: This is NOT hang protection: the pool's ``__exit__`` (``shutdown(
+#: wait=True)``) joins every leg to completion regardless, and a genuinely
+#: hung process is run_robust's OS-level watchdog. The timeout only marks a
+#: leg STATUS_UNAVAILABLE once its own wall time crosses the threshold — so
+#: it must sit ABOVE the legitimate slow paths, which the old fixed 60s did
+#: not: with ``YIALPHA_BINANCE_PROACTIVE_BACKOFF`` every ``_http_get``'s
+#: limiter ``acquire()`` can sleep out a ~60s rolling weight window (prices
+#: issues >= 3 requests serially), and ``YIALPHA_BINANCE_HTTP_RETRIES >= 3``
+#: adds 2+4+8+16+32 = 62s of transport backoff — a legal slow leg read as
+#: TimeoutError -> core sentinel -> NO_TRADE. Raising it does not extend the
+#: worst-case wall clock (the join dominates). Fault-tolerant parse in the
+#: ``YIALPHA_BAOSTOCK_RETRIES`` style, with the repo-wide ``0 = explicit
+#: off`` convention (``YIALPHA_LLM_TIMEOUT_S`` / ``YIALPHA_HTTP_TIMEOUT_S``
+#: precedent): ``0`` maps to ``None`` — ``future.result(timeout=None)`` waits
+#: forever, identical to the pool join's own semantics. Negative or
+#: non-numeric values warn once and fall back to the 300s default.
+_LEG_TIMEOUT_ENV = os.environ.get("YIALPHA_PERP_BUNDLE_LEG_TIMEOUT_S")
+LEG_TIMEOUT_S: float | None = 300.0
+if _LEG_TIMEOUT_ENV is not None and _LEG_TIMEOUT_ENV != "":
+    try:
+        _parsed_leg_timeout = float(_LEG_TIMEOUT_ENV)
+    except ValueError:
+        _parsed_leg_timeout = None
+    if _parsed_leg_timeout is None or _parsed_leg_timeout < 0:
+        logger.warning(
+            "YIALPHA_PERP_BUNDLE_LEG_TIMEOUT_S=%r is not a usable number of "
+            "seconds (positive, or 0 = no leg timeout); using the default "
+            "%.0fs",
+            _LEG_TIMEOUT_ENV, LEG_TIMEOUT_S,
+        )
+    elif _parsed_leg_timeout == 0:
+        LEG_TIMEOUT_S = None
+    else:
+        LEG_TIMEOUT_S = _parsed_leg_timeout
+
 
 def _fmt(value: float | None, digits: int = 4) -> str:
     """Adaptive-magnitude number formatting (PEPE 1e-5 … BTC 1e5)."""
@@ -108,6 +145,20 @@ def _window(start_days: int, end_date: str) -> tuple[str, str, int, int]:
         int(start_dt.timestamp() * 1000),
         int((end_dt.timestamp() + 86399) * 1000),  # end-of-day inclusive
     )
+
+
+def _row_beyond_end(r: dict, end_ms: int) -> bool:
+    """Belt-and-suspenders PIT trim for a ``/futures/data`` row.
+
+    A vendor (or mock) that ignores the endTime must never leak rows past
+    the requested window end (the tool layer's binance.py seam — compares
+    TIMESTAMP ms, not any formatted string). A row without a parseable
+    timestamp cannot be proven out-of-window and is kept.
+    """
+    try:
+        return int(r["timestamp"]) > end_ms
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _futures_data_start_ms(start_ms: int) -> int:
@@ -196,10 +247,44 @@ def _fetch_prices(symbol: str, end_date: str) -> dict[str, Any]:
             "start": frame.index[0].strftime("%Y-%m-%d"),
             "end": frame.index[-1].strftime("%Y-%m-%d"),
         }
-    if "mark" in closes and "last" in closes and closes["mark"] > 0:
-        out["last_vs_mark_bps"] = (closes["last"] / closes["mark"] - 1.0) * 1e4
-    if "index" in closes and "last" in closes and closes["index"] > 0:
-        out["last_vs_index_bps"] = (closes["last"] / closes["index"] - 1.0) * 1e4
+    # Round-11 same-date basis pairing (the regime layer's round-10 seam):
+    # a basis is a SAME-DATE ratio — the denominator leg must carry a bar at
+    # the LAST leg's own tail date (date-index lookup), never its own
+    # positional last bar. The old ``iloc[-1]``-vs-``iloc[-1]`` pairing
+    # fabricated last@D / mark@D-1 displacement whenever one feed's tail
+    # lagged a day. No denominator bar at the tail date -> the metric
+    # degrades (key absent), never a cross-date ratio.
+    #
+    # Duplicate-date defence: a paginated unordered kline frame can carry the
+    # tail date twice, which makes ``Series.loc[tail]`` return a SERIES —
+    # ``float(Series)`` is a TypeError that would fail the whole prices leg
+    # (core sentinel NO_TRADE). Deduplicate keep="last" before pairing (the
+    # last page's row wins, matching the ordering the paginator resolves to).
+    if "last" in frames:
+        anchor_col = frames["last"][KLINE_CLOSE_COLUMN].dropna()
+        anchor_col = anchor_col[~anchor_col.index.duplicated(keep="last")]
+        if not anchor_col.empty:
+            anchor_tail = anchor_col.index[-1]
+            for leg, out_key in (
+                ("mark", "last_vs_mark_bps"),
+                ("index", "last_vs_index_bps"),
+            ):
+                if leg not in frames:
+                    continue
+                other = frames[leg][KLINE_CLOSE_COLUMN].dropna()
+                other = other[~other.index.duplicated(keep="last")]
+                if anchor_tail not in other.index:
+                    logger.info(
+                        "perp bundle %s %s tail has no bar at the last leg's "
+                        "tail date %s; %s degraded (no cross-date ratio)",
+                        canonical, leg, anchor_tail, out_key,
+                    )
+                    continue
+                denom = float(other.loc[anchor_tail])
+                if denom > 0:
+                    out[out_key] = (
+                        float(anchor_col.loc[anchor_tail]) / denom - 1.0
+                    ) * 1e4
     if "mark" in closes:
         out["mark"] = {"status": STATUS_OK, "close": closes["mark"]}
     if "index" in closes:
@@ -274,9 +359,12 @@ def _oi_series(symbol: str, end_date: str, window_days: int) -> list[tuple[int, 
             if not isinstance(r, dict) or r.get("timestamp") is None:
                 continue
             try:
-                out.append((int(r["timestamp"]), float(r["sumOpenInterest"])))
+                ts, oi = int(r["timestamp"]), float(r["sumOpenInterest"])
             except (TypeError, ValueError):
                 continue
+            if _row_beyond_end(r, end_ms):
+                continue
+            out.append((ts, oi))
     return sorted(out)
 
 
@@ -292,6 +380,22 @@ def _fetch_open_interest(symbol: str, end_date: str) -> dict[str, Any]:
         return {"status": STATUS_UNAVAILABLE, "reason": "no rows in window"}
     values = [v for _ts, v in rows]
     latest = values[-1]
+    # Round-11: the percentile ranks the latest against the PRIOR window —
+    # the latest itself never belongs in the denominator. The old
+    # ``/ len(values)`` counted the latest as its own comparison base, so a
+    # monotonic new high on a full 30-row window could never exceed
+    # 29/30 (~97th pct): the reading was systematically compressed exactly
+    # when it mattered most (stress-trigger territory). n == 1 (retention
+    # clamp or a brand-new contract) has no prior base: the latest is
+    # trivially the window's max -> 100.0, and the disclosed ``days`` count
+    # makes the vacuous window self-evident in the rendered label.
+    if len(values) > 1:
+        percentile = (
+            sum(1 for v in values[:-1] if v < latest)
+            / (len(values) - 1) * 100.0
+        )
+    else:
+        percentile = 100.0
     out: dict[str, Any] = {
         "status": STATUS_OK,
         "latest": latest,
@@ -300,9 +404,7 @@ def _fetch_open_interest(symbol: str, end_date: str) -> dict[str, Any]:
         # historical replay) or the contract is younger than the window —
         # the rendered percentile label must state the span it really ranks.
         "days": len(values),
-        "percentile": (
-            sum(1 for v in values if v < latest) / len(values) * 100.0
-        ),
+        "percentile": percentile,
     }
     if len(values) >= 2 and values[-2] > 0:
         out["chg_1d"] = latest / values[-2] - 1.0
@@ -340,7 +442,9 @@ def _fetch_lsr(symbol: str, end_date: str) -> dict[str, Any]:
             )
             values = [
                 float(r["longShortRatio"])
-                for r in rows if isinstance(r, dict) and r.get("longShortRatio")
+                for r in rows
+                if isinstance(r, dict) and r.get("longShortRatio")
+                and not _row_beyond_end(r, end_ms)
             ] if isinstance(rows, list) else []
             if not values:
                 out[key] = {"status": STATUS_UNAVAILABLE, "reason": "no rows"}
@@ -376,7 +480,9 @@ def _fetch_taker(symbol: str, end_date: str) -> dict[str, Any]:
         )
         values = [
             float(r["buySellRatio"])
-            for r in rows if isinstance(r, dict) and r.get("buySellRatio")
+            for r in rows
+            if isinstance(r, dict) and r.get("buySellRatio")
+            and not _row_beyond_end(r, end_ms)
         ] if isinstance(rows, list) else []
         if not values:
             return {"status": STATUS_UNAVAILABLE, "reason": "no rows in window"}
@@ -551,24 +657,46 @@ def _fetch_adl(symbol: str) -> dict[str, Any]:
         return {"status": STATUS_UNAVAILABLE, "reason": f"{type(exc).__name__}: {exc}"}
 
 
-def _fetch_spot_basis(symbol: str, end_date: str, perp_close: float | None) -> dict[str, Any]:
+def _fetch_spot_basis(
+    symbol: str, end_date: str, perp_tail_close: tuple[Any, float] | None,
+) -> dict[str, Any]:
     """Perp-vs-spot premium on the SAME window (pure crypto only).
 
     A tokenized-stock perp (TRADIFI/EQUITY underlying) has no Binance spot
     leg — that is a structural capability_absent, not a fetch failure, and
-    must never read as degradation."""
+    must never read as degradation. ``perp_tail_close`` is the (tail date,
+    close) pair from :func:`_last_close_hint`: the basis is a SAME-DATE
+    ratio (the regime layer's round-10 seam) — the spot leg must carry a
+    bar at the perp tail's own date (date-index lookup), never its own
+    positional last bar, so a lagged final spot bar degrades honestly
+    instead of fabricating perp@D / spot@D-1 basis."""
     underlying = stock_perp_underlying(symbol)
     if underlying:
         return {
             "status": STATUS_CAPABILITY_ABSENT,
             "reason": f"tokenized-stock perp ({underlying} underlying) has no Binance spot leg",
         }
-    if perp_close is None or perp_close <= 0:
+    # Single guard (round-11 remediation): a missing hint OR a non-positive
+    # close both mean "no perp close to compare". The old two-step check kept
+    # a dead ``perp_close is None`` branch alive from before the hint became a
+    # (date, float) tuple — a float is never None.
+    if perp_tail_close is None or perp_tail_close[1] <= 0:
         return {"status": STATUS_UNAVAILABLE, "reason": "no perp close to compare"}
+    perp_tail, perp_close = perp_tail_close
     _start, end, _sms, _ems = _window(8, end_date)
     try:
         spot = binance_klines_frame(symbol, _start, end, "1d", "binance_spot", "last")
-        spot_close = float(spot[KLINE_CLOSE_COLUMN].iloc[-1])
+        spot_closes = spot[KLINE_CLOSE_COLUMN].dropna()
+        # Duplicate-date defence (same seam as the prices pairing): a
+        # duplicated tail date makes ``.loc[perp_tail]`` a SERIES and the
+        # float() below a TypeError — keep="last" resolves the pagination
+        # overlap the way the paginator itself would.
+        spot_closes = spot_closes[~spot_closes.index.duplicated(keep="last")]
+        if perp_tail not in spot_closes.index:
+            raise ValueError(  # noqa: TRY301
+                f"spot tail lags perp tail: no spot bar at {perp_tail}"
+            )
+        spot_close = float(spot_closes.loc[perp_tail])
         if spot_close <= 0:
             raise ValueError("spot close non-positive")  # noqa: TRY301
         return {
@@ -631,7 +759,9 @@ def fetch_perp_market_bundle(symbol: str, end_date: str) -> dict[str, Any]:
         futures = {key: submit_with_context(pool, fn) for key, fn in jobs}
         for key, future in futures.items():
             try:
-                bundle[key] = future.result(timeout=60)
+                # Labeling threshold only; the pool join below dominates the
+                # wall clock (see LEG_TIMEOUT_S).
+                bundle[key] = future.result(timeout=LEG_TIMEOUT_S)
             except Exception as exc:  # noqa: BLE001 — component isolation
                 bundle[key] = {
                     "status": STATUS_UNAVAILABLE,
@@ -701,13 +831,19 @@ _AUX_LEDGER_METHODS = {
 }
 
 
-def _last_close_hint(symbol: str, end_date: str) -> float | None:
-    """Best-effort last close for the spot-basis comparison (no extra fetch:
-    reuses the memoized kline path; None feeds an honest unavailable)."""
+def _last_close_hint(symbol: str, end_date: str) -> tuple[Any, float] | None:
+    """Best-effort (tail date, last close) for the spot-basis comparison (no
+    extra fetch: reuses the memoized kline path; None feeds an honest
+    unavailable). The tail DATE rides along so the spot leg can pair its bar
+    at the perp's own tail date — never a positional last-bar cross-date
+    ratio."""
     try:
         start, _end, _sms, _ems = _window(8, end_date)
         frame = binance_klines_frame(symbol, start, end_date, "1d", "binance_perp", "last")
-        return float(frame[KLINE_CLOSE_COLUMN].iloc[-1])
+        closes = frame[KLINE_CLOSE_COLUMN].dropna()
+        if closes.empty:
+            return None
+        return closes.index[-1], float(closes.iloc[-1])
     except Exception:  # noqa: BLE001 — hint only
         return None
 

@@ -67,6 +67,7 @@ from .baostock_fields import (
 )
 from .disk_cache import MinIntervalThrottle, cached_or_fetch, vendor_cache_dir
 from .errors import NoMarketDataError
+from .utils import current_pit_end
 
 logger = logging.getLogger(__name__)
 
@@ -144,9 +145,17 @@ def _with_transient_retry(fetch: Callable[[], _T], what: str) -> _T:
     (``UnicodeDecodeError`` from the raw TCP stream), socket errors (timeout /
     reset / refused — the ``OSError`` family), and session-scoped
     :class:`NoMarketDataError` (login refused / query answered with a server
-    error such as 接收数据异常). The DETERMINISTIC NoMarketDataErrors —
-    non-A-share ticker, package not installed — are raised before any session
-    opens, so they can never enter this loop. Each retry opens a FRESH
+    error such as 接收数据异常). The DETERMINISTIC NoMarketDataErrors are
+    kept out of this loop by construction (round-11): a non-A-share ticker
+    raises in ``_to_baostock_code``, and a missing ``baostock`` install in
+    the ``_require_baostock()`` guards at the top of the cache-miss fetch
+    closures (``_cached_daily._fetch`` / ``_statement_rows_cached``) — after
+    the cache decision (a warm cache serves without the package) but BEFORE
+    the retry-wrapped session fetch (the import used to surface only inside
+    ``_BaostockSession.__init__``, i.e. INSIDE this loop, so an uninstalled
+    machine slept through 2 retries of the same ImportError under
+    ``run_robust``'s default retries). Each retry opens a
+    FRESH
     session: one that died mid-stream cannot be trusted to yield consistent
     rows. ``run_robust`` opts its children into 2 retries via env setdefault;
     bare runs keep the module default 0 (byte-equivalent).
@@ -376,6 +385,14 @@ def _cached_daily(code: str, curr_date: str | None = None) -> list[dict]:
     """
 
     def _fetch() -> bytes:
+        # Optional-dependency guard (round-11 remediation): fires only on a
+        # cache MISS (this closure is never invoked on a hit), but still
+        # BEFORE the retry ring — a warm cache left by a since-uninstalled
+        # baostock keeps serving rows without importing the package, while a
+        # cold machine still raises the deterministic ImportError exactly
+        # once (never 3 attempts + 2s/4s sleeps mislabelled transient).
+        _require_baostock()
+
         def _session_fetch() -> bytes:
             with _BaostockSession() as bs:
                 rows = _query_daily(bs, code)
@@ -646,7 +663,14 @@ def _statement_rows_cached(code: str, query_fn_name: str,
     at 64 entries so a long multi-ticker backtest cannot grow it unbounded.
     The returned ``StatementFetch`` (and its row dicts) are shared and must
     not be mutated by callers — renderers only read.
+
+    The optional-dependency guard runs at the TOP of this cached body — after
+    the cache decision (a hit serves without importing baostock; round-11
+    remediation for machines that ran with the package and later removed it)
+    but outside the transient retry ring (the deterministic ImportError is
+    raised exactly once, never slept through as a fake transient).
     """
+    _require_baostock()
     try:
         # Session-scoped fetch wrapped for transient failures (corrupted
         # stream / socket timeout / 接收数据异常): a fresh login often heals
@@ -736,6 +760,11 @@ def get_a_share_income_statement_native(
     :class:`NoMarketDataError`.
     """
     code = _to_baostock_code(ticker)
+    # PIT clamp (round-11 remediation, same guard as sec_edgar/AV statements):
+    # a curr_date beyond the run's pinned analysis date (an LLM echoing a
+    # cached header's "today") must not widen the pubDate window — statements
+    # published after the pinned date stay invisible. No-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
     rows, failed = _statement_rows(code, "query_profit_data", upper_d)
@@ -790,6 +819,11 @@ def get_a_share_balance_sheet_native(
     ``pubDate <= curr_date``. Non-A-share ticker -> NoMarketDataError.
     """
     code = _to_baostock_code(ticker)
+    # PIT clamp (round-11 remediation, same guard as sec_edgar/AV statements):
+    # a curr_date beyond the run's pinned analysis date (an LLM echoing a
+    # cached header's "today") must not widen the pubDate window — statements
+    # published after the pinned date stay invisible. No-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
     rows, failed = _statement_rows(code, "query_balance_data", upper_d)
@@ -844,6 +878,11 @@ def get_a_share_cashflow_statement_native(
     ticker -> :class:`NoMarketDataError`.
     """
     code = _to_baostock_code(ticker)
+    # PIT clamp (round-11 remediation, same guard as sec_edgar/AV statements):
+    # a curr_date beyond the run's pinned analysis date (an LLM echoing a
+    # cached header's "today") must not widen the pubDate window — statements
+    # published after the pinned date stay invisible. No-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
     rows, failed = _statement_rows(code, "query_cash_flow_data", upper_d)

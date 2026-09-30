@@ -20,12 +20,13 @@ answer. This module is that answer:
   fields render; ``missing_inputs`` is always listed — a partial regime
   never masquerades as a complete one).
 
-Frozen classifier definitions (REGIME_VERSION v4 — bump
+Frozen classifier definitions (REGIME_VERSION v5 — bump
 :data:`yialpha.versions.REGIME_VERSION` when ANY of these changes, so
 historical regime tags never silently mix definitions; v3 redefined ONLY
 the stock-perp ``session_state`` bucket to the klines-verified 24/7
 calendar; v4 re-scoped ``overnight_gap_bps`` to the stock-perp field
-group and required same-date tails on the two basis legs):
+group and required same-date tails on the two basis legs; v5 excluded the
+latest row from the ``oi_pct`` percentile's own denominator):
 
 * **trend_regime / underlying_trend** — daily close vs SMA50/SMA200 on the
   series' own candles: ``up`` when close > SMA50 AND close > SMA200,

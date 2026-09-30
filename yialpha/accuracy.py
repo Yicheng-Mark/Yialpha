@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -275,6 +276,12 @@ def forward_outcome(
 
     ``None`` means the horizon has not fully elapsed (pending) or the vendor
     has no data (delisted/gap) — both are reported as excluded, never scored.
+    A dict whose ``raw_return`` is ``None`` (with an ``unscorable`` reason)
+    means the horizon HAS bars but a non-finite close sits in the forward
+    window (vendor hole): scored as neither hit nor miss, counted under
+    ``excluded_unscorable`` instead — a NaN endpoint used to flow through as
+    ``raw_return=NaN``, get labelled ``miss`` (NaN compares False) and crash
+    the web JSON rendering downstream.
     """
     try:
         start_dt = datetime.strptime(record.trade_date, "%Y-%m-%d")
@@ -286,6 +293,11 @@ def forward_outcome(
         return None
     baseline = float(closes.iloc[0])
     endpoint = float(closes.iloc[holding_days])
+    if not (math.isfinite(baseline) and math.isfinite(endpoint)):
+        return {
+            "raw_return": None,
+            "unscorable": "non-finite close in the forward window",
+        }
     if baseline <= 0:
         return None
     return {
@@ -416,19 +428,28 @@ def build_accuracy_report(
     directional = {"n": 0, "hits": 0}
     hold_returns: list[float] = []
     pending = 0
+    excluded_unscorable = 0
 
     for record in records:
         outcome = forward_outcome(record, holding_days=holding_days)
-        raw = outcome["raw_return"] if outcome else None
-        label = _outcome_label(record.rating, raw)
-        if label == "pending":
-            pending += 1
+        # A returned dict with raw_return=None is UNSCORABLE (non-finite
+        # close in the window) — distinct from pending (outcome is None):
+        # never counted as hit/miss, never bucketed, disclosed separately.
+        unscorable = outcome is not None and outcome.get("raw_return") is None
+        raw = None if unscorable else (outcome["raw_return"] if outcome else None)
+        if unscorable:
+            excluded_unscorable += 1
+            label = "unscorable"
+        else:
+            label = _outcome_label(record.rating, raw)
+            if label == "pending":
+                pending += 1
         row = {
             **asdict(record),
             "outcome": label,
             "forward_return": raw,
         }
-        if outcome is not None:
+        if outcome is not None and not unscorable:
             row["baseline_close"] = outcome.get("baseline_close")
         rows.append(row)
 
@@ -469,8 +490,9 @@ def build_accuracy_report(
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "holding_days": holding_days,
         "total_runs": len(records),
-        "scored": len(records) - pending,
+        "scored": len(records) - pending - excluded_unscorable,
         "pending": pending,
+        "excluded_unscorable": excluded_unscorable,
         "direction": {
             **directional,
             "hit_rate": (
@@ -497,13 +519,22 @@ def _bucket(store: dict[str, dict[str, Any]], key: str) -> dict[str, Any]:
 def render_markdown(report: dict[str, Any]) -> str:
     """Human-facing accuracy report (tables always carry sample sizes)."""
     d = report["direction"]
+    scanned = (
+        f"- Runs scanned: {report['total_runs']} "
+        f"(scored {report['scored']}, pending {report['pending']}"
+    )
+    if report.get("excluded_unscorable"):
+        scanned += (
+            f", unscorable {report['excluded_unscorable']} "
+            "(non-finite forward close — excluded from every aggregate)"
+        )
+    scanned += ")"
     lines = [
         "# Rating accuracy report",
         "",
         f"- Generated: {report['generated_at']}  ",
         f"- Horizon: {report['holding_days']} sessions  ",
-        f"- Runs scanned: {report['total_runs']} "
-        f"(scored {report['scored']}, pending {report['pending']})",
+        scanned,
         "",
         "## Directional hit rate (Buy/Overweight/Sell/Underweight)",
         "",
@@ -560,6 +591,36 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def sanitize_nonfinite(obj: Any) -> Any:
+    """Recursively replace non-finite floats with ``None`` (JSON has no NaN/Inf).
+
+    Belt-and-suspenders on the artifact WRITE side: the forward-outcome guard
+    upstream already keeps non-finite closes out of the aggregates, but any
+    other float field (an archived ``price_at_decision`` read back from a log,
+    say) could still carry one — ``json.dumps`` would happily emit a bare
+    ``NaN`` literal that the web layer's strict JSON rendering rejects. The
+    ``allow_nan=False`` at the call site then turns a missed case into a loud
+    write error here rather than a 500 in the request handler.
+
+    Public (round-11 remediation) so read-side consumers share ONE
+    implementation instead of growing byte-level duplicates. The web read
+    side itself now handles the literal-at-parse-time case via
+    ``json.loads(parse_constant=...)`` — this function stays the write-side
+    guard for in-memory objects.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: sanitize_nonfinite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [sanitize_nonfinite(v) for v in obj]
+    return obj
+
+
+#: Pre-round-11 private name, kept as an alias for any external caller.
+_sanitize_nonfinite = sanitize_nonfinite
+
+
 def verify_history(
     results_dir: str | Path | None = None, holding_days: int = 5
 ) -> tuple[dict[str, Any], Path, Path]:
@@ -573,7 +634,11 @@ def verify_history(
     json_path = out_dir / "accuracy_report.json"
     md_path = out_dir / "accuracy_report.md"
     json_path.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+        json.dumps(
+            sanitize_nonfinite(report), indent=2, ensure_ascii=False,
+            allow_nan=False,
+        ),
+        encoding="utf-8",
     )
     md_path.write_text(render_markdown(report), encoding="utf-8")
     return report, json_path, md_path

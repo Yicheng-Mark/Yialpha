@@ -40,6 +40,133 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Round-11 adversarial sweep (2026-09-30: the six blind-spot modules rescanned
+  in four read-only shards — dataflows perp chain / dataflows stock+vendor /
+  agents+cli / backtest+llm_clients+web — plus the round-10 recorded leftovers;
+  1 P1 + 6 P2 + 15 P3 confirmed findings, every one landed with a regression
+  pin).**
+  - **P1 — weekly resample dropped the last COMPLETED Friday bin on live
+    Tue–Thu/Sat runs** (`ohlcv_resample.py`): the still-forming guard asked
+    "has today's bar landed" — a question about the NEXT bin (already removed
+    by the cutoff filter) — so every live analysis dated Tue–Thu (crypto
+    always has today's bar) deleted the closed trailing week and
+    weekly pivots / weekly indicators read one week stale, the exact
+    "Wednesday analysis returned week-before-last" failure the round-5 fix
+    targeted. Criterion is now "the bin's own range extends into today"
+    (W-FRI label L covers (L−6, L]; today > L ⇒ closed), with clock-frozen
+    deterministic pins for all five calendar cases; round-5's Saturday skip
+    stays (it guards a different pathological future-date fixture).
+  - **P2 — perp bundle single-leg 60s timeout labeled legal slowness as a
+    core failure**: with `YIALPHA_BINANCE_PROACTIVE_BACKOFF` (each acquire may
+    sleep ~60s) or `BINANCE_HTTP_RETRIES≥3` backoff stacking, a slow-but-
+    succeeding prices leg tripped `future.result(timeout=60)` → core sentinel
+    → NO_TRADE. New `YIALPHA_PERP_BUNDLE_LEG_TIMEOUT_S` (default 300); purely
+    a labeling threshold — the pool join dominates wall time either way.
+  - **P2 — `positioning_split` was an end-to-end dead switch**: the filter
+    appended POSITIONING but the interactive selection funnel re-normalized
+    over the fixed 4-key order, the batch union intersected over the same
+    4-key base, and the live panel/web cards didn't know the section — the
+    flag-on perp run silently ran without the analyst. New
+    `resolve_run_analysts` re-applies the single-source filter post-selection,
+    batch unions filter-appended extras, and the panel (including a latent
+    section-title KeyError) + web report cards render `positioning_report`.
+  - **P2 — Form 4 PIT leak** (`sec_ownership.py`): a missing/malformed
+    `filingDate` skipped BOTH the upper (PIT) and lower (lookback) bounds and
+    rendered the filing's trades unfiltered — the same failure class the 13F
+    `if fd:` fix closed; Form 4 now drops those filings fail-closed.
+  - **P2 — baostock "not installed" entered the transient retry ring**: the
+    deterministic import error was raised inside the retried session
+    constructor, costing 3 attempts + 6s backoff per call under run_robust's
+    default retries; hoisted to the five public entry points (retry docstring
+    is now true again).
+  - **P2 — akshare's process-global proxy-env pop leaked into concurrent
+    vendor requests**: `_direct_connect` popped `HTTP(S)_PROXY` from
+    `os.environ` under a lock only its own callers held, so parallel
+    proxied requests (FRED/tavily/SEC/AV in the same ToolNode batch) went
+    direct during the window. Replaced with a thread-scoped bypass — a
+    lazily-installed `Session.merge_environment_settings` patch honoring a
+    thread-local depth flag (flag 0 = original method, byte-identical).
+  - **P2 — `/api/accuracy` returned 500 on NaN-bearing artifacts**: a NaN
+    forward close produced NaN returns that `json.dumps` wrote as bare
+    literals and starlette's `allow_nan=False` render then refused. Three
+    layers: non-finite forward endpoints are now `unscorable` (excluded from
+    hit/miss and disclosed via `excluded_unscorable`, distinct from pending),
+    the writer sanitizes non-finite floats and refuses NaN literals, and the
+    store strips non-finite values from pre-existing legacy artifacts.
+  - **P3 batch**: cross-day basis pairing in perp bundle legs now aligns on
+    the common tail date and degrades honestly (regime round-10 precedent);
+    OI percentile denominator excludes the latest value itself
+    (REGIME_VERSION v4→v5 — regime imports the bundle's `_fetch_open_interest`,
+    single source, so the percentile scale enters the id preimage);
+    endTime row-level trim on OI/LSR/taker (belt-and-suspenders vs
+    endTime-ignoring vendors/mocks); defillama catalog entries without a slug
+    no longer crash the cache key; sec_edgar + AV three-table entries gained
+    the round-8 `current_pit_end` clamp yfinance already had; yfinance news
+    soft-misses no longer log ERROR-with-traceback and the global-news window
+    filter runs before the `limit` quota so out-of-window first queries can't
+    starve later ones; tavily budget gate reads+charges atomically under its
+    lock; `"default"` vendor-chain fallback now orders by the documented
+    default (yfinance first, AV last) instead of dict insertion order;
+    netretry conditionally retries 5xx `HTTPError`s (never 429/418/<500);
+    backtest funding-drag denominator and coverage check bounded to the
+    actual charge domain `[first, mark_end)` instead of the fetch window;
+    `/api/analyze` validates dates with the same strftime round-trip as
+    run_robust (non-padded input → 400 at submit, not a doomed 200);
+    sentiment/news lookback helpers normalize `trade_date[:10]` (round-10
+    as-of dual-form lesson) before `strptime`; empty `ic_data` under
+    `YIALPHA_INDICATOR_IC_CONTEXT` now warns fail-visibly instead of silently
+    dropping the advisory.
+  - **Telemetry/watchdog (user-approved known leftovers)**: `ToolNode` now
+    wraps with a Runnable-aware telemetry wrapper (`.invoke(state, config)`
+    forwarding; parameter named `config` so LangGraph passes the real run
+    config) — serial-leg tool HTTP walls finally count, closing the A/B
+    speedup gate's systematic undercount of the 2.5× criterion; run_robust's
+    `_states_root` resolves an `.env`-only `YIALPHA_RESULTS_DIR` and pins it
+    into the child env (parent reads where the child writes, by
+    construction); `_kill_tree` returns landed-vs-already-gone (taskkill 128 /
+    ESRCH) so a natural crash in the poll→kill window reports `exit N`, not
+    "killed".
+  - **Style consolidations (byte-equivalent except where noted)**: the 9
+    script entry bootstrap blocks unified behind `scripts/_bootstrap.py`
+    (rank_signals' bare reconfigure gained the defensive form — the only
+    behavior hardening); new `atomic_write_text` helper collects the four
+    fixed-name tmp-write sites (cli scoreboard gains the Windows
+    `replace_retry_on_windows` retry, matching every other publish seam).
+  - **Adversarial self-review remediation (ten-angle forked review of the
+    round's own diff; every confirmed finding landed with a pin).** The
+    review caught three regressions the round's own fixes had introduced:
+    the new weekly-bin calendar guard dropped round-8's truncated-cache
+    clause (a Saturday run with a stale cache missing the Friday bar served
+    a truncated week as complete — both clauses now coexist); the akshare
+    thread-scoped proxy bypass silently no-oped for akshare's curl_cffi
+    transport (libcurl reads os.environ, never requests' merge hook — the
+    bypass is now a proxies-only dict override plus a curl_cffi-conditional
+    env-pop window, with a Windows env-key-folding restore bug found and
+    fixed along the way); and the hoisted baostock import guard broke
+    cache-hit-without-package replays (the guard now sits after the cache
+    lookup, before the retry ring). Also landed: duplicate-date defense on
+    the new same-day basis pairing (`duplicated(keep="last")`, no more
+    `float(Series)` → core sentinel); yfinance global-news `[:10]`
+    normalization + restored fault logging + titleless-flat exclusion +
+    dead defensive pass removal; `YIALPHA_PERP_BUNDLE_LEG_TIMEOUT_S=0` now
+    means explicit off (repo convention) instead of garbage; Form 4 / FTD /
+    13F and BaoStock statements gained the `current_pit_end` clamp;
+    run_robust anchors relative `.env`-derived results dirs to the project
+    root (cwd-independent parent/child agreement); the telemetry wrapper's
+    `config` parameter is typed the way langgraph's signature inspection
+    actually matches (`Optional[RunnableConfig]` — verified warning-free on
+    a real compile); the accuracy/store non-finite dedup collapsed into
+    `json.loads(parse_constant=…)` (one pass, zero copies); a shared
+    `is_canonical_ymd` validator now backs both run_robust and the web
+    submit endpoint; and run_baseline's graph builder routes through the
+    single-source analyst filter so flag-on perp backtests include the
+    Positioning analyst (the A/B gate already did via
+    `batch_selected_analysts`; analyze_window/analyze_nvda are stock-only
+    scripts where the filter is the identity).
+  - **Docs**: `YIALPHA_SEC_13F_PUB_LAG_DAYS` documented default corrected
+    5 → 45 (code was already 45 both places; following the doc would have
+    introduced a 40-day lookahead).
+
 - **Round-10 adversarial sweep (2026-09-29, four read-only shards — scripts /
   graph / ledger+regime+instruments / test-gap map — followed by a nine-angle
   adversarial self-review; every confirmed finding and all seven user-approved

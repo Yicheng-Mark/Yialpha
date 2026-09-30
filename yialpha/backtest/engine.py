@@ -924,10 +924,21 @@ def run_backtest(
         if not allow_funding_gaps:
             funding_days = {str(d) for d in perp_funding.index}
             # Days the simulator will actually charge: every price bar from
-            # the first decision onward (earlier bars never accrue drag). The
-            # FINAL bar is tolerated: a still-open current day can have
-            # settlements pending, and the last decision's window is buffered.
-            charge_days = [str(d) for d in prices.index if str(d) >= sorted_dates[0]]
+            # the first decision up to (exclusive) the marking boundary —
+            # exactly the charge loop's domain below (``prices.index <
+            # mark_end``). Round-11: this used to count through the FETCH
+            # window's end_date, so funding days missing inside the
+            # post-mark_end buffer — days no charge can ever touch — were
+            # misreported as coverage gaps and (default allow_funding_gaps=
+            # False) rejected an otherwise runnable backtest. The FINAL bar
+            # stays tolerated: the last marking bar can be a still-forming
+            # current day whose settlements have not posted yet (and the
+            # semantic-window extension can push mark_end past the funding
+            # fetch's end_date), while the final episode's window is buffered.
+            charge_days = [
+                str(d) for d in prices.index
+                if str(d) >= sorted_dates[0] and str(d) < mark_end
+            ]
             missing = [d for d in charge_days[:-1] if d not in funding_days]
             if missing:
                 shown = ", ".join(missing[:8]) + (" …" if len(missing) > 8 else "")
@@ -1531,8 +1542,16 @@ def run_backtest(
     # config_summary event lists, so downstream consumers (report, web,
     # multi-run comparisons) do not have to re-derive them from configs.
     if is_perp_family:
+        # Same domain as the funding-charge loop above: bars from the first
+        # decision up to (exclusive) mark_end. Round-11: counting through the
+        # fetch window's end_date inflated the denominator by the buffer days
+        # between mark_end and end_date — days the numerator never accrues —
+        # systematically understating the annualized drag.
         charge_day_count = max(
-            1, sum(1 for d in prices.index if str(d) >= sorted_dates[0]),
+            1, sum(
+                1 for d in prices.index
+                if str(d) >= sorted_dates[0] and str(d) < mark_end
+            ),
         )
         metrics.liquidation_count = len(liq_events)
         metrics.stop_trigger_count = len(stop_events)

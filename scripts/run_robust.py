@@ -32,6 +32,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 # noqa: E402 — imports follow the UTF-8 reconfigure guard above; reordering would
 # re-introduce UnicodeEncodeError when printing ❌/✅/中文 on a GBK Windows console.
+from yialpha.cli.utils import is_canonical_ymd  # noqa: E402
 from yialpha.logging_config import setup_logging  # noqa: E402
 
 setup_logging()  # noqa: E402 — centralised logging before any other import fires
@@ -159,17 +160,16 @@ def _parse_args() -> argparse.Namespace:
         p.error(f"--backoff must be >= 0 (got {opts.backoff})")
     if opts.stall_timeout < 0:
         p.error(f"--stall-timeout must be >= 0 (got {opts.stall_timeout})")
-    # Round-10: a garbage --date (e.g. 2026/07/01) used to slip through as an
-    # opaque string and propagate a malformed as-of through the whole graph
+    # Round-10/11: a garbage --date (e.g. 2026/07/01) used to slip through as
+    # an opaque string and propagate a malformed as-of through the whole graph
     # (evidence chain, regime as-of parsing) before failing mid-run. Same
     # exit convention as the numeric guards above (p.error -> exit 2 + a
-    # clean usage message). The strftime round-trip enforces zero-padded ISO
-    # (bare strptime accepts "2026-7-1").
-    try:
-        _parsed_date = datetime.strptime(opts.date, "%Y-%m-%d")
-    except ValueError:
-        _parsed_date = None
-    if _parsed_date is None or _parsed_date.strftime("%Y-%m-%d") != opts.date:
+    # clean usage message). The check is the SHARED canonical-ymd predicate
+    # (yialpha.cli.utils.is_canonical_ymd — strftime round-trip, zero-padded
+    # ISO; bare strptime accepts "2026-7-1"), the same one the web
+    # /api/analyze endpoint applies, so every parent of this subprocess
+    # accepts exactly what it accepts.
+    if not is_canonical_ymd(opts.date):
         p.error(f"--date must be YYYY-MM-DD (got {opts.date!r})")
     # Quality gate is ON by default now: the only way back to the old
     # "accept a degraded report" semantics is the explicit --allow-degraded
@@ -196,16 +196,47 @@ def _reports_root(reports_root: str) -> Path:
 def _states_root() -> Path:
     """Where the CHILD actually writes ``<TICKER>/YiAlphaStrategy_logs``.
 
-    The child inherits this process's environment, so its results dir is this
-    process's ``YIALPHA_RESULTS_DIR`` (or the ``~/.yialpha/logs`` default) —
-    independent of any ``--reports-root`` override, which only redirects
-    report DISCOVERY. With the default flags this equals ``reports_root.parent``
-    (byte-identical to the old anchoring); with an override it stays pinned to
+    Resolution order: this process's ``YIALPHA_RESULTS_DIR`` if exported
+    (used VERBATIM — an exported value is the operator's own resolution
+    semantics, relative or not); otherwise the project ``.env``'s value for
+    the same var (parsed read-only via ``dotenv_values`` — the child runs
+    ``load_dotenv(usecwd=True)`` with cwd=_PROJECT_ROOT, so an .env-only
+    value is what the child actually writes to; the parent used to fall
+    straight to the ``~/.yialpha/logs`` default and read quality evidence
+    from the wrong root); otherwise ``~/.yialpha/logs``. Independent of any
+    ``--reports-root`` override, which only redirects report DISCOVERY.
+    With the default flags this equals ``reports_root.parent`` (byte-
+    identical to the old anchoring); with an override it stays pinned to
     the run that was just executed.
+
+    Round-11 remediation: a RELATIVE ``.env`` value anchors to
+    ``_PROJECT_ROOT`` — the resolution-equivalent of the child's
+    ``load_dotenv(usecwd=True)`` with cwd=_PROJECT_ROOT (the child's
+    ``Path("logs")`` resolves against ITS cwd). The old parent resolved it
+    against its OWN cwd, so starting run_robust from another directory made
+    the parent read quality evidence from a different tree than the child
+    wrote.
     """
-    return Path(
-        os.getenv("YIALPHA_RESULTS_DIR", str(Path.home() / ".yialpha" / "logs"))
-    )
+    val = os.getenv("YIALPHA_RESULTS_DIR")
+    from_dotenv = False
+    if not val:
+        try:
+            from dotenv import dotenv_values
+
+            val = dotenv_values(_PROJECT_ROOT / ".env").get(
+                "YIALPHA_RESULTS_DIR"
+            ) or ""
+            from_dotenv = True
+        except (ImportError, OSError):
+            # python-dotenv absent or .env unreadable — behave exactly like
+            # the old parent (the child still resolves it itself).
+            val = ""
+    if not val:
+        return Path.home() / ".yialpha" / "logs"
+    resolved = Path(val)
+    if from_dotenv and not resolved.is_absolute():
+        return (_PROJECT_ROOT / resolved).resolve()
+    return resolved
 
 
 def _complete_mtime(reports_root: Path, ticker: str) -> float:
@@ -280,19 +311,36 @@ def _core_sentinel_count(
     return count if isinstance(count, int) else None
 
 
-def _kill_tree(pid: int) -> None:
-    """强杀整棵进程树（Windows: taskkill /F /T /PID；POSIX: kill -9 进程组）。"""
+def _kill_tree(pid: int) -> bool:
+    """强杀整棵进程树（Windows: taskkill /F /T /PID；POSIX: kill -9 进程组）。
+
+    Returns whether the kill plausibly LANDED (True) or the target was
+    already gone (False — Windows taskkill exit 128 / POSIX ESRCH). The
+    watchdog uses that to attribute the attempt: "killed" vs "exited on
+    its own inside the poll→kill race window" (its old rc==0 heuristic
+    misread a natural crash in that window as a kill). Indeterminate
+    failures (access denied etc.) conservatively return True — mistaking
+    a real kill for a natural exit would evaluate a half-killed attempt
+    as finished.
+    """
     if IS_WINDOWS:
-        # /F 强制 /T 含所有子进程；忽略「进程已退出」的退出码 128。
-        subprocess.run(
+        # /F 强制 /T 含所有子进程。Exit codes: 0 = killed, 128 = process
+        # not found (already exited); anything else — assume the kill landed.
+        rc = subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(pid)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
-        )
-    else:
-        with contextlib.suppress(ProcessLookupError, OSError):
-            os.killpg(os.getpgid(pid), 9)  # type: ignore[attr-defined]
+        ).returncode
+        return rc != 128
+    try:
+        os.killpg(os.getpgid(pid), 9)  # type: ignore[attr-defined]
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # EPERM 等：结果不确定——不当成「已自然退出」。
+        return True
 
 
 def _reap(proc: subprocess.Popen, label: str, timeout: float = 30.0) -> None:
@@ -460,6 +508,18 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         # 丢失（AAPL#1 偶发崩溃时 a1 日志只剩 7 行就是这个盲区）。字节等价——只改
         # flush 时机，不改输出内容；run_batch 的 LLM 决策不读自己的 stdout。
         child_env.setdefault("PYTHONUNBUFFERED", "1")
+        # Pin parent and child to the SAME states root: the parent reads
+        # quality evidence via _states_root() (which resolves .env-only
+        # values), while the child resolves its results dir through
+        # load_dotenv(usecwd=True) — an .env-only YIALPHA_RESULTS_DIR used
+        # to make the two sides disagree (parent read ~/.yialpha/logs,
+        # child wrote the .env path; _core_sentinel_count then found no
+        # readable log and the run was marked "quality unknown"). setdefault:
+        # an exported var wins, and a .env-only value equals what the child
+        # would resolve anyway (load_dotenv never overrides an inherited
+        # var; the sole package consumer reads it via os.getenv with the
+        # same default, so set-vs-unset is indistinguishable).
+        child_env.setdefault("YIALPHA_RESULTS_DIR", str(_states_root()))
         _apply_robust_llm_cache(child_env, opts.no_llm_cache)
 
         print(
@@ -469,6 +529,7 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         )
         t0 = time.time()
         kill_reason = ""
+        kill_landed = False
         try:
             with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
                 logf.write(
@@ -527,7 +588,7 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                 kill_reason = (
                     f"wall_clock {elapsed:.0f}s > {opts.per_ticker_timeout:.0f}s"
                 )
-                _kill_tree(proc.pid)
+                kill_landed = _kill_tree(proc.pid)
                 _reap(proc, ticker)
                 break
             # CPU 停滞（可选）
@@ -542,7 +603,7 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                                 f"cpu stall: {delta:.2f}s over "
                                 f"{opts.stall_timeout:.0f}s window"
                             )
-                            _kill_tree(proc.pid)
+                            kill_landed = _kill_tree(proc.pid)
                             # Mirror the wall-clock kill path: _reap catches the
                             # TimeoutExpired that proc.wait(timeout=30) raises when
                             # a killed grandchild (the ssl.read hang case) still
@@ -563,21 +624,26 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         rc = proc.returncode
         wall = time.time() - t0
 
-        if kill_reason and rc == 0:
-            # Race: the child finished (and flushed its artifacts) between
-            # the poll that saw it alive and the kill landing — taskkill on an
-            # exited pid is a no-op, so returncode is the child's own 0. A
-            # clean exit with a fresh report is a finished attempt, not a
-            # kill: evaluate it normally instead of retrying (the old code
-            # burned the attempt — and on the last one failed the ticker
-            # outright — while a complete report sat on disk).
+        # Conditional chain (no in-place kill_reason rewrite): raced means the
+        # child exited on its own inside the poll→kill window, so the kill
+        # never landed (taskkill 128 / ESRCH) and returncode is the child's
+        # own. A clean exit (rc=0) with a fresh report is a finished attempt,
+        # not a kill: evaluate it normally instead of retrying (the old code
+        # burned the attempt — and on the last one failed the ticker outright
+        # — while a complete report sat on disk). A natural CRASH (rc!=0) in
+        # the same window used to be misreported as "killed"; it now flows to
+        # the exit-N branch with its own code. The `rc == 0` half is
+        # belt-and-braces for a kill that landed while the child
+        # simultaneously exited cleanly — a complete report on disk still
+        # means a finished attempt.
+        raced = bool(kill_reason) and (not kill_landed or rc == 0)
+        if raced:
             print(
                 f"[{ticker}] ⚠️ kill raced with natural exit ({kill_reason}); "
-                f"rc=0 — evaluating attempt normally",
+                f"rc={rc} — evaluating attempt normally",
                 flush=True,
             )
-            kill_reason = None
-        if kill_reason:
+        if kill_reason and not raced:
             print(
                 f"[{ticker}] ⚠️ killed attempt {attempt}: {kill_reason} (wall {wall:.0f}s)",
                 flush=True,

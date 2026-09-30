@@ -155,7 +155,13 @@ def _request(path: str, params: dict) -> dict:
     def _fetch() -> bytes:
         return with_transient_retry(
             _http, vendor="fred",
-            retry_on=(requests.exceptions.ConnectionError, requests.exceptions.Timeout),
+            retry_on=(
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                # Conditionally transient inside netretry: only a 5xx response
+                # is retried; 4xx re-raises immediately (round-11).
+                requests.exceptions.HTTPError,
+            ),
         )
 
     raw = cached_or_fetch(

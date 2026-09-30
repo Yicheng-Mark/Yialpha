@@ -131,8 +131,10 @@ def test_open_interest_change_and_percentile(monkeypatch):
     assert out["status"] == pb.STATUS_OK
     assert out["latest"] == pytest.approx(121.0)
     assert out["chg_1d"] == pytest.approx(121.0 / 110.0 - 1.0)
-    # 121 is above 2 of the 3 window values -> ~67th percentile.
-    assert out["percentile"] == pytest.approx(2 / 3 * 100.0)
+    # Round-11: the latest ranks against the PRIOR window only (self
+    # excluded from the denominator) — 121 tops both prior values, so the
+    # window max reads a full 100th percentile, not the old 2/3 cap.
+    assert out["percentile"] == pytest.approx(100.0)
     assert "chg_7d" not in out  # window too short — not fabricated
 
 
@@ -337,7 +339,9 @@ def test_adl_transport_error_degrades(monkeypatch):
 @pytest.mark.unit
 def test_spot_basis_capability_absent_for_stock_perp(monkeypatch):
     monkeypatch.setattr(pb, "stock_perp_underlying", lambda t: "MU")
-    out = pb._fetch_spot_basis("MUUSDT", "2026-08-18", 100.0)
+    out = pb._fetch_spot_basis(
+        "MUUSDT", "2026-08-18", (pd.Timestamp("2026-08-18"), 100.0),
+    )
     assert out["status"] == pb.STATUS_CAPABILITY_ABSENT
     assert "no Binance spot leg" in out["reason"]
 
@@ -352,10 +356,278 @@ def test_spot_basis_bps_for_pure_crypto(monkeypatch):
         return _kline_frame([99.0 + i * 0.1 for i in range(8)])
 
     monkeypatch.setattr(pb, "binance_klines_frame", fake_klines)
-    out = pb._fetch_spot_basis("BTCUSDT", "2026-08-18", 100.0)
+    # (tail date, close) hint: the spot frame runs 2026-07-01..08, so the
+    # perp tail 2026-07-08 pairs the spot bar AT that date.
+    out = pb._fetch_spot_basis(
+        "BTCUSDT", "2026-08-18", (pd.Timestamp("2026-07-08"), 100.0),
+    )
     assert out["status"] == pb.STATUS_OK
     assert out["spot_close"] == pytest.approx(99.7)
     assert out["basis_bps"] == pytest.approx((100.0 / 99.7 - 1.0) * 1e4)
+
+
+# ---- round-11: same-date basis pairing (no cross-day ratios) -------------------
+
+
+@pytest.mark.unit
+def test_prices_basis_degrades_when_mark_tail_lags(monkeypatch):
+    """Round-11: the last−mark basis is a SAME-DATE ratio. A mark feed whose
+    tail lags one day (mark frame ends D-1 while last ends D) used to pair
+    each leg's positional ``iloc[-1]`` — fabricating last@D / mark@D-1
+    displacement. The metric must degrade (key absent), never cross-date."""
+    last_closes = [100.0 + i for i in range(10)]      # tail 2026-07-10
+    mark_closes = [90.0 + i for i in range(9)]        # tail 2026-07-09 (lags)
+
+    def fake_klines(symbol, start, end, interval="1d", venue="binance_perp",
+                    price_type="last"):
+        if price_type == "mark":
+            return _kline_frame(mark_closes)
+        return _kline_frame(last_closes)
+
+    monkeypatch.setattr(pb, "binance_klines_frame", fake_klines)
+    out = pb._fetch_prices("BTCUSDT", "2026-08-18")
+    assert out["core_complete"] is True
+    assert "last_vs_mark_bps" not in out  # degraded, not cross-dated
+    # index aligned with last -> its basis still pairs same-date.
+    assert out["last_vs_index_bps"] == pytest.approx(0.0, abs=1e-6)
+    # The per-leg readings themselves are untouched by the pairing rule.
+    assert out["mark"]["close"] == pytest.approx(98.0)
+
+
+@pytest.mark.unit
+def test_spot_basis_degrades_when_spot_tail_lags(monkeypatch):
+    """Round-11 (regime round-10 seam): the spot leg must carry a bar at the
+    perp tail's own date. A spot frame ending D-1 degrades to unavailable —
+    the old positional pairing fabricated perp@D / spot@D-1 basis."""
+    monkeypatch.setattr(pb, "stock_perp_underlying", lambda t: None)
+
+    def fake_klines(symbol, start, end, interval="1d", venue="binance_perp",
+                    price_type="last"):
+        assert venue == "binance_spot"
+        return _kline_frame([99.0 + i * 0.1 for i in range(7)])  # ends 07-07
+
+    monkeypatch.setattr(pb, "binance_klines_frame", fake_klines)
+    out = pb._fetch_spot_basis(
+        "BTCUSDT", "2026-08-18", (pd.Timestamp("2026-07-08"), 100.0),
+    )
+    assert out["status"] == pb.STATUS_UNAVAILABLE
+    assert "lags" in out["reason"]
+    assert "basis_bps" not in out
+
+
+# ---- round-11 remediation: duplicated tail dates must not TypeError -------------
+
+
+@pytest.mark.unit
+def test_prices_pairing_survives_duplicated_tail_date(monkeypatch):
+    """A paginated unordered kline frame can carry the tail date twice —
+    ``Series.loc[tail]`` then returns a SERIES and ``float(Series)`` raises
+    TypeError, failing the whole prices leg into a core NO_TRADE sentinel.
+    keep="last" resolves the overlap (the last page's row wins) and the
+    same-date basis still pairs."""
+    base = [100.0 + i for i in range(9)]  # 2026-07-01..09
+    # The last leg's feed delivers 07-10 twice: page A @111, page B @199
+    # (unordered pagination backfill). keep="last" -> 199.
+    dup_last = pd.concat([
+        _kline_frame(base),
+        _kline_frame([111.0], start="2026-07-10"),
+        _kline_frame([199.0], start="2026-07-10"),
+    ])
+    assert dup_last.index.duplicated().sum() == 1  # fixture really is dup
+    clean_tail = _kline_frame(base + [199.0])  # mark/index: no dup
+
+    def fake_klines(symbol, start, end, interval="1d", venue="binance_perp",
+                    price_type="last"):
+        if price_type == "last":
+            return dup_last
+        return clean_tail
+
+    monkeypatch.setattr(pb, "binance_klines_frame", fake_klines)
+    out = pb._fetch_prices("BTCUSDT", "2026-08-18")
+    assert out["core_complete"] is True
+    # keep="last": the tail close is 199.0 (not 111.0, not a TypeError).
+    assert out["last"]["close"] == pytest.approx(199.0)
+    # The basis pairs same-date on the deduplicated values: 199 vs 199 -> 0.
+    assert out["last_vs_mark_bps"] == pytest.approx(0.0, abs=1e-6)
+
+
+@pytest.mark.unit
+def test_spot_basis_survives_duplicated_tail_date(monkeypatch):
+    """Same seam on the spot leg: a duplicated perp-tail date in the spot
+    frame must resolve keep="last", not raise float(Series) TypeError."""
+    monkeypatch.setattr(pb, "stock_perp_underlying", lambda t: None)
+
+    spot = pd.concat([
+        _kline_frame([99.0 + i * 0.1 for i in range(7)]),  # ..2026-07-07
+        _kline_frame([99.9], start="2026-07-08"),          # page A @99.9
+        _kline_frame([100.0], start="2026-07-08"),         # page B @100.0
+    ])
+    assert spot.index.duplicated().sum() == 1
+
+    monkeypatch.setattr(pb, "binance_klines_frame", lambda *a, **k: spot)
+    out = pb._fetch_spot_basis(
+        "BTCUSDT", "2026-08-18", (pd.Timestamp("2026-07-08"), 101.0),
+    )
+    assert out["status"] == pb.STATUS_OK
+    assert out["spot_close"] == pytest.approx(100.0)  # keep="last"
+    assert out["basis_bps"] == pytest.approx((101.0 / 100.0 - 1.0) * 1e4)
+
+
+# ---- round-11: OI percentile ranks against the PRIOR window --------------------
+
+
+@pytest.mark.unit
+def test_open_interest_monotonic_new_high_reads_100th(monkeypatch):
+    """Round-11: the old denominator counted the latest as its own
+    comparison base, so a monotonic new high on a full window could never
+    exceed (n-1)/n — a 30-row window capped at ~97th pct. The latest must
+    rank against the PRIOR window only: a new high reads a full 100.0."""
+    rows = [
+        {"timestamp": _ts(29 - i), "sumOpenInterest": str(100.0 + i)}
+        for i in range(30)
+    ]
+    monkeypatch.setattr(pb, "_http_get", lambda path, params, *a, **k: rows)
+    out = pb._fetch_open_interest("BTCUSDT", date.today().isoformat())
+    assert out["status"] == pb.STATUS_OK
+    assert out["days"] == 30
+    assert out["percentile"] == pytest.approx(100.0)
+    # Mid-window value: 4 of 5 prior values below it -> 80th, not 4/6~67th.
+    rows_mid = [
+        {"timestamp": _ts(5 - i), "sumOpenInterest": str(v)}
+        for i, v in enumerate([100.0, 90.0, 125.0, 110.0, 105.0, 120.0])
+    ]
+    monkeypatch.setattr(pb, "_http_get", lambda path, params, *a, **k: rows_mid)
+    out_mid = pb._fetch_open_interest("BTCUSDT", date.today().isoformat())
+    assert out_mid["percentile"] == pytest.approx(4 / 5 * 100.0)
+
+
+@pytest.mark.unit
+def test_open_interest_single_row_window_is_disclosed_vacuous(monkeypatch):
+    """n == 1 (retention clamp / brand-new contract) has no prior base: the
+    latest is trivially the window's max -> 100.0, with the vacuous span
+    disclosed through ``days`` so the rendered label self-identifies."""
+    monkeypatch.setattr(
+        pb, "_http_get",
+        lambda path, params, *a, **k: [
+            {"timestamp": _ts(0), "sumOpenInterest": "121"},
+        ],
+    )
+    out = pb._fetch_open_interest("BTCUSDT", date.today().isoformat())
+    assert out["status"] == pb.STATUS_OK
+    assert out["days"] == 1
+    assert out["percentile"] == pytest.approx(100.0)
+
+
+# ---- round-11: endTime belt-and-suspenders row trim ----------------------------
+
+
+@pytest.mark.unit
+def test_oi_series_trims_rows_past_window_end(monkeypatch):
+    """A vendor (or mock) that ignores the endTime must never leak rows past
+    the requested window end into the percentile base (the tool layer's
+    binance.py seam, applied to the bundle's direct ``_http_get`` calls).
+    Row timestamps are built RELATIVE to the requested endTime so the pin
+    holds on any host/UTC date skew."""
+    day = 86_400_000
+
+    def fake_http(path, params, *a, **k):
+        end = params["endTime"]
+        return [
+            {"timestamp": end - 2 * day, "sumOpenInterest": "100"},
+            {"timestamp": end - day, "sumOpenInterest": "110"},
+            {"timestamp": end + 60_000, "sumOpenInterest": "999"},  # beyond
+        ]
+
+    monkeypatch.setattr(pb, "_http_get", fake_http)
+    rows = pb._oi_series("BTCUSDT", date.today().isoformat(), 30)
+    assert [v for _ts, v in rows] == [100.0, 110.0]
+
+
+@pytest.mark.unit
+def test_lsr_and_taker_trim_rows_past_window_end(monkeypatch):
+    day = 86_400_000
+
+    def fake_http(path, params, *a, **k):
+        end = params["endTime"]
+        return [
+            {"timestamp": end - day, "longShortRatio": "1.5",
+             "buySellRatio": "1.2"},
+            {"timestamp": end + 60_000, "longShortRatio": "9.9",
+             "buySellRatio": "9.9"},  # beyond end — must drop
+        ]
+
+    monkeypatch.setattr(pb, "_http_get", fake_http)
+    lsr = pb._fetch_lsr("BTCUSDT", date.today().isoformat())
+    for key in ("top_account", "top_position", "global_account"):
+        assert lsr[key]["latest"] == pytest.approx(1.5)
+    taker = pb._fetch_taker("BTCUSDT", date.today().isoformat())
+    assert taker["latest"] == pytest.approx(1.2)
+
+
+# ---- round-11: per-leg labeling timeout ----------------------------------------
+
+
+@pytest.mark.unit
+def test_leg_timeout_default_and_env_parsing(monkeypatch):
+    """``YIALPHA_PERP_BUNDLE_LEG_TIMEOUT_S`` defaults to 300s — ABOVE the
+    legal slow paths (proactive-backoff limiter waits out a ~60s weight
+    window per request; BINANCE_HTTP_RETRIES >= 3 adds 62s of backoff) that
+    the old fixed 60s mislabeled as TimeoutError -> core sentinel ->
+    NO_TRADE. ``0`` is EXPLICIT OFF (repo convention, round-11 remediation):
+    ``None`` makes ``future.result`` wait forever, identical to the pool
+    join's own semantics. Negative / non-numeric values fall back to 300."""
+    import importlib
+
+    assert pb.LEG_TIMEOUT_S == 300.0
+    for raw, expected in (("900", 900.0), ("0", None), ("-5", 300.0),
+                          ("garbage", 300.0)):
+        monkeypatch.setenv("YIALPHA_PERP_BUNDLE_LEG_TIMEOUT_S", raw)
+        importlib.reload(pb)
+        assert pb.LEG_TIMEOUT_S == expected, raw
+    monkeypatch.delenv("YIALPHA_PERP_BUNDLE_LEG_TIMEOUT_S", raising=False)
+    importlib.reload(pb)
+    assert pb.LEG_TIMEOUT_S == 300.0
+
+
+@pytest.mark.unit
+def test_bundle_leg_timeout_reads_module_constant(monkeypatch):
+    """The result-wait threshold must read ``LEG_TIMEOUT_S`` (not a
+    re-hardcoded 60): a leg over the threshold is labeled
+    TimeoutError-unavailable, a leg under it lands normally. Together with
+    the 300s default this pins the round-11 fix — a legal ~62s slow leg
+    lands in the bundle instead of escalating to a core sentinel."""
+    import time as time_mod
+
+    monkeypatch.setattr(pb, "is_historical_date", lambda d: True)
+    monkeypatch.setattr(pb, "LEG_TIMEOUT_S", 0.05)
+
+    def slow_taker(symbol, end_date):
+        time_mod.sleep(0.1)  # over the patched threshold
+        return {"status": pb.STATUS_OK}
+
+    def fast_oi(symbol, end_date):
+        return {"status": pb.STATUS_OK}
+
+    monkeypatch.setattr(
+        pb, "_fetch_prices",
+        lambda s, d: {"status": pb.STATUS_OK, "core_complete": True},
+    )
+    monkeypatch.setattr(pb, "_fetch_open_interest", fast_oi)
+    monkeypatch.setattr(pb, "_fetch_lsr", fast_oi)
+    monkeypatch.setattr(pb, "_fetch_taker", slow_taker)
+    monkeypatch.setattr(pb, "_fetch_spot_basis",
+                        lambda s, d, c: {"status": pb.STATUS_CAPABILITY_ABSENT})
+    monkeypatch.setattr(pb, "_last_close_hint", lambda s, d: None)
+
+    quality.ensure_run_context()
+    try:
+        bundle = pb.fetch_perp_market_bundle("BTCUSDT", "2020-01-10")
+    finally:
+        quality.reset_quality()
+
+    assert "TimeoutError" in bundle["taker"]["reason"]
+    assert bundle["taker"]["status"] == pb.STATUS_UNAVAILABLE
+    assert bundle["prices"]["status"] == pb.STATUS_OK  # under threshold lands
 
 
 # ---- assembler: CORE sentinel --------------------------------------------------

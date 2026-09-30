@@ -215,6 +215,54 @@ def test_form4_primary_document_with_path_prefix_caches_correctly(monkeypatch, t
     assert cached[0].name == "form4_320193_000032019324000003_xslF345X05_wk-form4_20240605.xml"
 
 
+@pytest.mark.unit
+def test_form4_malformed_filing_date_fail_closed(monkeypatch, tmp_path, caplog):
+    """Round-11 pin (mainline fix): a Form 4 whose filingDate is an empty
+    string or a malformed value cannot prove it was public by curr_date —
+    fail-closed skip aligned with the 13F path (the old guards required a
+    truthy fd_d for BOTH bounds and rendered such filings' trades unfiltered,
+    a PIT leak). The malformed filings are never fetched, never rendered, and
+    never consume the fetched budget; normal entries are unaffected."""
+    import json as _json
+    import logging as _logging
+
+    subs = _json.dumps({
+        "cik": 320193,
+        "filings": {"recent": {
+            "form": ["4", "4", "4"],
+            "accessionNumber": [
+                "000032019324000099", "000032019324000098",
+                "000032019324000002",
+            ],
+            "filingDate": ["", "not-a-date", "2024-06-10"],
+            "primaryDocument": ["bad1.xml", "bad2.xml", "f2.xml"],
+        }},
+    }).encode()
+    requested = []
+
+    def fake_fetch(_path, url, ttl_days):
+        requested.append(url)
+        if "submissions" in url:
+            return subs
+        if "f2.xml" in url:
+            return XML_BY_DOC["f2.xml"]
+        raise AssertionError(f"malformed filing must never be fetched: {url}")
+
+    monkeypatch.setattr(sec_ownership, "_cache_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(sec_ownership, "_cik_for_ticker", lambda t: 320193)
+    monkeypatch.setattr(sec_ownership, "_cached_or_fetch", fake_fetch)
+
+    with caplog.at_level(
+        _logging.DEBUG, logger="yialpha.dataflows.sec_ownership",
+    ):
+        out = sec_ownership.get_form4_insider_trading("AAPL", "2024-06-15", 180)
+    assert "LUCA MAESTRI" in out                    # the valid filing renders
+    assert not any("bad" in u for u in requested)   # malformed never fetched
+    assert any(
+        "missing/malformed filingDate" in r.message for r in caplog.records
+    )
+
+
 # --------------------------------------------------------------------------- #
 # FTD
 # --------------------------------------------------------------------------- #
@@ -788,6 +836,72 @@ def test_13f_malformed_curr_date_fails_closed(monkeypatch, tmp_path):
     _patch_13f(monkeypatch, tmp_path, _13f_zip(cover, holding))
     with pytest.raises(NoMarketDataError):
         sec_ownership.get_institutional_holdings("AAPL", "2026/08/01", 180)
+
+
+# --------------------------------------------------------------------------- #
+# Round-11 remediation (C2): curr_date clamped to the pinned analysis date
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_form4_curr_date_clamped_to_pinned_analysis_date(
+        monkeypatch, tmp_path):
+    """An LLM-supplied curr_date beyond the run's pinned analysis date must
+    not widen the filingDate window — the 2024-07-01 filing stays invisible
+    at the pinned 2024-06-15 whether the caller passes the pinned date or a
+    far-future echo (byte-identical output)."""
+    from yialpha.dataflows.utils import set_analysis_date
+
+    _patch_form4(monkeypatch, tmp_path)
+    set_analysis_date("2024-06-15")
+    try:
+        clamped = sec_ownership.get_form4_insider_trading("AAPL", "2030-01-01", 180)
+        direct = sec_ownership.get_form4_insider_trading("AAPL", "2024-06-15", 180)
+    finally:
+        set_analysis_date(None)
+    assert clamped == direct
+    assert "JEFF WILLIAMS" not in clamped   # filed 2024-07-01: invisible
+    assert "LUCA MAESTRI" in clamped        # filed 2024-06-10: visible
+
+
+@pytest.mark.unit
+def test_ftd_curr_date_clamped_to_pinned_analysis_date(monkeypatch, tmp_path):
+    """Same clamp on the FTD visibility window: a pinned 2024-06-20 keeps the
+    June half-month files not-yet-public even when the LLM echoes a future
+    date — identical bytes to the direct pinned-date call."""
+    from yialpha.dataflows.utils import set_analysis_date
+
+    requested = _patch_ftd(monkeypatch, tmp_path)
+    set_analysis_date("2024-06-20")
+    try:
+        clamped = sec_ownership.get_ftd_data("AAPL", "2030-01-01", 90)
+        assert not any("cnsfails202406" in u for u in requested)
+        direct = sec_ownership.get_ftd_data("AAPL", "2024-06-20", 90)
+    finally:
+        set_analysis_date(None)
+    assert clamped == direct
+    assert "1234567" in clamped            # the public May-b file still serves
+
+
+@pytest.mark.unit
+def test_13f_curr_date_clamped_to_pinned_analysis_date(monkeypatch, tmp_path):
+    """Same clamp on the 13F dataset-visibility window (and the CUSIP's
+    filed-at gate): a pinned 2024-07-10 keeps the not-yet-published Mar-May
+    ZIP out even when curr_date echoes the future."""
+    from yialpha.dataflows.utils import set_analysis_date
+
+    requested = _patch_13f(
+        monkeypatch, tmp_path, _13f_zip(COVER_HEADER, HOLDING_HEADER))
+    set_analysis_date("2024-07-10")
+    try:
+        clamped = sec_ownership.get_institutional_holdings("AAPL", "2030-01-01", 180)
+        direct = sec_ownership.get_institutional_holdings("AAPL", "2024-07-10", 180)
+    finally:
+        set_analysis_date(None)
+    assert clamped == direct
+    # The Mar-May ZIP (public only from 2024-07-15) was never requested in
+    # either call — both fell back to the last published dataset.
+    assert all("01mar2024-31may2024" not in u for u in requested)
+    assert requested  # the Dec-Feb fallback WAS requested
+    assert "No bulk 13F data set was public" not in clamped
 
 
 @pytest.mark.unit

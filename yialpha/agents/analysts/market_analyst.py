@@ -332,6 +332,34 @@ def _system_message() -> str:
     return _legacy_system_message() + get_language_instruction()
 
 
+def _warn_ic_context_empty() -> None:
+    """Fail-visible WARNING: indicator_ic_context is on but nothing loaded.
+
+    Round-11: the flag used to no-op silently when no ``ic_data/*.prune.json``
+    verdict was loadable (dir missing, dir empty, or nothing catalog-known
+    inside it) — inconsistent with config-check's explicit posture toward
+    indicator_battery. One WARNING names the checked path, the common
+    causes, and the ``yialpha ic-cycle`` remedy. Unifying the ic_data path
+    (a single well-known root) is deliberately out of scope here. Gated on
+    the flag so direct calls with the flag off stay silent (and the run
+    path never calls this helper at all — the node-level gate below).
+    """
+    from pathlib import Path
+
+    if not get_config().get("indicator_ic_context", False):
+        return
+    logger.warning(
+        "indicator_ic_context is enabled but no IC verdict was loadable "
+        "from %s. Possible causes: `yialpha ic-cycle` has not been run yet; "
+        "the CLI was launched from a different working directory than the "
+        "one containing ic_data/; or the prune output was written to a "
+        "different directory. Run `yialpha ic-cycle` (or place the "
+        "*.prune.json files under ./ic_data) — the market-analyst prompt "
+        "stays unchanged for this run.",
+        Path("ic_data").resolve(),
+    )
+
+
 def _format_indicator_ic_context(asset_type: str = "stock") -> str | None:
     """One advisory line per indicator with its trailing mean |IC|.
 
@@ -353,6 +381,7 @@ def _format_indicator_ic_context(asset_type: str = "stock") -> str | None:
 
     ic_dir = Path("ic_data")
     if not ic_dir.is_dir():
+        _warn_ic_context_empty()
         return None
     all_files = sorted(ic_dir.glob("*.prune.json"))
     suffix = ".csv.prune.json"
@@ -391,6 +420,7 @@ def _format_indicator_ic_context(asset_type: str = "stock") -> str | None:
             if isinstance(mic, (int, float)):
                 values.setdefault(name, []).append(float(mic))
     if not values:
+        _warn_ic_context_empty()
         return None
     known = set(INDICATOR_NAMES)
     parts = sorted(
@@ -398,6 +428,7 @@ def _format_indicator_ic_context(asset_type: str = "stock") -> str | None:
         for name, v in values.items() if name in known
     )
     if not parts:
+        _warn_ic_context_empty()
         return None
     rendered = ", ".join(f"{name} |IC|={avg:.3f}" for name, avg in parts)
     return f"Trailing mean |IC| by indicator: {rendered}"

@@ -31,22 +31,20 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import sys
 from datetime import datetime
 from pathlib import Path
 
-# Allow running as `python scripts/run_batch.py` without an editable install.
-_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+# Allow running as `python scripts/run_batch.py` without an editable install, and
+# make scripts/_bootstrap importable under importlib-based test loading too
+# (spec_from_file_location does not put scripts/ on sys.path).
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-# Windows 控制台默认 GBK，打印 ✅/❌/中文会触发 UnicodeEncodeError；强制 utf-8。
-for _stream in (sys.stdout, sys.stderr):
-    _reconfigure = getattr(_stream, "reconfigure", None)
-    if callable(_reconfigure):
-        with contextlib.suppress(AttributeError, ValueError):
-            _reconfigure(encoding="utf-8", errors="replace")
+import _bootstrap  # noqa: E402
+
+_bootstrap.bootstrap()  # project-root sys.path + UTF-8 console (Windows GBK)
 
 from yialpha.logging_config import setup_logging  # noqa: E402
 

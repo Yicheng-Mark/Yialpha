@@ -2,6 +2,8 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from yialpha.default_config import DEFAULT_CONFIG
+
 from . import quality
 from .akshare_vendor import (
     get_a_share_dragon_tiger_native as get_akshare_a_share_dragon_tiger,
@@ -497,6 +499,27 @@ def get_category_for_method(method: str) -> str:
             return category
     raise ValueError(f"Method '{method}' not found in any category")
 
+
+def _default_chain_order(category: str, available: list[str]) -> list[str]:
+    """Order a method's vendors by the documented default chain for its category.
+
+    The ``"default"`` fallback (no explicit chain configured) used to serve
+    ``VENDOR_METHODS[method]``'s dict insertion order, which puts alpha_vantage
+    first for the price / indicator / news methods — violating the default
+    multi-source chain contract (T0-3: yfinance, keyless and unthrottled,
+    always leads; AV's rate-limited free tier only ever trails). The order
+    comes from ``DEFAULT_CONFIG``'s ``data_vendors`` value for the method's
+    category (single source of truth — no second ordering invented here);
+    vendors available for the method but not named in the chain (e.g. the
+    ``fundamentals_overview`` aggregate) keep their dict order after it.
+    """
+    chain = DEFAULT_CONFIG.get("data_vendors", {}).get(category, "")
+    named = [v.strip() for v in str(chain).split(",") if v.strip()]
+    head = [v for v in named if v in available]
+    tail = [v for v in available if v not in head]
+    return head + tail
+
+
 def get_vendor(category: str, method: str | None = None) -> str:
     """Get the configured vendor for a data category or specific tool method.
     Tool-level configuration takes precedence over category-level.
@@ -534,7 +557,9 @@ def route_to_vendor(method: str, *args: Any, _qualifier: str = "", **kwargs: Any
     # vendors the user did not choose (#988/#289) — that returned data from an
     # unexpected source and caused cross-vendor inconsistencies. For multi-vendor
     # fallback, list them in order, e.g. data_vendors="yfinance,alpha_vantage".
-    # The "default" sentinel (no explicit config) uses all available vendors.
+    # The "default" sentinel (no explicit config) uses all available vendors,
+    # ordered by the documented default chain for the category (round-11: dict
+    # insertion order put alpha_vantage first for prices/indicators/news).
     explicit = [v for v in primary_vendors if v and v != "default"]
     if explicit:
         vendor_chain = [v for v in explicit if v in VENDOR_METHODS[method]]
@@ -544,7 +569,7 @@ def route_to_vendor(method: str, *args: Any, _qualifier: str = "", **kwargs: Any
                 f"Available: {all_available_vendors}."
             )
     else:
-        vendor_chain = all_available_vendors
+        vendor_chain = _default_chain_order(category, all_available_vendors)
 
     last_no_data: NoMarketDataError | None = None
     first_error: Exception | None = None
