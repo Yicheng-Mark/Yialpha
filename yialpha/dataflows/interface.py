@@ -642,7 +642,13 @@ def route_to_vendor(method: str, *args: Any, _qualifier: str = "", **kwargs: Any
         # non-US ticker, which raises NoMarketDataError by design) must count
         # as optional-unavailable, not core — otherwise every non-US/crypto
         # run querying a US-only tool is flagged "core data degraded".
-        if category in OPTIONAL_CATEGORIES:
+        # Round-12: perp price-book engines (klines/indicators) inside the
+        # optional Binance categories record CORE kinds — the severity the
+        # success side and classify_quality already assign them, so
+        # core_sentinel_count and the tradeability gate can't disagree.
+        if category in OPTIONAL_CATEGORIES and not quality.sentinel_is_core(
+            category, method, _qualifier
+        ):
             quality.record_sentinel(
                 method, quality.KIND_OPTIONAL_UNAVAILABLE,
                 last_no_data.detail or "no usable data",
@@ -667,8 +673,19 @@ def route_to_vendor(method: str, *args: Any, _qualifier: str = "", **kwargs: Any
     if first_error is not None:
         if category in OPTIONAL_CATEGORIES:
             logger.warning("Optional %s unavailable for %s: %s", category, method, first_error)
+            # Round-12: same severity single-source as the no-data branch —
+            # a failed perp price-book engine records KIND_CORE_ERROR (its
+            # enrichment neighbours keep the optional kind). Return-vs-raise
+            # behaviour is unchanged: optional categories still degrade to
+            # the sentinel string, never abort the tool call.
             quality.record_sentinel(
-                method, quality.KIND_OPTIONAL_UNAVAILABLE, str(first_error),
+                method,
+                (
+                    quality.KIND_CORE_ERROR
+                    if quality.sentinel_is_core(category, method, _qualifier)
+                    else quality.KIND_OPTIONAL_UNAVAILABLE
+                ),
+                str(first_error),
                 qualifier=_qualifier,
             )
             return (

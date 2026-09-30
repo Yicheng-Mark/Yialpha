@@ -153,15 +153,29 @@ def _fetch_chart_cached(chart: str) -> tuple[Any, str] | None:
     cache hit can never masquerade as a fresh fetch (regenerating it at
     assembly time claimed NOW for up-to-6h-old bytes).
     """
+    def _fetch_slot() -> bytes:
+        payload = fetch_chart_json(chart)
+        if payload is None:
+            # Round-12: serializing a None payload let the disk cache store
+            # the FAILURE for the full 6h TTL — one transient bad body (a
+            # maintenance page, a shape change) became a 6h outage that
+            # fail_open was designed to prevent. Raising leaves the entry
+            # uncached (fail_open returns None to the caller) so the next
+            # call refetches instead of replaying the outage.
+            raise ValueError(
+                f"chart {chart!r}: no usable payload (HTTP/parse failure)"
+            )
+        return json.dumps(
+            {
+                "fetched_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "payload": payload,
+            }
+        ).encode("utf-8")
+
     raw = cached_or_fetch(
         vendor_cache_dir(_VENDOR),
         f"{chart}_{_TIMESPAN}.json",
-        lambda: json.dumps(
-            {
-                "fetched_at": datetime.now(UTC).isoformat(timespec="seconds"),
-                "payload": fetch_chart_json(chart),
-            }
-        ).encode("utf-8"),
+        _fetch_slot,
         ttl_days=_CACHE_TTL_DAYS,
         vendor=_VENDOR,
         fail_open=True,

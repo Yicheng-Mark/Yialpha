@@ -97,6 +97,15 @@ _ARCHIVE_TTL_DAYS = 3650.0
 # bound the old hard cap enforced, now a rate bound instead of a coverage
 # ceiling.
 _SYNC_BUDGET_FILES = 400
+
+#: Round-12 memory guard for bookDepth: ``VisionStore.load()`` materializes
+#: the FULL window before any shaping or output cap, and bookDepth runs
+#: ~20k rows/day at 30s grain — a multi-year call concatenated tens of
+#: millions of rows (multi-GB peak) before the caps could protect anything.
+#: The manifest-based row estimate refuses oversized windows up front;
+#: ~12M rows ≈ a 1.5-2 year window. Coverage still accumulates across
+#: narrower successive calls.
+_BOOK_DEPTH_MAX_ROWS = 12_000_000
 _MAX_OUTPUT_ROWS = 2000
 _MAX_RAW_ROWS = 20000
 
@@ -343,11 +352,19 @@ def _load_window_from_store(
     df = store.load(dataset, symbol, start_dt, end_dt)
     qa = store.qa(dataset, symbol, start_dt, end_dt)
     if df.empty:
+        # Round-12: fold the manifest's recorded 404-days into the reason —
+        # report.missing/unsynced cover only THIS call's fresh attempts, so
+        # a repeat query inside the 24h backoff of an all-404 window
+        # otherwise claims "0 404'd, 0 unsynced" while nothing is servable.
+        backoff_missing = store.missing_days_in_window(
+            dataset, symbol, start_dt, end_dt,
+        )
         raise NoMarketDataError(
             symbol_for_error, canonical,
             f"no {dataset} archive data found for the window — the dataset "
             f"is not published for this symbol or the dates precede its "
-            f"listing ({report.missing} day(s) 404'd, "
+            f"listing ({report.missing} day(s) 404'd now, "
+            f"{backoff_missing} in the 24h 404-backoff, "
             f"{report.unsynced} unsynced within the per-call budget)",
         )
     return df, report, qa
@@ -754,7 +771,9 @@ def get_binance_vision_book_depth(
     Serves the data.binance.vision ``bookDepth`` dataset — resting depth
     within SIGNED ±``percentage`` price bands of mid (negative = bid side,
     positive = ask side; bands at ±0.2/1/2/3/4/5%), ~30-second source grain,
-    back years. Depth persistence is the liquidation-cascade context — a
+    back years (per-call windows are capped by a manifest-based row budget —
+    query ~6-month windows for deep history; coverage accumulates locally).
+    Depth persistence is the liquidation-cascade context — a
     thin book into a falling price means slippage amplifies forced selling;
     a thick book absorbing a dump signals real demand.
 
@@ -775,6 +794,26 @@ def get_binance_vision_book_depth(
         )
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
     start_dt, end_dt, note = _resolve_window(symbol, canonical, start_date, end_date)
+    # Round-12 memory guard: load() materializes the full window before any
+    # shaping — refuse bookDepth windows whose manifest-based row estimate
+    # exceeds the budget instead of concatenating tens of millions of rows.
+    # None (fresh store, nothing synced yet) lets the first call through:
+    # the 400-file sync budget bounds what a first call can even assemble.
+    from .binance_vision_store import VisionStore
+
+    _est_rows = VisionStore().window_row_estimate(
+        "bookDepth", canonical, start_dt, end_dt,
+    )
+    if _est_rows is not None and _est_rows > _BOOK_DEPTH_MAX_ROWS:
+        raise NoMarketDataError(
+            symbol, canonical,
+            f"bookDepth window [{start_dt.date()}, {end_dt.date()}] "
+            f"(~{_est_rows:,} estimated rows) exceeds the per-call memory "
+            f"budget of {_BOOK_DEPTH_MAX_ROWS:,} rows — the store "
+            f"materializes the whole window before shaping. Query narrower "
+            f"windows (~6 months per call); synced coverage accumulates "
+            f"locally across calls.",
+        )
     try:
         df, report, qa = _load_window_from_store(
             "bookDepth", canonical, start_dt, end_dt, symbol, canonical,

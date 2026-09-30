@@ -142,8 +142,12 @@ def _select_pit(entries: list[dict], curr_date: str) -> tuple[dict, dict | None]
     module docstring's same-day visibility note). ``None`` when nothing in
     the series is that old (analysis date precedes index coverage).
     """
+    # Round-12: live programmatic entries carry the dual form
+    # "YYYY-MM-DD HH:MM:SS" (the propagate() entry documented in
+    # sentiment/news analysts) — the bare %Y-%m-%d strptime raised on it,
+    # killing the cue and mislabeling it "fetch failed". Date-part first.
     cutoff = (
-        datetime.strptime(curr_date, "%Y-%m-%d").replace(tzinfo=UTC)
+        datetime.strptime(str(curr_date)[:10], "%Y-%m-%d").replace(tzinfo=UTC)
         + timedelta(days=1)
         - timedelta(seconds=1)
     )

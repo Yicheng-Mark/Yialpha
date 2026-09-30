@@ -101,14 +101,18 @@ def _load_regime_ohlcv(
 
     from .binance import _now_ms, binance_klines_frame
 
+    # Round-12: dual-form live entries ("YYYY-MM-DD HH:MM:SS") made the bare
+    # strptime raise, so the regime cue rendered "unavailable" on exactly the
+    # live runs that opted in. Date-part once and use it for both edges.
+    day = str(curr_date)[:10]
     lookback = (
-        datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=500)
+        datetime.strptime(day, "%Y-%m-%d") - timedelta(days=500)
     ).strftime("%Y-%m-%d")
     # closed bars only: the turbulence reading is advisory evidence in the
     # risk debate — a forming bar would feed an intraday partial close into
     # the 252d rolling-z computation (same seam the regime stage uses).
     frame = binance_klines_frame(
-        symbol, lookback, curr_date, "1d", venue, "last",
+        symbol, lookback, day, "1d", venue, "last",
         closed_as_of=_now_ms(),
     )
     # binance_klines_frame is Date-INDEXED; load_ohlcv returns Date as a

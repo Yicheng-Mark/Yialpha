@@ -47,6 +47,7 @@ from yialpha.risk.perp_ticket import (  # noqa: E402
     LIQ_SAFETY,
     RATING_STRENGTH,
     VOL_K,
+    advisory_leverage_cap,
     compute_leverage,
     liquidation_price,
     take_profits,
@@ -430,7 +431,23 @@ def build_ticket(report_dir: Path, capital: float, profile: str) -> dict:
     quantity = notional / entry
 
     strength = RATING_STRENGTH.get(rating, 1 if direction != "hold" else 0)
-    L, caps = compute_leverage(stop_dist, atr_pct, asset_type, strength, profile)
+    # Round-12：与运行时 overlay 对齐——三个运行时消费方（overlay 票据段、
+    # Candidate ticket、_sync_candidate_ticket）都把 advisory_leverage_cap
+    # （交易所 leverageBracket 的 initialLeverage 档上限）喂进 compute_leverage，
+    # 唯独本脚本没传；低上限合约（如 5x 档）的报告 overlay 写
+    # "≤ 5.0x (… bracket 5x)"，同一份报告的手动执行单却打 10x、按 10x 算
+    # 保证金与爆仓价。fail-soft：无 key / 无档位 / 离线 → None → 旧静态
+    # 硬顶，行为与今天字节一致。
+    bracket_cap = None
+    if asset_type == "crypto_perp":
+        try:
+            bracket_cap = advisory_leverage_cap(ticker, notional)
+        except Exception:  # noqa: BLE001 — advisory cap must never break the ticket
+            bracket_cap = None
+    L, caps = compute_leverage(
+        stop_dist, atr_pct, asset_type, strength, profile,
+        bracket_max_leverage=bracket_cap,
+    )
     margin = notional / L
     margin_pct = margin / capital
 

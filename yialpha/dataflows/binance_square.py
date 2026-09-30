@@ -186,6 +186,13 @@ def base_asset_candidates(ticker: str) -> tuple[str, ...]:
     :func:`safe_ticker_component` (fail-closed ValueError) before any use.
     """
     safe = safe_ticker_component(ticker.upper())
+    # Round-12: legacy-crypto tickers arrive in the yfinance hyphenated form
+    # ("BTC-USD") — stripping "USD" across the hyphen left a trailing-hyphen
+    # base ("BTC-") that can never match a structured code or a $/# cashtag,
+    # so the block rendered "0 posts / not a topic of Square chatter" for
+    # the most-discussed assets on the platform. Collapse hyphens first:
+    # BTC-USD -> BTCUSD -> BTC; BTC-USDT -> BTCUSDT -> BTC.
+    safe = safe.replace("-", "")
     base = safe
     for suffix in _QUOTE_SUFFIXES:
         if base.endswith(suffix) and len(base) > len(suffix):

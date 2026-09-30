@@ -448,7 +448,18 @@ def _http_get(
     cfg = get_config()
     proactive = cfg.get("binance_proactive_backoff", False)
     use_session = cfg.get("binance_http_keepalive", False)
-    max_retries = int(cfg.get("binance_http_retries", 0))
+    # Round-12: a NEGATIVE value slipped through the env coercion and made
+    # ``range(max_retries + 1)`` execute zero attempts — the fall-through
+    # assertion in _request_with_retry then crashed every Binance call with
+    # an untyped error naming neither the env var nor the vendor. Negative
+    # means "off" exactly like 0 (byte-equivalent transport), with a warning.
+    _raw_retries = int(cfg.get("binance_http_retries", 0) or 0)
+    if _raw_retries < 0:
+        logger.warning(
+            "Invalid YIALPHA_BINANCE_HTTP_RETRIES=%d (must be >= 0); "
+            "using 0 (single attempt, raw exceptions)", _raw_retries,
+        )
+    max_retries = max(0, _raw_retries)
     honor_retry_after = cfg.get("binance_honor_retry_after", False)
     if proactive:
         # Back off BEFORE the request if the budget is hot, so we avoid tripping
@@ -996,6 +1007,19 @@ def get_binance_open_interest(
         header = (
             f"# Perp USDT-M open interest for {label} (last {limit} {scope})\n"
         )
+        # Round-12: an unwindowed request takes ``limit = look_back_days``,
+        # but the endpoint retains only the last 30 days — a 90-day ask
+        # serves ~31 daily rows under a header claiming "last 90 days".
+        # Render-only fix: disclose the retention cap (the request bytes are
+        # unchanged; the retention note was previously gated on the windowed
+        # form alone). LSR/taker/basis don't need this — they cap look-back
+        # at _LSR_LIMIT_CAP; OI is the only uncapped daily form.
+        if period == "1d" and int(look_back_days) > _FUTURES_DATA_RETENTION_DAYS:
+            header += (
+                f"# ⚠ endpoint retains the last {_FUTURES_DATA_RETENTION_DAYS} "
+                f"days only ({look_back_days} requested) — older rows are not "
+                f"served. Deeper history: get_binance_vision_metrics\n"
+            )
     if period != "1d":
         header += f"# period: {period}\n"
     if end_iso is not None:
@@ -1234,11 +1258,18 @@ def get_binance_long_short_ratio(
             if not extra:
                 params["limit"] = limit
             rows = _http_get(path, params, symbol, canonical)
-        except (NoMarketDataError, VendorRateLimitError) as exc:
+        except (
+            NoMarketDataError, VendorRateLimitError, requests.RequestException,
+        ) as exc:
             # One series 429'd or is unsupported for this contract — log and keep
             # the others rather than failing the whole call. The header notes
             # which are missing so absence reads as "fetch failed", not "no
-            # positioning data".
+            # positioning data". Round-12: with retries=0 a dropped connection
+            # re-raises the RAW transport error (not wrapped in
+            # NoMarketDataError) — without it in the tuple, one blip on a
+            # single series leg discarded the already-fetched series through
+            # the router's generic catch (same hole the round-9 S2 fix closed
+            # for the OI live-snapshot leg).
             unavailable.append(slabel)
             logger.info("Binance %s L/S ratio unavailable for %s: %s",
                         slabel, canonical, exc)

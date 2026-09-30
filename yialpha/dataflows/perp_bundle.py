@@ -216,6 +216,19 @@ def _fetch_prices(symbol: str, end_date: str) -> dict[str, Any]:
                 price_type, canonical, exc,
             )
 
+    # Round-12: a paginated/unordered kline frame can carry the tail date
+    # twice. The basis-pairing block below already deduplicates its own
+    # columns, but chg_1d/chg_7d/ATR ran on the RAW frame — with a
+    # duplicated tail, ``iloc[-2]`` was the same date's earlier page, so
+    # chg_1d reported a phantom same-day "change" and the ATR window
+    # ingested the same phantom gap. Deduplicate every leg once, up front
+    # (keep="last": the last page's row wins, matching the ordering the
+    # paginator resolves to — and the same rule the pairing block uses).
+    for _pt in tuple(frames):
+        _frame = frames[_pt]
+        if getattr(_frame.index, "has_duplicates", False):
+            frames[_pt] = _frame[~_frame.index.duplicated(keep="last")]
+
     if "last" in frames:
         frame = frames["last"]
         col = frame[KLINE_CLOSE_COLUMN]
@@ -641,8 +654,23 @@ def _fetch_adl(symbol: str) -> dict[str, Any]:
 
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")
     try:
-        data = signed_fapi_get("/fapi/v1/adlQuantile", {}, symbol, canonical)
-        entry = data[0] if isinstance(data, list) and data else {}
+        # Round-12: the symbol param is OPTIONAL on this endpoint — an empty
+        # params dict gets the ALL-symbols response, whose [0] entry is an
+        # arbitrary symbol's quantiles rendered as this contract's. Always
+        # send the symbol, and still verify the returned entry's symbol
+        # matches (defense against a future param-drop regression).
+        data = signed_fapi_get(
+            "/fapi/v1/adlQuantile", {"symbol": canonical}, symbol, canonical,
+        )
+        entry = {}
+        if isinstance(data, list) and data:
+            entry = next(
+                (
+                    d for d in data
+                    if isinstance(d, dict) and d.get("symbol") == canonical
+                ),
+                data[0] if isinstance(data[0], dict) else {},
+            )
         raw = entry.get("adlQuantile") if isinstance(entry, dict) else None
         if not isinstance(raw, dict):
             raise ValueError("adlQuantile returned no quantiles")  # noqa: TRY301

@@ -237,6 +237,24 @@ def create_positioning_analyst(llm):
                 onchain_available_at = None
 
         evidence_messages: list[HumanMessage] = []
+        if not positioning_block:
+            # Round-12: the structured schema's Literals (funding_bias /
+            # crowding / liquidity_risk) have no "unavailable" option, so
+            # invoking the LLM with ZERO positioning evidence forced
+            # fabricated labels rendered as a data-derived header in the
+            # live panel and final report. The bundle-fetch failure path now
+            # returns an honest skip note — no LLM call, no invented numbers
+            # (same fail-honest rule as the fundamentals grounding note and
+            # the skip the flag/perp gate itself uses).
+            note = (
+                "[Positioning Analyst skipped: perp positioning bundle "
+                "unavailable (fetch failed) — funding/OI/LSR evidence "
+                "absent; labels withheld rather than fabricated]"
+            )
+            return {
+                "positioning_report": note,
+                "messages": [AIMessage(content=note)],
+            }
         if positioning_block:
             evidence_messages.append(_bundle_evidence_message(positioning_block))
             # V2.3 record stage: the injected block becomes one evidence row

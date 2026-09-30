@@ -2804,7 +2804,12 @@ class YiAlphaGraph:
         suffix = {"crypto_perp": "_perp", "crypto_spot": "_spot"}.get(
             str(asset_type or "stock"), ""
         )
-        return f"full_states_log_{trade_date}{suffix}"
+        # Round-12: live programmatic entries carry trade_date as
+        # "YYYY-MM-DD HH:MM:SS" — embedded verbatim, the colons made the
+        # filename ILLEGAL on Windows and the run's entire on-disk evidence
+        # (web history, accuracy, price-at-decision anchor) silently never
+        # wrote. Date-part the stem; the payload keeps the raw value.
+        return f"full_states_log_{str(trade_date)[:10]}{suffix}"
 
     def _log_state(self, trade_date, final_state, asset_type: str = "stock"):
         """Log the final state to a JSON file (fail-soft: returns None on IO).

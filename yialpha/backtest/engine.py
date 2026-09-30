@@ -294,6 +294,37 @@ class BacktestResult:
         return pd.Series(self.benchmark_equity, index=self.equity_dates, dtype=float)
 
 
+def _index_leg_provider(
+    name: str,
+    index_price_provider: Callable[[str, str, str], pd.Series],
+    perp_provider: Callable[[str, str, str], pd.Series],
+    swapped: bool,
+) -> Callable[[str, str, str], pd.Series]:
+    """Round-12: index-leg provider for benchmark ``name``.
+
+    A Binance-shaped benchmark (the pure-crypto native BTCUSDT default, or
+    an explicit ``benchmark_ticker`` override) kept the yfinance leg, whose
+    ``normalize_symbol`` silently maps BTCUSDT -> the Yahoo spot pair
+    BTC-USD: per-trade alpha and the event-study market model then ran on a
+    different instrument than ``config_summary`` names, basis and funding
+    divergence folded into "alpha". USDT/USDC-suffixed benchmarks on a
+    swapped (Binance) run fetch from the run's own provider, with a log
+    line so the routing is observable; every other name (SPY, 000300.SS)
+    keeps the original index leg byte-identically.
+    """
+    if (
+        swapped
+        and index_price_provider is _yfinance_price_provider
+        and str(name).endswith(("USDT", "USDC", "BUSD", "FDUSD"))
+    ):
+        logger.info(
+            "index benchmark %r is Binance-shaped; fetching the index leg "
+            "from the run's Binance provider (not yfinance)", name,
+        )
+        return perp_provider
+    return index_price_provider
+
+
 def _resolve_index_benchmark(graph: Any | None, ticker: str) -> str:
     """Pick the index used for alpha, reusing the graph's benchmark logic."""
     if graph is not None and hasattr(graph, "_resolve_benchmark"):
@@ -732,6 +763,11 @@ def run_backtest(
         estimation window, then test whether cumulative abnormal returns in the
         holding window are reliably non-zero (mean CAR, Brown & Warner
         cross-sectional t, bootstrap 95% CI). Fills ``metrics.event_study_*``.
+        The CAR window is ``(0, holding_days)`` — offset 0 keeps the event
+        study comparable with the naive ``alpha_vs_index`` baseline (see
+        ``event_study``'s window-convention note); the end offset tracks the
+        strategy's own holding length, and the window actually used is
+        disclosed in ``metrics.event_study_window`` and the rendered report.
         ``False`` (default) skips it entirely — byte-equivalent. Needs ~250
         trading days of asset + benchmark prices *before* the first decision,
         so an extra wide-window price pull is made when opted in. Advisory /
@@ -939,7 +975,26 @@ def run_backtest(
                 str(d) for d in prices.index
                 if str(d) >= sorted_dates[0] and str(d) < mark_end
             ]
-            missing = [d for d in charge_days[:-1] if d not in funding_days]
+            # Round-11 kept the FINAL bar tolerated for its two real causes
+            # (a still-forming current day whose settlements have not posted;
+            # mark_end pushed past the funding fetch's end_date by the
+            # semantic-window extension). Round-12: a fully-historical window
+            # whose final bar genuinely lacks settlements (delisting
+            # mid-window, a partial vendor batch) silently accrued zero drag
+            # through the same exemption — narrow it to exactly those two
+            # causes; any other final-bar funding miss now fails closed like
+            # every interior day.
+            from datetime import datetime, timezone  # noqa: PLC0415
+
+            _today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            _exempt_final = bool(charge_days) and (
+                charge_days[-1] >= _today_utc or mark_end > str(end_date)
+            )
+            # Exempt the final bar ONLY for its two justified causes; any
+            # other final-bar funding miss joins the interior days in the
+            # fail-closed check (charge_days[:-1] was the round-11 form).
+            _check_days = charge_days[:-1] if _exempt_final else charge_days
+            missing = [d for d in _check_days if d not in funding_days]
             if missing:
                 shown = ", ".join(missing[:8]) + (" …" if len(missing) > 8 else "")
                 raise ValueError(
@@ -1099,7 +1154,10 @@ def run_backtest(
     if compute_index_alpha:
         index_name = _resolve_index_benchmark(graph, ticker)
         try:
-            index_prices = index_price_provider(index_name, start_date, end_date).sort_index()
+            index_prices = _index_leg_provider(
+                index_name, index_price_provider, price_provider,
+                price_provider_swapped,
+            )(index_name, start_date, end_date).sort_index()
         except Exception as exc:  # noqa: BLE001 -- index data is advisory only
             logger.warning("Could not load index benchmark %s: %s", index_name, exc)
             index_prices = None
@@ -1576,10 +1634,23 @@ def run_backtest(
     # above. Needs benchmark prices, so it resolves + pulls the index itself
     # when compute_index_alpha was off.
     if event_study:
+        # Round-12 (E1): the CAR window follows holding_days — the module's
+        # (0, 20) default measured a 21-session drift while the docstring
+        # promised "the holding window", so a 5-day strategy's mean CAR
+        # described days the strategy never held. Offset 0 keeps the
+        # documented comparability with the naive alpha_vs_index baseline.
+        # Round-12 (E3): a Binance-shaped benchmark fetches through the
+        # run's own provider (see _index_leg_provider) — the name is
+        # resolved here once so it matches _run_event_study's own choice.
+        _es_bench_name = index_name or _resolve_index_benchmark(graph, ticker)
         _run_event_study(
             metrics, graph, ticker, price_provider, trades,
             index_name, end_date,
-            bench_provider=index_price_provider,
+            bench_provider=_index_leg_provider(
+                _es_bench_name, index_price_provider, price_provider,
+                price_provider_swapped,
+            ),
+            event_window=(0, holding_days),
         )
 
     return BacktestResult(
@@ -1829,6 +1900,7 @@ def _run_event_study(
     index_name: str,
     end_date: str,
     bench_provider: Callable[[str, str, str], pd.Series] | None = None,
+    event_window: tuple[int, int] | None = None,
 ) -> None:
     """Fill the event-study fields on ``metrics`` in place.
 
@@ -1890,6 +1962,7 @@ def _run_event_study(
             ratings=ratings,
             benchmark_name=bench_name or "benchmark",
             rng_seed=_event_study_seed(ticker, event_dates),
+            event_window=event_window or (0, 20),
         )
         if result.n_events == 0:
             return
@@ -1903,6 +1976,10 @@ def _run_event_study(
             else None
         )
         metrics.event_study_benchmark = result.benchmark
+        # Round-12: disclose the window the CAR actually integrated over, so
+        # the report can state it (a (0, 20) default behind a docstring that
+        # said "holding window" was the original defect).
+        metrics.event_study_window = result.event_window
     except Exception as exc:  # noqa: BLE001 -- event study is advisory; never break a run
         logger.warning("event study failed for %s: %s", ticker, exc)
 

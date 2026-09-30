@@ -670,10 +670,40 @@ def test_sync_budget_counts_404_attempts(archive, monkeypatch):
     # no further attempts were made (previously the miss was free and
     # 05-02 would have been fetched too). Zero synced days → the
     # instructive no-data error discloses the miss + budget stop.
-    with pytest.raises(NoMarketDataError, match="1 day\\(s\\) 404'd, 2 unsynced"):
+    # Round-12: the error also folds in the manifest's 404-backoff days
+    # (the fresh miss is now ALSO the recorded missing day, so both
+    # counters read 1).
+    with pytest.raises(
+        NoMarketDataError,
+        match="1 day\\(s\\) 404'd now, 1 in the 24h 404-backoff, 2 unsynced",
+    ):
         bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-03")
     zips = archive.zip_fetches()
     assert len(zips) == 1 and "2024-05-03" in zips[0]
+
+
+@pytest.mark.unit
+def test_no_data_error_discloses_backoff_on_repeat_query(archive, monkeypatch):
+    """Round-12: a repeat query inside the 24h 404-backoff of an all-404
+    window attempts nothing — the old error then claimed "0 day(s) 404'd,
+    0 unsynced" while nothing was servable, defeating the module's
+    every-absence-disclosed contract. The manifest's recorded misses fold
+    into the reason so the stated cause matches reality on every call."""
+    monkeypatch.setattr(bnv, "_SYNC_BUDGET_FILES", 4)
+    # No days added: the whole 2-day window 404s on the first call (the
+    # misses are recorded into the manifest as they happen, so the backoff
+    # counter already reads 2 on this first error too).
+    with pytest.raises(
+        NoMarketDataError, match="2 day\\(s\\) 404'd now, 2 in the 24h 404-backoff",
+    ):
+        bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-02")
+    # The retry minutes later: every day sits in the backoff map, so the
+    # fresh counters read zero — the backoff counter carries the reason.
+    with pytest.raises(
+        NoMarketDataError,
+        match="0 day\\(s\\) 404'd now, 2 in the 24h 404-backoff",
+    ):
+        bnv.get_binance_vision_metrics("BTCUSDT", "2024-05-01", "2024-05-02")
 
 
 @pytest.mark.unit

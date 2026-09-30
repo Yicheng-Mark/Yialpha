@@ -73,6 +73,31 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _read_partition_with_retry(path: Path, attempts: int = 3) -> pd.DataFrame:
+    """Read one year partition, retrying the Windows sharing-violation race.
+
+    Round-12: ``load()`` is lockless by design (readers take no FileLock),
+    and a concurrent writer's ``os.replace`` (already retried on ITS side by
+    ``replace_retry_on_windows``) opens a short window where the reader's
+    open raises PermissionError — which the caller classified as "partition
+    unreadable … delete it" for a perfectly healthy partition, with
+    destructive remediation advice. Retry the transient open briefly
+    (0.2s / 0.4s) before letting the error through; genuine corruption
+    (ValueError/EOFError) is never retried.
+    """
+    import time
+
+    last: PermissionError | None = None
+    for attempt in range(attempts):
+        try:
+            return pd.read_csv(path, compression="gzip")
+        except PermissionError as exc:  # sharing violation (winerror 32/5)
+            last = exc
+            time.sleep(0.2 * (attempt + 1))
+    assert last is not None
+    raise last
+
+
 def _day_list(start_dt: datetime, end_dt: datetime) -> list[str]:
     days: list[str] = []
     day = start_dt.date()
@@ -361,6 +386,50 @@ class VisionStore:
 
     # ---- load / QA ---------------------------------------------------------
 
+    def missing_days_in_window(
+        self, dataset: str, symbol: str,
+        start_dt: datetime, end_dt: datetime,
+    ) -> int:
+        """Window days the manifest has recorded as 404-missing.
+
+        Round-12: the sync report's ``missing``/``unsynced`` cover only THIS
+        call's fresh attempts — days inside the 24h 404-backoff were skipped
+        silently, so a repeat query on an all-404 window rendered the no-data
+        error as "0 day(s) 404'd, 0 unsynced" while nothing was servable.
+        The no-data path folds this count in so the stated reason matches
+        reality on every call.
+        """
+        window = _day_list(start_dt, end_dt)
+        manifest = self._read_manifest(dataset, symbol)
+        return sum(1 for d in window if d in manifest["missing"])
+
+    def window_row_estimate(
+        self, dataset: str, symbol: str,
+        start_dt: datetime, end_dt: datetime,
+    ) -> int | None:
+        """Manifest-based row estimate for the window, loading nothing.
+
+        Known days contribute their recorded per-day counts; in-window days
+        the manifest does not know contribute the known-days' median. None
+        when the manifest knows no days at all (a fresh store estimates
+        nothing). Round-12: ``load()`` materializes the FULL window before
+        any shaping or output cap — for bookDepth (~20k rows/day at 30s
+        grain) a multi-year call concatenated tens of millions of rows
+        (multi-GB peak) before the caps could protect anything; this
+        estimate lets callers refuse oversized windows up front.
+        """
+        manifest = self._read_manifest(dataset, symbol)
+        window = _day_list(start_dt, end_dt)
+        counts = [int(manifest["days"][d]) for d in window if d in manifest["days"]]
+        if not counts:
+            return None
+        total = sum(counts)
+        unknown_days = len(window) - len(counts)
+        if unknown_days > 0:
+            counts.sort()
+            total += int(counts[len(counts) // 2]) * unknown_days
+        return total
+
     def load(
         self, dataset: str, symbol: str, start_dt: datetime, end_dt: datetime,
     ) -> pd.DataFrame:
@@ -376,7 +445,7 @@ class VisionStore:
             if not path.exists():
                 continue
             try:
-                frames.append(pd.read_csv(path, compression="gzip"))
+                frames.append(_read_partition_with_retry(path))
             except (OSError, ValueError, EOFError) as exc:
                 # Round-9 S3: this used to skip the year with a warning while
                 # the manifest (and qa/headers driven by it) still counted

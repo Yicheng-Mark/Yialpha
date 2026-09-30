@@ -375,6 +375,23 @@ def _is_critical_failure(method: str, category: str, qualifier: str = "") -> boo
     return category in CRITICAL_CATEGORIES
 
 
+def sentinel_is_core(category: str, method: str, qualifier: str = "") -> bool:
+    """Whether a sentinel for this (category, method, qualifier) is CORE.
+
+    Round-12: the router's SUCCESS side already treats the perp price-book
+    engines as core inside optional categories (:func:`is_perp_core_method`
+    at the router call site), but the sentinel side recorded them
+    ``KIND_OPTIONAL_UNAVAILABLE`` — so a perp run with Binance klines down
+    had ``core_sentinel_count = 0`` (run_robust's DEGRADED verdict read
+    "ok") while ``classify_quality`` graded the very same evidence
+    ``DEGRADED_CRITICAL`` and NO_TRADE'd: two consumers of one ledger
+    disagreed about one event. This predicate is the single severity
+    source both sides now share (it already encodes the index-qualifier
+    downgrade via ``_KLINES_AUX_QUALIFIERS``).
+    """
+    return _is_critical_failure(method, category, qualifier)
+
+
 def is_perp_core_method(method: str) -> bool:
     """True when ``method`` is one of the perp price-book core engines.
 

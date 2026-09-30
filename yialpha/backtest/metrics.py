@@ -275,6 +275,7 @@ class BacktestMetrics:
     event_study_p_value: float | None = None          # two-sided, None without scipy
     event_study_ci: tuple[float, float] | None = None  # bootstrap 95% CI of mean CAR
     event_study_benchmark: str | None = None          # market-model benchmark name
+    event_study_window: tuple[int, int] | None = None  # CAR return offsets used (round-12)
     # Perp-specific run facts (filled by run_backtest for crypto_perp only;
     # None otherwise so every non-perp caller is unchanged). liquidation_count
     # and stop_trigger_count are the forced-exit tallies behind the event

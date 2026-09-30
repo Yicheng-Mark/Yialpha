@@ -422,10 +422,18 @@ def test_node_degrades_when_bundle_fetch_fails(monkeypatch):
             raise RuntimeError("vendor down")
 
         monkeypatch.setattr(pb, "fetch_perp_market_bundle", boom)
-        monkeypatch.setattr(pa, "invoke_structured_or_freetext", lambda *a, **k: ("R", True))
+        # Round-12: the old pin asserted the LLM still ran ("fail-soft:
+        # report still runs") — but the structured schema's Literals
+        # (funding_bias / crowding / liquidity_risk) have no "unavailable"
+        # option, so that call forced fabricated labels rendered as a
+        # data-derived header. The bundle-fetch failure path now returns an
+        # honest skip note with NO LLM call (same fail-honest rule as the
+        # fundamentals grounding note).
         llm = _FakeLLM()
         out = pa.create_positioning_analyst(llm)(_perp_state())
-        assert out["positioning_report"] == "R"  # fail-soft: report still runs
+        assert "skipped" in out["positioning_report"]
+        assert "unavailable" in out["positioning_report"]
+        assert llm.calls == 0  # no billed call on zero evidence
     finally:
         set_config({"positioning_split": False})
 

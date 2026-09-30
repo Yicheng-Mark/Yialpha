@@ -24,6 +24,7 @@ blocks: rendering stays per-entry so status text can evolve.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any, TypeVar
@@ -53,17 +54,37 @@ def reset_run_scope() -> None:
     _RUN_CACHE.set(None)
 
 
+#: Round-12 single-flight for run_cached. The old check-then-set let two
+#: concurrent subgraphs (analyst fanout: market + positioning share ONE
+#: perp-bundle key) both fetch — duplicate live endpoints sampled seconds
+#: apart inside one decision (nondeterminism serial mode cannot produce),
+#: doubled quality sentinels, and a broken "fetch exactly once" contract.
+#: A fixed stripe of locks bounds memory (one entry per stripe, forever);
+#: a hash-stripe collision only over-serializes unrelated keys, never
+#: blocks a key behind an unrelated long fetch twice. Different keys in
+#: different stripes still fetch in parallel, so analyst fanout keeps its
+#: concurrency.
+_LOCK_STRIPES = tuple(threading.Lock() for _ in range(64))
+_LOCK_STRIPE_MASK = len(_LOCK_STRIPES) - 1
+
+
 def run_cached(key: tuple[str, ...], fn: Callable[[], _T]) -> _T:
     """Return the cached value for ``key`` or fetch it exactly once.
 
     When no scope is bound (unit tests, script callers that never ran
     ``ensure_run_scope``) this degrades to a direct call — never a silent
     cross-test leak. Exceptions are NOT cached: a transient fetch failure
-    retries on the next node re-entry within the same run.
+    retries on the next node re-entry within the same run. Concurrent
+    callers of the SAME key single-flight: the loser blocks on the stripe
+    lock and re-reads the winner's cached value (double-checked), so the
+    fetch runs exactly once per run scope even under the analyst fanout.
     """
     cache = _RUN_CACHE.get()
     if cache is None:
         return fn()
-    if key not in cache:
-        cache[key] = fn()
-    return cache[key]
+    if key in cache:
+        return cache[key]
+    with _LOCK_STRIPES[hash(key) & _LOCK_STRIPE_MASK]:
+        if key not in cache:
+            cache[key] = fn()
+        return cache[key]

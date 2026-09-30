@@ -70,6 +70,16 @@ class _StructuredFallbackSentinel:
 #: Singleton instance. Use identity comparison (``is STRUCTURED_FALLBACK``).
 STRUCTURED_FALLBACK: Any = _StructuredFallbackSentinel()
 
+#: Round-12 marker returned when the FREE-TEXT fallback itself produced no
+#: usable content (a thinking model that answered entirely in reasoning
+#: content, or a tool-call-only reply from an unbound model). Previously the
+#: empty string flowed out as the agent's report: the analyst ran and was
+#: billed, then every consumer's truthiness guard silently dropped the
+#: section — the exact silent hole MALFORMED_TOOL_CALLS_SENTINEL closed for
+#: the tool-loop analysts. Parallel semantics, distinct cause (no tool calls
+#: were involved), hence a distinct marker string.
+EMPTY_RESPONSE_SENTINEL = "[analyst produced no report: empty free-text response]"
+
 
 def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Any | None:
     """Return ``llm.with_structured_output(schema)`` or ``None`` if unsupported.
@@ -161,6 +171,17 @@ def invoke_structured_or_freetext(
             return md
 
     response = plain_llm.invoke(prompt)
+    content = response.content
+    if isinstance(content, str) and not content.strip():
+        # Round-12: an empty free-text reply must not masquerade as a real
+        # (empty) report — emit the visible marker instead so consumers
+        # distinguish "model said nothing" from "section absent". Non-str
+        # content shapes pass through unchanged (previous behaviour).
+        logger.warning(
+            "%s: free-text fallback returned no usable content; emitting "
+            "empty-response marker", agent_name,
+        )
+        content = EMPTY_RESPONSE_SENTINEL
     if extract is not None:
-        return response.content, STRUCTURED_FALLBACK
-    return response.content
+        return content, STRUCTURED_FALLBACK
+    return content

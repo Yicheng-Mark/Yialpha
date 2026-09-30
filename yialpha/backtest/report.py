@@ -254,11 +254,16 @@ def render_backtest_report(result: BacktestResult) -> str:
         _es_ci = m.get("event_study_ci")
         _es_ci_str = (f"[{_fmt_num(_es_ci[0])}, {_fmt_num(_es_ci[1])}]"
                       if _es_ci else "n/a")
+        _es_win = m.get("event_study_window")
+        _es_win_str = (
+            f"  |  CAR window: [{_es_win[0]}, +{_es_win[1]}]"
+            if _es_win else ""
+        )
         lines += [
             "## Event study (market-model abnormal returns)",
             "",
             (f"- Benchmark: `{m.get('event_study_benchmark') or 'benchmark'}`"
-             f"  |  Events used: {m['event_study_n']}"),
+             f"  |  Events used: {m['event_study_n']}{_es_win_str}"),
             "",
             "| Statistic | Value |",
             "|---|---:|",
