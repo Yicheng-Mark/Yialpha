@@ -96,6 +96,12 @@ _BY_ID: dict[str, ModelCapabilities] = {
     "deepseek-reasoner": _DEEPSEEK_THINKING,
     "deepseek-v4-flash": _DEEPSEEK_THINKING,
     "deepseek-v4-pro": _DEEPSEEK_THINKING,
+    # DeepSeek renamed the flash line for the V4.1 generation: /models serves
+    # API id ``deepseek-flash`` (display name "DeepSeek-V4.1-Flash", verified
+    # 2026-09-30). Same thinking-mode profile as the v4 line — the bare
+    # ``flash`` suffix matches no _BY_PATTERN rule, so without this row it
+    # would fall to _DEFAULT (tool_choice + json_schema) and 400 on DeepSeek.
+    "deepseek-flash": _DEEPSEEK_THINKING,
     # MiniMax — full official model lineup per
     # platform.minimax.io/docs/api-reference/text-openai-api
     "MiniMax-M2.7": _MINIMAX_THINKING,

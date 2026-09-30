@@ -37,7 +37,8 @@ def _clean_pool_env(monkeypatch):
     test pins explicitly.
     """
     for env_var in ("ZHIPU_API_KEYS", "ZHIPU_CN_API_KEYS", "ZHIPU_CN_BASE_URL",
-                    "ZHIPU_BASE_URL", "YIALPHA_LLM_KEY_COOLDOWN_S"):
+                    "ZHIPU_BASE_URL", "YIALPHA_LLM_KEY_COOLDOWN_S",
+                    "YIALPHA_LLM_TIMEOUT_S"):
         monkeypatch.delenv(env_var, raising=False)
     for env_var in ("ZHIPU_API_KEY", "ZHIPU_CN_API_KEY"):
         monkeypatch.delenv(env_var, raising=False)
@@ -264,3 +265,35 @@ def test_ensure_api_key_accepts_pool(monkeypatch):
     # No interactive prompt (a prompt would hang the test): the pool alone
     # satisfies the key requirement.
     assert ensure_api_key("glm-cn") == _K1
+
+
+@pytest.mark.unit
+def test_pool_client_carries_transport_ceiling(monkeypatch):
+    """Regression (2026-09-30): the pooled client must carry an explicit
+    httpx timeout. A "connect then never respond" GLM endpoint stalled the
+    rotating-auth body drain (ssl.read in bull_node) for 30+ minutes while
+    YIALPHA_LLM_TIMEOUT_S=120 was configured — the per-model timeout never
+    reached the auth-flow read. Precedence mirrors resolve_timeout: unset ->
+    120s default, explicit value -> that value, 0 -> no ceiling (watchdog
+    owns hang recovery)."""
+    _set_pool(monkeypatch, _K1, _K2)
+    client = get_pool_http_client("glm-cn")
+    assert client is not None
+    assert isinstance(client.timeout, httpx.Timeout)
+    assert client.timeout.read == 120.0
+    assert client.timeout.connect == 15.0
+
+    monkeypatch.setenv("YIALPHA_LLM_TIMEOUT_S", "300")
+    reset_for_test()
+    client = get_pool_http_client("glm-cn")
+    assert client.timeout.read == 300.0
+
+    monkeypatch.setenv("YIALPHA_LLM_TIMEOUT_S", "0")
+    reset_for_test()
+    # httpx normalizes timeout=None to Timeout(timeout=None): all bounds None.
+    ceiling = get_pool_http_client("glm-cn").timeout
+    assert ceiling is None or (isinstance(ceiling, httpx.Timeout) and ceiling.read is None)
+
+    monkeypatch.setenv("YIALPHA_LLM_TIMEOUT_S", "120s")  # invalid -> default
+    reset_for_test()
+    assert get_pool_http_client("glm-cn").timeout.read == 120.0

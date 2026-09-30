@@ -139,11 +139,13 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # sync with the .env YIALPHA_QUICK_THINK_LLM=deepseek-v4-flash default.
     "deepseek": {
         "quick": [
+            ("DeepSeek V4.1 Flash - Fast, multi-turn quick channel", "deepseek-flash"),
             ("DeepSeek V4 Flash - Fast, multi-turn quick channel", "deepseek-v4-flash"),
             ("DeepSeek V4 Pro - Latest flagship", "deepseek-v4-pro"),
             ("Custom model ID", "custom"),
         ],
         "deep": [
+            ("DeepSeek V4.1 Flash - Fast, multi-turn quick channel", "deepseek-flash"),
             ("DeepSeek V4 Pro - Latest flagship", "deepseek-v4-pro"),
             ("Custom model ID", "custom"),
         ],

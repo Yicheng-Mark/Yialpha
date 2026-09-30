@@ -30,9 +30,12 @@ non-empty; single-key setups are byte-equivalent to today.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
+
+from ._timeout import _DEFAULT_CLOUD_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +257,35 @@ class RotatingKeyAuth(httpx.Auth if _HAS_HTTPX else object):  # type: ignore[mis
         # Every key refused this request once; the last response stands.
 
 
+def _pool_transport_timeout():  # type: ignore[no-untyped-return]
+    """Client-level httpx ceiling for the pooled transport.
+
+    The rotating auth drains response bodies inside the auth flow — a path
+    per-request SDK timeouts do not reliably reach: on 2026-09-30 a
+    "connect then never respond" GLM endpoint left bull_node in ssl.read for
+    30+ minutes while YIALPHA_LLM_TIMEOUT_S=120 was configured. This ceiling
+    bounds EVERY network op on the pooled client, auth-flow body reads
+    included. Precedence mirrors ``_timeout.resolve_timeout`` (which stays
+    the single source for the value and its warnings): unset -> 120s cloud
+    default, explicit positive finite -> that value, ``0`` -> no ceiling
+    (hang recovery stays with the run_robust watchdog). Invalid values fall
+    back to the cloud default silently here — resolve_timeout already
+    warned once per process for the model-level timeout.
+    """
+    ceiling: float = _DEFAULT_CLOUD_TIMEOUT
+    raw = os.environ.get("YIALPHA_LLM_TIMEOUT_S")
+    if raw is not None:
+        try:
+            parsed = float(raw)
+        except ValueError:
+            parsed = None
+        if parsed == 0.0:
+            return None
+        if parsed is not None and math.isfinite(parsed) and parsed > 0:
+            ceiling = parsed
+    return httpx.Timeout(ceiling, connect=15.0, pool=10.0)
+
+
 def get_pool_http_client(provider: str):
     """Shared ``httpx.Client`` whose auth rotates the provider's key pool.
 
@@ -282,6 +314,11 @@ def get_pool_http_client(provider: str):
             _clients[provider] = httpx.Client(
                 auth=RotatingKeyAuth(keys, state),
                 trust_env=True,
+                # Client-level ceiling (see _pool_transport_timeout): bounds
+                # auth-flow body drains that per-request SDK timeouts don't
+                # reach; requests carrying their own timeout extensions are
+                # unaffected by this default.
+                timeout=_pool_transport_timeout(),
                 # The openai SDK's own default client enables redirects; a
                 # custom http_client silently drops to httpx's
                 # follow_redirects=False, so a 30x-relaying base_url would

@@ -30,6 +30,14 @@ class TestExactIdMatches:
         assert caps.supports_tool_choice is False
         assert caps.requires_reasoning_content_roundtrip is True
 
+    def test_deepseek_flash_v41_api_id_rejects_tool_choice(self):
+        # V4.1 generation serves API id "deepseek-flash" (display name
+        # "DeepSeek-V4.1-Flash"); the bare suffix matches no forward-compat
+        # pattern, so the exact row is what keeps it off the _DEFAULT profile.
+        caps = get_capabilities("deepseek-flash")
+        assert caps.supports_tool_choice is False
+        assert caps.requires_reasoning_content_roundtrip is True
+
 
 @pytest.mark.unit
 class TestPatternMatches:
