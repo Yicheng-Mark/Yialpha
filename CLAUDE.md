@@ -27,14 +27,14 @@ AI 多智能体量化投资框架（前身 TradingAgents v0.3.0 fork，已于 20
 
 ## 模型偏好
 
-GLM 两档分工（2026-09-03 从 DeepSeek 切到 GLM Coding Plan，BigModel 国内 coding 端点 + key 池轮换；两档哲学不变）：
+**DeepSeek 全通道统一（2026-09-30 晚生效，当前状态）**：GLM coding plan 端点当日病态 ~5h（拒连/建连后挂死/滴字节吊流，详见 memory `glm-endpoint-sick-day-2026-09-30`），整链切回 DeepSeek。
 
-- **deep 通道（Research Manager / Portfolio Manager）用 `glm-5.3`** —— 重裁决，推理深度决定质量。
-- **quick 通道（4 分析师 / Trader / 反思 / 信号提取）+ 辩论层（Bull-Bear / 风控三方辩论，`YIALPHA_DEBATE_LLM`）用 `glm-5.3-flash`** —— 轻量多轮，速度优先；coding plan 按套餐限额（并发/每 5h 提示数），flash 层不占旗舰并发额度。
+- **deep / quick / debate 三通道全部 `deepseek-flash`**（display name **DeepSeek-V4.1-Flash**，`/models` 实测 id，2026-09-30 验证；1M ctx，thinking 档——`capabilities.py` 注册不发 `tool_choice`、需 `reasoning_content` 回传）。
+- 端点 `https://api.deepseek.com` 走 `NO_PROXY` 直连；`YIALPHA_LLM_TIMEOUT_S=120` + `YIALPHA_LLM_MAX_RETRIES=6` 抗半开挂死与 DNS 瞬时抖动（`.env` 内有实测注释）。DeepSeek 单 key（`DEEPSEEK_API_KEY`）不经 key 池。
 
-**Key 池**（`yialpha/llm_clients/key_pool.py`）：`ZHIPU_CN_API_KEYS` 四把 key（2026-09-19 扩容；多项目共用，单 key 的 5h 窗口可能被其他项目耗尽——429 冷却轮换正是为此设计），**每个请求轮流取下一把活 key**（401/403 该 key 本进程内踢出；429 冷却 `YIALPHA_LLM_KEY_COOLDOWN_S` 秒默认 120 后回归）。coding plan 端点 `ZHIPU_CN_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4/` 与按量端点不通用。单 key（仅 `ZHIPU_CN_API_KEY`）时池不启用，行为与旧版字节等价。**Tavily 同款池**（`TAVILY_API_KEYS` + `TAVILY_API_KEY` 合并去重轮换，现 5 把）。
+**GLM 备用（切回只改 `.env` 的 provider + 三个模型行，四把 key 已保留在 `ZHIPU_CN_API_KEYS`）**：两档分工 deep=`glm-5.3` / quick+debate=`glm-5.3-flash`；**Key 池**（`yialpha/llm_clients/key_pool.py`）：`ZHIPU_CN_API_KEYS` 四把 key（2026-09-19 扩容；多项目共用，单 key 的 5h 窗口可能被其他项目耗尽——429 冷却轮换正是为此设计），**每个请求轮流取下一把活 key**（401/403 该 key 本进程内踢出；429 冷却 `YIALPHA_LLM_KEY_COOLDOWN_S` 秒默认 120 后回归）。coding plan 端点 `ZHIPU_CN_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4/` 与按量端点不通用。单 key（仅 `ZHIPU_CN_API_KEY`）时池不启用。**Tavily 同款池**（`TAVILY_API_KEYS` + `TAVILY_API_KEY` 合并去重轮换，现 5 把）。
 
-切回 DeepSeek 需在 `.env` 重配 provider/模型并重新填 key（旧 key 已于 2026-09-03 删除）。`capabilities.py` 仍登记 deepseek pro/flash 两模型，不要误删。
+`capabilities.py` 登记的 deepseek 模型档案（v1-3 chat 档 / v4+ thinking 档 / `deepseek-flash` / `deepseek-v4-pro`）继续维护，不要误删。
 
 ## 铁律
 
@@ -172,8 +172,8 @@ IC 剪枝结论的**真实落地路径**（此前 `prune_indicators_cli.py --sug
 
 ## 环境（已验证可用，别再重复诊断）
 
-- GLM Coding Plan 四把 key 有效（2026-09-19 扩容实测），**走直连**：`.env` 里 `NO_PROXY=open.bigmodel.cn`。端点 `ZHIPU_CN_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4/`（coding plan 专用）。可用模型 `glm-5.3` / `glm-5.3-flash`。
-- yfinance / 行情 / 财报必须经 `socks5h://127.0.0.1:1080`（SOCKS5 代理，FLASH-CAT VPN）。代理一断 → 数据抓取永久挂起。
+- 当前 LLM = **DeepSeek 直连**（2026-09-30 实测：key 有效、`deepseek-flash` / `deepseek-v4-pro` 在 served 列表、chat 端点回话正常）；`NO_PROXY=api.deepseek.com,...`。GLM 四把 key + coding plan 端点保留在 `.env` 备切回（见「模型偏好」）。
+- yfinance / 行情 / 财报必须经 VPN 代理（FLASH-CAT）。**双端口实况（2026-09-30）**：机器级用户环境变量 `HTTP_PROXY/HTTPS_PROXY=http://127.0.0.1:8086`（load_dotenv 不覆盖已设值，故实际出口常是 8086 而非 `.env` 写的 `socks5h://127.0.0.1:1080`）；两端口均为活代理，1080 实测 yfinance 可拉数。代理一断 → 数据抓取永久挂起（preflight 的 yfinance ❌ 先怀疑代理没开）。
 - **Windows 控制台是 GBK(cp936)**，打印 ✅/❌ 会 `UnicodeEncodeError`；入口脚本顶部须 `sys.stdout.reconfigure(utf-8)`，兜底用 `PYTHONUTF8=1`。
 - Reddit RSS 429、`FRED_API_KEY not set` 是**非致命降级**，不影响评级输出，不用装 FRED key。
 
