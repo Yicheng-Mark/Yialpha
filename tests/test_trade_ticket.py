@@ -435,10 +435,14 @@ def test_build_ticket_perp_report_keeps_perp_semantics(tmp_path):
     # Leverage > 1 is possible on perp: conviction cap (|Buy|=2, moderate) = 10x
     # binds below L_liq (14.6x) and L_vol (18.3x).
     assert t["leverage"] == pytest.approx(10.0)
-    # MMR-aware long liquidation at the disclosed assumed-50k bracket
-    # (MMR 0.50% + 5bps fee estimate).
+    # MMR-aware long liquidation. Round-13 semantic change: the ticket now
+    # tiers the MMR bracket at the REAL notional — 150 / (2_200/64_200) ≈
+    # 4,378.6 USDT → FIRST tier MMR 0.40% — instead of the disclosed
+    # assumed-50k default (0.50%), the same real notional that
+    # advisory_leverage_cap already tiers on. Expectation moved 0.005 →
+    # 0.004 accordingly (5bps fee estimate unchanged).
     assert t["liquidation_price"] == pytest.approx(
-        64_200.0 * (1.0 - 1.0 / 10.0 + 0.005 + 0.0005)
+        64_200.0 * (1.0 - 1.0 / 10.0 + 0.004 + 0.0005)
     )
     assert t["take_profits"] == pytest.approx([67_500.0, 70_800.0, 75_200.0])
     # The rendered perp ticket carries the funding note, the liquidation row,

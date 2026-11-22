@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +44,26 @@ from yialpha.backtest.ic import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Round-13 [P3]：ticker 内插 CSV 文件名（``<TICKER>_<h>d.csv``）的白名单。
+#: 此前只替换点号，路径敏感字符（/ \ .. 盘符冒号等）原样落进 ``Path /``，
+#: 可写出 output_dir 之外。非法即 raise ValueError（指名 ticker），由
+#: export_ic_datasets 的 per-ticker except 转成 skip + 调用方 exit 1。
+_CSV_TICKER_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _require_csv_safe_ticker(ticker: str) -> None:
+    """Raise ValueError naming the ticker unless it is filename-safe.
+
+    Round-13 [P3]: validated BEFORE any file is opened so a hostile ticker
+    can never reach ``out_dir / stem`` — the per-ticker except in
+    :func:`export_ic_datasets` turns this into skip-and-log (caller exit 1).
+    """
+    if not isinstance(ticker, str) or not _CSV_TICKER_RE.fullmatch(ticker):
+        raise ValueError(
+            f"ticker {ticker!r} contains characters not allowed in a CSV "
+            "filename (whitelist [A-Za-z0-9._-])"
+        )
 
 
 def build_ic_frame(
@@ -183,6 +204,9 @@ def export_ic_datasets(
     written: dict[str, Path] = {}
     for ticker in tickers:
         try:
+            # Round-13 [P3]：文件名白名单校验放进 per-ticker try——单个非法
+            # ticker 转成 skip（调用方 exit 1），不炸整批。
+            _require_csv_safe_ticker(ticker)
             frame, skipped = build_ic_frame(
                 ticker, horizon, names, cutoff, extra_horizons=extra_horizons,
                 asset_type=asset_type,

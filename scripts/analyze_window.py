@@ -11,6 +11,7 @@
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -28,6 +29,7 @@ _bootstrap.bootstrap()  # project-root sys.path + UTF-8 console (Windows GBK)
 # noqa: E402 — imports sit after the bootstrap shim above (project-root
 # sys.path + Windows GBK UTF-8 reconfigure; the except branches below print
 # ❌ — without it a UnicodeEncodeError would mask the real exception).
+from yialpha.cli.utils import is_canonical_ymd  # noqa: E402
 from yialpha.default_config import DEFAULT_CONFIG  # noqa: E402
 from yialpha.graph.overlay_fields import parse_overlay  # noqa: E402
 from yialpha.graph.trading_graph import YiAlphaGraph  # noqa: E402
@@ -61,6 +63,20 @@ def main() -> int:
     p.add_argument("--no-risk", dest="risk", action="store_false")
     p.add_argument("--out", default="analysis_output")
     args = p.parse_args()
+
+    # Round-13 [P3]：ticker 原样内插输出文件名（f"window_{ticker}.json"）
+    # ——同 ic_dataset 的白名单校验；--dates 每个值用 is_canonical_ymd
+    # （yialpha.cli.utils，与 run_robust --date 同一口径）。非法 exit 2，
+    # 不带无效参数跑多日 propagate。
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", args.ticker):
+        print(f"❌ --ticker 含输出文件名不允许的字符（白名单 [A-Za-z0-9._-]）："
+              f"{args.ticker!r}", file=sys.stderr)
+        return 2
+    bad_dates = [d for d in args.dates if not is_canonical_ymd(d)]
+    if bad_dates:
+        print(f"❌ --dates 每项必须是补零的 YYYY-MM-DD（got {bad_dates!r}）",
+              file=sys.stderr)
+        return 2
 
     print(f"\n=== 窗口序列：{args.ticker}  risk_enabled={args.risk}  equity=${args.equity:,.0f} ===",
           flush=True)

@@ -5,6 +5,7 @@
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ _bootstrap.bootstrap()  # project-root sys.path + UTF-8 console (Windows GBK)
 
 # noqa: E402 — imports sit after the bootstrap shim above (project-root
 # sys.path + Windows GBK UTF-8 reconfigure).
+from yialpha.cli.utils import is_canonical_ymd  # noqa: E402
 from yialpha.default_config import DEFAULT_CONFIG  # noqa: E402
 from yialpha.graph.trading_graph import YiAlphaGraph  # noqa: E402
 
@@ -31,6 +33,19 @@ def main() -> int:
     p.add_argument("--date", default="2026-06-26")
     p.add_argument("--out", default="analysis_output")
     args = p.parse_args()
+
+    # Round-13 [P3]：ticker/date 原样内插输出文件名（f"{ticker}_{date}.json"）
+    # ——路径敏感字符（/ \ .. 盘符冒号）可把 dump 写到 --out 之外。同
+    # ic_dataset 的白名单 + is_canonical_ymd（yialpha.cli.utils，与
+    # run_robust --date 同一口径），非法 exit 2，不带无效参数跑昂贵 propagate。
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", args.ticker):
+        print(f"❌ --ticker 含输出文件名不允许的字符（白名单 [A-Za-z0-9._-]）："
+              f"{args.ticker!r}", file=sys.stderr)
+        return 2
+    if not is_canonical_ymd(args.date):
+        print(f"❌ --date 必须是补零的 YYYY-MM-DD（got {args.date!r}）",
+              file=sys.stderr)
+        return 2
 
     print(f"\n=== 深度分析：{args.ticker} @ {args.date} ===", flush=True)
     cfg = DEFAULT_CONFIG.copy()

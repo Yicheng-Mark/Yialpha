@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Allow running as `python scripts/rank_signals.py` without an editable install, and
@@ -377,7 +379,15 @@ def render_rank(rows: list[dict], tickers: list[str], top: int, capital=None) ->
                  "非校准概率，不构成投资建议。杠杆交易有爆仓归零风险。*")
 
     # 可选：对 #1 多/空追加完整执行单
-    if capital and (top_long or top_short):
+    # Round-13 [P3]：--capital 无校验直灌 build_ticket——NaN 为真值直接过
+    # `if capital`，负数出负值票据（负风险预算 → 负名义仓位），0 则静默吞
+    # 整段。显式 gate（> 0 且有限），非法值 stderr 提示并跳过执行单段——
+    # 排名本身照常输出，不让一个坏参数废掉整张排名。
+    capital_ok = capital is not None and capital > 0 and math.isfinite(capital)
+    if capital is not None and not capital_ok:
+        print(f"✗ --capital 非法（必须 > 0 且有限，got {capital!r}），跳过执行单段",
+              file=sys.stderr)
+    if capital_ok and (top_long or top_short):
         for r in [x for x in (top_long, top_short) if x]:
             lines.append("")
             lines.append(f"---\n# 附：`{r['ticker']}` 执行单（capital={capital}, moderate 档）")
@@ -408,6 +418,11 @@ def main():
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     args = ap.parse_args()
 
+    # Round-13 [P3]：负 --top 使 group[:top] 尾切——做多/做空表静默丢掉
+    # 末尾 |top| 行（0=全部的语义已被占用），负数只能是 typo，入口即拒。
+    if args.top < 0:
+        ap.error("--top 不能为负（N=每组前 N 行；0=全部）")
+
     # 决定 ticker 列表：带点号的（600519.SS/0700.HK）原样，纯字母（btcusdt/aapl）大写
     if args.tickers:
         tickers = [t if "." in t else t.upper() for t in args.tickers]
@@ -426,8 +441,17 @@ def main():
                     seen.add(tk)
                     tickers.append(tk)
 
-    # since 过滤
-    since = args.since
+    # Round-13 [P3]：--since 此前是字符串比较——非补零日期（"2026-9-1"）
+    # 会按字节序错杀全部（"2026-09-18" < "2026-9-1" 在第 6 个字符 '0'<'9'
+    # 处成立），无戳目录又整个绕过过滤。两侧 strptime 成 date 再比较；
+    # --since 本身非法入口即拒；无戳（或戳非法）报告无法判定日期，
+    # 排除并 stderr 提示——不能无条件入选。
+    since_date = None
+    if args.since:
+        try:
+            since_date = datetime.strptime(args.since, "%Y-%m-%d").date()
+        except ValueError:
+            ap.error(f"--since 需要 YYYY-MM-DD 日期（got {args.since!r}）")
 
     rows = []
     for tk in tickers:
@@ -435,13 +459,20 @@ def main():
         if r.get("status") != "ok":
             rows.append(r)
             continue
-        if since and r.get("report_date"):
-            # report_date 是 MM-DD；补当前年份比对
-            ymd = None
+        if since_date is not None:
             m = _DIR_STAMP_RE.search(Path(r["report_dir"]).name)
+            report_d = None
             if m:
-                ymd = m.group(1)[:8]  # YYYYMMDD
-            if ymd and f"{ymd[0:4]}-{ymd[4:6]}-{ymd[6:8]}" < since:
+                try:
+                    report_d = datetime.strptime(m.group(1)[:8], "%Y%m%d").date()
+                except ValueError:
+                    report_d = None  # 8 位数字但不是合法日期：与无戳同罪
+            if report_d is None:
+                print(f"✗ {tk}：报告目录无（或非法）_YYYYMMDD_HHMMSS 时间戳，"
+                      f"无法判定 --since={args.since}，已排除：{r['report_dir']}",
+                      file=sys.stderr)
+                continue
+            if report_d < since_date:
                 continue
         rows.append(r)
 

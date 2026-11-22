@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import re
 import sys
@@ -42,8 +43,13 @@ with contextlib.suppress(Exception):
 # 杠杆/爆仓/止盈核心数学已抽到 yialpha/risk/perp_ticket.py（运行时风险
 # overlay 复用同一套公式）；本脚本保留展示用的本地常量与报告解析。
 
+from yialpha.dataflows.binance_brackets import (  # noqa: E402
+    DEFAULT_USDT_M_BRACKETS,
+    mmr_for_notional,
+)
 from yialpha.risk.perp_ticket import (  # noqa: E402
     ATR_STOP_MULT,
+    LIQ_FEE_RATE_EST,
     LIQ_SAFETY,
     RATING_STRENGTH,
     VOL_K,
@@ -454,7 +460,34 @@ def build_ticket(report_dir: Path, capital: float, profile: str) -> dict:
     # 保证金占比护栏：>50% 提示过度集中
     margin_warn = margin_pct > 0.50
 
-    liq = liquidation_price(entry, L, direction, asset_type)
+    # Round-13 [P2]：liquidation_price 此前不传 notional——缺省按
+    # ASSUMED_NOTIONAL_USDT=50k 定 MMR 档，而这里的 notional 早已算出、
+    # 且上面的 advisory_leverage_cap 也按它定档（round-12）：大 notional
+    # 票据的爆仓价系统性用了偏低的 MMR（爆仓距离被高估）。改传真实
+    # notional 定档，并对照 overlay 路径（perp_ticket_numbers 的
+    # liq_mmr_basis 措辞）披露 MMR 假设来源。
+    liq = liquidation_price(entry, L, direction, asset_type, notional=notional)
+    liq_mmr = (
+        mmr_for_notional(DEFAULT_USDT_M_BRACKETS, notional) if liq is not None else None
+    )
+    liq_mmr_basis = (
+        f"default bracket ladder @ notional {notional:,.0f} USDT"
+        if liq is not None else None
+    )
+    liq_refusal = None
+    if liq is not None and (
+        (direction == "long" and liq >= entry) or (direction == "short" and liq <= entry)
+    ):
+        # 真实档 MMR（+费用缓冲）≥ 1/L 时公式倒挂：触发价
+        # entry×(1 − 1/L + MMR + fee) 翻到入场价错误一侧（多头在上方 /
+        # 空头在下方）。倒挂数值不是「更保守的爆仓价」，是公式对该档位
+        # 失效——拒绝渲染该行并注明原因，绝不输出倒挂数值。
+        liq_refusal = (
+            f"真实名义 {notional:,.0f} USDT 档 MMR {liq_mmr:.2%} + 费用 "
+            f"{LIQ_FEE_RATE_EST:.2%} ≥ 1/L（L={L:.1f}）——公式倒挂，爆仓价落在"
+            f"入场价{'上方' if direction == 'long' else '下方'}（错误侧），拒绝渲染倒挂数值"
+        )
+        liq = None
     liq_dist = (abs(entry - liq) / entry) if liq else None
 
     tps = take_profits(entry, stop, direction)
@@ -475,6 +508,10 @@ def build_ticket(report_dir: Path, capital: float, profile: str) -> dict:
         "margin_warning": margin_warn,
         "liquidation_price": liq,
         "liquidation_dist_pct": liq_dist,
+        # Round-13 [P2]：MMR 定档假设随单携带（JSON 消费方与渲染共用）。
+        "liquidation_mmr": liq_mmr,
+        "liquidation_mmr_basis": liq_mmr_basis,
+        "liquidation_refusal_reason": liq_refusal,
         "take_profits": tps,
         "conviction_score": RATING_TO_CONFIDENCE.get(rating),
     })
@@ -506,6 +543,11 @@ def _pct(x):
 
 def _mult(x):
     return "—" if x is None else f"{x:.1f}×"
+
+
+def _cap_word(n: int) -> str:
+    """杠杆上限个数的中文数词（4→四 / 5→五）；其他数量退回阿拉伯数字。"""
+    return {4: "四", 5: "五"}.get(n, str(n))
 
 
 DIR_CN = {"long": "做多 🟢", "short": "做空 🔴", "hold": "观望 ⚪"}
@@ -599,7 +641,20 @@ def render_ticket(t: dict) -> str:
     if t["liquidation_price"] is not None:
         ratio = (t["liquidation_dist_pct"] / t["stop_dist_pct"]) if t["stop_dist_pct"] else None
         rstr = f"，{ratio:.1f}× 止损距离（≥{LIQ_SAFETY:.0f}× 才安全）" if ratio else ""
-        lines.append(f"| 爆仓价(估) | {_money(t['liquidation_price'])} | 距入场 {_pct(t['liquidation_dist_pct'])}{rstr} |")
+        # Round-13 [P2]：MMR 假设来源披露（对照 overlay 路径已有的
+        # liq_mmr_basis 措辞）——票据按真实名义定档，读者必须能看出这是
+        # 静态默认档位表而非交易所实时档。
+        mmr_note = (
+            f"；含 MMR {t['liquidation_mmr']:.2%} + 费用 {LIQ_FEE_RATE_EST:.2%}；"
+            f"{t['liquidation_mmr_basis']}"
+            if t.get("liquidation_mmr") is not None else ""
+        )
+        lines.append(f"| 爆仓价(估) | {_money(t['liquidation_price'])} | "
+                     f"距入场 {_pct(t['liquidation_dist_pct'])}{rstr}{mmr_note} |")
+    elif t.get("liquidation_refusal_reason"):
+        # Round-13 [P2]：真实档 MMR ≥ 1/L 公式倒挂——只注明拒绝原因，
+        # 不渲染倒挂数值。
+        lines.append(f"| 爆仓价(估) | **拒绝渲染** | {t['liquidation_refusal_reason']} |")
     lines.append("")
 
     lines.append("## ③ 仓位 / 杠杆 / 保证金")
@@ -608,12 +663,12 @@ def render_ticket(t: dict) -> str:
     lines.append(f"| 单笔最大亏损 | **{_money(t['risk_dollar'])}** | 资金的 {_pct(t['risk_frac'])}（{t['risk_profile']} 档：打止损恰好亏这么多） |")
     lines.append(f"| 名义仓位 | **{_money(t['notional'])}** | = 风险预算 ÷ 止损距离；占资金 {_pct(t['notional']/t['capital'])} |")
     lines.append(f"| 数量 | {_money(t['quantity'])} {_share_unit(t)} | 名义 ÷ 入场价 |")
-    lines.append(f"| **建议杠杆** | **{_mult(t['leverage'])}** | 见下方四上限 |")
+    lines.append(f"| **建议杠杆** | **{_mult(t['leverage'])}** | "
+                 f"见下方{_cap_word(len(t['leverage_caps']))}上限 |")
     lines.append(f"| 保证金(占用) | **{_money(t['margin'])}** | 占资金 {_pct(t['margin_pct_of_capital'])}"
                  + (" ⚠️ 过度集中，建议降风险预算" if t["margin_warning"] else "") + " |")
     lines.append("")
 
-    lines.append("### 杠杆是怎么来的（取四个上限的最小值）")
     c = t["leverage_caps"]
     rows = [
         ("爆仓安全上限 L_liq", c["L_liq"], f"1 ÷ ({LIQ_SAFETY:.0f} × 止损距离 {_pct(t['stop_dist_pct'])})，保证爆仓远在止损之外"),
@@ -621,6 +676,16 @@ def render_ticket(t: dict) -> str:
         ("信心上限 L_conv", c["L_conv"], f"方向强度 {t['rating']} × {t['risk_profile']} 档"),
         ("资产硬顶 L_hard", c["L_hard"], f"{t['asset_type']} 监管/sane 上限"),
     ]
+    # Round-13 [P3]：caps 里有 L_bracket（round-12：交易所 leverageBracket
+    # 的 initialLeverage 按真实 notional 定档）时追加一行——此前表格硬编码
+    # 四行，bracket 生效时读者看不到真正绑住杠杆的那条上限；标题措辞
+    # 同步按 caps 数量调整（四/五个上限）。
+    if "L_bracket" in c:
+        rows.append((
+            "交易所档位上限 L_bracket", c["L_bracket"],
+            f"leverageBracket initialLeverage（真实名义 {_money(t['notional'])} 所在档）",
+        ))
+    lines.append(f"### 杠杆是怎么来的（取{_cap_word(len(rows))}个上限的最小值）")
     lines.append("| 上限 | 值 | 依据 |")
     lines.append("|---|---|---|")
     for name, val, why in rows:
@@ -713,8 +778,11 @@ def main():
         except (ValueError, EOFError):
             print("✗ 必须提供 --capital", file=sys.stderr)
             sys.exit(2)
-    if capital <= 0:
-        print("✗ 资金必须 > 0", file=sys.stderr)
+    # Round-13 [P3]：`capital <= 0` 放行 NaN/Inf——NaN 与任何比较都是
+    # False（`nan <= 0` 不成立），交互输入 "nan" 或 --capital inf 会直接
+    # 灌进票据公式出 NaN 单。必须显式 isfinite（NaN/Inf/非正一律拒）。
+    if not (capital > 0 and math.isfinite(capital)):
+        print("✗ 资金必须 > 0 且为有限数", file=sys.stderr)
         sys.exit(2)
 
     report_dir = find_report(ticker=args.ticker, report_dir=args.report_dir)
