@@ -329,3 +329,162 @@ def test_production_ticket_payload_satisfies_outcome_cost_decomposition(
     (record,) = outcomes_for_prediction(prediction_id)
     assert record.status == "complete", record.legs_missing
     assert "ticket_cost" not in (record.legs_missing or ())
+
+
+# --------------------------------------------------------------------------- #
+# Round-13 wave 4: baostock quarter gate + prediction fallback prompt parity
+# --------------------------------------------------------------------------- #
+
+class _BSResultSet:
+    """Minimal BaoStock result-set double: empty success by default."""
+
+    error_code = "0"
+    error_msg = ""
+    fields = ("pubDate", "statDate")
+
+    def __init__(self, rows: list[list[str]] | None = None):
+        self._rows = rows or []
+        self._i = 0
+
+    def next(self):
+        if self._i < len(self._rows):
+            self._i += 1
+            return True
+        return False
+
+    def get_row_data(self):
+        return self._rows[self._i - 1]
+
+
+class _FakeBS:
+    """Session double whose query_profit_data fails on scripted quarters."""
+
+    def __init__(self, fail_labels: set[str]):
+        self._fail = fail_labels
+
+    def query_profit_data(self, code, year, quarter):
+        label = f"{year}Q{quarter}"
+        if label in self._fail:
+            raise RuntimeError("network glitch")
+        return _BSResultSet()
+
+
+@pytest.mark.unit
+def test_baostock_expected_quarter_deadline_derivation():
+    from datetime import date
+
+    from yialpha.dataflows.baostock_vendor import _expected_latest_disclosed_quarter as q
+
+    # Statutory A-share deadlines: Q1 by Apr 30, semi-annual by Aug 31,
+    # Q3 by Oct 31, annual (prior Q4) by next Apr 30 — boundary-inclusive.
+    assert q(date(2026, 4, 29)) == ("2025", "3")
+    assert q(date(2026, 4, 30)) == ("2026", "1")
+    assert q(date(2026, 8, 30)) == ("2026", "1")
+    assert q(date(2026, 8, 31)) == ("2026", "2")
+    assert q(date(2026, 10, 30)) == ("2026", "2")
+    assert q(date(2026, 10, 31)) == ("2026", "3")
+    assert q(date(2026, 12, 31)) == ("2026", "3")
+    assert q(date(2026, 1, 1)) == ("2025", "3")
+
+
+@pytest.mark.unit
+def test_baostock_gate_fails_closed_on_expected_quarter_not_first_queried():
+    """Anchor 2026-09-15 -> expected latest-disclosed quarter is 2026Q2 (the
+    first QUERIED is 2026Q4, usually not yet published). A fetch error on the
+    EXPECTED quarter must fail closed even though it is not the first queried
+    (pre-fix only the first-queried quarter could trip the gate, so the real
+    primary row's failure degraded to an in-band note)."""
+    from datetime import date
+
+    import pytest as _pytest
+
+    from yialpha.dataflows.baostock_vendor import _query_statement
+    from yialpha.dataflows.errors import NoMarketDataError
+
+    with _pytest.raises(NoMarketDataError):
+        _query_statement(
+            _FakeBS({"2026Q2"}), "sh.600519", "query_profit_data",
+            anchor=date(2026, 9, 15),
+        )
+
+
+@pytest.mark.unit
+def test_baostock_gate_tolerates_undue_newer_quarter_error():
+    """The same anchor's anchor-year Q4 is NOT yet due for disclosure: its
+    transient error must degrade to an in-band failed note, not kill the
+    whole statement (pre-fix the first-queried-quarter gate failed the tool
+    here despite full history being available)."""
+    from datetime import date
+
+    from yialpha.dataflows.baostock_vendor import _query_statement
+
+    fetch = _query_statement(
+        _FakeBS({"2026Q4"}), "sh.600519", "query_profit_data",
+        anchor=date(2026, 9, 15),
+    )
+    assert "2026Q4" in fetch.failed
+
+
+@pytest.mark.unit
+def test_market_fallback_round_advertises_only_the_prediction_tool(monkeypatch):
+    """Round-13: the fallback round re-partials tool_names. Pre-fix the base
+    prompt advertised the FULL tool list while only submit_prediction was
+    bound — the model kept calling advertised-but-unbound tools and dispatch
+    silently dropped them, losing the blind-prediction row."""
+    import re
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import Runnable
+
+    import yialpha.agents.analysts.market_analyst as market_analyst
+    import yialpha.dataflows.perp_bundle as pb
+    from tests.test_prediction_tool import (
+        _bind_perp_run,
+        _entries,
+        _perp_state,
+    )
+    from yialpha.dataflows import quality
+    from yialpha.dataflows.config import set_config
+
+    class _CaptureLLM(Runnable):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+            self.fallback_system: str | None = None
+
+        def invoke(self, inp, config=None, **kwargs):  # noqa: ARG002
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(content="FINAL REPORT", tool_calls=[])
+            self.fallback_system = str(inp[0].content)
+            return AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "submit_prediction",
+                    "args": {"predictions": _entries()},
+                    "id": "call-fb",
+                    "type": "tool_call",
+                }],
+            )
+
+        def bind_tools(self, tools, **kwargs):  # noqa: ARG002
+            return self
+
+    set_config({"prediction_ledger": True, "perp_market_bundle": True})
+    quality.ensure_run_context()
+    _bind_perp_run()
+    monkeypatch.setattr(
+        pb, "fetch_perp_market_bundle", lambda s, d: {"symbol": s, "as_of": d}
+    )
+    monkeypatch.setattr(pb, "render_perp_bundle_block", lambda b: "MARKET BLOCK")
+
+    llm = _CaptureLLM()
+    market_analyst.create_market_analyst(llm)(_perp_state())
+
+    assert llm.fallback_system is not None, "fallback round must have run"
+    m = re.search(
+        r"You have access to the following tools: ([^.]+)\.",
+        llm.fallback_system,
+    )
+    assert m, "tools sentence missing from the fallback prompt"
+    assert m.group(1).strip() == "submit_prediction"

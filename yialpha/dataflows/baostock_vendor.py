@@ -614,6 +614,23 @@ class StatementFetch(NamedTuple):
     failed: list[str]
 
 
+def _expected_latest_disclosed_quarter(anchor: date) -> tuple[str, str]:
+    """(year, quarter) of the most recent period whose STATUTORY A-share
+    disclosure deadline has passed by ``anchor`` — the quarter the renderer
+    treats as the primary row. Deadlines (exchange rules): Q1 report by
+    Apr 30, semi-annual by Aug 31, Q3 by Oct 31, annual (prior Q4) by
+    Apr 30 of the following year.
+    """
+    y = anchor.year
+    if anchor >= date(y, 10, 31):
+        return (str(y), "3")
+    if anchor >= date(y, 8, 31):
+        return (str(y), "2")
+    if anchor >= date(y, 4, 30):
+        return (str(y), "1")
+    return (str(y - 1), "3")
+
+
 def _query_statement(bs, code: str, query_fn_name: str,
                      anchor: date | None = None) -> StatementFetch:
     """Fetch quarterly statement rows for ``code`` via the given BaoStock query fn.
@@ -624,10 +641,17 @@ def _query_statement(bs, code: str, query_fn_name: str,
     window tracks the analysis instead of rotting as calendar years pass —
     rows after ``curr_date`` are pubDate-filtered by the renderer anyway.
 
-    A failure on the FIRST (most recent) quarter raises
-    :class:`NoMarketDataError` (fail-closed — the tool's primary row is gone);
-    failures on the older trend quarters are logged, collected in
+    A failure on the EXPECTED latest-disclosed quarter (derived from
+    ``anchor`` via the statutory deadlines) raises
+    :class:`NoMarketDataError` (fail-closed — the tool's primary row is
+    gone); failures on any other quarter — older trend quarters, or newer
+    quarters not yet due for disclosure — are logged, collected in
     ``StatementFetch.failed``, and rendered in-band by the caller.
+    Round-13: the gate used to key on the FIRST QUERIED quarter (anchor-year
+    Q4, usually not yet published): its transient error failed the whole
+    tool despite full history being available, while an error on the
+    actually-latest published quarter only produced an in-band note — the
+    exact opposite of the docstring's promise.
     """
     query_fn = getattr(bs, query_fn_name, None)
     if query_fn is None:
@@ -635,12 +659,13 @@ def _query_statement(bs, code: str, query_fn_name: str,
             code, detail=f"BaoStock {query_fn_name} not available")
     anchor = anchor or date.today()
     years = (str(anchor.year - 2), str(anchor.year - 1), str(anchor.year))
+    exp_year, exp_quarter = _expected_latest_disclosed_quarter(anchor)
+    expected_label = f"{exp_year}Q{exp_quarter}"
 
     rows: list[dict] = []
     failed: list[str] = []
-    first = True
-    # Newest quarter first so the fail-closed gate applies to the row the
-    # renderer treats as "latest".
+    # Newest quarter first so the fetched trend reads latest→oldest; the
+    # fail-closed gate keys on the EXPECTED primary quarter (see docstring).
     for year in reversed(years):
         for quarter in ("4", "3", "2", "1"):
             label = f"{year}Q{quarter}"
@@ -653,7 +678,7 @@ def _query_statement(bs, code: str, query_fn_name: str,
             except Exception as exc:  # noqa: BLE001 -- one bad quarter must not
                 # sink the whole statement, but the gap must stay visible to
                 # the agent, not only the log.
-                if first:
+                if label == expected_label:
                     raise NoMarketDataError(
                         code, detail=f"{query_fn_name} failed: {exc}") from exc
                 logger.warning(
@@ -662,7 +687,6 @@ def _query_statement(bs, code: str, query_fn_name: str,
                 )
                 failed.append(label)
                 continue
-            first = False
             while (rs.error_code == "0") and rs.next():
                 rows.append(dict(zip(rs.fields, rs.get_row_data(), strict=False)))
     # Deduplicate by (pubDate, statDate).

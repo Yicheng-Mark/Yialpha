@@ -462,10 +462,18 @@ def create_news_analyst(llm):
             # from its finished report, and execute the calls in-node.
             if analyst_capture_is_empty("news"):
                 try:
+                    # Round-13: re-partial tool_names for THIS round only —
+                    # the base prompt advertises the full tool list while the
+                    # fallback binds ONLY submit_prediction, so the model kept
+                    # calling advertised-but-unbound tools whose calls
+                    # dispatch silently dropped (blind-prediction row lost).
+                    fallback_tool = make_submit_prediction_tool(
+                        prediction_instrument
+                    )
                     response = llm.bind_tools(
-                        [make_submit_prediction_tool(prediction_instrument)]
+                        [fallback_tool]
                     ).invoke(
-                        prompt.format_messages(
+                        prompt.partial(tool_names=fallback_tool.name).format_messages(
                             messages=list(llm_messages) + [result]
                         )
                     )
