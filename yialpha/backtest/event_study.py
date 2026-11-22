@@ -240,6 +240,15 @@ def event_study(
     start_off, end_off = event_window
 
     events: list[EventCAR] = []
+    # Round-13: the most recent PRIOR event's window whose returns this tape
+    # has already served (skipped events included — their drift is in the
+    # returns either way). An estimation window that intersects a prior
+    # event's window regresses event-contaminated returns into the market
+    # model: beta absorbs the prior event's abnormal drift and every
+    # downstream CAR/t-stat is biased toward it. Events whose two windows
+    # intersect are skipped, same semantics as the boundary skips below.
+    prev_ev_start: int | None = None
+    prev_ev_end: int | None = None
     for k, event_date in enumerate(event_dates):
         # Map the event date to a *return* index (the event-day return). A price
         # at index `pos` realizes its return at return-index `pos-1`, so the
@@ -257,11 +266,25 @@ def event_study(
         ev_start = ret_idx + start_off
         ev_end = ret_idx + end_off
 
+        prior_window = (prev_ev_start, prev_ev_end)
+        prev_ev_start, prev_ev_end = ev_start, ev_end
+
         # Skip events whose estimation or event window is not fully inside both
         # return series (the common edge cases: the earliest events, where the
         # estimation window runs off the start; and the latest, where the event
         # window runs past the end).
         if est_start < 0 or ev_end >= asset_ret.size or ev_end >= bench_ret.size:
+            continue
+        # Cross-event contamination guard (round-13): the estimation window
+        # [est_start, est_end] must not intersect the prior event's window
+        # [prev_ev_start, prev_ev_end] — interval overlap is the two-sided
+        # condition below (one-sided checks skip cleanly-separated events).
+        if (
+            prior_window[0] is not None
+            and prior_window[1] is not None
+            and est_start <= prior_window[1]
+            and prior_window[0] <= est_end
+        ):
             continue
 
         a_est = asset_ret.values[est_start:est_end]

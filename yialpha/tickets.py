@@ -118,6 +118,17 @@ class ExecutionTicket(BaseModel):
     stop_price: float | None = None
     gross_edge: float | None = None
     estimated_cost: float | None = None
+    # Round-13: the bps decomposition behind ``estimated_cost``. The class
+    # docstring originally claimed it was "recoverable from the inputs" —
+    # but the outcome scorer's contract (outcome_compute._ticket_cost_legs,
+    # require_decomposition=True) REFUSES the scalar total for new outcomes,
+    # so a prediction whose horizon elapsed under the new contract could
+    # only ever land terminal-incomplete with legs_missing=["ticket_cost"]:
+    # every production ticket lacked the four keys the scorer reads under
+    # ``cost_detail``. Additive optional field (default None keeps every
+    # legacy payload valid), populated by build_execution_ticket from the
+    # same CostEstimate that produced ``estimated_cost``.
+    cost_detail: dict[str, float] | None = None
     net_edge: float | None = None
     proposed_size: float | None = None
     final_size: float | None = None
@@ -249,6 +260,7 @@ def build_candidate_ticket(
             verdict.gross_edge_bps / 1e4 if verdict.gross_edge_bps is not None else None
         ),
         estimated_cost=cost.total_bps / 1e4,
+        cost_detail=cost.as_dict(),
         net_edge=(
             verdict.net_edge_bps / 1e4 if verdict.net_edge_bps is not None else None
         ),

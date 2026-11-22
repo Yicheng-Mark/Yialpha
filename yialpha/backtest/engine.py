@@ -1213,6 +1213,25 @@ def run_backtest(
     pos_avg_entry = 0.0            # weighted-average fill price of the open position
     current_stop: float | None = None  # armed GTC stop from the risk overlay
 
+    def _close_forced_exit_episode(exit_equity: float) -> None:
+        """Round-13: stamp the open episode when a liquidation or stop-out
+        forcibly zeroes the position mid-bar, OUTSIDE the decision-driven
+        episode accounting below. Without this the forced exit's P&L was
+        never recorded: a later decision re-entry simply overwrote
+        ``opening_trade`` (the forced loss vanished from win_rate /
+        num_trades / profit_factor — precisely the strategies that get
+        stopped out need honest accounting most), and the Kelly ledger fed
+        from ``ctx['realized_returns']`` never saw it either. ``exit_equity``
+        is post-exit cash: the position is gone, so equity == cash."""
+        nonlocal opening_trade, opening_equity
+        realized = _finish_open_position_episode(
+            opening_trade, opening_equity, exit_equity,
+        )
+        if realized is not None:
+            ctx["realized_returns"].append(realized)
+        opening_trade = None
+        opening_equity = None
+
     for trade_date, price in prices.loc[prices.index < mark_end].items():
         if trade_date < sorted_dates[0]:
             continue
@@ -1281,6 +1300,9 @@ def run_backtest(
                 shares = 0.0
                 pos_avg_entry = 0.0
                 current_stop = None  # position gone; the resting order dies with it
+                # The liquidated episode's loss must land in the metrics and
+                # the risk ledger, not just the equity curve.
+                _close_forced_exit_episode(cash)
 
         # Stop-trigger simulation: the overlay's ATR stop behaves like a GTC
         # stop-market order — the bar's adverse extreme crossing the level
@@ -1323,6 +1345,9 @@ def run_backtest(
                 shares = 0.0
                 pos_avg_entry = 0.0
                 current_stop = None
+                # Same as the liquidation exit above: the stopped-out episode
+                # is a real closed trade and must be counted as one.
+                _close_forced_exit_episode(cash)
 
         # Mark to market at today's completed close before any close-price fill.
         equity = cash + shares * px

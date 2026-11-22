@@ -282,7 +282,17 @@ class RiskManager:
                     f"invalid equity ({state.equity!r}) for sector cap on {sector}"
                 )
             else:
-                sector_weight = state.sectors.get(sector, 0.0) / state.equity
+                # Round-13: ``target_weight`` is the TOTAL target for this
+                # ticker, but ``state.sectors[sector]`` already contains this
+                # ticker's current market value — adding both double-counted
+                # the existing exposure and over-trimmed re-sizes (cap 0.30,
+                # sector 0.25 of which this ticker 0.20, target 0.20: the old
+                # math saw 0.45 and trimmed to 0.05, when the true post-trade
+                # sector weight is 0.25). Deduct the ticker's own book first.
+                own_value = state.positions.get(ticker, 0.0)
+                sector_weight = max(
+                    0.0, state.sectors.get(sector, 0.0) - max(0.0, own_value)
+                ) / state.equity
                 if sector_weight + target_weight > self.breaker.max_single_sector:
                     headroom = max(0.0, self.breaker.max_single_sector - sector_weight)
                     if headroom <= 0.0:

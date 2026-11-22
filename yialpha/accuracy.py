@@ -534,6 +534,16 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         f"- Generated: {report['generated_at']}  ",
         f"- Horizon: {report['holding_days']} sessions  ",
+        # Round-13: name the anchor so the hit rate is never silently
+        # compared against the backtest's raw_return (whose baseline is the
+        # NEXT session's executable close — the engine's execution-lag
+        # contract forbids filling at the decision close). This report
+        # deliberately anchors at the decision-date close (PIT-safe by
+        # construction), so gap drift between signal and execution sits
+        # INSIDE these numbers.
+        "- Baseline: decision-date close (includes any signal→execution "
+        "drift; the backtest's raw_return instead fills at the next "
+        "session's close)  ",
         scanned,
         "",
         "## Directional hit rate (Buy/Overweight/Sell/Underweight)",

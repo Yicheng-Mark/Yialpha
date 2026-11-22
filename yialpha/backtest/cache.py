@@ -199,8 +199,16 @@ class DecisionCache:
             # Round-10: same Windows lockless-reader race as the other publish
             # seams — retry before the best-effort swallow below gives up.
             replace_retry_on_windows(tmp, path)
-        except OSError as exc:
+        except (OSError, TypeError, ValueError) as exc:
+            # Round-13: TypeError/ValueError escape json.dump when a caller
+            # passes a non-serializable payload into remember() (its args are
+            # public API without str coercion). "A bad cache can never break
+            # a backtest" is this module's contract — an unserializable
+            # entry must degrade to a skipped cache write, not kill the run
+            # after the LLM spend already happened.
             logger.warning("Could not write backtest cache entry %s (%s)", path, exc)
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
 
     def remember(
         self,

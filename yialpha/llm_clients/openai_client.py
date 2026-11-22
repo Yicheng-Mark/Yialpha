@@ -53,7 +53,13 @@ class NormalizedChatOpenAI(ChatOpenAI):
         # DeepSeek's official tool-calling examples do.
         if method == "function_calling" and not caps.supports_tool_choice:
             kwargs.setdefault("tool_choice", None)
-        return super().with_structured_output(schema, method=method, **kwargs)
+        # Round-13: forward include_raw explicitly — it is part of langchain's
+        # public signature for this method, and a caller asking for the
+        # (raw, parsed, parse_error) diagnostic triple used to silently get
+        # the bare parsed value instead.
+        return super().with_structured_output(
+            schema, method=method, include_raw=include_raw, **kwargs
+        )
 
 
 class LocalCompatibleChatOpenAI(NormalizedChatOpenAI):
@@ -70,7 +76,10 @@ class LocalCompatibleChatOpenAI(NormalizedChatOpenAI):
         resolved = method or get_capabilities(self.model_name).preferred_structured_method
         if resolved == "function_calling":
             kwargs.setdefault("tool_choice", None)
-        return super().with_structured_output(schema, method=method, **kwargs)
+        # Round-13: same include_raw forward as the base class (see there).
+        return super().with_structured_output(
+            schema, method=method, include_raw=include_raw, **kwargs
+        )
 
 
 def _input_to_messages(input_: Any) -> list[Any]:

@@ -187,11 +187,16 @@ def test_zero_env_explicitly_disables_timeout(monkeypatch, caplog):
     ``timeout=None`` (no YiAlpha ceiling; watchdog owns recovery)."""
     import logging
 
-    captured = _captured_llm(
-        monkeypatch,
-        "deepseek",
-        env={"DEEPSEEK_API_KEY": _DUMMY_KEY, "YIALPHA_LLM_TIMEOUT_S": "0"},
-    )
+    # Round-13: caplog's default capture level is WARNING, so the INFO
+    # disclosure line this pin asserts on never reached caplog.records
+    # outside a full-suite run (where another test's set_level leaked in)
+    # — the pin was deterministically red file-scoped. Capture INFO here.
+    with caplog.at_level(logging.INFO):
+        captured = _captured_llm(
+            monkeypatch,
+            "deepseek",
+            env={"DEEPSEEK_API_KEY": _DUMMY_KEY, "YIALPHA_LLM_TIMEOUT_S": "0"},
+        )
     assert captured["timeout"] is None
     assert any(
         "explicitly disabled" in r.message
