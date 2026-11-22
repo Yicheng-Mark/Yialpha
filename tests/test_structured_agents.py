@@ -28,6 +28,29 @@ from yialpha.agents.schemas import (
 )
 from yialpha.agents.trader.trader import create_trader
 
+
+@pytest.fixture(autouse=True)
+def _hermetic_sentiment_sources(monkeypatch):
+    """Round-13: pin the sentiment node's evidence prefetch to fixed strings.
+
+    ``sentiment_analyst_node`` fetches real news/StockTwits/Reddit blocks
+    BEFORE invoking the (mocked) LLM, so these pins' outcome depended on the
+    live network: an unreachable network produced a connection error that the
+    router degrades to a sentinel (tests passed), while Yahoo's "Will be
+    right back" page raised ``YFDataException`` through the core-category
+    fail-closed contract (tests failed). The pins only assert on the
+    prompt/report plumbing, never on evidence content — so the fetch seam is
+    stubbed and the module runs hermetically either way.
+    """
+    import yialpha.agents.analysts.sentiment_analyst as sa
+
+    monkeypatch.setattr(
+        sa,
+        "_fetch_sentiment_sources",
+        lambda *a, **kw: ("stub news block", "stub stocktwits", "stub reddit", None),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Render functions
 # ---------------------------------------------------------------------------

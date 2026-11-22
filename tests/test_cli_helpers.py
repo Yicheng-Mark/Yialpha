@@ -316,6 +316,16 @@ class TestGetAnalysisDate:
         monkeypatch.setattr("typer.prompt", lambda *a, **kw: next(answers))
         assert get_analysis_date() == "2020-01-02"
 
+    def test_rejects_non_padded_date_then_accepts(self, monkeypatch):
+        """Round-13 pin: bare strptime accepted "2020-9-1" (parses fine) and
+        the non-canonical stem flowed into full_states_log filenames — which
+        the web store's _DATE_RE then cannot match, hiding the run from the
+        UI. The shared canonical-ymd predicate (the same one run_robust's
+        --date guard uses) must reject it at the prompt."""
+        answers = iter(["2020-9-1", "2020-09-01"])
+        monkeypatch.setattr("typer.prompt", lambda *a, **kw: next(answers))
+        assert get_analysis_date() == "2020-09-01"
+
 
 # ---------------------------------------------------------------------------
 # batch command validation

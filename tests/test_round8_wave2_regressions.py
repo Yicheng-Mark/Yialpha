@@ -216,6 +216,18 @@ def _decision_dates(n=6, start="2024-01-01"):
     return [idx[i].strftime("%Y-%m-%d") for i in range(0, n * 6, 5)][:n]
 
 
+def _zero_funding(ticker, start, end):
+    """Deterministic zero funding — keeps this file's "zero network" promise.
+
+    Pre-fix, ``test_flip_splits_position_episodes`` omitted ``funding_provider``,
+    so the engine fell back to the REAL ``_binance_funding_provider`` and the
+    pin's outcome depended on the ambient proxy reaching fapi.binance.com
+    (the exact flake this module docstring claims cannot happen).
+    """
+    idx = pd.bdate_range(start, end)
+    return pd.Series([0.0] * len(idx), index=idx.strftime("%Y-%m-%d"), dtype=float)
+
+
 @pytest.mark.unit
 def test_flip_splits_position_episodes():
     """Buy -> Sell under allow_short is TWO episodes, not one merged sample.
@@ -228,7 +240,8 @@ def test_flip_splits_position_episodes():
     ratings = {dates[0]: "Buy", dates[1]: "Sell"}  # later dates default Hold
     result = run_backtest(
         _FakeGraph(ratings), "BTCUSDT", dates, holding_days=5,
-        price_provider=_rising_prices, asset_type="crypto_perp",
+        price_provider=_rising_prices, funding_provider=_zero_funding,
+        asset_type="crypto_perp",
         allow_short=True,
     )
     m = result.metrics

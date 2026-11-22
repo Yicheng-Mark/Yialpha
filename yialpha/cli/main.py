@@ -61,6 +61,7 @@ from .utils import (  # noqa: E402
     detect_asset_type,
     ensure_api_key,
     get_ticker,
+    is_canonical_ymd,
     prompt_openai_compatible_url,
     resolve_backend_url,
     resolve_run_analysts,
@@ -870,8 +871,18 @@ def get_analysis_date():
             "", default=datetime.datetime.now().strftime("%Y-%m-%d")
         )
         try:
-            # Validate date format and ensure it's not in the future
+            # Canonical-ymd round-trip (not bare strptime): the shared
+            # predicate rejects non-zero-padded forms ("2026-9-1") that parse
+            # fine here but break every downstream consumer keyed on the
+            # canonical stem — full_states_log filenames, web _DATE_RE, and
+            # run_robust's own --date guard (which exits 2 on them).
             analysis_date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+            if not is_canonical_ymd(date_str):
+                console.print(
+                    "[red]Error: Date must be zero-padded YYYY-MM-DD "
+                    "(e.g. 2026-09-01, not 2026-9-1)[/red]"
+                )
+                continue
             if analysis_date.date() > datetime.datetime.now().date():
                 console.print("[red]Error: Analysis date cannot be in the future[/red]")
                 continue
@@ -1921,10 +1932,20 @@ def memory_resolve_cmd(
         raise typer.Exit(code=2)
 
     wanted = {t.upper() for t in tickers} if tickers else None
-    pending = [
-        e for e in pending_all
-        if wanted is None or str(e.get("ticker", "")).upper() in wanted
-    ]
+    pending = []
+    for e in pending_all:
+        # Same malformed-row tolerance as resolve_pending_entries (round-8):
+        # a hand-corrupted pending entry without a "ticker" key used to crash
+        # this sweep at the bare ``e["ticker"]`` below before the hardened
+        # resolver ever ran.
+        entry_ticker = str(e.get("ticker", "") or "").upper()
+        if not entry_ticker:
+            console.print(
+                "[yellow]Skipping malformed pending entry without a ticker.[/yellow]"
+            )
+            continue
+        if wanted is None or entry_ticker in wanted:
+            pending.append(e)
     tickers_to_sweep = sorted({str(e["ticker"]) for e in pending})
     if not tickers_to_sweep:
         console.print("[green]No pending entries match the given ticker filter.[/green]")

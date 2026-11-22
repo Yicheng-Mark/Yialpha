@@ -95,3 +95,40 @@ class TestRunSignature:
         cfg1 = self._base_config()
         cfg2 = {**self._base_config(), "max_debate_rounds": 3}
         assert _bare_graph(cfg1)._run_signature("stock") != _bare_graph(cfg2)._run_signature("stock")
+
+
+class TestPropagateDateNormalization:
+    """Round-13: ``propagate`` normalizes the trade_date ONCE at the entry.
+
+    A dual-form "YYYY-MM-DD HH:MM:SS" (as legacy Square-derived state carried)
+    used to survive into every node: bare-strptime consumers raised inside
+    their advisory try/excepts and their evidence blocks were silently
+    dropped. Canonical inputs are identity.
+    """
+
+    @staticmethod
+    def _capturing_graph(captured):
+        g = _bare_graph({"memory_enabled": False})
+        g._checkpointer_ctx = None  # propagate's finally block reads it
+        g._resolve_pending_entries = lambda *a, **kw: None
+        g._run_graph = lambda *a, **kw: (captured.append(a), {"final_trade_decision": "**Rating**: Hold"})[1]
+        return g
+
+    def test_dual_form_normalized_to_date_parts(self):
+        captured = []
+        g = self._capturing_graph(captured)
+        g.propagate("AAPL", "2026-01-02 03:04:05", asset_type="stock")
+        assert captured[0][1] == "2026-01-02"
+
+    def test_canonical_input_is_identity(self):
+        captured = []
+        g = self._capturing_graph(captured)
+        g.propagate("AAPL", "2026-01-02", asset_type="stock")
+        assert captured[0][1] == "2026-01-02"
+
+    def test_datetime_object_normalized(self):
+        import datetime as _dt
+        captured = []
+        g = self._capturing_graph(captured)
+        g.propagate("AAPL", _dt.datetime(2026, 1, 2, 3, 4, 5), asset_type="stock")
+        assert captured[0][1] == "2026-01-02"

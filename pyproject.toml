@@ -96,7 +96,13 @@ include = ["yialpha*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+# "-m 'not integration'" keeps the default run hermetic: a dev box whose .env
+# holds real keys (yialpha/__init__.py load_dotenv) would otherwise fire live
+# API calls in TestGLMLiveStructuredOutput, failing whenever the provider
+# endpoint is unreachable (e.g. the 2026-09-30 GLM coding-plan outage). CI has
+# no secrets so integration tests skip there either way. Opt back in with an
+# explicit `pytest -m integration` (a CLI -m overrides this one).
+addopts = "-ra --strict-markers -m 'not integration'"
 markers = [
     "unit: fast isolated unit tests",
     "integration: tests requiring external services",

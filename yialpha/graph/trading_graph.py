@@ -2236,6 +2236,16 @@ class YiAlphaGraph:
         """
         self.ticker = company_name
 
+        # Round-13: normalize the date ONCE at the graph entry. A dual-form
+        # "YYYY-MM-DD HH:MM:SS" trade_date (as legacy Square-derived state
+        # carried) survived into every node: bare-strptime consumers
+        # (onchain_flows, alpha_vantage, fred) raised ValueError inside their
+        # advisory try/excepts and their evidence blocks were silently
+        # dropped, while the log stem and checkpoint keys each defended
+        # themselves with separate [:10] slices. Canonical "YYYY-MM-DD"
+        # inputs are identity here, so only the malformed class changes.
+        trade_date = str(trade_date)[:10]
+
         # Perp runs: warm the EQUITY-perp listing once (one exchangeInfo
         # fetch, fail-open to the static seed with a WARNING) so instrument-
         # context / identity / tool remaps all see the same fresh universe.
