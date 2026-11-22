@@ -384,8 +384,20 @@
   };
 
   const STORE_KEY = "yialpha_lang";
-  let current = localStorage.getItem(STORE_KEY);
+  // round-13: localStorage access wrapped like theme-init.js — a hardened or
+  // private-mode context throws SecurityError on access, which used to kill
+  // this whole module (and thus every t() call) at load. Read failure falls
+  // back to the default language; write failure skips persistence but the
+  // toggle itself still works for the session.
+  let stored = null;
+  try { stored = localStorage.getItem(STORE_KEY); } catch (_) { /* storage unavailable */ }
+  let current = stored;
   if (current !== "zh" && current !== "en") current = "zh";
+  // round-13: the language already applied. Boot-time applyAll(current) is the
+  // FIRST application, not a change — it must not dispatch langchange (app.js
+  // re-runs route() on that event, so the old unconditional dispatch doubled
+  // every fetch/render on each hard load). Only a real change dispatches.
+  let applied = current;
 
   function applyAll(lang) {
     current = lang;
@@ -399,8 +411,11 @@
       const k = e.getAttribute("data-i18n-ph");
       if (d[k] != null) e.setAttribute("placeholder", d[k]);
     });
-    localStorage.setItem(STORE_KEY, lang);
-    document.dispatchEvent(new CustomEvent("langchange", { detail: { lang } }));
+    try { localStorage.setItem(STORE_KEY, lang); } catch (_) { /* private mode: persist fails, switch still applies */ }
+    if (lang !== applied) {
+      applied = lang;
+      document.dispatchEvent(new CustomEvent("langchange", { detail: { lang } }));
+    }
   }
 
   function toggle() {

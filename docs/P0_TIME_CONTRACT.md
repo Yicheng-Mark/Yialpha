@@ -74,6 +74,9 @@ UNDERLYING 使用 `yfinance:1d:close`，按相同 UTC 闭合界限选择最近�
 
 **费用与标签。** 新评分必须有 entry/exit fee 与 slippage 分解，分别只收一次，不收 expected funding。
 只有 estimated_cost 总额时无法排除其携带的预估资金费，按缺失 ticket_cost 处理。
+（round-13 起 `build_candidate_ticket` 产出的票据自带 `cost_detail` bps 分解——此前生产票据
+只带标量总额，与本条的分解要求相互矛盾，所有带 timing 的预测曾注定 terminal incomplete；
+旧票据仍按本条原规则处理。）
 资金费仍采用方向无关的 long-pay 基准 `funding_pnl = -sum(rate)`；
 校准用 `net_return = price_return + funding_pnl - fees - slippage`，不是多空策略收益。
 现有多空策略 view 仍单独披露：方向符号只作用于价格与 long funding，费用永远是成本，flat 为零。

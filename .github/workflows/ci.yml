@@ -92,7 +92,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,web]"
       - name: Run test suite with coverage
-        run: pytest -q --cov=yialpha --cov-report=term-missing
+        # round-13: same tee + PIPESTATUS + failure-summary pattern as the
+        # `test` and `test-windows` jobs — this was the only job (and the only
+        # py3.12 lane on ubuntu) whose failures were invisible without a
+        # GitHub sign-in to read the raw log.
+        run: pytest -q --cov=yialpha --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
+      - name: Publish failure summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "## Test failures (auto-extracted)"
+            grep -E "^(FAILED|ERROR) " pytest.log || echo "(no FAILED/ERROR lines captured)"
+            echo ""
+            echo "### Tail of pytest output"
+            tail -n 40 pytest.log
+          } >> "$GITHUB_STEP_SUMMARY"
 
   test-windows:
     # The project is developed on Windows (Git Bash), yet the suite only ever
@@ -189,7 +204,13 @@ jobs:
           pip install .
           # Catches undeclared runtime deps (e.g. #994 python-dotenv): a bare
           # install must import the package and the CLI module.
-          python -c "import yialpha, yialpha.cli.main; print('clean-install import OK')"
+          # round-13: -I (isolated mode) — the plain `python -c` run executes
+          # with the checkout as cwd, and '' (cwd) sits first on sys.path, so
+          # the source tree shadowed the installed wheel and the "bare install
+          # imports" claim tested nothing. -I drops the cwd prepend (and
+          # PYTHON* env vars / user site) so only the installed dist resolves;
+          # this is interpreter semantics, identical on every OS.
+          python -I -c "import yialpha, yialpha.cli.main; print('clean-install import OK')"
 
   lockfile:
     # requirements.lock is what the README tells users to install from (line

@@ -50,6 +50,13 @@
     return r.json();
   }
 
+  // round-13: decodeURIComponent raises URIError on malformed escapes (a raw
+  // "#" of "#/%"), which used to throw inside route() and leave the view stuck
+  // on the loading skeleton. Null signals "undecodable" → error page instead.
+  function tryDecode(v) {
+    try { return decodeURIComponent(v); } catch (_) { return null; }
+  }
+
   // Mirror of cli.utils.is_valid_ticker_input for live client-side validation.
   function validTicker(v) {
     v = (v || "").trim();
@@ -177,11 +184,26 @@
     if (parts[0] === "health") return renderHealth();
     if (parts[0] === "compare") return renderCompare();
     if (parts[0] === "accuracy") return renderAccuracy();
-    if (parts[0] === "task" && parts[1]) return renderTask(decodeURIComponent(parts[1]));
-    if (parts[0] === "r" && parts[1]) return renderReportFile(decodeURIComponent(parts[1]));
+    // round-13: every decode goes through tryDecode so a malformed escape in
+    // any segment renders the error page instead of dying mid-route.
+    if (parts[0] === "task" && parts[1]) {
+      const id = tryDecode(parts[1]);
+      if (id === null) return renderError("not found");
+      return renderTask(id);
+    }
+    if (parts[0] === "r" && parts[1]) {
+      const dir = tryDecode(parts[1]);
+      if (dir === null) return renderError("not found");
+      return renderReportFile(dir);
+    }
     if (parts[0] === "t" && parts[1]) {
-      const ticker = decodeURIComponent(parts[1]);
-      if (parts[2]) return renderReport(ticker, decodeURIComponent(parts[2]));
+      const ticker = tryDecode(parts[1]);
+      if (ticker === null) return renderError("not found");
+      if (parts[2]) {
+        const date = tryDecode(parts[2]);
+        if (date === null) return renderError("not found");
+        return renderReport(ticker, date);
+      }
       return renderDetail(ticker);
     }
     renderError("not found");
@@ -699,7 +721,12 @@
   async function renderReportFile(dir) {
     // Report dirs are <TICKER>_<YYYYMMDD>_<HHMMSS>: charset-validate the whole
     // name (no separators, no dot segments) so the fetch stays inside /reports.
-    if (!/^[A-Za-z0-9_-]+$/.test(dir)) { renderError("not found"); return; }
+    // round-13: charset now mirrors the server's safe_ticker_component
+    // (dot/caret/equals/plus — e.g. 0700.HK, ^GSPC, GC=F, XAUUSD+), which the
+    // old [A-Za-z0-9_-] gate rejected, so the in-app viewer 404'd on the very
+    // examples the submit form suggests. "/" and "%" stay excluded, and the
+    // pure-dot values are refused, so traversal is still impossible.
+    if (!/^[A-Za-z0-9._\-\^=+]+$/.test(dir) || dir === "." || dir === "..") { renderError("not found"); return; }
     view().innerHTML = `<div class="sk-card sk-report"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>`;
     let text;
     try {
@@ -708,7 +735,10 @@
       text = await r.text();
     } catch (e) { renderError(e); return; }
 
-    const ticker = dir.split("_")[0];
+    // round-13: strip the trailing <YYYYMMDD>_<HHMMSS> stamp instead of
+    // splitting on "_" — tickers may contain underscores (FOO_BAR_20260919_
+    // 123456 belongs to FOO_BAR, and split("_")[0] linked back to a 404 "FOO").
+    const ticker = dir.replace(/_\d{8}_\d{6}$/, "");
     const rawURL = `/reports/${encodeURIComponent(dir)}/complete_report.md`;
     view().innerHTML = `
       <p><a href="#/t/${encodeURIComponent(ticker)}" class="muted">${t("common_back")} ${esc(ticker)}</a></p>
@@ -1155,7 +1185,10 @@
 
   function setTheme(t) {
     document.documentElement.setAttribute("data-theme", t);
-    localStorage.setItem(THEME_KEY, t);
+    // round-13: persist defensively (theme-init.js pattern) — Safari private
+    // mode throws on setItem, which used to abort the toggle before the
+    // button icon and chart redraw below ever ran.
+    try { localStorage.setItem(THEME_KEY, t); } catch (_) { /* private mode: skip persist */ }
     const btn = themeBtn();
     if (btn) btn.textContent = t === "dark" ? "🌙" : "☀️";
     // Redraw all ECharts so they pick up the new theme's CSS colors.

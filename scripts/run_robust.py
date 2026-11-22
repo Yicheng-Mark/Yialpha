@@ -43,6 +43,7 @@ import argparse  # noqa: E402
 import contextlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
+import re  # noqa: E402
 import subprocess  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
@@ -239,6 +240,13 @@ def _states_root() -> Path:
     return resolved
 
 
+def _report_dir_re(ticker: str):
+    """Round-13: glob "{ticker}_*" 前缀碰撞收紧 —— "*" 也匹配下划线，FOO 会串列
+    FOO_BAR_* 的目录。写侧固定 ``<TICKER>_<YYYYMMDD>_<HHMMSS>``
+    （trading_graph.save_reports），按 fullmatch 钉住形状。"""
+    return re.compile(rf"{re.escape(ticker)}_\d{{8}}_\d{{6}}")
+
+
 def _complete_mtime(reports_root: Path, ticker: str) -> float:
     """该 ticker 现存报告中 complete_report.md 的最新 mtime（无则 0）。
 
@@ -246,7 +254,10 @@ def _complete_mtime(reports_root: Path, ticker: str) -> float:
     最后写出，mtime>快照 才代表「本次新产出了一份完整报告」。
     """
     newest = 0.0
+    stamp_re = _report_dir_re(ticker)
     for d in reports_root.glob(f"{ticker}_*"):
+        if stamp_re.fullmatch(d.name) is None:
+            continue
         cr = d / "complete_report.md"
         if cr.is_file():
             with contextlib.suppress(OSError):
@@ -258,7 +269,10 @@ def _find_new_report(reports_root: Path, ticker: str, pre_mtime: float) -> Path 
     """找一份 mtime 比 pre_mtime 新且含 complete_report.md 的 <TICKER>_<stamp>/。"""
     best: Path | None = None
     best_mtime = pre_mtime
+    stamp_re = _report_dir_re(ticker)
     for d in reports_root.glob(f"{ticker}_*"):
+        if stamp_re.fullmatch(d.name) is None:
+            continue
         cr = d / "complete_report.md"
         if not cr.is_file():
             continue

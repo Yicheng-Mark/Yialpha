@@ -8,7 +8,10 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /build
 COPY . .
-RUN pip install --no-cache-dir .
+# round-13: install with [web] extras — the runtime layer copies the full
+# tree (including web/), and `python web/app.py` imports fastapi/uvicorn;
+# a bare install made the venv crash on that import inside the container.
+RUN pip install --no-cache-dir ".[web]"
 
 FROM python:3.12-slim
 

@@ -183,7 +183,7 @@ For a fully reproducible environment (pinned transitive deps), install from
 the lock instead:
 
 ```bash
-pip install -r requirements.lock   # core + dev, pinned (regenerate: uv pip compile)
+pip install -r requirements.lock   # core + dev + web, pinned (regenerate: uv pip compile)
 ```
 
 Docker:

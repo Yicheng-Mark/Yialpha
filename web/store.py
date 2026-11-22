@@ -145,9 +145,17 @@ def list_reports(ticker: str) -> list[dict]:
         return []
     if not REPORTS_ROOT.is_dir():
         return []
+    # Round-13: glob's "{ticker}_*" prefix match also lists a LONGER ticker
+    # that starts with this one plus "_" (FOO lists FOO_BAR_* dirs — glob's
+    # "*" matches underscores too). The write side stamps every dir
+    # ``<TICKER>_<YYYYMMDD>_<HHMMSS>`` (trading_graph.save_reports), so pin
+    # the exact shape with a fullmatch instead of trusting the glob prefix.
+    stamp_re = re.compile(rf"{re.escape(ticker)}_\d{{8}}_\d{{6}}")
     reports: list[dict] = []
     for d in REPORTS_ROOT.glob(f"{ticker}_*"):
         if not d.is_dir():
+            continue
+        if stamp_re.fullmatch(d.name) is None:
             continue
         cr = d / "complete_report.md"
         try:
