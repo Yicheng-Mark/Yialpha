@@ -181,7 +181,6 @@ class TestClearCheckpointRobustness:
         OperationalError subclass) on the first execute; clear_checkpoint
         must warn and return, never raise — its callers guard completed runs
         and this is the innermost layer of that defense."""
-        import sqlite3
 
         db = _db_path(tmp_path, "AAPL")
         # Enough non-SQLite garbage that connect->execute refuses the file.

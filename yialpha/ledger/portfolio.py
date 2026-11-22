@@ -128,10 +128,7 @@ def load_positions_input() -> tuple[list[dict[str, Any]], str]:
     # snapshot taken against it is auditable as "not a validated book". The
     # label IS the audit trail; the read itself already logged its one
     # warning-with-traceback in open_positions_with_status.
-    if ledger_rows:
-        source = "ledger"
-    else:
-        source = "empty" if ledger_ok else "ledger-unreadable"
+    source = "ledger" if ledger_rows else ("empty" if ledger_ok else "ledger-unreadable")
 
     from yialpha.dataflows.config import get_config
 

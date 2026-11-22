@@ -244,7 +244,10 @@ def wrap_runnable_node(
     """
 
     def wrapper(
-        state: Any, config: Optional[RunnableConfig] = None, **kwargs: Any
+        # UP007 (X | None) must NOT be applied here: langgraph matches the
+        # ``Optional[RunnableConfig]`` string form only (see the pinned test
+        # test_wrap_runnable_node_compiles_without_config_type_warning).
+        state: Any, config: Optional[RunnableConfig] = None, **kwargs: Any  # noqa: UP007, UP045
     ) -> Any:
         previous = tracker.get_active_node()
         tracker.set_active_node(node_name)

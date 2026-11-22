@@ -156,11 +156,6 @@ class VendorRoutingTests(unittest.TestCase):
              "fundamentals_overview"],
         )
         self.assertEqual(
-            interface._default_chain_order("a_share_native",
-                                           ["baostock", "tushare"]),
-            ["baostock", "tushare"],
-        )
-        self.assertEqual(
             interface._default_chain_order("binance_perp", ["binance"]),
             ["binance"],
         )

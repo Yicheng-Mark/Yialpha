@@ -22,11 +22,13 @@ from yialpha.dataflows.symbol_utils import normalize_symbol
     ("BTC-USDT", "BTC-USD"),
     ("BTC-USDC", "BTC-USD"),
     ("ethusdt", "ETH-USD"),
-    # non-crypto must be untouched
+    # non-crypto must be untouched (former forex/CFD/alias mapping was
+    # removed with the US+crypto-only policy — they pass through and are
+    # rejected by the market gate instead)
     ("AAPL", "AAPL"),
-    ("GC=F", "GC=F"),
     ("600519.SS", "600519.SS"),
-    ("EURUSD", "EURUSD=X"),
+    ("EURUSD", "EURUSD"),
+    ("XAUUSD", "XAUUSD"),
 ])
 def test_normalize_symbol_crypto_and_passthrough(raw, expected):
     assert normalize_symbol(raw) == expected
@@ -45,6 +47,30 @@ def test_normalize_symbol_crypto_and_passthrough(raw, expected):
 ])
 def test_ticker_input_validation(value, ok):
     assert is_valid_ticker_input(value) is ok
+
+
+# --- market gate layering in the interactive prompt (US+crypto only) -------
+@pytest.mark.parametrize("value,kind", [
+    ("AAPL", None),            # supported -> no message
+    ("BRK.B", None),
+    ("BTC-USD", None),
+    ("", None),                # empty defaults to SPY downstream
+    ("0700.HK", "market"),     # charset-valid but unsupported market
+    ("600519.SS", "market"),
+    ("EURUSD", "market"),
+    ("XAUUSD", "market"),
+    ("bad symbol!", "charset"),  # a typo reads as a typo, not a policy hit
+])
+def test_ticker_prompt_error_layering(value, kind):
+    from yialpha.cli.utils import _ticker_prompt_error
+
+    msg = _ticker_prompt_error(value)
+    if kind is None:
+        assert msg is None
+    elif kind == "charset":
+        assert msg is not None and "e.g. AAPL" in msg
+    else:
+        assert msg is not None and "only" in msg  # policy message
 
 
 # --- round-11: shared canonical-ymd gate (run_robust --date + /api/analyze) ---
@@ -150,5 +176,5 @@ def test_get_user_selections_invalid_override_fails_fast(monkeypatch):
 
 def test_cli_normalize_delegates_to_data_layer():
     # CLI must produce the same canonical symbol the data path will price.
-    for raw in ("XAUUSD", "BTCUSD", "btc-usdt", "AAPL"):
+    for raw in ("muusdt", "BTCUSD", "btc-usdt", "AAPL"):
         assert normalize_ticker_symbol(raw) == normalize_symbol(raw)

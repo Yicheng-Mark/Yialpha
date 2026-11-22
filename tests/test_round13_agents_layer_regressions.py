@@ -42,7 +42,6 @@ from yialpha.agents.schemas import PortfolioDecision
 from yialpha.agents.utils.agent_utils import final_analyst_report
 from yialpha.agents.utils.structured import EMPTY_RESPONSE_SENTINEL
 
-
 # --------------------------------------------------------------------------- #
 # P1 — get_news tool-layer date normalization
 # --------------------------------------------------------------------------- #

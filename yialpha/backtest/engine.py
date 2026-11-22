@@ -332,7 +332,7 @@ def _resolve_index_benchmark(graph: Any | None, ticker: str) -> str:
             return graph._resolve_benchmark(ticker)
         except Exception:  # noqa: BLE001 -- benchmark resolution must never break a backtest
             # The fallback keeps the backtest alive, but alpha/beta vs SPY are
-            # plain wrong for A-share/crypto tickers — the substitution must
+            # plain wrong for crypto tickers — the substitution must
             # be observable, not silent.
             logger.warning(
                 "benchmark resolution failed for %s; falling back to SPY "
@@ -984,9 +984,9 @@ def run_backtest(
             # through the same exemption — narrow it to exactly those two
             # causes; any other final-bar funding miss now fails closed like
             # every interior day.
-            from datetime import datetime, timezone  # noqa: PLC0415
+            from datetime import datetime  # noqa: PLC0415
 
-            _today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            _today_utc = datetime.now(UTC).strftime("%Y-%m-%d")
             _exempt_final = bool(charge_days) and (
                 charge_days[-1] >= _today_utc or mark_end > str(end_date)
             )

@@ -1,6 +1,6 @@
 """Vendor cache growth / staleness fixes (workflow B).
 
-Covers five fixes that all share the "one cache, bounded lifetime" theme:
+Covers the fixes that all share the "one cache, bounded lifetime" theme:
 
 * B1 — the OHLCV per-symbol cache uses ONE fixed filename (the old name
   embedded tomorrow's date, minting a new ~1250-row CSV per symbol per day,
@@ -11,8 +11,6 @@ Covers five fixes that all share the "one cache, bounded lifetime" theme:
   t+1's value at the head of the window = look-ahead for early curr_dates).
 * B4 — ``get_YFin_history_cached`` caches a window reaching today for only
   15 minutes (today's close must not wait a full 24h TTL).
-* B5 — Eastmoney's daily margin cache drops to a 15-minute TTL when the
-  as-of date is today (rows publish after the close).
 """
 
 from __future__ import annotations
@@ -23,7 +21,6 @@ import time
 import pandas as pd
 import pytest
 
-import yialpha.dataflows.eastmoney as eastmoney
 import yialpha.dataflows.stockstats_utils as su
 import yialpha.dataflows.y_finance as y_finance
 from yialpha.dataflows.config import get_config, set_config
@@ -308,73 +305,3 @@ def test_history_past_window_still_cached_a_day(monkeypatch, tmp_path):
     os.utime(cache_file, (stale, stale))
     y_finance.get_YFin_history_cached("SPY", "2026-06-01", "2026-06-11")
     assert calls["n"] == 1
-
-
-# --------------------------------------------------------------------------- #
-# B5 — Eastmoney same-day margin refresh
-# --------------------------------------------------------------------------- #
-
-def _margin_payload(days_ago: int = 0) -> bytes:
-    """A minimal RPTA_WEB_RZRQ_GGMX payload with rows relative to today."""
-    import json as _json
-
-    d = (pd.Timestamp.today() - pd.Timedelta(days=days_ago)).strftime("%Y-%m-%d")
-    rows = [{"DATE": f"{d} 00:00:00", "SCODE": "600519", "RZYE": 1.0e10,
-             "RQYE": 2.0e9, "RZRQYE": 1.2e10, "RZMRE": 5.0e8, "RQMCL": 100000,
-             "RZJME": 1.0e8, "RZYEZB": 0.5}]
-    return _json.dumps({"result": {"data": rows}, "success": True}).encode("utf-8")
-
-
-@pytest.mark.unit
-def test_margin_same_day_uses_short_ttl_past_uses_daily(monkeypatch, tmp_path):
-    """curr_date == today -> 15-minute TTL; a past curr_date -> 1 day."""
-    captured: dict[str, float] = {}
-    monkeypatch.setattr(eastmoney, "_cache_dir", lambda: str(tmp_path))
-
-    def fake_fetch(path, url, params=None, ttl_days=1.0):
-        captured["ttl"] = ttl_days
-        return _margin_payload()
-
-    monkeypatch.setattr(eastmoney, "_cached_or_fetch", fake_fetch)
-
-    today = pd.Timestamp.today().strftime("%Y-%m-%d")
-    eastmoney.get_margin_trading("600519.SS", today, 7)
-    assert captured["ttl"] == pytest.approx(eastmoney._SAME_DAY_TTL_DAYS)
-
-    eastmoney.get_margin_trading("600519.SS", "2024-06-20", 180)
-    assert captured["ttl"] == pytest.approx(1.0)
-
-
-@pytest.mark.unit
-def test_margin_same_day_cache_refetches_after_ttl(monkeypatch, tmp_path):
-    """End-to-end through the REAL cached_or_fetch: an intraday run picks up
-    the freshly published rows within minutes instead of the next day."""
-    monkeypatch.setattr(eastmoney, "_cache_dir", lambda: str(tmp_path))
-    fetches = {"n": 0}
-
-    def fake_direct_get(url, params=None):
-        fetches["n"] += 1
-        return _margin_payload()
-
-    monkeypatch.setattr(eastmoney, "_direct_get", fake_direct_get)
-    monkeypatch.setattr(eastmoney, "_throttle", lambda: None)
-
-    today = pd.Timestamp.today().strftime("%Y-%m-%d")
-    eastmoney.get_margin_trading("600519.SS", today, 7)
-    eastmoney.get_margin_trading("600519.SS", today, 7)
-    assert fetches["n"] == 1  # fresh same-day cache served
-
-    # Age the cache past the 15-minute TTL: the next same-day call refetches
-    # (this is where the old 1-day TTL served stale data until tomorrow).
-    # Round-8 pagination: page 1 now caches under its own per-page name.
-    cache_file = tmp_path / "margin_600519_p1.json"
-    stale = time.time() - eastmoney._SAME_DAY_TTL_DAYS * 86400.0 - 60
-    os.utime(cache_file, (stale, stale))
-    eastmoney.get_margin_trading("600519.SS", today, 7)
-    assert fetches["n"] == 2
-
-    # A HISTORICAL as-of date with a 2h-old cache stays cached (immutable).
-    stale_2h = time.time() - 2 * 3600
-    os.utime(cache_file, (stale_2h, stale_2h))
-    eastmoney.get_margin_trading("600519.SS", "2024-06-20", 180)
-    assert fetches["n"] == 2  # daily TTL still covers it

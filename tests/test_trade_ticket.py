@@ -46,9 +46,10 @@ _tt_spec.loader.exec_module(tt)
         ("BTCUSDT", "crypto_perp"),
         ("PEPEUSDC", "crypto_perp"),
         ("CAKEBUSD", "crypto_perp"),
-        ("600519.SS", "cn_stock"),
-        ("0700.HK", "hk_stock"),
+        # cn_stock / hk_stock classes were removed with the US+crypto-only
+        # policy; every non-crypto ticker is us_stock.
         ("AAPL", "us_stock"),
+        ("BRK.B", "us_stock"),
     ],
 )
 def test_detect_asset_type_by_suffix(ticker, expected):

@@ -82,7 +82,7 @@ def periods_per_year_for(
 ) -> float:
     """Annualization factor for a daily series of ``asset_type``.
 
-    Crypto (spot and perp) trades every calendar day; equities/A-shares keep
+    Crypto (spot and perp) trades every calendar day; equities keep
     the 252-session convention. A ``None``/unrecognized ``asset_type`` keeps
     252 (the historical behaviour), matching the backtest engine's
     ``periods_per_year`` rule.

@@ -38,8 +38,74 @@ Breaking changes within the 0.x line are called out explicitly.
   reframe, vendor PIT windows, resolution/floor, router sentinels, tool-layer
   date clamp).
 
+### Removed
+
+- **Live execution layer (`yialpha/execution/`, 2026-11-22):** the whole package
+  (`domain` / `gateway` / `bridge` / `binance_gateway` / `browser_broker`) plus
+  its test files (`test_execution_*`, `test_browser_broker`, `test_base_gateway`,
+  `test_pre_trade_risk_check`, `test_round8_ki_execution`) — it never wired into
+  the LangGraph graph and had zero production callers; the repo is now
+  analysis-only by construction (reports + backtests + tickets). Also removed:
+  the `YIALPHA_EXECUTION_{ENABLED,MAINNET,TIMEOUT_MS,LEVERAGE}` direct-read env
+  keys and their `.env.example` section, the mypy `yialpha.execution.*` override
+  and CI mypy scope entry, and the `yialpha.execution` prefix in
+  `p0_shadow/guard.py`'s B0 blocklist. Kept: `YIALPHA_ANALYSIS_ONLY` /
+  `YIALPHA_LIVE_EXECUTION_ENABLED` (p0-shadow manifest snapshots assert them at
+  their inert defaults), `YIALPHA_KILL_SWITCH` (dashboard halt banner), and
+  `BINANCE_API_KEY` / `BINANCE_API_SECRET` (read-only perp-ticket data access —
+  `binance_brackets` / `perp_bundle` / `risk/perp_ticket` — not order keys).
+- **Docker packaging (2026-11-22):** `Dockerfile`, `docker-compose.yml`, and
+  `.dockerignore` — single-user local install on Windows; docker was never
+  installed, CI has no image build/publish job, and the web UI runs via
+  `python web/app.py` directly. README Docker sections and the
+  `.dockerignore`-content packaging test removed with them.
+- **Dead code sweep (2026-11-22):** the no-op timeout-shim mechanism in
+  `run_robust.py` (`YIALPHA_TIMEOUT_SHIM_DIR` + PYTHONPATH injection; the repo
+  never shipped a shim and its test was already gone); the orphaned scripts
+  `scripts/_pull_crypto_snapshot.py`, `scripts/smoke_binance_vision.py`, and
+  `scripts/analyze_nvda.py` (plus its argv-validation regression pin); the
+  self-declared `PRODUCTION-ORPHANED` `yialpha/dataflows/browser_data.py` and
+  its test; and `.env.enterprise.example` (superseded by the annotated Azure
+  section in `.env.example`). ~10 stale A-share wording remnants in
+  docstrings/comments cleaned (incl. the KDJ catalog line that reached LLM
+  prompts).
+- **P0 shadow-validation harness (2026-11-22):** `scripts/p0_shadow/`
+  (~2.1k lines), `scripts/p0_shadow_validation.py`, its three test files
+  (~840 lines), and the stale planning docs `docs/P0_NEXT_SESSION_PLAN.md` /
+  `docs/P0_SHADOW_VALIDATION_PLAN.md` — the B1/B2 shadow validation cohort
+  completed in September and its checkpoints (2026-10-04 / 10-11) lapsed six
+  weeks unexecuted. Kept: `docs/P0_FINAL_REVIEW.md` and the actively
+  maintained `docs/P0_TIME_CONTRACT.md` (their dated log lines referencing
+  the deleted harness are history, left verbatim), and the local untracked
+  `analysis_output/` evidence tree (its review/closeout status is the
+  operator's call).
+- **A-share native data layer (`a_share_native`):** the optional category, its
+  AKShare / BaoStock / Tushare / Eastmoney vendors, the 13 bound analyst tools,
+  the `[a-share]` and `[a-share-tushare]` install extras, and the
+  `YIALPHA_A_SHARE_NATIVE` / `YIALPHA_A_STOCK` / `YIALPHA_BAOSTOCK_RETRIES` /
+  `YIALPHA_BAOSTOCK_TIMEOUT_S` / `TUSHARE_TOKEN` env keys. US / crypto runs
+  were never gated on it (default off) and are unchanged.
+- **Non-US market support:** the regional alpha-benchmark map, the commodity /
+  forex / index-CDN symbol aliases, and the non-US exchange-suffix resolution
+  (`.SS` / `.SZ` / `.HK` / `.T` / `.L` / `.NS` / `.TO` / `.AX`) — only
+  US-listed equities/ETFs and crypto remain analyzable.
+- **NEW hard input gate:** non-US / non-crypto tickers are rejected up front
+  with `UnsupportedMarketError` (`yialpha.dataflows.symbol_utils`) at every
+  entrance — CLI, batch, web, and `YiAlphaGraph.propagate()` — instead of
+  silently resolving to the wrong instrument.
+
 ### Fixed
 
+- **NTFS future-mtime served a just-written cache as fresh under
+  ``ttl_days=0`` (2026-11-22):** NTFS stores mtimes in 100ns units and the
+  write path can round them UP past the immediately following ``time.time()``
+  reading, so the freshness check ``now - mtime < ttl * 86_400`` saw a
+  NEGATIVE age — with ``ttl_days=0`` ("always refetch") that inequality is
+  trivially true and the stale bytes were returned instead of fetching
+  (Windows-only, timing-dependent; surfaced as the long-flaky
+  ``test_disk_cache_persistent_denial_still_best_effort``). Age is now
+  clamped at zero via ``_age_seconds`` in ``dataflows/disk_cache.py``, used
+  by both the freshness gate and the stale-serve age report.
 - **Round-11 adversarial sweep (2026-09-30: the six blind-spot modules rescanned
   in four read-only shards — dataflows perp chain / dataflows stock+vendor /
   agents+cli / backtest+llm_clients+web — plus the round-10 recorded leftovers;

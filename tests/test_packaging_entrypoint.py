@@ -42,11 +42,3 @@ def test_unique_cli_starts_even_when_top_level_cli_is_not_a_package(tmp_path):
 
     assert completed.returncode == 0, completed.stderr
     assert "YiAlpha CLI" in completed.stdout
-
-
-@pytest.mark.unit
-def test_docker_context_excludes_environment_secrets():
-    patterns = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
-    assert ".env" in patterns
-    assert ".env.*" in patterns
-    assert "!.env.example" in patterns

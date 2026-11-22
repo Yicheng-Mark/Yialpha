@@ -4,10 +4,6 @@ from langchain_core.messages import HumanMessage
 
 from yialpha.agents.utils.agent_utils import (
     final_analyst_report,
-    get_a_share_market_breadth_native,
-    get_a_share_northbound_native,
-    get_a_share_realtime_quote_native,
-    get_a_share_sector_flow_native,
     get_binance_basis,
     get_binance_depth_snapshot,
     get_binance_funding_rate,
@@ -46,7 +42,6 @@ from yialpha.agents.utils.prompt_builder import build_collaborator_prompt, build
 from yialpha.dataflows import indicator_catalog
 from yialpha.dataflows.config import get_config
 from yialpha.dataflows.market_regime import format_regime_context
-from yialpha.dataflows.symbol_utils import is_a_stock
 from yialpha.dataflows.utils import is_historical_date
 from yialpha.ledger.models import (
     REPLAYABILITY_LIVE_ONLY,
@@ -146,28 +141,6 @@ _SPOT_HISTORICAL_NUDGE = (
     "get_binance_spot_klines with explicit date bounds. The rolling 24-hour "
     "ticker and current spot-perpetual basis are intentionally unavailable "
     "because they would expose present-day data; do not infer them."
-)
-
-# Appended to the system message ONLY for China A-share runs when
-# YIALPHA_A_SHARE_NATIVE is on AND the ticker is .SS/.SH/.SZ. Adds the
-# northbound / sector-flow / realtime / breadth tools. When off (or non-A-
-# share) the analyst's prompt and tool list are byte-for-byte unchanged.
-_A_SHARE_MARKET_NUDGE = (
-    " Additional China A-share market tools (A-share only): "
-    "`get_a_share_northbound_native` (北向资金 / Stock Connect — daily foreign "
-    "institutional holding; a persistent increase = foreign accumulation, a "
-    "major bullish signal in A-shares; persistent decrease = foreign "
-    "distribution), `get_a_share_sector_flow_native` (industry fund-flow "
-    "ranking with this stock's sector highlighted — shows whether the sector "
-    "is a capital magnet or in outflow), and `get_a_share_realtime_quote_native` "
-    "(real-time spot quote — live mode only; for a historical date it returns "
-    "a sentinel explaining real-time data is unavailable, so use "
-    "get_stock_data / get_indicators for PIT-correct daily OHLCV). Also "
-    "`get_a_share_market_breadth_native` (whole-market advance-decline breadth "
-    "— A/D > 2 = broad advance, < 0.5 = broad decline; live mode only). If a "
-    "tool returns 'data not available' or 'no coverage found', report that "
-    "honestly and do not estimate northbound holdings, sector flows, or "
-    "breadth."
 )
 
 # Appended to the market system prompt when web_search is bound (config
@@ -523,21 +496,7 @@ def create_market_analyst(llm):
                     get_binance_spot_perp_basis,
                 ]
 
-        # China A-share market tools (env: YIALPHA_A_SHARE_NATIVE, off by
-        # default). Same double-gate byte-equivalence contract — flag AND
-        # is_a_stock(ticker). When either fails the tool list / prompt are
-        # byte-for-byte identical to the prior behaviour, so US / crypto / HK
-        # tickers never enter this branch. When both hold, A-share-native
-        # market signals (northbound capital, sector fund-flow, real-time
-        # quote, market breadth) are appended plus a short nudge.
         ticker = str(state["company_of_interest"])
-        if get_config().get("a_share_native") and is_a_stock(ticker):
-            tools.extend([
-                get_a_share_northbound_native,
-                get_a_share_sector_flow_native,
-                get_a_share_realtime_quote_native,
-                get_a_share_market_breadth_native,
-            ])
 
         # Open-web search (config: web_search_enabled, on by default). Live
         # dates only — Tavily has no as-of parameter, so binding it on a
@@ -759,12 +718,6 @@ def create_market_analyst(llm):
                     ticker,
                 )
                 regime_evidence = None
-
-        # A-share market nudge uses the SAME double gate (flag AND is_a_stock)
-        # as the tool extension above, so the prompt only changes when the
-        # tools do (byte-equivalent when off or non-A-share).
-        if get_config().get("a_share_native") and is_a_stock(ticker):
-            system_message = system_message + _A_SHARE_MARKET_NUDGE
 
         # Web-search nudge uses the SAME gate (flag AND live date) as the
         # tool extension above, so the prompt only changes when the tools do.

@@ -99,13 +99,10 @@ class TestStatesRootDotenv(unittest.TestCase):
     ``YIALPHA_RESULTS_DIR`` is what the child WRITES — while the parent used
     to read the ``~/.yialpha/logs`` default and never find the evidence.
 
-    dotenv_values is MOCKED (no real .env file is written): the B0 shadow
-    guard (scripts/p0_shadow/guard.py) installs a process-lifetime audit hook
-    denying opens of dotenv-family filenames — deliberately non-removable —
-    so any test later in the full-suite order that touches a real ``.env``
-    dies with GuardError. Mocking keeps these pins order-independent; file
-    parsing itself is python-dotenv's contract, both sides use the same lib
-    on the same file in production."""
+    dotenv_values is MOCKED (no real .env file is written) to keep these pins
+    order-independent — no later full-suite test that touches a real ``.env``
+    can perturb them; file parsing itself is python-dotenv's contract, both
+    sides use the same lib on the same file in production."""
 
     def test_env_var_beats_dotenv(self):
         with mock.patch("dotenv.dotenv_values", return_value={
@@ -236,9 +233,8 @@ class TestArgValidation(unittest.TestCase):
                 *extra_args]
         buf = io.StringIO()
         with mock.patch("sys.argv", argv), \
-                contextlib.redirect_stderr(buf):
-            with self.assertRaises(SystemExit) as cm:
-                rr._parse_args()
+                contextlib.redirect_stderr(buf), self.assertRaises(SystemExit) as cm:
+            rr._parse_args()
         self.assertEqual(cm.exception.code, 2)
 
     def test_workers_zero_rejected(self):
@@ -257,9 +253,8 @@ class TestArgValidation(unittest.TestCase):
         argv = ["run_robust.py", "--tickers", "AAA", "--date", bad_date]
         buf = io.StringIO()
         with mock.patch("sys.argv", argv), \
-                contextlib.redirect_stderr(buf):
-            with self.assertRaises(SystemExit) as cm:
-                rr._parse_args()
+                contextlib.redirect_stderr(buf), self.assertRaises(SystemExit) as cm:
+            rr._parse_args()
         return cm.exception.code, buf.getvalue()
 
     def test_slash_date_rejected(self):
@@ -341,7 +336,7 @@ class TestKillRaceAndReason(unittest.TestCase):
                     mock.patch.object(rr, "_register_proc"), \
                     mock.patch.object(rr, "_unregister_proc"), \
                     kill_patch, \
-                    mock.patch.object(rr, "_reap", side_effect=lambda p, l, **k: p.wait()), \
+                    mock.patch.object(rr, "_reap", side_effect=lambda p, _sig, **k: p.wait()), \
                     mock.patch.object(rr.time, "time", side_effect=lambda: next(clock, 4010.0)), \
                     mock.patch.object(rr.time, "sleep"), \
                     mock.patch.object(rr, "_find_new_report", return_value=Path("fake.md")), \

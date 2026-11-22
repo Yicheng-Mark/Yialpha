@@ -45,14 +45,11 @@ _ENV_OVERRIDES = {
     # prompts (task -> reasoning steps -> output constraints). Off by default so
     # the baseline prompt shape -- and model behaviour -- stays reproducible.
     "YIALPHA_FIN_COT_PROMPTS":         "fin_cot_prompts",
-    # Phase 4: global kill switch. When truthy, the browser broker refuses to
-    # submit any order (positions are flattened manually / via the broker). The
-    # execution layer reads the same env var directly so a halt takes effect
-    # without restarting the agent process.
+    # Phase 4: global kill switch. When truthy, the monitoring dashboard shows
+    # a halt banner (positions are flattened manually / via the broker).
     "YIALPHA_KILL_SWITCH":             "kill_switch",
-    # Safety boundary for analysis-only installations. Live execution requires
-    # analysis_only=False plus both execution enable switches at the network
-    # edge; PoT host-side code execution is independently opt-in.
+    # Safety boundary for analysis-only installations. PoT host-side code
+    # execution is independently opt-in.
     "YIALPHA_ANALYSIS_ONLY":            "analysis_only",
     "YIALPHA_LIVE_EXECUTION_ENABLED":   "live_execution_enabled",
     "YIALPHA_POT_ENABLED":              "pot_enabled",
@@ -153,41 +150,18 @@ _ENV_OVERRIDES = {
     # of served. Default 30 bounds how old "stale fallback" data can get during
     # an outage; 0 disables stale serving entirely (fully fail-closed).
     "YIALPHA_DATA_CACHE_MAX_STALE_DAYS":    "data_cache_max_stale_days",
-    # Track A: China A-share margin trading (Eastmoney 融资融券) exposed to the
-    # fundamentals analyst as an opt-in tool behind one flag, AND only for A-share
-    # tickers (.SS/.SH/.SZ) via the is_a_stock double-gate. Off by default = the
-    # analyst's tool list / prompt / capabilities are byte-for-byte unchanged when
-    # the flag is unset (same contract as valuation_tools). The tool only adds a
-    # PIT-correct A-share-only signal the analyst may consult; it changes no agent
-    # input. The vendor connects directly (bypassing the SOCKS5 VPN proxy) since
-    # Eastmoney is a domestic source.
-    "YIALPHA_A_STOCK":                      "a_stock",
-    # Native A-share OHLC + TTM valuation + news / money flow / dragon-tiger
-    # (a_share_native) exposed to the fundamentals + news analysts as opt-in
-    # tools behind one flag, AND only for A-share tickers (.SS/.SH/.SZ) via the
-    # is_a_stock double-gate. Off by default = the analyst tool list / prompt /
-    # capabilities are byte-for-byte unchanged when the flag is unset (same
-    # contract as a_stock / sec_ownership). When on, PIT-correct 前复权 OHLC +
-    # server-computed TTM/MRQ multiples (PE/PB/PS/PCF) are appended so the
-    # analyst can consult native A-share data the default yfinance path covers
-    # thinly, plus 资金流 (主力 net inflow) and 龙虎榜 (dragon-tiger) smart-money
-    # signals via AKShare. The BaoStock vendor reaches a domestic TCP socket (no
-    # proxy bypass needed); the AKShare vendor pops the SOCKS5 proxy env around
-    # its domestic HTTP calls. Optional deps are lazy-imported, so default-off
-    # runs never import baostock/akshare (zero overhead).
-    "YIALPHA_A_SHARE_NATIVE":               "a_share_native",
-    # Crypto-native fundamentals (crypto_native) — the mirror-image gap of
-    # a_share_native: PURE-crypto instruments (BTCUSDT-style perps, crypto spot)
-    # are dropped from the fundamentals analyst entirely (no company to analyze),
-    # which also removes token/network fundamentals the crypto ecosystem DOES
-    # expose. When this flag is on AND the instrument classifies as pure crypto
-    # (pure_crypto_perp / crypto_spot), the fundamentals analyst runs with a
-    # REPLACEMENT crypto tool set (CoinGecko token fundamentals + DefiLlama
-    # chain/protocol TVL — keyless free tiers via the SOCKS5 proxy) instead of
-    # the stock statement tools. Off by default = the analyst is still dropped
-    # for pure crypto and every other run's tool list / prompt / capabilities
-    # are byte-for-byte unchanged (same contract as a_stock / sec_ownership).
-    # Stock runs and tokenized-stock perps are untouched by the flag.
+    # Crypto-native fundamentals (crypto_native): PURE-crypto instruments
+    # (BTCUSDT-style perps, crypto spot) are dropped from the fundamentals
+    # analyst entirely (no company to analyze), which also removes token/network
+    # fundamentals the crypto ecosystem DOES expose. When this flag is on AND the
+    # instrument classifies as pure crypto (pure_crypto_perp / crypto_spot), the
+    # fundamentals analyst runs with a REPLACEMENT crypto tool set (CoinGecko
+    # token fundamentals + DefiLlama chain/protocol TVL — keyless free tiers via
+    # the SOCKS5 proxy) instead of the stock statement tools. Off by default =
+    # the analyst is still dropped for pure crypto and every other run's tool
+    # list / prompt / capabilities are byte-for-byte unchanged (same contract as
+    # sec_ownership). Stock runs and tokenized-stock perps are untouched by the
+    # flag.
     "YIALPHA_CRYPTO_NATIVE":                "crypto_native",
     # Market turbulence index (FinRL-derived, see yialpha.dataflows.market_regime).
     # Off by default = the conservative risk debater's prompt is byte-for-byte
@@ -212,12 +186,12 @@ _ENV_OVERRIDES = {
     # Composite regime context (see yialpha.dataflows.market_regime.
     # format_regime_context): one structured line — ticker trend state
     # (close vs 50/200 SMA + ADX), volatility state (rvol_20 percentile vs
-    # trailing year), benchmark turbulence, and (A-share live runs)
-    # whole-market breadth — appended to the market analyst's prompt. ON by
-    # default (it is deterministic, advisory, and fail-soft: any component
-    # that cannot be computed is omitted); set false to restore the bare
-    # prompt. The pre-existing YIALPHA_MARKET_REGIME turbulence-only
-    # opt-in for the conservative debater is unchanged.
+    # trailing year), and benchmark turbulence — appended to the market
+    # analyst's prompt. ON by default (it is deterministic, advisory, and
+    # fail-soft: any component that cannot be computed is omitted); set
+    # false to restore the bare prompt. The pre-existing
+    # YIALPHA_MARKET_REGIME turbulence-only opt-in for the conservative
+    # debater is unchanged.
     "YIALPHA_REGIME_CONTEXT":               "regime_context",
     # Deterministic perp market bundle (see the perp_market_bundle comment
     # in DEFAULT_CONFIG): crypto_perp market analyst prefetch injection.
@@ -372,8 +346,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "max_drawdown_hard_stop": 0.15,    # flatten + cool off beyond this drawdown
     "atr_stop_mult": 2.0,              # stop = last_close - mult*ATR (long)
     # Analysis is the product's default boundary. These config values document
-    # the mode for callers/UI; execution gateways additionally read the same
-    # environment flags at each submission so a stop takes effect immediately.
+    # the mode for callers/UI and for the p0-shadow manifest snapshots. The
+    # live execution layer was removed (2026-11-22); this repo is analysis-only.
     "analysis_only": True,
     "live_execution_enabled": False,
     # The in-process PoT namespace is not an OS sandbox. Keep LLM-generated
@@ -421,23 +395,6 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # vendor fails, a disk cache older than this many days is refused instead
     # of served (fail-closed bound on outage staleness). 0 = never serve stale.
     "data_cache_max_stale_days": 30,
-    # Track A: China A-share margin trading (env: YIALPHA_A_STOCK). Off by
-    # default = the fundamentals analyst's tool list is unchanged (byte-
-    # equivalent). Double-gated: when on AND the ticker is an A-share
-    # (.SS/.SH/.SZ), one PIT-correct A-share-only tool (margin trading 融资融券)
-    # is appended so the analyst can consult a money-flow signal the default
-    # yfinance path cannot supply. US/crypto/HK tickers never enter the branch.
-    "a_stock": False,
-    # Native A-share data (env: YIALPHA_A_SHARE_NATIVE). Off by default = the
-    # fundamentals/news analyst tool lists are unchanged (byte-equivalent).
-    # Double-gated: when on AND the ticker is an A-share (.SS/.SH/.SZ),
-    # PIT-correct A-share-only tools are appended — OHLC qfq + TTM valuation
-    # (BaoStock), 资金流 money flow + 龙虎榜 dragon-tiger (AKShare), and 东财 news
-    # (AKShare) — so the analyst can consult native data the default yfinance
-    # path covers thinly/sparsely. US/crypto/HK tickers never enter the branch.
-    # baostock/akshare are optional lazy-imported dependencies, so default-off
-    # runs (and machines without the 'a-share' extra) are unaffected.
-    "a_share_native": False,
     # Crypto-native fundamentals (env: YIALPHA_CRYPTO_NATIVE). Off by default =
     # pure-crypto instruments are still dropped from the fundamentals analyst
     # and every other run's tool list is unchanged (byte-equivalent). When on
@@ -468,11 +425,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "crypto_fear_greed": False,
     # Composite regime context (env: YIALPHA_REGIME_CONTEXT). ON by default:
     # the market analyst's prompt gains one structured regime line (trend
-    # state + volatility state + benchmark turbulence +, on A-share live
-    # runs, market breadth). Deterministic and fail-soft — components that
-    # cannot be computed are omitted, and the line disappears entirely when
-    # neither trend nor volatility state has enough history. Set false to
-    # restore the pre-2026-08-15 bare prompt.
+    # state + volatility state + benchmark turbulence). Deterministic and
+    # fail-soft — components that cannot be computed are omitted, and the
+    # line disappears entirely when neither trend nor volatility state has
+    # enough history. Set false to restore the pre-2026-08-15 bare prompt.
     "regime_context": True,
     # Deterministic perp market bundle (see yialpha.dataflows.perp_bundle).
     # ON by default for crypto_perp runs: before the market analyst's LLM
@@ -491,8 +447,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # fundamentals analyst's LLM turn, ONE parallel prefetch assembles the
     # core fundamentals evidence — the merged SEC+Yahoo overview and the
     # three quarterly statements (for ETFs the fund snapshot REPLACES the
-    # company statements; native A-share statements ride along when
-    # a_share_native is on) — and rides the final USER message as marked
+    # company statements) — and rides the final USER message as marked
     # untrusted evidence. The LLM no longer decides WHETHER the core
     # fundamentals get fetched; fetches run through route_to_vendor inside
     # submit_with_context workers so the quality ledger sees the same
@@ -722,9 +677,6 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "news_data": "yfinance,alpha_vantage",             # Options: alpha_vantage, yfinance
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
-        # a_stock tools are single-vendor (eastmoney); the category is optional
-        # and only advertised for A-share tickers, so no category-level default
-        # is needed — route_to_vendor uses the sole configured vendor.
     },
     # Data-vacuum gate (env: YIALPHA_DATA_VACUUM_POLICY). When "reject", a run
     # whose core data calls ALL failed raises DataVacuumError at the trader
@@ -746,27 +698,13 @@ DEFAULT_CONFIG = _apply_env_overrides({
         # Example: "get_stock_data": "alpha_vantage",  # Override category default
     },
     # Benchmark for alpha calculation in the reflection layer.
-    # ``benchmark_ticker`` (when set) overrides the suffix map for all
-    # tickers; leave it None to use ``benchmark_map`` for auto-detection
-    # based on the ticker's exchange suffix. SPY remains the US default
-    # so the reflection label keeps reading "Alpha vs SPY" for US tickers
-    # while non-US tickers get their regional index automatically.
+    # ``benchmark_ticker`` (when set) overrides the map for all tickers;
+    # leave it None to fall back to ``benchmark_map``'s empty-suffix entry —
+    # SPY, so the reflection label keeps reading "Alpha vs SPY" for US
+    # tickers (crypto-family runs resolve their benchmark in
+    # yialpha.dataflows.market_regime instead).
     "benchmark_ticker": None,
     "benchmark_map": {
-        ".NS":  "^NSEI",       # NSE India (Nifty 50)
-        ".BO":  "^BSESN",      # BSE India (Sensex)
-        ".T":   "^N225",       # Tokyo (Nikkei 225)
-        ".HK":  "^HSI",        # Hong Kong (Hang Seng)
-        ".L":   "^FTSE",       # London (FTSE 100)
-        ".TO":  "^GSPTSE",     # Toronto (TSX Composite)
-        ".AX":  "^AXJO",       # Australia (ASX 200)
-        # A-shares benchmark against CSI 300 (沪深300, 000300.SS) — the
-        # investable large-cap index fund flows actually track — rather than
-        # the SSE Composite, which is dominated by state-owned banks and
-        # makes almost any growth stock look like it has index alpha. Both
-        # .SS and .SZ map to the same cross-market index on purpose.
-        ".SS":  "000300.SS",   # China A-share (CSI 300)
-        ".SZ":  "000300.SS",   # China A-share (CSI 300)
         "":     "SPY",         # default for US-listed tickers (no suffix)
     },
 })

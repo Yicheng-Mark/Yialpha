@@ -45,7 +45,6 @@ class TestConfigCheck:
         monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-dummy")
         monkeypatch.setenv("FRED_API_KEY", "dummy-fred")
-        monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
         result = runner.invoke(app, ["config-check"])
         assert result.exit_code == 0
         assert "SET" in result.output  # FRED should be SET

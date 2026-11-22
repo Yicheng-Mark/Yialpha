@@ -5,15 +5,6 @@ from typing import Any
 from yialpha.default_config import DEFAULT_CONFIG
 
 from . import quality
-from .akshare_vendor import (
-    get_a_share_dragon_tiger_native as get_akshare_a_share_dragon_tiger,
-    get_a_share_market_breadth_native as get_akshare_a_share_market_breadth,
-    get_a_share_money_flow_native as get_akshare_a_share_money_flow,
-    get_a_share_news_native as get_akshare_a_share_news,
-    get_a_share_northbound_native as get_akshare_a_share_northbound,
-    get_a_share_realtime_quote_native as get_akshare_a_share_realtime_quote,
-    get_a_share_sector_flow_native as get_akshare_a_share_sector_flow,
-)
 from .alpha_vantage import (
     get_balance_sheet as get_alpha_vantage_balance_sheet,
     get_cashflow as get_alpha_vantage_cashflow,
@@ -24,13 +15,6 @@ from .alpha_vantage import (
     get_insider_transactions as get_alpha_vantage_insider_transactions,
     get_news as get_alpha_vantage_news,
     get_stock as get_alpha_vantage_stock,
-)
-from .baostock_vendor import (
-    get_a_share_balance_sheet_native as get_baostock_a_share_balance_sheet,
-    get_a_share_cashflow_statement_native as get_baostock_a_share_cashflow,
-    get_a_share_fundamentals_native as get_baostock_a_share_fundamentals,
-    get_a_share_income_statement_native as get_baostock_a_share_income,
-    get_a_share_ohlc_native as get_baostock_a_share_ohlc,
 )
 from .binance import (
     get_binance_basis,
@@ -56,7 +40,6 @@ from .config import get_config
 from .defillama_vendor import (
     get_crypto_network_fundamentals as get_defillama_crypto_network,
 )
-from .eastmoney import get_margin_trading as get_eastmoney_margin_trading
 from .errors import (
     NoMarketDataError,
     VendorNotConfiguredError,
@@ -75,10 +58,6 @@ from .sec_ownership import (
     get_form4_insider_trading as get_sec_form4,
     get_ftd_data as get_sec_ftd,
     get_institutional_holdings as get_sec_13f,
-)
-from .tushare_vendor import (
-    get_a_share_fundamentals_native as get_tushare_a_share_fundamentals,
-    get_a_share_news_native as get_tushare_a_share_news,
 )
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
@@ -192,46 +171,9 @@ TOOLS_CATEGORIES = {
             "get_institutional_holdings",
         ],
     },
-    # China A-share margin-trading signal (Track A, Eastmoney 东方财富). One
-    # A-share-only signal the default yfinance path cannot supply: 融资融券
-    # (margin trading — full exchange-disclosed history). Reached directly
-    # (bypassing the SOCKS5 VPN proxy) via a domestic host. Lives behind an
-    # optional category so a host block / non-A-share ticker / no-data degrades
-    # to a sentinel instead of aborting the run.
-    "a_stock": {
-        "description": "China A-share margin trading (Eastmoney 融资融券). A-share only.",
-        "tools": [
-            "get_margin_trading",
-        ],
-    },
-    # Native A-share OHLC + TTM valuation (a_share_native). Fills the gap the
-    # default yfinance path leaves for A-shares (sparse/delayed fundamentals):
-    # PIT-correct 前复权 OHLC and server-computed TTM/MRQ multiples (PE/PB/PS/PCF)
-    # straight from the exchange via BaoStock's TCP API (no proxy bypass needed
-    # — raw socket, not HTTP). Multi-vendor: BaoStock now; AKShare/Tushare wire
-    # in later phases. Same optional-category contract as a_stock — a vendor
-    # block / non-A-share ticker / missing optional dependency degrades to a
-    # sentinel rather than aborting the run.
-    "a_share_native": {
-        "description": "Native China A-share OHLC + TTM valuation + quarterly statements (BaoStock) + news / money flow / dragon-tiger / northbound / sector-flow / realtime / breadth (AKShare). A-share only.",
-        "tools": [
-            "get_a_share_fundamentals_native",
-            "get_a_share_ohlc_native",
-            "get_a_share_income_statement_native",
-            "get_a_share_balance_sheet_native",
-            "get_a_share_cashflow_statement_native",
-            "get_a_share_news_native",
-            "get_a_share_money_flow_native",
-            "get_a_share_dragon_tiger_native",
-            "get_a_share_northbound_native",
-            "get_a_share_sector_flow_native",
-            "get_a_share_realtime_quote_native",
-            "get_a_share_market_breadth_native",
-        ],
-    },
-    # Crypto-native fundamentals (crypto_native). Fills the mirror-image gap of
-    # a_share_native: PURE-crypto instruments (BTCUSDT-style perps / crypto spot)
-    # have no company fundamentals, but they DO have token-level fundamentals
+    # Crypto-native fundamentals (crypto_native). PURE-crypto instruments
+    # (BTCUSDT-style perps / crypto spot) have no company fundamentals, but they
+    # DO have token-level fundamentals
     # (market cap, supply schedule, FDV, ATH/ATL — CoinGecko free tier) and
     # network/protocol fundamentals (chain & protocol TVL history — DefiLlama).
     # Keyless foreign hosts on the SOCKS5 proxy. Only the fundamentals analyst
@@ -256,10 +198,6 @@ VENDOR_LIST = [
     "binance",
     "sec_edgar",
     "fundamentals_overview",
-    "eastmoney",
-    "baostock",
-    "akshare",
-    "tushare",
     "defillama",
     "coingecko",
 ]
@@ -269,7 +207,7 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "binance_perp", "binance_spot", "sec_ownership", "a_stock", "a_share_native", "crypto_native"}
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "binance_perp", "binance_spot", "sec_ownership", "crypto_native"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS: dict[str, dict[str, Callable[..., Any] | list[Any]]] = {
@@ -400,86 +338,6 @@ VENDOR_METHODS: dict[str, dict[str, Callable[..., Any] | list[Any]]] = {
     },
     "get_institutional_holdings": {
         "sec_edgar": get_sec_13f,
-    },
-    # a_stock — a single Eastmoney vendor; the category is optional so an
-    # Eastmoney host block / non-A-share ticker / no-data degrades to a sentinel
-    # rather than aborting the run. Vendor key "eastmoney" (the domestic direct-
-    # connect transport, distinct from the SOCKS5-proxied SEC/Binance vendors).
-    "get_margin_trading": {
-        "eastmoney": get_eastmoney_margin_trading,
-    },
-    # a_share_native — native A-share OHLC + TTM valuation. BaoStock now (TCP
-    # socket, direct connect, keyless); AKShare/Tushare wire in later phases as
-    # additional vendors on the same method keys (config-driven chain). The
-    # category is optional so a baostock block / non-A-share ticker / missing
-    # optional dependency degrades to a sentinel rather than aborting the run.
-    "get_a_share_fundamentals_native": {
-        "baostock": get_baostock_a_share_fundamentals,
-        "tushare": get_tushare_a_share_fundamentals,
-    },
-    "get_a_share_ohlc_native": {
-        "baostock": get_baostock_a_share_ohlc,
-    },
-    # A-share quarterly income statement (利润表) via BaoStock's
-    # query_profit_data. PIT: pubDate <= curr_date. Same optional-category
-    # contract — a baostock block / non-A-share ticker degrades to sentinel.
-    "get_a_share_income_statement_native": {
-        "baostock": get_baostock_a_share_income,
-    },
-    # A-share quarterly balance sheet (资产负债表) via BaoStock's
-    # query_balance_data. PIT: pubDate <= curr_date. Same contract.
-    "get_a_share_balance_sheet_native": {
-        "baostock": get_baostock_a_share_balance_sheet,
-    },
-    # A-share quarterly cashflow statement (现金流表) via BaoStock's
-    # query_cash_flow_data. PIT: pubDate <= curr_date. Same contract.
-    "get_a_share_cashflow_statement_native": {
-        "baostock": get_baostock_a_share_cashflow,
-    },
-    # A-share news (AKShare / 东财 stock_news_em). Reached directly (proxy env
-    # popped) so the domestic HTTP host cannot hang on the SOCKS5 tunnel. Tushare
-    # wires in as a second news vendor in Phase 3. Same optional-category contract.
-    "get_a_share_news_native": {
-        "akshare": get_akshare_a_share_news,
-        "tushare": get_tushare_a_share_news,
-    },
-    # A-share money flow (资金流: 主力/超大单/大单/中单/小单 净流入) via AKShare's
-    # stock_individual_fund_flow (东财). Reached directly (proxy env popped). PIT:
-    # daily rows filtered 日期<=curr_date. Same optional-category contract — a
-    # host block / non-A-share ticker / missing optional dependency -> sentinel.
-    "get_a_share_money_flow_native": {
-        "akshare": get_akshare_a_share_money_flow,
-    },
-    # A-share dragon-tiger board (龙虎榜) via AKShare's stock_lhb_detail_em (东财).
-    # Reached directly (proxy env popped). PIT: 上榜日<=curr_date; the post-event
-    # 上榜后N日 forward-return columns are dropped (lookahead). Same contract.
-    "get_a_share_dragon_tiger_native": {
-        "akshare": get_akshare_a_share_dragon_tiger,
-    },
-    # A-share northbound capital (北向资金 / Stock Connect individual holding)
-    # via AKShare's stock_hsgt_individual_em (东财). Reached directly (proxy env
-    # popped). PIT: 持股日期<=curr_date. Same optional-category contract.
-    "get_a_share_northbound_native": {
-        "akshare": get_akshare_a_share_northbound,
-    },
-    # A-share sector/industry fund-flow ranking via AKShare's
-    # stock_sector_fund_flow_rank (东财). Live snapshot (no historical date param)
-    # so a historical curr_date returns the current snapshot with a caveat.
-    # Same optional-category contract.
-    "get_a_share_sector_flow_native": {
-        "akshare": get_akshare_a_share_sector_flow,
-    },
-    # A-share real-time spot quote via AKShare's stock_zh_a_spot_em (东财). Live
-    # mode only; a historical curr_date returns a sentinel explaining that
-    # real-time data cannot be reconstructed for a past date (no lookahead).
-    "get_a_share_realtime_quote_native": {
-        "akshare": get_akshare_a_share_realtime_quote,
-    },
-    # A-share market breadth (advance-decline counts) via AKShare's
-    # stock_zh_a_spot (whole-market real-time). Live mode only; same sentinel
-    # contract as the real-time quote for historical dates.
-    "get_a_share_market_breadth_native": {
-        "akshare": get_akshare_a_share_market_breadth,
     },
     # crypto_native — single vendor each; the category is optional so a vendor
     # block / unresolved base symbol / beyond-window historical date degrades to

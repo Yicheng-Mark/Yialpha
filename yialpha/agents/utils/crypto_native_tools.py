@@ -1,7 +1,7 @@
 """LangChain ``@tool`` wrappers for the crypto-native fundamentals vendors.
 
 A thin pass-through to ``route_to_vendor`` — same shape as
-``a_share_native_tools`` / ``binance_perp_tools`` — so the optional-category
+``binance_perp_tools`` — so the optional-category
 fallback (unresolved symbol / vendor block / beyond-window historical date ->
 sentinel) is reused verbatim. Only the fundamentals analyst advertises these,
 and only when ``YIALPHA_CRYPTO_NATIVE`` is on **and** the instrument

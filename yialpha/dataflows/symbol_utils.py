@@ -1,21 +1,24 @@
 """Symbol normalization and market-data error types for vendor calls.
 
-Yahoo Finance (the default vendor) uses specific ticker conventions that
-differ from the broker / TradingView / MT5 style symbols users often type:
+Only two markets are supported: US-listed equities/ETFs and crypto
+(:func:`is_supported_market` / :func:`require_supported_market` gate every
+entry point). The former metals/energy/index-CFD alias table and the spot
+forex ``=X`` mapping were removed with the A-share/forex/CFD strip — those
+inputs are now rejected at the gate with :class:`UnsupportedMarketError`
+instead of being silently remapped, so the only normalization left is the
+crypto rule:
 
-    user types        Yahoo wants       why
-    ---------------   ---------------   -----------------------------------
-    XAUUSD, XAUUSD+   GC=F              gold has no forex pair on Yahoo;
-                                        it is quoted as a COMEX future
-    EURUSD            EURUSD=X          spot forex pairs take a ``=X`` suffix
-    BTCUSD            BTC-USD           crypto pairs use a ``-`` separator
-    SPX500, US500     ^GSPC             index CFDs map to Yahoo index symbols
+    user types             Yahoo wants       why
+    ---------------        ---------------   -----------------------------------
+    BTCUSD                 BTC-USD           crypto pairs use a ``-`` separator
+    BTCUSDT, BTC-USDT      BTC-USD           stablecoin quotes resolve to the
+                                             Yahoo ``-USD`` pair (#982)
 
-Passing the raw broker symbol to Yahoo returns an empty result, which the
-agents previously received as free text and could hallucinate a price
-around (see issue #781). Centralizing the mapping here means every yfinance
-entry point resolves symbols the same way, and new instruments are added by
-appending a table row rather than editing call sites.
+Everything else (``AAPL``, ``BRK.B``, ``SPY``) passes through upper-cased
+unchanged. Passing an unsupported symbol to Yahoo used to return an empty
+result, which the agents received as free text and could hallucinate a
+price around (see issue #781); centralizing the allowlist here means every
+entry point rejects the same set of symbols with the same message.
 """
 
 from __future__ import annotations
@@ -25,14 +28,23 @@ import re
 
 # NoMarketDataError lives in the vendor-error taxonomy (errors.py); re-exported
 # here for the many call sites that import it alongside normalize_symbol.
-from .errors import NoMarketDataError as NoMarketDataError
+# UnsupportedMarketError is re-exported the same way so the entry-point gates
+# can import the whole gate contract (predicate + raiser + error) from here.
+from .errors import (
+    NoMarketDataError as NoMarketDataError,
+    UnsupportedMarketError as UnsupportedMarketError,
+)
 
 logger = logging.getLogger(__name__)
 
 
-# ISO-4217 codes common enough to appear in retail forex pairs. A bare
-# six-letter symbol whose halves are BOTH in this set is treated as a spot
-# forex pair and given Yahoo's ``=X`` suffix.
+# ISO-4217 codes common enough to appear in retail forex pairs. The spot
+# forex ``=X`` normalization is gone; the set survives as the deny-check
+# vocabulary for the market gate — a bare six-letter symbol whose halves are
+# BOTH in this set is a spot forex pair, which is no longer a supported
+# market and must be rejected with a specific reason (not fall through to
+# the crypto-venue shape check, which a ``...USD`` pair would otherwise
+# satisfy).
 _FOREX_CURRENCIES = frozenset(
     {
         "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD",
@@ -46,28 +58,25 @@ _CRYPTO_BASES = frozenset(
     {"BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "BCH", "DOT", "AVAX", "LINK"}
 )
 
-# Explicit aliases for instruments whose broker symbol does not map to a
-# Yahoo symbol by rule. Metals/energy resolve to their front-month future;
-# index CFD names resolve to the underlying Yahoo index symbol. Extend by
-# adding rows — no call site changes required.
-_ALIASES = {
-    # Precious metals (spot names -> COMEX/NYMEX futures)
-    "XAUUSD": "GC=F", "XAU": "GC=F", "GOLD": "GC=F",
-    "XAGUSD": "SI=F", "XAG": "SI=F", "SILVER": "SI=F",
-    "XPTUSD": "PL=F", "XPDUSD": "PA=F",
-    # Energy
-    "WTICOUSD": "CL=F", "USOIL": "CL=F", "WTI": "CL=F",
-    "BCOUSD": "BZ=F", "UKOIL": "BZ=F", "BRENT": "BZ=F",
-    "NATGAS": "NG=F", "XNGUSD": "NG=F",
-    "COPPER": "HG=F", "XCUUSD": "HG=F",
-    # Index CFDs -> Yahoo index symbols
-    "SPX500": "^GSPC", "US500": "^GSPC", "SPX": "^GSPC",
-    "NAS100": "^NDX", "US100": "^NDX", "USTEC": "^NDX",
-    "US30": "^DJI", "DJI30": "^DJI", "WS30": "^DJI",
-    "GER40": "^GDAXI", "GER30": "^GDAXI", "DE40": "^GDAXI",
-    "UK100": "^FTSE", "JP225": "^N225", "JPN225": "^N225",
-    "FRA40": "^FCHI", "EU50": "^STOXX50E", "HK50": "^HSI",
-}
+# Keys of the former metals/energy/index-CFD alias table (kept as a deny
+# set): these broker names used to remap to futures/index symbols and would
+# now otherwise look like plausible tickers downstream. Rejecting them by
+# name gives the user a precise "no longer supported" error instead of a
+# confusing empty-data failure from the vendor.
+_REMOVED_CFD_ALIASES = frozenset(
+    {
+        # Precious metals (former spot names -> COMEX/NYMEX futures)
+        "XAUUSD", "XAU", "GOLD", "XAGUSD", "XAG", "SILVER",
+        "XPTUSD", "XPDUSD",
+        # Energy
+        "WTICOUSD", "USOIL", "WTI", "BCOUSD", "UKOIL", "BRENT",
+        "NATGAS", "XNGUSD", "COPPER", "XCUUSD",
+        # Index CFDs (former -> Yahoo index symbols)
+        "SPX500", "US500", "SPX", "NAS100", "US100", "USTEC",
+        "US30", "DJI30", "WS30", "GER40", "GER30", "DE40",
+        "UK100", "JP225", "JPN225", "FRA40", "EU50", "HK50",
+    }
+)
 
 # Yahoo symbols may contain letters, digits, and these structural characters.
 _YAHOO_SAFE = re.compile(r"^[A-Za-z0-9._\-\^=]+$")
@@ -78,6 +87,14 @@ _YAHOO_SAFE = re.compile(r"^[A-Za-z0-9._\-\^=]+$")
 # in any of these resolves to ``-USD`` (#982). Longest first so ``USDT``/``USDC``
 # match before the ``USD`` substring.
 _CRYPTO_QUOTES = ("USDT", "USDC", "USD")
+
+# US-listed equity/ETF ticker shape for the market gate: 1-6 letters plus an
+# optional single class-share letter A/B/C after ``.`` or ``-`` (covers AAPL,
+# SPY, BRK.B, BRK-B, BF.B). Letters-only means it naturally rejects Yahoo
+# index/futures sigils (``^GSPC``, ``GC=F``), non-US exchange suffixes
+# (.SS/.SZ/.HK/.T/.L/.NS/.TO/.AX) and the 6-digit A-share codes — no
+# per-suffix deny list to maintain.
+_US_STOCK_RE = re.compile(r"^[A-Z]{1,6}(?:[.\-][A-C])?$")
 
 # Binance USDT-M lists tokenized US-equity perpetuals (``underlyingType ==
 # "EQUITY"`` in exchangeInfo): the contract tracks a real listed company or
@@ -137,7 +154,7 @@ def tokenized_stock_perp_underlying(
     (``MUUSDT``/``MU-USDT``/``MUUSDC`` -> ``MU``). Bases with a Yahoo spelling
     exception are mapped (``BRKBUSDT`` -> ``BRK-B``). Pure-crypto perps
     (``BTCUSDT``), unlisted alts (``PEPEUSDT``), and anything without a
-    stablecoin quote (``MU``, ``600519.SS``) return None.
+    stablecoin quote (``MU``, ``AAPL``) return None.
     """
     if not isinstance(ticker, str) or not ticker.strip():
         return None
@@ -184,16 +201,17 @@ def normalize_symbol(raw: str) -> str:
     """Map a user/broker symbol to its canonical Yahoo Finance symbol.
 
     Resolution order (first match wins):
-      1. Explicit alias table (metals, energy, index CFDs).
-      2. Crypto rule: a known crypto base quoted in USD/USDT/USDC (dashed or
+      1. Crypto rule: a known crypto base quoted in USD/USDT/USDC (dashed or
          not) -> ``BASE-USD``.
-      3. Forex rule: six letters that are two ISO currency codes -> ``PAIR=X``.
-      4. Otherwise the upper-cased symbol is returned unchanged (plain
-         equities, ETFs, Yahoo-native symbols like ``GC=F`` or ``^GSPC``).
+      2. Otherwise the upper-cased symbol is returned unchanged (plain
+         US-listed equities/ETFs, e.g. ``AAPL``, ``BRK.B``).
 
-    A trailing ``+`` (broker CFD marker, e.g. ``XAUUSD+``) is stripped before
-    matching. The function is purely syntactic — it performs no network
-    calls — so it is safe to apply on every request.
+    Only US-listed equities and crypto are supported markets — see
+    :func:`require_supported_market`; former alias/forex inputs are rejected
+    at the entry-point gates, not remapped here. A trailing ``+`` (broker
+    CFD marker, e.g. ``BTCUSD+``) is stripped before matching. The function
+    is purely syntactic — it performs no network calls — so it is safe to
+    apply on every request.
     """
     if not isinstance(raw, str) or not raw.strip():
         return raw
@@ -202,14 +220,8 @@ def normalize_symbol(raw: str) -> str:
     # Broker CFD/qualifier suffixes Yahoo never uses.
     s = s.rstrip("+")
 
-    crypto = _normalize_crypto(s)
-    if s in _ALIASES:
-        canonical = _ALIASES[s]
-    elif crypto is not None:
-        canonical = crypto
-    elif len(s) == 6 and s[:3] in _FOREX_CURRENCIES and s[3:] in _FOREX_CURRENCIES:
-        canonical = f"{s}=X"
-    else:
+    canonical = _normalize_crypto(s)
+    if canonical is None:
         canonical = s
 
     if canonical != raw.strip().upper():
@@ -236,25 +248,90 @@ def is_crypto_symbol(raw: str) -> bool:
     return _normalize_crypto(raw.strip().upper().rstrip("+")) is not None
 
 
-def is_a_stock(ticker: str) -> bool:
-    """True when ``ticker`` is a China A-share (Shanghai or Shenzhen) symbol.
+def _gate_deny_reason(s: str) -> str | None:
+    """Specific unsupported-market reason for a cleaned symbol, else None.
 
-    Recognizes the Yahoo-style exchange suffixes ``.SS``/``.SH`` (Shanghai SSE)
-    and ``.SZ`` (Shenzhen SZSE) on a 6-digit code — the same form yfinance
-    accepts for A-shares (e.g. ``600519.SS``, ``000001.SZ``). Purely syntactic
-    (no network), so it is safe as a per-call gate. Used to decide whether the
-    optional ``a_stock`` Eastmoney tools (margin trading + capital flow) are
-    advertised to the fundamentals analyst, so US / crypto / HK tickers never
-    enter that branch (byte-equivalent to a default-off run for them).
+    The forex/CFD denies sit BEFORE the allow checks in
+    :func:`is_supported_market` because both shapes would otherwise sneak
+    through: a ``...USD`` forex pair satisfies the crypto-venue suffix check,
+    and bare alias words like ``GOLD``/``SPX`` match the US-stock regex.
     """
-    if not isinstance(ticker, str):
+    if len(s) == 6 and s[:3] in _FOREX_CURRENCIES and s[3:] in _FOREX_CURRENCIES:
+        return "spot forex pairs are no longer supported"
+    if s in _REMOVED_CFD_ALIASES:
+        return "former commodity/index CFD alias, no longer supported"
+    return None
+
+
+# One policy sentence shared by every gate rejection (CLI retry hint, batch
+# validation error, web 400) so the wording cannot drift per entry point.
+_MARKET_POLICY = (
+    "only US-listed stocks/ETFs (e.g. AAPL, BRK.B, SPY) and crypto "
+    "(e.g. BTC-USD, BTCUSDT) are supported; A-shares, HK and other "
+    "exchange listings, forex, commodities and index CFDs were removed"
+)
+
+
+def is_supported_market(raw: str) -> bool:
+    """True when ``raw`` is a supported market symbol: US equity or crypto.
+
+    Accepts (in order, first match wins):
+      (a) known crypto — a :data:`_CRYPTO_BASES` base quoted in
+          USD/USDT/USDC (``BTC-USD``, ``BTCUSDT``), via
+          :func:`is_crypto_symbol`;
+      (b) crypto-venue-shaped — a compact (dashes removed) symbol ending in
+          ``USDT``/``USDC``/``USD`` with a non-empty base, or a dashed
+          ``-BTC``/``-ETH`` quote (``ETH-BTC``). These flow down the
+          Binance/Yahoo crypto paths whose underlyings are already
+          US-equity-or-crypto — Binance rejects non-US-equity perp
+          underlyings in the registry — so the shape alone is sufficient;
+      (c) US-listed equity/ETF — :data:`_US_STOCK_RE` full match.
+
+    False otherwise, including spot forex pairs (both halves in
+    :data:`_FOREX_CURRENCIES`), the removed CFD aliases, ``^``/``=``
+    symbols, and non-US exchange suffixes (.SS/.HK/.T/...). Purely
+    syntactic — no network calls.
+    """
+    if not isinstance(raw, str) or not raw.strip():
         return False
-    t = ticker.strip().upper()
-    for suf in (".SS", ".SH", ".SZ"):
-        if t.endswith(suf):
-            code = t[: -len(suf)]
-            return code.isdigit() and len(code) == 6
-    return False
+    s = raw.strip().upper().rstrip("+")
+
+    if _normalize_crypto(s) is not None:
+        return True
+    if _gate_deny_reason(s) is not None:
+        return False
+
+    # (b) venue shape. Longest quote first so USDT/USDC are not shadowed by
+    # the USD substring; require a non-empty base so a bare "USDT"/"USD"
+    # does not pass as a pair with no underlying.
+    compact = s.replace("-", "")
+    for quote in _CRYPTO_QUOTES:
+        if compact.endswith(quote) and len(compact) > len(quote):
+            return True
+    if s.endswith(("-BTC", "-ETH")) and len(s) > len("-BTC"):
+        return True
+
+    return _US_STOCK_RE.fullmatch(s) is not None
+
+
+def require_supported_market(raw: str) -> str:
+    """Clean ``raw`` and enforce the US-stocks + crypto allowlist gate.
+
+    Returns the cleaned symbol (strip/upper, trailing ``+`` removed) when
+    supported; otherwise raises :class:`UnsupportedMarketError` naming the
+    ticker and stating the policy. Forex-shaped and former-CFD-alias inputs
+    get their specific reason prepended so the user learns *why*, not just
+    *that*. Purely syntactic — the entry points (CLI prompt, batch runner,
+    web API) call this so every path rejects the same set with the same
+    message.
+    """
+    s = raw.strip().upper().rstrip("+") if isinstance(raw, str) else ""
+    if s and is_supported_market(s):
+        return s
+    reason = _gate_deny_reason(s) if s else None
+    raise UnsupportedMarketError(
+        s or str(raw), f"{reason} — {_MARKET_POLICY}" if reason else _MARKET_POLICY
+    )
 
 
 def _plausible_delivery_code(code: str) -> bool:

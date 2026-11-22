@@ -648,33 +648,27 @@ class TestDeferredReflection:
         assert YiAlphaGraph._resolve_benchmark(mock_graph, "NVDA") == "QQQ"
 
     def test_resolve_benchmark_suffix_map(self):
-        """Known suffixes route to their regional index."""
+        """Regional-suffix routing was removed with the US+crypto-only policy:
+        every equity ticker — dotted, foreign-suffixed or plain — resolves to
+        the empty-suffix entry (SPY; the market gate rejects such tickers at
+        input, this only pins the resolver's fallback)."""
         mock_graph = MagicMock(spec=YiAlphaGraph)
         mock_graph.config = {
             "benchmark_ticker": None,
-            "benchmark_map": {
-                ".T": "^N225", ".HK": "^HSI", ".NS": "^NSEI",
-                ".L": "^FTSE", ".TO": "^GSPTSE", ".AX": "^AXJO",
-                ".BO": "^BSESN", "": "SPY",
-            },
+            "benchmark_map": {"": "SPY"},
         }
-        assert YiAlphaGraph._resolve_benchmark(mock_graph, "7203.T") == "^N225"
-        assert YiAlphaGraph._resolve_benchmark(mock_graph, "0700.HK") == "^HSI"
-        assert YiAlphaGraph._resolve_benchmark(mock_graph, "RELIANCE.NS") == "^NSEI"
-        assert YiAlphaGraph._resolve_benchmark(mock_graph, "AZN.L") == "^FTSE"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "7203.T") == "SPY"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "0700.HK") == "SPY"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "7203.t") == "SPY"
 
-    def test_resolve_benchmark_china_a_shares(self):
-        """A-share tickers route to their exchange composite (uses the real
-        default benchmark_map, since A-share support relies on it)."""
+    def test_default_benchmark_map_is_spy_only(self):
+        """The default config carries no regional benchmark entries anymore."""
         from yialpha.default_config import DEFAULT_CONFIG
         mock_graph = MagicMock(spec=YiAlphaGraph)
         mock_graph.config = {"benchmark_ticker": None,
                              "benchmark_map": DEFAULT_CONFIG["benchmark_map"]}
-        # 2026-08-15: A-share benchmarks are CSI 300 (000300.SS) on both
-        # .SS and .SZ — the investable cross-market index — instead of the
-        # old SSE Composite / SZSE Component pair.
-        assert YiAlphaGraph._resolve_benchmark(mock_graph, "600519.SS") == "000300.SS"
-        assert YiAlphaGraph._resolve_benchmark(mock_graph, "000001.SZ") == "000300.SS"
+        assert DEFAULT_CONFIG["benchmark_map"] == {"": "SPY"}
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "600519.SS") == "SPY"
 
     def test_resolve_benchmark_us_ticker_defaults_to_spy(self):
         """US tickers (no dotted suffix) take the empty-suffix entry."""
@@ -697,13 +691,14 @@ class TestDeferredReflection:
         assert YiAlphaGraph._resolve_benchmark(mock_graph, "BRK.B") == "SPY"
 
     def test_resolve_benchmark_case_insensitive(self):
-        """Suffix matching is case-insensitive so 7203.t resolves like 7203.T."""
+        """Lowercase dotted tickers resolve identically (both hit the
+        empty-suffix SPY entry now that regional routing is gone)."""
         mock_graph = MagicMock(spec=YiAlphaGraph)
         mock_graph.config = {
             "benchmark_ticker": None,
-            "benchmark_map": {".T": "^N225", "": "SPY"},
+            "benchmark_map": {"": "SPY"},
         }
-        assert YiAlphaGraph._resolve_benchmark(mock_graph, "7203.t") == "^N225"
+        assert YiAlphaGraph._resolve_benchmark(mock_graph, "7203.t") == "SPY"
 
     def test_reflector_includes_benchmark_in_label(self):
         """benchmark_name appears in the prompt label, not 'SPY' hardcoded."""

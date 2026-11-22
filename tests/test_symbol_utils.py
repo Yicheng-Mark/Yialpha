@@ -1,4 +1,9 @@
-"""Tests for symbol normalization and the no-data routing sentinel."""
+"""Tests for symbol normalization and the no-data routing sentinel.
+
+Commodity/forex/index-CDN alias mapping was removed with the US+crypto-only
+policy — those inputs now pass through unchanged here and are rejected by the
+market gate (see test_market_gate.py) with a dedicated reason string.
+"""
 
 import unittest
 
@@ -14,30 +19,19 @@ from yialpha.dataflows.symbol_utils import (
 @pytest.mark.unit
 class TestNormalizeSymbol(unittest.TestCase):
     def test_plain_equities_unchanged(self):
-        for sym in ("AAPL", "MSFT", "TSM", "BRK.B", "0700.HK", "^GSPC", "GC=F"):
+        for sym in ("AAPL", "MSFT", "TSM", "BRK.B", "^GSPC", "GC=F"):
             self.assertEqual(normalize_symbol(sym), sym)
 
     def test_lowercases_are_upper(self):
         self.assertEqual(normalize_symbol("aapl"), "AAPL")
         self.assertEqual(normalize_symbol("  msft  "), "MSFT")
 
-    def test_metal_aliases_map_to_futures(self):
-        self.assertEqual(normalize_symbol("XAUUSD"), "GC=F")
-        self.assertEqual(normalize_symbol("XAUUSD+"), "GC=F")   # broker CFD suffix
-        self.assertEqual(normalize_symbol("xauusd+"), "GC=F")
-        self.assertEqual(normalize_symbol("GOLD"), "GC=F")
-        self.assertEqual(normalize_symbol("XAGUSD"), "SI=F")
-
-    def test_energy_and_index_aliases(self):
-        self.assertEqual(normalize_symbol("USOIL"), "CL=F")
-        self.assertEqual(normalize_symbol("SPX500"), "^GSPC")
-        self.assertEqual(normalize_symbol("NAS100"), "^NDX")
-        self.assertEqual(normalize_symbol("US30"), "^DJI")
-
-    def test_forex_pairs_get_x_suffix(self):
-        self.assertEqual(normalize_symbol("EURUSD"), "EURUSD=X")
-        self.assertEqual(normalize_symbol("GBPJPY"), "GBPJPY=X")
-        self.assertEqual(normalize_symbol("eurusd"), "EURUSD=X")
+    def test_removed_aliases_pass_through_unchanged(self):
+        # The alias table is gone: former CFD/forex names reach the market
+        # gate verbatim (which rejects them) instead of being silently
+        # remapped to a futures/index symbol.
+        for sym in ("XAUUSD", "GOLD", "USOIL", "SPX500", "GER40", "EURUSD"):
+            self.assertEqual(normalize_symbol(sym), sym)
 
     def test_crypto_pairs_get_dash_usd(self):
         self.assertEqual(normalize_symbol("BTCUSD"), "BTC-USD")

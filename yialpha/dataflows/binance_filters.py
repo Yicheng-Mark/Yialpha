@@ -15,10 +15,11 @@ provides Decimal-exact quantization:
   - :func:`quantize_order` — floor quantity to stepSize, round price to
     tickSize, and report MIN_NOTIONAL compliance
 
-Consumers: the Track B execution gateway (pre-submit quantization) and any
-Track A display that wants exchange-native price precision. Track A fetches
-reuse :func:`yialpha.dataflows.binance._http_get` (SOCKS5 proxy, weight
-limiter, typed errors), so no new transport is introduced.
+Consumers: the backtest engine and perp ticket paths (order-shape sanity
+against exchange-native precision) and any display that wants exchange-native
+price precision. Fetches reuse :func:`yialpha.dataflows.binance._http_get`
+(SOCKS5 proxy, weight limiter, typed errors), so no new transport is
+introduced.
 """
 from __future__ import annotations
 

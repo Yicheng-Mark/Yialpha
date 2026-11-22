@@ -10,7 +10,7 @@ rank_signals.py — YiAlpha 多标的信心排名。
 导致 BTCUSDT「卖出」被错读成 Hold 的坑。
 
 用法：
-    python scripts/rank_signals.py --tickers BTCUSDT 0700.HK AAPL 600519.SS
+    python scripts/rank_signals.py --tickers BTCUSDT AAPL NVDA
     python scripts/rank_signals.py --tickers BTCUSDT ETHUSDT SOLUSDT --top 5 --capital 10000
     python scripts/rank_signals.py                       # 不传则全部 ticker 各取最新
     python scripts/rank_signals.py --tickers ... --json
@@ -69,7 +69,7 @@ BLOCKED_REGIMES = {"no_new", "hard_stop"}
 #: 资产类型中文名
 ASSET_CN = {
     "crypto_perp": "加密永续", "crypto_spot": "加密现货",
-    "us_stock": "美股", "hk_stock": "港股", "cn_stock": "A股",
+    "us_stock": "美股",
 }
 
 _DIR_STAMP_RE = re.compile(r"_(\d{8})_(\d{6})$")
@@ -85,7 +85,7 @@ def latest_for_ticker(ticker: str) -> Path | None:
     if not root.is_dir():
         return None
     best, best_mt = None, 0.0
-    for d in root.glob(f"{ticker}_*"):  # 点号 ticker（600519.SS/0700.HK）原样匹配
+    for d in root.glob(f"{ticker}_*"):  # ticker 原样匹配（美股/加密均无路径特殊字符）
         cr = d / "complete_report.md"
         if not cr.is_file():
             continue  # 跳半截 / 中断 run
@@ -370,9 +370,6 @@ def render_rank(rows: list[dict], tickers: list[str], top: int, capital=None) ->
                      f"`python scripts/trade_ticket.py --ticker {top_short['ticker']} --capital <你的资金>`")
     if not top_long and not top_short:
         lines.append("- 本组无可推荐标的（全为观望 / 熔断 / 无报告）。")
-    # A 股做空通道提示
-    if top_short and top_short["asset_type"] == "cn_stock":
-        lines.append("- ⚠️ 最强空头是 A 股：做空通道受限（融券难/利率高），建议反向 ETF 或认沽期权替代。")
     lines.append("")
     lines.append("---")
     lines.append("*免责声明：信心分为代理分（评级+情绪+盈亏比加权），基于 LLM 分析结论与历史公式，"
@@ -423,7 +420,8 @@ def main():
     if args.top < 0:
         ap.error("--top 不能为负（N=每组前 N 行；0=全部）")
 
-    # 决定 ticker 列表：带点号的（600519.SS/0700.HK）原样，纯字母（btcusdt/aapl）大写
+    # 决定 ticker 列表：纯字母（btcusdt/aapl）统一大写，其余（BRK.B 这类带点号
+    # 的美股）原样
     if args.tickers:
         tickers = [t if "." in t else t.upper() for t in args.tickers]
     else:

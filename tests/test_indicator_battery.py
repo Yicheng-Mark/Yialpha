@@ -43,7 +43,7 @@ MACD Related:
 
 Momentum Indicators:
 - rsi: RSI: Measures momentum to flag overbought/oversold conditions. Usage: Apply 70/30 thresholds and watch for divergence to signal reversals. Tips: In strong trends, RSI may remain extreme; always cross-check with trend analysis.
-- kdjk: KDJ K: The %K line of the 9-period KDJ stochastic, an A-share favourite. Usage: K crossing above D from the low zone (below 20) is a classic buy trigger; above 80 is overbought. Tips: KDJ whipsaws in strong trends; require a D-line cross, not just the level.
+- kdjk: KDJ K: The %K line of the 9-period KDJ stochastic. Usage: K crossing above D from the low zone (below 20) is a classic buy trigger; above 80 is overbought. Tips: KDJ whipsaws in strong trends; require a D-line cross, not just the level.
 - kdjd: KDJ D: The %D line of the 9-period KDJ stochastic — the smoothed K signal line. Usage: K/D crosses are the signal; D's own slope gauges momentum persistence. Tips: Use together with kdjk, never alone.
 - kdjj: KDJ J: The J line (3K - 2D) of the KDJ stochastic — its overextended wing. Usage: J above 100 flags short-term overbought extremes; below 0 marks oversold snapback candidates. Tips: The noisiest of the three; trade its extremes only, not its crosses.
 - cci: CCI: Commodity Channel Index (14) measures deviation of typical price from its mean. Usage: The +100/-100 bands flag strong momentum; zero-line crosses confirm direction. Tips: Choppy near zero in ranges; trust extremes more than mid-band wiggles.

@@ -6,7 +6,6 @@ from langchain_core.messages import HumanMessage
 
 from yialpha.agents.utils.agent_utils import (
     final_analyst_report,
-    get_a_share_news_native,
     get_global_news,
     get_instrument_context_from_state,
     get_language_instruction,
@@ -25,7 +24,6 @@ from yialpha.agents.utils.prediction_tools import (
 from yialpha.agents.utils.prompt_builder import build_collaborator_prompt
 from yialpha.dataflows.binance import stock_perp_underlying
 from yialpha.dataflows.config import get_config, submit_with_context
-from yialpha.dataflows.symbol_utils import is_a_stock
 from yialpha.dataflows.utils import is_historical_date
 from yialpha.ledger.models import (
     REPLAYABILITY_LIVE_ONLY,
@@ -35,19 +33,6 @@ from yialpha.ledger.models import (
 from yialpha.ledger.run_context import record_evidence_block
 
 logger = logging.getLogger(__name__)
-
-# Appended to the news system prompt only when YIALPHA_A_SHARE_NATIVE is on AND
-# the ticker is a China A-share (.SS/.SH/.SZ). When off (or non-A-share), the
-# analyst's prompt (and tool list) are byte-for-byte unchanged. Same double-gate
-# contract as the fundamentals analyst's a_share_native nudge.
-_A_SHARE_NATIVE_NUDGE = (
-    " Additional native China A-share news tool (A-share only): "
-    "`get_a_share_news_native` (东财 per-stock Chinese headlines via AKShare, "
-    "point-in-time by publish date). Use it to surface A-share-specific news "
-    "the default Reddit/StockTwits/yfinance path covers thinly. Headlines are "
-    "Chinese-language. If the tool returns 'no coverage found' for this symbol/"
-    "date, report that honestly and do not fabricate headlines."
-)
 
 # Appended to the news system prompt when config web_search_enabled is on
 # (default) AND the run date is live. The tool itself degrades to a
@@ -312,13 +297,6 @@ def create_news_analyst(llm):
         ):
             tools.append(web_search)
             web_search_instruction = _WEB_SEARCH_INSTRUCTION
-        # Native A-share news (env: YIALPHA_A_SHARE_NATIVE, off by default).
-        # Double-gated byte-equivalence contract: flag AND is_a_stock(ticker).
-        # When either fails the tool list / prompt are byte-for-byte identical to
-        # the prior behaviour, so US / crypto / HK tickers never enter this branch.
-        # When both hold, one PIT-correct A-share-only news tool is appended.
-        if get_config().get("a_share_native") and is_a_stock(ticker):
-            tools.append(get_a_share_news_native)
 
         # Tokenized-stock perp dual coverage: deterministically prefetch BOTH
         # news angles in parallel with per-angle fault isolation — the
@@ -424,11 +402,6 @@ def create_news_analyst(llm):
             + " Grounding rules (anti-hallucination): (1) Every news item or macro claim must cite its source and date (e.g. 'per FRED, core_pce was X% on YYYY-MM-DD' or 'headline from get_news, YYYY-MM-DD'). (2) If two sources conflict, flag the discrepancy rather than inventing a reconciled narrative. (3) If a tool returns no results for the query/period, write 'no coverage found' for that angle instead of speculating or filling gaps from prior knowledge."
             + get_language_instruction()
         )
-        # A-share news nudge uses the SAME double gate as the tool extension
-        # above, so the prompt only changes when the tools do. (news keeps
-        # system_message as a plain string, unlike fundamentals' 1-tuple.)
-        if get_config().get("a_share_native") and is_a_stock(ticker):
-            system_message = system_message + _A_SHARE_NATIVE_NUDGE
         # Tokenized-stock perp instruction uses the SAME gate as the prefetch
         # above; appending "" keeps every non-equity-perp run byte-identical.
         system_message = system_message + stock_perp_instruction

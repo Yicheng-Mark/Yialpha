@@ -15,18 +15,6 @@ from langgraph.prebuilt import ToolNode
 # Import the abstract tool methods from agent_utils
 from yialpha.agents.utils.agent_utils import (
     build_instrument_context,
-    get_a_share_balance_sheet_native,
-    get_a_share_cashflow_statement_native,
-    get_a_share_dragon_tiger_native,
-    get_a_share_fundamentals_native,
-    get_a_share_income_statement_native,
-    get_a_share_market_breadth_native,
-    get_a_share_money_flow_native,
-    get_a_share_news_native,
-    get_a_share_northbound_native,
-    get_a_share_ohlc_native,
-    get_a_share_realtime_quote_native,
-    get_a_share_sector_flow_native,
     get_balance_sheet,
     get_binance_basis,
     get_binance_depth_snapshot,
@@ -57,7 +45,6 @@ from yialpha.agents.utils.agent_utils import (
     get_insider_transactions,
     get_institutional_holdings,
     get_macro_indicators,
-    get_margin_trading,
     get_news,
     get_prediction_markets,
     get_relative_strength,
@@ -76,6 +63,7 @@ from yialpha.agents.utils.prediction_tools import submit_prediction
 from yialpha.agents.utils.valuation_tools import get_valuation_metrics
 from yialpha.dataflows.binance import stock_perp_underlying, warm_equity_perp_bases
 from yialpha.dataflows.config import set_config
+from yialpha.dataflows.symbol_utils import require_supported_market
 from yialpha.dataflows.utils import (
     live_anchor_dates,
     replace_retry_on_windows,
@@ -107,8 +95,6 @@ _SIGNATURE_CONFIG_KEYS = (
     "deep_think_llm",
     "debate_llm",
     "sec_ownership",
-    "a_stock",
-    "a_share_native",
     "crypto_native",
     "web_search_enabled",
     "regime_context",
@@ -523,14 +509,6 @@ class YiAlphaGraph:
                     get_binance_spot_klines,
                     get_binance_spot_ticker24,
                     get_binance_spot_perp_basis,
-                    # Native A-share market signal tools (a_share_native gate on
-                    # the analyst side). Same dormant contract: only advertised
-                    # when YIALPHA_A_SHARE_NATIVE is on AND the ticker is an
-                    # A-share, so they sit unused otherwise.
-                    get_a_share_northbound_native,
-                    get_a_share_sector_flow_native,
-                    get_a_share_realtime_quote_native,
-                    get_a_share_market_breadth_native,
                     # Open-web search (Tavily), market-scoped instance. The
                     # market analyst binds it only when web_search_enabled is
                     # on AND the run date is live (PIT: Tavily has no as-of
@@ -568,13 +546,6 @@ class YiAlphaGraph:
                     get_insider_transactions,
                     get_macro_indicators,
                     get_prediction_markets,
-                    # Native A-share news (a_share_native). Dormant for default
-                    # runs: the news analyst only advertises it when
-                    # YIALPHA_A_SHARE_NATIVE is on AND the ticker is an A-share
-                    # (.SS/.SH/.SZ), so the LLM never names it otherwise and it
-                    # is simply an extra entry in ToolNode's name->tool map (same
-                    # dormant contract as the fundamentals A-share tools).
-                    get_a_share_news_native,
                     # Open-web search (Tavily). Gated on the analyst side by
                     # web_search_enabled; the vendor itself degrades to a
                     # WEB_SEARCH_UNAVAILABLE sentinel + quality event when the
@@ -601,32 +572,6 @@ class YiAlphaGraph:
                     get_form4_insider_trading,
                     get_ftd_data,
                     get_institutional_holdings,
-                    # China A-share margin-trading tool (Track A). Dormant for
-                    # default runs: the fundamentals analyst only advertises it
-                    # when YIALPHA_A_STOCK is on AND the ticker is an A-share
-                    # (.SS/.SH/.SZ), so the LLM never names it otherwise and it
-                    # is simply an extra entry in ToolNode's name->tool map
-                    # (same dormant contract as the SEC/Binance tools above).
-                    get_margin_trading,
-                    # Native A-share OHLC + TTM valuation (a_share_native). Dormant
-                    # for default runs: the fundamentals analyst only advertises
-                    # them when YIALPHA_A_SHARE_NATIVE is on AND the ticker is an
-                    # A-share (.SS/.SH/.SZ), so the LLM never names them otherwise
-                    # and they are simply extra entries in ToolNode's name->tool
-                    # map (same dormant contract as the margin tool above).
-                    get_a_share_fundamentals_native,
-                    get_a_share_ohlc_native,
-                    # Native A-share financials (a_share_native gate): the
-                    # fundamentals analyst appends these five alongside the two
-                    # above when the flag and ticker gates both hold; they must
-                    # be executable in the same ToolNode or those calls fail
-                    # (same wiring-gap class as the market price-structure
-                    # tools, round-5 audit).
-                    get_a_share_money_flow_native,
-                    get_a_share_dragon_tiger_native,
-                    get_a_share_income_statement_native,
-                    get_a_share_balance_sheet_native,
-                    get_a_share_cashflow_statement_native,
                     # Crypto-native fundamentals (crypto_native gate). Dormant
                     # for default runs: the fundamentals analyst only
                     # advertises them when YIALPHA_CRYPTO_NATIVE is on AND the
@@ -634,7 +579,7 @@ class YiAlphaGraph:
                     # (pure_crypto_perp / crypto_spot), so the LLM never
                     # names them otherwise and they are simply extra entries
                     # in ToolNode's name->tool map (same dormant contract as
-                    # the A-share tools above).
+                    # the SEC tools above).
                     get_crypto_token_fundamentals,
                     get_crypto_network_fundamentals,
                     # Deterministic valuation + PoT compute (valuation_tools
@@ -663,9 +608,10 @@ class YiAlphaGraph:
         resolve_market_benchmark` (the dataflow-layer implementation this
         method was previously a verbatim copy of — the two drifted once
         already). ``config["benchmark_ticker"]`` overrides everything when
-        set; otherwise the suffix map matches the ticker's exchange suffix
-        and the empty-suffix entry (SPY by default) is the fallback, which is
-        right because the alpha calculation works in USD.
+        set; otherwise the empty-suffix entry of ``benchmark_map`` (SPY by
+        default) is the fallback, which is right because the alpha
+        calculation works in USD — regional-suffix routing was removed with
+        the US+crypto-only policy.
         """
         from yialpha.dataflows.market_regime import resolve_market_benchmark
 
@@ -2245,6 +2191,15 @@ class YiAlphaGraph:
         # themselves with separate [:10] slices. Canonical "YYYY-MM-DD"
         # inputs are identity here, so only the malformed class changes.
         trade_date = str(trade_date)[:10]
+
+        # Market-gate backstop (US stocks + crypto only): the CLI gates
+        # tickers before the graph is ever built, but direct-API callers and
+        # the backtest engine reach propagate() without them — a non-US,
+        # non-crypto symbol must die HERE, before any graph kickoff or state
+        # seeding, rather than inside a vendor call. The crypto venue paths
+        # (asset_type crypto_*: BTCUSDT / MUUSDT forms) are accepted by
+        # require_supported_market, so no asset_type branching is needed.
+        require_supported_market(company_name)
 
         # Perp runs: warm the EQUITY-perp listing once (one exchangeInfo
         # fetch, fail-open to the static seed with a WARNING) so instrument-

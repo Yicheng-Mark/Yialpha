@@ -13,7 +13,7 @@ from .models import AnalystType, AssetType
 
 console = Console()
 
-TICKER_INPUT_EXAMPLES = "SPY, 0700.HK, BTC-USD"
+TICKER_INPUT_EXAMPLES = "SPY, AAPL, NVDA, BTC-USD"
 
 ANALYST_ORDER = [
     ("Market Analyst", AnalystType.MARKET),
@@ -26,13 +26,18 @@ CRYPTO_SUFFIXES = ("-USD", "-USDT", "-USDC", "-BTC", "-ETH")
 
 
 def is_valid_ticker_input(value: str) -> bool:
-    """Whether a ticker entry is acceptable (charset + length).
+    """Whether a ticker entry passes the charset/shape pre-check only.
 
-    Allows the characters Yahoo symbols use, including ``=`` for futures/forex
-    like ``GC=F`` and ``EURUSD=X`` (#980), and ``^`` for indices. Empty input is
-    allowed (it defaults to SPY downstream). Values made of dots only are
-    rejected: they pass the charset check but are path components that traverse
-    out of the results/cache directories (``..``).
+    Deliberately market-agnostic: it allows every character Yahoo symbols
+    use (``.``/``-``/``^``/``=``) so an obvious typo is caught before the
+    market gate runs — the gate's "unsupported market" error must only fire
+    for charset-valid input, or a stray ``!`` would read as a policy
+    rejection. WHICH markets are allowed is decided by the data layer's
+    ``require_supported_market`` (US-listed equities + crypto only; see
+    ``get_ticker``). Empty input is allowed (it defaults to SPY downstream).
+    Values made of dots only are rejected: they pass the charset check but
+    are path components that traverse out of the results/cache directories
+    (``..``).
     """
     v = value.strip()
     return not v or (
@@ -62,21 +67,48 @@ def is_canonical_ymd(value: str) -> bool:
         return False
 
 
+def _ticker_prompt_error(value: str) -> str | None:
+    """Validation message for the ticker prompt, or None when acceptable.
+
+    Layered: charset first (:func:`is_valid_ticker_input` — a typo should
+    read as a typo, not a policy rejection), then the shared market
+    allowlist (``require_supported_market``) so an unsupported market
+    (anything outside US-listed equities/ETFs and crypto) surfaces the
+    policy message inside the
+    prompt's retry loop instead of aborting the run after it. Empty input
+    is charset-valid and skips the market gate (it defaults to SPY, a
+    supported market, downstream).
+    """
+    if not is_valid_ticker_input(value):
+        return "Please enter a valid ticker symbol, e.g. AAPL, BRK.B, BTC-USD."
+    if not value.strip():
+        return None
+    from yialpha.dataflows.errors import UnsupportedMarketError
+    from yialpha.dataflows.symbol_utils import require_supported_market
+
+    try:
+        require_supported_market(value)
+    except UnsupportedMarketError as exc:
+        return str(exc)
+    return None
+
+
 def get_ticker() -> str:
-    """Prompt the user to enter a ticker symbol, preserving exchange suffixes.
+    """Prompt for a ticker symbol (US-listed stock/ETF or crypto only).
 
     Uses questionary.text (not typer.prompt, which strips trailing dot-suffixes
-    like ``000404.SH`` on some shells) and validates the symbol charset so an
-    obvious typo is caught before the run starts. The resolved symbol is
-    re-checked with the data layer's ``safe_ticker_component`` as the last line
-    of defense: every path the CLI builds (results dir, locks) interpolates it.
+    like ``BRK.B`` on some shells). Validation is layered in the prompt's
+    retry loop: charset/shape first, then the data layer's
+    ``require_supported_market`` so unsupported markets are rejected with the
+    policy message while the user can still retype. The authoritative gate
+    re-runs after the prompt (questionary's validate is UI sugar, not a
+    contract), then the resolved symbol is re-checked with the data layer's
+    ``safe_ticker_component`` as the last line of defense: every path the CLI
+    builds (results dir, locks) interpolates it.
     """
     ticker = questionary.text(
         f"Enter ticker symbol (e.g. {TICKER_INPUT_EXAMPLES}):",
-        validate=lambda x: (
-            is_valid_ticker_input(x)
-            or "Please enter a valid ticker symbol, e.g. AAPL, 000404.SZ, 0700.HK, GC=F."
-        ),
+        validate=lambda x: (_ticker_prompt_error(x) or True),
         style=questionary.Style(
             [
                 ("text", "fg:green"),
@@ -89,7 +121,16 @@ def get_ticker() -> str:
         console.print("\n[red]No ticker symbol provided. Exiting...[/red]")
         exit(1)
 
-    resolved = normalize_ticker_symbol(ticker) if ticker.strip() else "SPY"
+    from yialpha.dataflows.errors import UnsupportedMarketError
+    from yialpha.dataflows.symbol_utils import require_supported_market
+
+    try:
+        # Empty input defaults to SPY (a supported market), never to the gate.
+        gated = require_supported_market(ticker) if ticker.strip() else "SPY"
+    except UnsupportedMarketError as exc:
+        console.print(f"\n[red]{exc}. Exiting...[/red]")
+        exit(1)
+    resolved = normalize_ticker_symbol(gated)
     try:
         safe_ticker_component(resolved)
     except ValueError as exc:
@@ -103,8 +144,10 @@ def normalize_ticker_symbol(ticker: str) -> str:
 
     Delegates to the data layer's ``normalize_symbol`` so the symbol the CLI
     passes through the pipeline is exactly the one the data path will price
-    (e.g. ``BTCUSD`` -> ``BTC-USD``, ``XAUUSD`` -> ``GC=F``). Falls back to the
-    plain upper-case if the data layer is unavailable.
+    (e.g. ``BTCUSD`` -> ``BTC-USD``; US equities pass through unchanged).
+    Market admission is NOT this function's job — callers gate first with
+    ``require_supported_market`` (US equities + crypto only). Falls back to
+    the plain upper-case if the data layer is unavailable.
     """
     try:
         from yialpha.dataflows.symbol_utils import normalize_symbol
@@ -122,9 +165,10 @@ def detect_asset_type(ticker: str) -> AssetType:
     but compact ``<BASE>USDT``/``<BASE>USDC`` forms for bases OUTSIDE the
     Yahoo crypto whitelist — Binance tokenized-stock perps (MUUSDT, SPCXUSDT)
     and unlisted alts (PEPEUSDT, 1000PEPEUSDT) — survive normalization
-    unchanged, so they need a second undashed check. No listed stock, index,
-    or futures symbol ends in USDT/USDC, and forex canonicalizes to ``PAIR=X``
-    before this check, so the undashed form cannot misfire.
+    unchanged, so they need a second undashed check. No listed stock symbol
+    ends in USDT/USDC, and spot forex (EURUSD) never reaches this check —
+    the market allowlist gate rejects it at input — so the undashed form
+    cannot misfire.
     """
     canonical = normalize_ticker_symbol(ticker)
     if canonical.endswith(CRYPTO_SUFFIXES):

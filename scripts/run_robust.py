@@ -59,19 +59,6 @@ IS_WINDOWS = os.name == "nt"
 # tree root so /T reliably reaches every descendant (grandchild datafetch etc.).
 _CREATE_FLAGS = subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0
 
-# OPTIONAL operator-installed shim: if a sitecustomize.py with a urllib hard
-# timeout + socket backstop was manually placed here, prepending it to the
-# child PYTHONPATH auto-loads it at interpreter startup. The repo ships no
-# shim and no package code reads these env vars — without a hand-installed
-# file this is a harmless no-op, and hang recovery today is
-# YIALPHA_LLM_TIMEOUT_S / SDK retries + the watchdog below. Override the
-# location with YIALPHA_TIMEOUT_SHIM_DIR.
-_DEFAULT_SHIM_DIR = os.environ.get(
-    "YIALPHA_TIMEOUT_SHIM_DIR",
-    str(Path(os.environ.get("TEMP", str(Path.home()))) / "yialpha_timeout_shim"),
-)
-
-
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="按-ticker 子进程编排器：硬墙钟看门狗 + 卡死强杀 + 重跑。",
@@ -495,11 +482,8 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         log_path = log_dir / f"robust_{ticker}_{stamp}_a{attempt}.log"
         result["log_path"] = log_path
 
-        # 子进程 env：cwd=项目根让 .env 自动加载；注入 timeout shim 到 PYTHONPATH。
+        # 子进程 env：cwd=项目根让 .env 自动加载。
         child_env = os.environ.copy()
-        child_env["PYTHONPATH"] = os.pathsep.join(
-            [p for p in [_DEFAULT_SHIM_DIR, child_env.get("PYTHONPATH", "")] if p]
-        )
         child_env.setdefault("YIALPHA_URLOPEN_HARD_TIMEOUT_S", "20")
         child_env.setdefault("YIALPHA_FAULT_DUMP_S", "0")
         # Hang-recovery，与 _apply_robust_llm_cache 同一动机：半开 LLM 连接默认
@@ -508,10 +492,6 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
         # 字节等价，只改失败路径的恢复速度。setdefault — 用户显式导出的
         # YIALPHA_LLM_TIMEOUT_S（含 0=显式关闭）优先。
         child_env.setdefault("YIALPHA_LLM_TIMEOUT_S", "120")
-        # 同理：BaoStock TCP 会话的瞬时故障（解码错/超时/连接重置）vendor 层
-        # 默认 0 次（字节等价）；robust 子进程给 2 次退避重试，避免单次抖动
-        # 把 a_share_native 类目打成哨兵、再由整个 attempt 重跑兜底。
-        child_env.setdefault("YIALPHA_BAOSTOCK_RETRIES", "2")
         # --allow-degraded opts the child's data-vacuum gate down to warn as
         # well: without this the child would still raise DataVacuumError at the
         # trader node and never produce the degraded report the operator asked

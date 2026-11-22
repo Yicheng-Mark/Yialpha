@@ -101,16 +101,13 @@ class TestBenchmarkComparison:
 
 
 @pytest.mark.unit
-class TestBenchmarkMapCsi300:
-    def test_a_share_suffixes_resolve_to_csi300(self):
+class TestBenchmarkMapDefault:
+    def test_default_map_is_spy_only(self):
         from yialpha.dataflows.config import get_config
         from yialpha.dataflows.market_regime import resolve_market_benchmark
 
         bmap = get_config()["benchmark_map"]
-        assert bmap[".SS"] == "000300.SS"
-        assert bmap[".SZ"] == "000300.SS"
-        assert resolve_market_benchmark("600519.SS") == "000300.SS"
-        assert resolve_market_benchmark("000001.SZ") == "000300.SS"
+        assert bmap == {"": "SPY"}
         assert resolve_market_benchmark("AAPL") == "SPY"
 
 
@@ -129,13 +126,14 @@ class TestRelativeStrengthTool:
         import yialpha.agents.utils.price_structure_tools as pst
 
         # Ticker doubles over ~2y; benchmark up 20% over the same rows.
+        # The tool hardcodes SPY as the stock benchmark since the
+        # US+crypto-only policy removed regional resolution.
         n = 300
         ticker = self._frame(list(np.linspace(100, 200, n)))
         bench = self._frame(list(np.linspace(100, 120, n)))
-        monkeypatch.setattr(pst, "resolve_market_benchmark", lambda s: "BMKT")
         monkeypatch.setattr(
             pst, "load_ohlcv",
-            lambda s, d: bench if s == "BMKT" else ticker,
+            lambda s, d: bench if s == "SPY" else ticker,
         )
         return pst
 
@@ -143,7 +141,7 @@ class TestRelativeStrengthTool:
         out = patched.get_relative_strength.invoke({
             "symbol": "TEST", "curr_date": "2025-12-31",
         })
-        assert "Relative strength: TEST vs BMKT" in out
+        assert "Relative strength: TEST vs SPY" in out
         for w in ("1m", "3m", "6m", "12m"):
             assert w in out
         assert "RS ratio" in out
@@ -156,16 +154,15 @@ class TestRelativeStrengthTool:
         ticker = self._frame(list(np.linspace(100, 200, n)))
 
         def fake_load(symbol, curr_date):
-            if symbol == "BMKT":
+            if symbol == "SPY":
                 raise RuntimeError("bench down")
             return ticker
 
-        monkeypatch.setattr(pst, "resolve_market_benchmark", lambda s: "BMKT")
         monkeypatch.setattr(pst, "load_ohlcv", fake_load)
         out = pst.get_relative_strength.invoke({
             "symbol": "TEST", "curr_date": "2025-12-31",
         })
-        assert "BMKT unavailable" in out
+        assert "SPY unavailable" in out
         assert "relative strength as unavailable" in out
 
     def test_ticker_failure_is_typed(self, monkeypatch):

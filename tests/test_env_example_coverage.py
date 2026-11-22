@@ -40,16 +40,10 @@ _DIRECT_READ_KEYS = {
     "YIALPHA_SEC_USER_AGENT",       # dataflows/sec_edgar.py:_user_agent
     "YIALPHA_FUNDAMENTALS_FILING_LAG_DAYS",  # dataflows/utils.py
     "YIALPHA_HTTP_TIMEOUT_S",       # dataflows/stockstats_utils.py
-    "YIALPHA_BAOSTOCK_TIMEOUT_S",   # dataflows/baostock_vendor.py
     "YIALPHA_LLM_TIMEOUT_S",        # llm_clients/_timeout.py
     "YIALPHA_SENTIMENT_PARALLEL_FETCH",  # agents/analysts/sentiment_analyst.py
     "YIALPHA_TAVILY_BUDGET_SPLIT",  # dataflows/tavily.py:_budget_split
     "YIALPHA_ROBUST_CHILD_SCRIPT",  # scripts/run_robust.py
-    "YIALPHA_TIMEOUT_SHIM_DIR",     # scripts/run_robust.py
-    "YIALPHA_EXECUTION_ENABLED",    # execution/binance_gateway.py (legacy gate)
-    "YIALPHA_EXECUTION_MAINNET",    # execution/binance_gateway.py
-    "YIALPHA_EXECUTION_TIMEOUT_MS",  # execution/binance_gateway.py
-    "YIALPHA_EXECUTION_LEVERAGE",   # execution/binance_gateway.py (_ensure_leverage)
 }
 
 

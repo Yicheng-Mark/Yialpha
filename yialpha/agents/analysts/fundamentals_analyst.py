@@ -4,13 +4,6 @@ from langchain_core.messages import HumanMessage
 
 from yialpha.agents.utils.agent_utils import (
     final_analyst_report,
-    get_a_share_balance_sheet_native,
-    get_a_share_cashflow_statement_native,
-    get_a_share_dragon_tiger_native,
-    get_a_share_fundamentals_native,
-    get_a_share_income_statement_native,
-    get_a_share_money_flow_native,
-    get_a_share_ohlc_native,
     get_balance_sheet,
     get_cashflow,
     get_crypto_network_fundamentals,
@@ -22,7 +15,6 @@ from yialpha.agents.utils.agent_utils import (
     get_institutional_holdings,
     get_instrument_context_from_state,
     get_language_instruction,
-    get_margin_trading,
     web_search_fundamentals,
 )
 from yialpha.agents.utils.pot_tool import make_pot_compute_tool
@@ -37,7 +29,6 @@ from yialpha.agents.utils.prompt_builder import build_collaborator_prompt
 from yialpha.agents.utils.valuation_tools import get_valuation_metrics
 from yialpha.dataflows.binance import stock_perp_underlying
 from yialpha.dataflows.config import get_config
-from yialpha.dataflows.symbol_utils import is_a_stock
 from yialpha.dataflows.utils import is_historical_date
 from yialpha.ledger.models import (
     REPLAYABILITY_LIVE_ONLY,
@@ -81,49 +72,6 @@ _SEC_OWNERSHIP_NUDGE = (
     "available', 'no fails reported', or 'not yet published' for this symbol, "
     "report that honestly and do not estimate insider activity, short "
     "pressure, or institutional positioning."
-)
-
-
-# Appended to the fundamentals system prompt only when YIALPHA_A_STOCK is on
-# AND the ticker is a China A-share (.SS/.SH/.SZ). When off (or non-A-share),
-# the analyst's prompt (and tool list) are byte-for-byte unchanged.
-_A_STOCK_NUDGE = (
-    " Additional China A-share margin-trading tool (A-share only): "
-    "`get_margin_trading` (融资融券 — margin balance 融资余额, short balance "
-    "融券余额, margin buy 融资买入额, net margin buy 融资净买入额; exchange-"
-    "disclosed daily with full history). Rising 融资余额 = bullish leverage "
-    "build-up; rising 融券余额 = growing short interest. If the tool returns "
-    "'data not available' for this symbol/date, report that honestly and do "
-    "not estimate margin positions."
-)
-
-
-# Appended to the fundamentals system prompt only when YIALPHA_A_SHARE_NATIVE
-# is on AND the ticker is a China A-share (.SS/.SH/.SZ). When off (or non-
-# A-share), the analyst's prompt (and tool list) are byte-for-byte unchanged.
-_A_SHARE_NATIVE_NUDGE = (
-    " Additional native China A-share data tools (A-share only): "
-    "`get_a_share_fundamentals_native` (daily TTM valuation — PE-TTM / PB-MRQ / "
-    "PS-TTM / PCF-TTM, server-computed so no single-period distortion, plus the "
-    "ST flag) and `get_a_share_ohlc_native` (daily 前复权 OHLCV). These are more "
-    "reliable for A-shares than the default Yahoo path; use them to cross-check "
-    "multiples and prices. A negative PE = trailing loss. Also "
-    "`get_a_share_money_flow_native` (daily 资金流 — 主力/超大单/大单/中单/小单 "
-    "net inflow; a persistent positive 主力净流入 = institutional accumulation / "
-    "bullish, persistent negative = distribution / bearish) and "
-    "`get_a_share_dragon_tiger_native` (龙虎榜 appearances — net institutional "
-    "buy-in vs sell-out, a smart-money signal; most stocks do not appear in a "
-    "given window, which is normal, not bearish). NEW: "
-    "`get_a_share_income_statement_native` (quarterly 利润表 — revenue, net "
-    "profit, ROE, EPS), `get_a_share_balance_sheet_native` (quarterly 资产负债表 "
-    "— total assets, liabilities, debt ratio), and "
-    "`get_a_share_cashflow_statement_native` (quarterly 现金流表 — operating / "
-    "investing / financing cash flows). These quarterly statements are PIT-correct "
-    "(pubDate <= curr_date) and provide the A-share financial-statement detail the "
-    "default path covers thinly. If a tool returns 'data not available' or 'no "
-    "coverage found' for this symbol/date, report that honestly and do not "
-    "estimate multiples, prices, capital flow, dragon-tiger activity, or "
-    "statement line items."
 )
 
 
@@ -276,41 +224,15 @@ def create_fundamentals_analyst(llm):
         # PIT-correct US-only tools are appended plus a short nudge.
         if get_config().get("sec_ownership"):
             tools.extend([get_form4_insider_trading, get_ftd_data, get_institutional_holdings])
-        # China A-share margin trading (Track A, env: YIALPHA_A_STOCK, off by
-        # default). Same byte-equivalence contract as the flags above — gated
-        # TWICE: the flag AND is_a_stock(ticker). When either fails, the tool
-        # list / prompt / capabilities are byte-for-byte identical to the prior
-        # behaviour, so US / crypto / HK tickers never enter this branch and the
-        # analyst's inputs/capabilities/depth are unchanged. When both hold, one
-        # PIT-correct A-share-only tool is appended plus a short nudge.
-        if get_config().get("a_stock") and is_a_stock(ticker):
-            tools.append(get_margin_trading)
-        # Native A-share OHLC + TTM valuation (env: YIALPHA_A_SHARE_NATIVE,
-        # off by default). Same double-gate byte-equivalence contract as a_stock
-        # above — flag AND is_a_stock(ticker). When either fails the tool list /
-        # prompt / capabilities are byte-for-byte identical to the prior
-        # behaviour, so US / crypto / HK tickers never enter this branch. When
-        # both hold, two PIT-correct A-share-only tools are appended plus a nudge.
-        if get_config().get("a_share_native") and is_a_stock(ticker):
-            tools.extend([
-                get_a_share_fundamentals_native,
-                get_a_share_ohlc_native,
-                get_a_share_money_flow_native,
-                get_a_share_dragon_tiger_native,
-                get_a_share_income_statement_native,
-                get_a_share_balance_sheet_native,
-                get_a_share_cashflow_statement_native,
-            ])
         # Crypto-native branch (env: YIALPHA_CRYPTO_NATIVE + pure-crypto
         # instrument class, computed above): REPLACEMENT, not append — the
         # market analyst's perp-mode precedent. The stock statement tools
         # cannot serve a pure-crypto symbol (every call would sentinel), and
         # the stock-only optional categories above are equally inert here
-        # (their A-share double gates never fire for crypto; the single-gated
-        # valuation/SEC tools would append stock tools the reassignment below
-        # discards — created-but-unbound objects with no side effects). Stock
-        # runs and tokenized-stock perps never enter this branch: their tool
-        # list is byte-for-byte unchanged.
+        # (the single-gated valuation/SEC tools would append stock tools the
+        # reassignment below discards — created-but-unbound objects with no
+        # side effects). Stock runs and tokenized-stock perps never enter
+        # this branch: their tool list is byte-for-byte unchanged.
         if crypto_native_run:
             tools = [
                 get_crypto_token_fundamentals,
@@ -377,14 +299,6 @@ def create_fundamentals_analyst(llm):
             )
         if get_config().get("sec_ownership") and not crypto_native_run:
             system_message += _SEC_OWNERSHIP_NUDGE
-        # A-share nudge uses the SAME double gate (flag AND is_a_stock) as the
-        # tool extension above, so the prompt only changes when the tools do.
-        if get_config().get("a_stock") and is_a_stock(ticker):
-            system_message += _A_STOCK_NUDGE
-        # Native A-share nudge uses the SAME double gate (flag AND is_a_stock) as
-        # its tool extension above, so the prompt only changes when the tools do.
-        if get_config().get("a_share_native") and is_a_stock(ticker):
-            system_message += _A_SHARE_NATIVE_NUDGE
         # Crypto-native nudge uses the SAME gate (flag AND pure-crypto
         # instrument class) as the tool replacement above, so the prompt only
         # changes when the tools do.

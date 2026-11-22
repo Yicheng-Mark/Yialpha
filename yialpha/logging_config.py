@@ -83,7 +83,6 @@ _KEYRING_ENVS = (
     "TAVILY_API_KEY",
     "BINANCE_API_KEY",
     "BINANCE_API_SECRET",
-    "TUSHARE_TOKEN",
 )
 
 # ``apikey=SECRET`` / ``apikey: SECRET`` (also inside URLs: stops at '&').

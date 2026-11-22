@@ -381,6 +381,19 @@ async def api_analyze(req: AnalyzeReq):
     else:
         ticker = normalize_ticker_symbol(raw)
 
+    # Market allowlist gate (US-listed equities + crypto only): reject right
+    # here with a 400 + the shared policy message instead of letting the
+    # run_robust subprocess die on it minutes into the run. This is the
+    # raising twin of is_supported_market, so the wording stays
+    # single-sourced across CLI/batch/web.
+    from yialpha.dataflows.errors import UnsupportedMarketError
+    from yialpha.dataflows.symbol_utils import require_supported_market
+
+    try:
+        require_supported_market(ticker)
+    except UnsupportedMarketError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
     if runner.registry.is_busy():
         raise HTTPException(status_code=409, detail="an analysis is already running")
 

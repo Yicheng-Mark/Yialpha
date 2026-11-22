@@ -154,9 +154,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   typecheck:
-    # Gradual typing: mypy is scoped to the money path (execution), risk overlay,
-    # backtest engine, graph, agents, dataflows, and CLI. Widen the scope as
-    # baselines are cleaned.
+    # Gradual typing: mypy is scoped to the risk overlay, backtest engine,
+    # graph, agents, dataflows, and CLI. Widen the scope as baselines are
+    # cleaned.
     name: mypy (money path + risk + engine + dataflows + cli)
     runs-on: ubuntu-latest
     steps:
@@ -184,7 +184,7 @@ jobs:
         # Scope widened 2026-08-10 from money-path-only (7 files) to 6 packages
         # (~111 files), and 2026-08-14 to add llm_clients (every agent's LLM
         # transport), batch, monitoring, and the four top-level modules.
-        run: mypy --no-site-packages --follow-imports=skip yialpha/execution yialpha/risk yialpha/backtest yialpha/graph yialpha/agents yialpha/dataflows yialpha/cli yialpha/llm_clients yialpha/batch yialpha/monitoring yialpha/reporting.py yialpha/config_snapshot.py yialpha/default_config.py yialpha/logging_config.py
+        run: mypy --no-site-packages --follow-imports=skip yialpha/risk yialpha/backtest yialpha/graph yialpha/agents yialpha/dataflows yialpha/cli yialpha/llm_clients yialpha/batch yialpha/monitoring yialpha/reporting.py yialpha/config_snapshot.py yialpha/default_config.py yialpha/logging_config.py
 
   smoke-install:
     name: clean-install smoke
@@ -251,22 +251,16 @@ jobs:
           # The [dev]-only lock never resolves these install graphs, so a
           # regression in an extra's dependency chain (e.g. a version floor
           # that pulls a missing wheel) would go unnoticed until a user hit it.
-          - label: web + a-share
-            extras: web,a-share
+          - label: web
+            extras: web
             # web extra: the web UI tree is run-in-place (not packaged), but
             # importing its deps (fastapi, uvicorn) verifies the install graph.
-            # a-share extra: vendors are lazy-imported at runtime; importing
-            # them here confirms the native libs are installed and loadable.
-            imports: "import fastapi, uvicorn, baostock, akshare"
+            imports: "import fastapi, uvicorn"
           - label: bedrock
             extras: bedrock
-            # Bedrock LLM transport; lazy-imported at runtime like the a-share
-            # vendors, so only an explicit import proves the graph installs.
+            # Bedrock LLM transport; lazy-imported at runtime, so only an
+            # explicit import proves the graph installs.
             imports: "import langchain_aws"
-          - label: a-share-tushare
-            extras: a-share-tushare
-            # Tushare Pro quality tier (needs TUSHARE_TOKEN at runtime).
-            imports: "import tushare"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -298,5 +292,5 @@ jobs:
         run: pip install "ruff>=0.15"
       - name: Lint the repository
         # The repo is fully clean under the strict select, so we lint everything
-        # (results/ and worklog/ are excluded via pyproject extend-exclude).
+        # (results/ is excluded via pyproject extend-exclude).
         run: ruff check .

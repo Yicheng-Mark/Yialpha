@@ -69,21 +69,6 @@ web = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
 ]
-# Native China A-share data vendors for the optional ``a_share_native`` category
-# (BaoStock OHLC/TTM valuation + AKShare 东财 news). Optional so the core install
-# stays lean: ``pip install "yialpha[a-share]"``. The vendors are lazy-imported,
-# so default-off runs (and machines without this extra) are unaffected — the
-# category degrades to a sentinel when the libs are absent. curl_cffi is an
-# optional anti-bot enhancer for AKShare (not required; degrades gracefully).
-a-share = [
-    "baostock>=0.8.8",
-    "akshare>=1.17.86",
-]
-# Tushare Pro — opt-in quality tier (needs TUSHARE_TOKEN). Separate extra because
-# it requires a token the keyless vendors do not. ``pip install "yialpha[a-share-tushare]"``.
-a-share-tushare = [
-    "tushare>=1.4.21",
-]
 
 [project.scripts]
 yialpha = "yialpha.cli.main:app"
@@ -124,7 +109,7 @@ show_missing = true
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = ["results", "worklog"]
+extend-exclude = ["results"]
 
 [tool.ruff.lint]
 # Standard "good defaults" rule set (pyflakes + pycodestyle + isort + bugbear +
@@ -146,8 +131,8 @@ combine-as-imports = true
 [tool.mypy]
 # Gradual typing: the repo carries inline annotations on ~87% of source files.
 # We start permissive (no --strict) and tighten per-module as baselines are
-# cleaned. The CI job scopes mypy to the money path (execution), risk overlay,
-# backtest engine, graph, agents, dataflows, and CLI — see ci.yml.
+# cleaned. The CI job scopes mypy to the risk overlay, backtest engine,
+# graph, agents, dataflows, and CLI — see ci.yml.
 python_version = "3.11"
 warn_unused_ignores = false
 warn_redundant_casts = true
@@ -183,9 +168,3 @@ follow_imports = "skip"
 # records the intent for numpy specifically.
 module = "numpy"
 follow_imports = "skip"
-
-[[tool.mypy.overrides]]
-# The execution layer is money-touching: check function bodies there even when
-# defs are untyped, so a wrong-type arg is caught before order placement.
-module = "yialpha.execution.*"
-check_untyped_defs = true

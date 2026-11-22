@@ -37,14 +37,11 @@ YiAlpha 用一组分工明确的 **LLM 智能体**模拟真实交易团队的分
 
 给 YiAlpha 一个 **ticker + 日期**，它会从四个维度分析，经过多轮辩论与风控裁决，输出带评级、仓位、止损的结构化交易决策。完整过程（从输入到落盘报告）见[分析流程](#分析流程)一节。
 
-**支持的资产**（Yahoo Finance 覆盖范围，用交易所后缀的 ticker；公司身份与 alpha 基准自动按市场解析）：
+**支持的资产**（Yahoo Finance 的美股上市股票/ETF，外加加密货币；公司身份与 alpha 基准自动解析）：
 
 | 市场 | 示例 ticker |
 | ------ | ------ |
 | 美股 | `AAPL`、`SPY` |
-| A 股 | `600519.SS`（贵州茅台）、`000001.SZ` |
-| 港股 / 东京 / 伦敦 | `0700.HK` / `7203.T` / `AZN.L` |
-| 印度 / 加拿大 / 澳洲 | `RELIANCE.NS` / `SHOP.TO` / `BHP.AX` |
 | 加密货币 | `BTC-USD`、`ETH-USD` |
 
 **四个分析维度**（分析师团队，可勾选）：
@@ -69,18 +66,6 @@ YiAlpha 用一组分工明确的 **LLM 智能体**模拟真实交易团队的分
 | Binance 永续 | `crypto_perp` | Binance USDT-M 永续（`fapi.binance.com`）+ data.binance.vision 深历史归档 | 所有运行：klines + funding + 指标 + **vision 深历史归档**（OI/多空/taker 指标 + 盘口深度，回溯数年，PIT 正确）；当前日期另含 OI / 多空比 / 主动买卖 / basis / mark price 溢价指数 / 盘口快照 | 仅分析；回测已支持完整永续建模（资金费 / 成本 / 杠杆 / 强平） |
 
 加密模式下纯币对（无公司基本面）仍会自动剔除 Fundamentals Analyst——但币安**代币化股票永续**（exchangeInfo `underlyingType=EQUITY`，如跟踪美光的 `MUUSDT`）会保留该分析师并分析**标的美股**（符号自动重映射；每 run 预热一次实时上市表，失败回退静态种子快照）。此类运行的 News Analyst 还会在代码层**确定性预取双角度新闻**——标的公司与 perp 合约本身（`MU` 与 `MUUSDT` 两组查询，7 天窗口）——以带标签的 prompt 块注入，双覆盖不依赖模型自觉查询。所有 Binance 请求为手写 `requests`（**非官方 SDK**），复用已验证的 SOCKS5 代理，按产品线独立限流，并保留反应式 429/418 兜底。
-
-### A 股原生数据
-
-面向 A 股 ticker 的可选原生数据模式：设 `YIALPHA_A_SHARE_NATIVE=true`（默认关闭；先 `pip install "yialpha[a-share]"` 装数据源）。门控为 **开关 AND `is_a_stock(ticker)`**，美股 / 加密 / 港股运行保持字节等价。两者同时成立时，向分析师追加 12 个 PIT 正确的只读工具：
-
-| 分析师 | 追加工具（数据源） |
-| ------ | ------ |
-| Market | 北向资金 · 板块资金流 · 实时行情 · 涨跌家数（AKShare） |
-| Fundamentals | TTM PE/PB/股息 · 前复权 OHLCV · 利润表 / 资产负债表 / 现金流量表（BaoStock）；资金流 · 龙虎榜（AKShare） |
-| News | 个股中文新闻，东财 via AKShare |
-
-另提供 Tushare 质量档（`pip install "yialpha[a-share-tushare]"` + `TUSHARE_TOKEN`）用于基本面/新闻。数据源均为惰性导入：未装 extra 时默认关闭的运行不受影响。
 
 ### 加密原生基本面
 
@@ -175,7 +160,6 @@ pip install -e .
 # 可选 extras
 pip install -e ".[web]"        # 本地 Web UI 的 FastAPI + Uvicorn
 pip install -e ".[bedrock]"    # Amazon Bedrock 提供商（AWS SigV4）
-pip install -e ".[a-share]"    # A 股原生数据的 AKShare + BaoStock
 pip install -e ".[dev]"        # ruff / pytest
 ```
 
@@ -183,13 +167,6 @@ pip install -e ".[dev]"        # ruff / pytest
 
 ```bash
 pip install -r requirements.lock   # core + dev，锁版本（重新生成：uv pip compile）
-```
-
-Docker：
-
-```bash
-cp .env.example .env        # 填入 API key
-docker compose run --rm yialpha
 ```
 
 > `PySocks` 是关键依赖：yfinance 与 Binance vendor 经 SOCKS5 代理访问网络，正是 PySocks 让 `requests` 能透过代理解析主机名，而不是卡在 DNS。
@@ -255,9 +232,6 @@ yialpha analyze --clear-checkpoints   # 运行前清空所有检查点
 ```bash
 # 多只美股，同一日期
 yialpha batch -t AAPL -t NVDA -t MSFT -d 2026-06-30
-
-# 多只 A 股
-yialpha batch -t 600519.SS -t 000858.SZ -t 601318.SS -d 2026-06-30
 
 # 加密一批（默认 Yahoo 现货）
 yialpha batch -t BTC-USD -t ETH-USD -t SOL-USD -d 2026-06-30 -w 3
@@ -388,7 +362,7 @@ python scripts/run_baseline.py --baseline --tickers AAPL NVDA
 python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 ```
 
-常用参数：`--tickers`（A股 `600519.SS`）/ `--asset-type`（`stock` / `crypto` / `crypto_perp`）/ `--start --end` / `--step`（调仓间隔，默认 10）/ `--rebalance`（调仓次数，默认 6）/ `--holding-days` / `--cost-bps`（单边成本，默认 5bp）/ `--runs`（LLM 非确定性，每票跑几次取分布）/ `--workers`（跨 ticker 并发）/ `--out`（默认 `./backtest_output`）。仅永续：`--leverage`（默认 1.0；>1 启用逐仓强平建模）/ `--allow-short` / `--slippage-bps`（默认 0）/ `--bnb-discount`。
+常用参数：`--tickers` / `--asset-type`（`stock` / `crypto` / `crypto_perp`）/ `--start --end` / `--step`（调仓间隔，默认 10）/ `--rebalance`（调仓次数，默认 6）/ `--holding-days` / `--cost-bps`（单边成本，默认 5bp）/ `--runs`（LLM 非确定性，每票跑几次取分布）/ `--workers`（跨 ticker 并发）/ `--out`（默认 `./backtest_output`）。仅永续：`--leverage`（默认 1.0；>1 启用逐仓强平建模）/ `--allow-short` / `--slippage-bps`（默认 0）/ `--bnb-discount`。
 
 > 每次 `propagate()` = 一次完整 LLM 图（4 分析师 + 辩论 + 交易员 + 风控辩论 + PM）。成本随 `tickers × 日期数 × runs` 线性增长。**先 preflight 全绿，再 smoke，最后放大。**
 
@@ -444,7 +418,7 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 
 **检查点恢复（opt-in）：** 用 `--checkpoint` 开启，LangGraph 在每个节点后存档，崩溃 / 中断可从最后一个成功步骤续跑，成功完成后自动清理。按 ticker 的 SQLite 库位于 `~/.yialpha/cache/checkpoints/<TICKER>.db`（`YIALPHA_CACHE_DIR` 覆盖）。
 
-**分析边界：** `YIALPHA_ANALYSIS_ONLY=true` 为默认值，会阻断全部实盘入口。只有关闭分析模式并同时显式开启新旧两个执行开关后，执行路径才可能工作；网关每次提交前都会重新检查这些开关与 `YIALPHA_KILL_SWITCH`。PoT 主机代码执行同样默认关闭；在具备真正进程隔离前，Windows 上始终拒绝执行。
+**分析边界：** `YIALPHA_ANALYSIS_ONLY=true` 为默认值；本仓库只产出报告与回测——实盘执行层已于 2026-11-22 移除。PoT 主机代码执行默认关闭；在具备真正进程隔离前，Windows 上始终拒绝执行。
 
 ---
 
@@ -476,7 +450,6 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 │   ├── risk/                 # kelly / atr_stop / breaker / cvar / manager（量化风控叠加层）
 │   ├── backtest/             # engine / metrics / validation_gate / ic / report / cache
 │   ├── batch/                # 多 ticker 并发 runner + filelock
-│   ├── execution/            # domain/gateway/bridge（Binance SDK 网关）+ browser_broker 兜底
 │   ├── monitoring/           # dashboard（HTML 仪表盘）
 │   ├── llm_clients/          # 多 LLM 提供商适配 + 限流器 + 共享 httpx
 │   ├── cli/                  # 交互式 CLI（analyze / batch / config-check / snapshot）

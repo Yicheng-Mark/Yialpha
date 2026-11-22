@@ -126,7 +126,7 @@ def render_dashboard(
     primary = results[0] if results else None
 
     kill_banner = (
-        '<div class="halt">KILL SWITCH ENGAGED — new order submission is blocked.</div>'
+        '<div class="halt">KILL SWITCH ENGAGED — manual halt: flatten/adjust at the broker.</div>'
         if kill_switch else ""
     )
 

@@ -616,7 +616,7 @@ def get_user_selections(asset_type_override: str = "auto"):
     console.print(
         create_question_box(
             "Step 1: Ticker Symbol",
-            "Enter the ticker, with exchange suffix when needed (e.g. SPY, 0700.HK, BTC-USD)",
+            "Enter a US-listed stock/ETF or crypto ticker (e.g. SPY, AAPL, BRK.B, BTC-USD)",
             "SPY",
         )
     )
@@ -2047,13 +2047,11 @@ def config_check():
     # os.environ.get(name) -> SET / unset, never printing secrets.
     _FRED = "FRED" + "_API_KEY"
     _AV = "ALPHA_VANTAGE" + "_API_KEY"
-    _TUSHARE = "TUSHARE" + "_TOKEN"
     _KIMI = "MOONSHOT" + "_API_KEY"
     _TAVILY = "TAVILY" + "_API_KEY"
     optional_keys = {
         _FRED: "macro data (rates/inflation)",
         _AV: "stock/fundamentals vendor",
-        _TUSHARE: "China A-share data",
         _KIMI: "Kimi/Moonshot (if provider=kimi)",
         _TAVILY: "open-web search (news/market/fundamentals analysts)",
     }

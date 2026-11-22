@@ -55,30 +55,12 @@ def test_market_toolnode_registers_prompt_mandated_expansion_tools():
 
 
 @pytest.mark.unit
-def test_market_toolnode_registers_flag_gated_tools():
-    """A-share market tools the analyst binds when YIALPHA_A_SHARE_NATIVE is on."""
-    market_tools = set(_tool_nodes()["market"].tools_by_name)
-    missing = {
-        "get_a_share_northbound_native",
-        "get_a_share_sector_flow_native",
-        "get_a_share_realtime_quote_native",
-        "get_a_share_market_breadth_native",
-    } - market_tools
-    assert not missing, f"A-share market tools bound by the analyst but not executable: {missing}"
-
-
-@pytest.mark.unit
 def test_fundamentals_toolnode_registers_flag_gated_tools():
-    """Valuation/PoT tools (valuation_tools) + A-share financials (a_share_native)."""
+    """Valuation/PoT tools (valuation_tools)."""
     fundamentals_tools = set(_tool_nodes()["fundamentals"].tools_by_name)
     missing = {
         "get_valuation_metrics",
         "pot_compute",
-        "get_a_share_money_flow_native",
-        "get_a_share_dragon_tiger_native",
-        "get_a_share_income_statement_native",
-        "get_a_share_balance_sheet_native",
-        "get_a_share_cashflow_statement_native",
     } - fundamentals_tools
     assert not missing, (
         f"Flag-gated fundamentals tools bound by the analyst but not executable: {missing}"

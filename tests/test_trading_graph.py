@@ -36,13 +36,15 @@ class TestResolveBenchmark:
         g = _bare_graph({"benchmark_map": {"": "SPY"}})
         assert g._resolve_benchmark("AAPL") == "SPY"
 
-    def test_tokyo_suffix_maps_to_nikkei(self):
+    def test_regional_suffix_falls_back_to_spy(self):
+        # Regional-suffix routing was removed with the US+crypto-only policy:
+        # even a config-injected regional entry is ignored — SPY everywhere.
         g = _bare_graph({"benchmark_map": {"": "SPY", ".T": "^N225"}})
-        assert g._resolve_benchmark("7203.T") == "^N225"
+        assert g._resolve_benchmark("7203.T") == "SPY"
 
-    def test_suffix_match_is_case_insensitive(self):
+    def test_regional_suffix_case_insensitive(self):
         g = _bare_graph({"benchmark_map": {"": "SPY", ".T": "^N225"}})
-        assert g._resolve_benchmark("7203.t") == "^N225"
+        assert g._resolve_benchmark("7203.t") == "SPY"
 
     def test_dotted_us_ticker_falls_back_to_empty_suffix(self):
         # BRK.B has a dot but no recognised suffix — alpha calc in USD, so SPY.

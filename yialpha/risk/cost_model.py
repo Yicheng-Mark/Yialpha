@@ -34,8 +34,8 @@ BINANCE_SPOT_FEE_BPS = 10.0   # 0.10%
 # --- Conservative defaults for venues the framework does not trade on -------
 # Zero-commission US retail equity brokers charge nothing explicit per fill,
 # but executions still cross spread/impact; 5 bps per side approximates liquid
-# US names and UNDERSTATES small caps or HK/A-share legs — price those
-# explicitly at the call site when they matter. Stock shorts additionally pay
+# US names and UNDERSTATES small caps — price those explicitly at the call
+# site when they matter. Stock shorts additionally pay
 # margin borrow, defaulted to a conservative 1%/yr placeholder.
 STOCK_FEE_BPS = 0.0
 STOCK_SLIPPAGE_BPS = 5.0

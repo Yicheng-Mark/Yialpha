@@ -101,7 +101,3 @@ def test_kill_switch_config_env_override(monkeypatch):
     monkeypatch.setenv("YIALPHA_KILL_SWITCH", "true")
     cfg = _apply_env_overrides({"kill_switch": False})
     assert cfg["kill_switch"] is True
-
-    # And the browser broker reads the same env var live at order time.
-    from yialpha.execution.browser_broker import KillSwitch
-    assert KillSwitch.is_halted() is True

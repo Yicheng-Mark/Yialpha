@@ -721,11 +721,14 @@
   async function renderReportFile(dir) {
     // Report dirs are <TICKER>_<YYYYMMDD>_<HHMMSS>: charset-validate the whole
     // name (no separators, no dot segments) so the fetch stays inside /reports.
-    // round-13: charset now mirrors the server's safe_ticker_component
-    // (dot/caret/equals/plus — e.g. 0700.HK, ^GSPC, GC=F, XAUUSD+), which the
-    // old [A-Za-z0-9_-] gate rejected, so the in-app viewer 404'd on the very
-    // examples the submit form suggests. "/" and "%" stay excluded, and the
-    // pure-dot values are refused, so traversal is still impossible.
+    // round-13: charset mirrors the server's safe_ticker_component
+    // (dot/caret/equals/plus), which the old [A-Za-z0-9_-] gate rejected.
+    // Supported markets are now US-listed equities and crypto only (e.g.
+    // BRK.B, BTC-USD; the server 400s on anything else at submit time), but
+    // report dirs written before the strip (0700.HK, ^GSPC, GC=F, XAUUSD+)
+    // must stay viewable, so the charset stays permissive on purpose.
+    // "/" and "%" stay excluded, and pure-dot values are refused, so
+    // traversal is still impossible.
     if (!/^[A-Za-z0-9._\-\^=+]+$/.test(dir) || dir === "." || dir === "..") { renderError("not found"); return; }
     view().innerHTML = `<div class="sk-card sk-report"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>`;
     let text;

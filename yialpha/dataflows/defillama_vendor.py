@@ -4,7 +4,7 @@ Supplies network / protocol fundamentals for PURE-crypto instruments: protocol
 TVL history (for governance tokens like UNI / AAVE), chain TVL history (for
 L1/L2 assets like ETH / SOL / BTC), and — live runs only — the chain's
 current TVL ranking. Same optional-category contract shape as
-``a_share_native``:
+``sec_ownership``:
 
 * **Free / keyless** — the public ``api.llama.fi`` endpoints (no key, no
   documented hard quota; verified live 2026-09-29).

@@ -57,3 +57,26 @@ class VendorNotConfiguredError(VendorError, ValueError):
     Also a ``ValueError`` so existing callers that catch ``ValueError`` keep
     working while the routing layer can treat it as "vendor unavailable".
     """
+
+
+class UnsupportedMarketError(ValueError):
+    """Input rejected by the market allowlist gate (non-US / non-crypto symbol).
+
+    Not a :class:`VendorError`: nothing failed at a vendor — the request was
+    refused before any fetch because the project only supports US-listed
+    equities/ETFs and crypto (A-shares, HK/other exchanges, spot forex and
+    commodity/index CFDs were removed). Raised by
+    :func:`yialpha.dataflows.symbol_utils.require_supported_market`; the
+    offending symbol is on the ``ticker`` attribute and the message states
+    the policy so entry points (CLI prompt, batch validation, web 400) can
+    surface it verbatim. A ``ValueError`` so generic input-validation
+    handlers catch it alongside other bad-input errors.
+    """
+
+    def __init__(self, ticker: str, reason: str = ""):
+        self.ticker = ticker
+        self.reason = reason
+        msg = f"Unsupported market for {ticker!r}"
+        if reason:
+            msg += f": {reason}"
+        super().__init__(msg)

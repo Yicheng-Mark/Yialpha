@@ -77,6 +77,8 @@ def prepare_batch_run(
         is_canonical_ymd,
         is_valid_ticker_input,
     )
+    from yialpha.dataflows.errors import UnsupportedMarketError
+    from yialpha.dataflows.symbol_utils import require_supported_market
     from yialpha.default_config import DEFAULT_CONFIG
 
     if not tickers:
@@ -87,6 +89,17 @@ def prepare_batch_run(
     bad = [t for t in tickers if not is_valid_ticker_input(t)]
     if bad:
         raise BatchInputError(f"Invalid ticker(s): {bad} (letters/digits and ._-^=)")
+    # Market allowlist gate (US-listed equities + crypto only). Every batch
+    # frontend — the Typer command, scripts/run_batch.py, run_robust and the
+    # web-spawned subprocess — routes through prepare_batch_run, so one check
+    # enforces the policy for all of them. The gate's message already names
+    # the ticker and states the policy; re-raising it as BatchInputError
+    # keeps the exit-2 validation contract for every frontend.
+    for t in tickers:
+        try:
+            require_supported_market(t)
+        except UnsupportedMarketError as exc:
+            raise BatchInputError(str(exc)) from None
     # Round-13: bare strptime accepted non-zero-padded forms ("2026-9-1") —
     # the batch ran to completion, but its full_states_log_<date>.json then
     # never matches the web store's canonical _DATE_RE, so the run silently

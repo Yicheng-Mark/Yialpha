@@ -457,7 +457,6 @@ class TestPriceStructureTools:
 
         frames = {"TEST": up_frame(), "SPY": down_frame()}
         monkeypatch.setattr(pst, "load_ohlcv", lambda s, d: frames[s])
-        monkeypatch.setattr(pst, "resolve_market_benchmark", lambda t: "SPY")
 
         out = pst.get_relative_strength.invoke(
             {"symbol": "TEST", "curr_date": str(dates[-1].date())}

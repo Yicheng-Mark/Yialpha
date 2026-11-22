@@ -42,10 +42,13 @@ class TestResolveBenchmark:
         monkeypatch.setattr(mr, "get_config", lambda: {"benchmark_map": {"": "SPY"}})
         assert resolve_market_benchmark("AAPL") == "SPY"
 
-    def test_suffix_map(self, monkeypatch):
+    def test_no_regional_suffix_routing(self, monkeypatch):
+        # Regional-suffix routing was removed with the US+crypto-only policy:
+        # even a config-injected regional entry is ignored — the resolver
+        # only ever returns the empty-suffix entry for equity tickers.
         cfg = {"benchmark_map": {".HK": "^HSI", "": "SPY"}}
         monkeypatch.setattr(mr, "get_config", lambda: cfg)
-        assert resolve_market_benchmark("0700.HK") == "^HSI"
+        assert resolve_market_benchmark("0700.HK") == "SPY"
 
     def test_explicit_override_wins(self, monkeypatch):
         cfg = {"benchmark_ticker": "BTCUSDT", "benchmark_map": {"": "SPY"}}

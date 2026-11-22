@@ -77,7 +77,7 @@ def get_indicators_weekly(
     to frame the weekly trend; when it conflicts with the daily indicators,
     state the conflict explicitly.
     Args:
-        symbol (str): Ticker symbol, e.g. AAPL, 600519.SS
+        symbol (str): Ticker symbol, e.g. AAPL, BRK.B
         curr_date (str): The current trading date, YYYY-mm-dd
         look_back_weeks (int): How many weekly bars back (default 26 ≈ 6 months)
     Returns:

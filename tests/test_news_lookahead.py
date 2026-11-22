@@ -249,9 +249,9 @@ def test_stock_news_soft_miss_not_logged_as_error(monkeypatch, caplog):
     monkeypatch.setattr(ynews.yf, "Ticker", FakeTicker)
     monkeypatch.setattr(ynews, "yf_retry", lambda fn, **kw: fn())
     with caplog.at_level(logging.ERROR,
-                         logger="yialpha.dataflows.yfinance_news"):
-        with pytest.raises(NoMarketDataError):
-            ynews.get_news_yfinance("AAPL", "2025-05-01", "2025-05-09")
+                         logger="yialpha.dataflows.yfinance_news"), \
+            pytest.raises(NoMarketDataError):
+        ynews.get_news_yfinance("AAPL", "2025-05-01", "2025-05-09")
     assert not caplog.records  # the soft-miss is not a fault
 
 
@@ -267,10 +267,10 @@ def test_global_news_soft_miss_not_logged_as_error(monkeypatch, caplog):
 
     monkeypatch.setattr(ynews.yf, "Search", FakeSearch)
     with caplog.at_level(logging.ERROR,
-                         logger="yialpha.dataflows.yfinance_news"):
-        with pytest.raises(NoMarketDataError):
-            ynews.get_global_news_yfinance("2025-05-09", look_back_days=7,
-                                           limit=10)
+                         logger="yialpha.dataflows.yfinance_news"), \
+            pytest.raises(NoMarketDataError):
+        ynews.get_global_news_yfinance("2025-05-09", look_back_days=7,
+                                       limit=10)
     assert not caplog.records
 
 
@@ -302,9 +302,8 @@ def test_global_news_malformed_curr_date_is_a_logged_fault(monkeypatch, caplog):
 
     with caplog.at_level(
         logging.ERROR, logger="yialpha.dataflows.yfinance_news",
-    ):
-        with pytest.raises(ValueError):
-            ynews.get_global_news_yfinance("2025/05/09", look_back_days=7)
+    ), pytest.raises(ValueError):
+        ynews.get_global_news_yfinance("2025/05/09", look_back_days=7)
     assert caplog.records
 
 

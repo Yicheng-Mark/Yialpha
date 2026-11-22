@@ -55,7 +55,6 @@ from datetime import date, timedelta
 from .config import get_config
 from .disk_cache import safe_cache_component
 from .errors import NoMarketDataError
-from .utils import current_pit_end
 
 # Reuse sec_edgar's transport verbatim (CIK resolution, GET, cache, throttle).
 from .sec_edgar import (
@@ -65,6 +64,7 @@ from .sec_edgar import (
     _cik_for_ticker,
     _fetch_company_facts,
 )
+from .utils import current_pit_end
 
 logger = logging.getLogger(__name__)
 
@@ -608,7 +608,7 @@ def get_ftd_data(
     if look_back_days > _FTD_MAX_LOOKBACK_DAYS:
         # Each half-month is one throttled ZIP fetch (~0.12s + RTT); an
         # LLM-supplied 3000 would mean hundreds of GETs and a huge cache for
-        # one tool call. Cap like Form4's _MAX_FORM4 / tushare's news cap.
+        # one tool call. Cap like Form4's _MAX_FORM4.
         logger.warning(
             "sec_ownership: get_ftd_data look_back_days %d capped to %d",
             look_back_days, _FTD_MAX_LOOKBACK_DAYS,

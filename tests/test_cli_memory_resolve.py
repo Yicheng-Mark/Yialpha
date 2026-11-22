@@ -13,8 +13,8 @@ import pytest
 from typer.testing import CliRunner
 
 import yialpha.cli.main as main_mod
-import yialpha.llm_clients as llm_clients_mod
 import yialpha.graph.memory_resolution as memory_resolution_mod
+import yialpha.llm_clients as llm_clients_mod
 from yialpha.cli.main import app
 
 runner = CliRunner()

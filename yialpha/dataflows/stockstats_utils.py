@@ -61,8 +61,7 @@ if _HTTP_TIMEOUT_ENV is not None and _HTTP_TIMEOUT_ENV != "":
         )
 
 
-# Depth-counted patch state for _scoped_yf_socket_timeout (same pattern as
-# timeout_shim.default_request_timeout). Save/restore must NOT be per-call:
+# Depth-counted patch state for _scoped_yf_socket_timeout. Save/restore must NOT be per-call:
 # thread A saves prev=None, thread B saves prev=30 (A's patch), A exits and
 # restores None, B exits and "restores" 30 — the process default is then
 # permanently polluted with the YF timeout. With the counter, only the
@@ -257,8 +256,7 @@ def _assert_ohlcv_not_stale(
 def _utc_today() -> pd.Timestamp:
     """Today anchored to UTC, not the host-local clock.
 
-    This cache serves the yfinance path (US/global tickers; the A-share path
-    is the akshare/baostock native vendor, which never touches it). A
+    This cache serves the yfinance path (US/global tickers). A
     host-local ``pd.Timestamp.today()`` classifies "same day" by whatever
     timezone the process happens to run in — on an Asia/Shanghai host the
     local date runs hours ahead of the UTC date, so a window that can still

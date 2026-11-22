@@ -9,7 +9,7 @@ from yialpha.dataflows.utils import current_pit_end, get_analysis_date
 def _pit_curr_date(curr_date):
     """Clamp an LLM-supplied curr_date to the run's pinned analysis date.
 
-    Same guard as the a_share_native / sec_ownership tools: vendors
+    Same guard as the sec_ownership tools: vendors
     PIT-filter (or refuse historical snapshots) by the passed ``curr_date``
     verbatim, so an LLM echoing a cached header's today-date must not
     disarm the gate. An EMPTY/omitted curr_date in a pinned (backtest) run

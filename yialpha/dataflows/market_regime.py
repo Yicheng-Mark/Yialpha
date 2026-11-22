@@ -29,10 +29,9 @@ opt-in is wired in ``conservative_debator`` behind ``YIALPHA_MARKET_REGIME``
 
 The 2026-08-15 expansion adds the composite :func:`format_regime_context`:
 trend state (close vs 50/200 SMA + ADX strength), volatility state (rvol_20
-percentile vs its trailing year), the benchmark turbulence above, and — for
-A-share live runs — whole-market breadth. It feeds the market analyst's
-prompt behind the ``regime_context`` config key (default ON, fail-soft
-omission, env ``YIALPHA_REGIME_CONTEXT`` to disable).
+percentile vs its trailing year), and the benchmark turbulence above. It feeds
+the market analyst's prompt behind the ``regime_context`` config key (default
+ON, fail-soft omission, env ``YIALPHA_REGIME_CONTEXT`` to disable).
 """
 
 from __future__ import annotations
@@ -44,8 +43,6 @@ from stockstats import wrap
 
 from .config import get_config
 from .stockstats_utils import load_ohlcv
-from .symbol_utils import is_a_stock
-from .utils import is_historical_date
 from .vol_estimators import close_to_close_vol, periods_per_year_for
 
 logger = logging.getLogger(__name__)
@@ -146,22 +143,18 @@ def resolve_market_benchmark(
     The single implementation of the benchmark-resolution rule (the graph's
     ``YiAlphaGraph._resolve_benchmark`` delegates here since 2026-08-16 —
     it was a verbatim copy before): ``benchmark_ticker`` overrides
-    everything; otherwise the suffix map in config matches the ticker's
-    exchange suffix; the empty-suffix entry (SPY by default) is the
-    fallback — EXCEPT on crypto-family runs, whose suffix-less tickers
-    default to the crypto-native :data:`_CRYPTO_NATIVE_BENCHMARK` instead of
-    SPY. A tokenized-stock perp keeps the SPY equity-market context: its
-    risk narrative is the underlying company's market, not BTC's.
+    everything; otherwise the empty-suffix entry of ``benchmark_map`` in
+    config (SPY by default) is the fallback — EXCEPT on crypto-family runs,
+    whose suffix-less tickers default to the crypto-native
+    :data:`_CRYPTO_NATIVE_BENCHMARK` instead of SPY. A tokenized-stock perp
+    keeps the SPY equity-market context: its risk narrative is the
+    underlying company's market, not BTC's.
     """
     config = get_config()
     explicit = config.get("benchmark_ticker")
     if explicit:
         return explicit
     benchmark_map = config.get("benchmark_map", {})
-    ticker_upper = ticker.upper()
-    for suffix, benchmark in benchmark_map.items():
-        if suffix and ticker_upper.endswith(suffix.upper()):
-            return benchmark
     if _binance_venue_for_asset(asset_type) == "binance_perp":
         from .binance import stock_perp_underlying
 
@@ -227,10 +220,10 @@ def compute_turbulence(
 
 # ---------------------------------------------------------------------------
 # Composite regime context (2026-08-15 expansion): trend + volatility states
-# on the analyzed ticker, plus the existing benchmark turbulence and (A-share
-# live runs only) whole-market breadth. One structured line the market
-# analyst and the conservative debater can weigh — advisory, fail-soft per
-# component, and gated by the ``regime_context`` config key.
+# on the analyzed ticker, plus the existing benchmark turbulence. One
+# structured line the market analyst and the conservative debater can weigh —
+# advisory, fail-soft per component, and gated by the ``regime_context``
+# config key.
 # (The pre-expansion turbulence-only renderer ``format_market_regime`` was
 # removed 2026-08-16: format_regime_context is its strict superset and its
 # only remaining callers were its own tests.)
@@ -324,28 +317,6 @@ def classify_vol_state(
     return {"rvol_20": latest, "percentile": pct, "label": label}
 
 
-def _a_share_breadth_part(ticker: str, curr_date: str) -> str | None:
-    """Live-only A-share breadth fragment; ``None`` for non-A-share,
-    historical dates, or any fetch failure (fail-soft omission)."""
-    if not is_a_stock(ticker) or is_historical_date(curr_date):
-        return None
-    try:
-        from .akshare_vendor import _cached_breadth_counts
-
-        counts = _cached_breadth_counts()
-    except Exception:  # noqa: BLE001 — advisory, must never break the run
-        return None
-    if not counts:
-        return None
-    adv, dec = counts["advancing"], counts["declining"]
-    ratio = (adv / dec) if dec else float("inf")
-    tone = "broad advance" if ratio >= 2.0 else "broad decline" if ratio <= 0.5 else "mixed"
-    return (
-        f"breadth (A-share live): {adv} up / {dec} down ({tone}), "
-        f"涨停 {counts['limit_up']} / 跌停 {counts['limit_down']}"
-    )
-
-
 def _regime_vol_class(ticker: str, asset_type: str | None) -> str | None:
     """Instrument class refining the vol state's annualization (V2.2 fix).
 
@@ -369,11 +340,11 @@ def format_regime_context(
 ) -> str | None:
     """One structured regime line for the analyzed ticker.
 
-    Composes trend state + volatility state + benchmark turbulence + (A-share
-    live) market breadth. Every component is fail-soft: a component that
-    cannot be computed is omitted, and the whole line returns ``None`` when
-    neither the trend nor the volatility state is available. Advisory only —
-    it informs the analyst and the risk debate, it never gates tools.
+    Composes trend state + volatility state + benchmark turbulence. Every
+    component is fail-soft: a component that cannot be computed is omitted,
+    and the whole line returns ``None`` when neither the trend nor the
+    volatility state is available. Advisory only — it informs the analyst
+    and the risk debate, it never gates tools.
 
     ``asset_type`` (e.g. from the graph state) annualizes the vol state on
     the asset's own calendar — 365 for 24/7 crypto, 252 otherwise, and a
@@ -415,9 +386,5 @@ def format_regime_context(
         sigma = math.sqrt(turb) if turb > 0 else 0.0
         label = "elevated" if sigma >= _ELEVATED_SIGMA else "normal"
         parts.append(f"turbulence({benchmark})={label} ({sigma:.1f}σ)")
-
-    breadth = _a_share_breadth_part(ticker, curr_date)
-    if breadth is not None:
-        parts.append(breadth)
 
     return f"Market regime ({ticker}, {curr_date}): " + " | ".join(parts)

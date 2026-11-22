@@ -268,7 +268,7 @@ def proxy_map() -> dict[str, str]:
     the dict matches ``requests``' ``proxies: Mapping[str, str]`` contract;
     an empty dict means "no proxy", identical to requests' default behaviour.
 
-    Domestic sources that must bypass the proxy (e.g. Eastmoney) do NOT use
+    Sources that must bypass the proxy do NOT use
     this -- they disable env merging via ``Session(trust_env=False)`` instead.
     """
     raw = {

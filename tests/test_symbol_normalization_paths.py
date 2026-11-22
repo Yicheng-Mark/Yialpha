@@ -1,9 +1,10 @@
 """Symbol normalization must apply on every yfinance path, not just price fetch.
 
 Regression tests for #983 (instrument identity), #984 (reflection returns), and
-the news path: a broker symbol like XAUUSD must resolve to the same Yahoo symbol
-(GC=F) that the price path uses, so identity, realized-return, and news lookups
-hit the right instrument instead of failing/mismatching.
+the news path: a broker-style crypto symbol like BTCUSD must resolve to the
+same Yahoo symbol (BTC-USD) that the price path uses, so identity,
+realized-return, and news lookups hit the right instrument instead of
+failing/mismatching.
 """
 import pandas as pd
 import pytest
@@ -23,15 +24,15 @@ def test_identity_lookup_normalizes_symbol(monkeypatch):
 
         @property
         def info(self):
-            return {"longName": "Gold Futures", "quoteType": "FUTURE"}
+            return {"longName": "Bitcoin USD", "quoteType": "CRYPTOCURRENCY"}
 
     monkeypatch.setattr(au.yf, "Ticker", FakeTicker)
     au.resolve_instrument_identity.cache_clear()
 
-    identity = au.resolve_instrument_identity("XAUUSD")
+    identity = au.resolve_instrument_identity("BTCUSD")
 
-    assert seen["symbol"] == "GC=F"  # normalized, not the raw broker symbol
-    assert identity.get("company_name") == "Gold Futures"
+    assert seen["symbol"] == "BTC-USD"  # normalized, not the raw broker symbol
+    assert identity.get("company_name") == "Bitcoin USD"
 
 
 def test_fetch_returns_normalizes_symbol(monkeypatch):
@@ -50,10 +51,10 @@ def test_fetch_returns_normalizes_symbol(monkeypatch):
 
     # _fetch_returns does not use ``self``; call unbound to avoid building the graph.
     raw, alpha, days = YiAlphaGraph._fetch_returns(
-        None, "XAUUSD", "2025-01-02", holding_days=5, benchmark="SPY"
+        None, "BTCUSD", "2025-01-02", holding_days=5, benchmark="SPY"
     )
 
-    assert queried[0] == "GC=F"  # stock symbol normalized (#984)
+    assert queried[0] == "BTC-USD"  # crypto symbol normalized (#984)
     assert queried[1] == "SPY"   # benchmark left as the canonical symbol
     assert raw is not None and days is not None
 
@@ -78,8 +79,8 @@ def test_news_lookup_normalizes_symbol(monkeypatch):
     from yialpha.dataflows.errors import NoMarketDataError
 
     with pytest.raises(NoMarketDataError) as excinfo:
-        ynews.get_news_yfinance("XAUUSD", "2025-01-01", "2025-01-10")
+        ynews.get_news_yfinance("BTCUSD", "2025-01-01", "2025-01-10")
 
-    assert seen["symbol"] == "GC=F"   # news queried with the canonical symbol
-    assert "XAUUSD" in str(excinfo.value)   # the user's ticker stays in the error
-    assert "GC=F" in str(excinfo.value)     # provenance noted
+    assert seen["symbol"] == "BTC-USD"   # news queried with the canonical symbol
+    assert "BTCUSD" in str(excinfo.value)   # the user's ticker stays in the error
+    assert "BTC-USD" in str(excinfo.value)  # provenance noted

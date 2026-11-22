@@ -1,7 +1,8 @@
 """Shared on-disk caching / throttling helpers for data vendors.
 
 Before this module existed, the same TTL-cache-read/fetch/stale-fallback loop
-was copy-pasted per vendor (eastmoney, sec_edgar, baostock) plus a fourth
+was copy-pasted per vendor (sec_edgar, fred, and the since-removed A-share
+vendors) plus a fourth
 variant in ``backtest/factor_model.py`` — four implementations of one contract
 that had already drifted (different warning formats, one bypassing the config
 layer to read ``YIALPHA_CACHE_DIR`` directly). This module is the single
@@ -20,7 +21,7 @@ implementation of that contract:
   for advisory data whose absence must not abort a run).
 
 Also hosts :class:`MinIntervalThrottle`, the thread-safe minimum spacing that
-eastmoney/sec_edgar each implemented privately, and :func:`vendor_cache_dir`,
+vendors previously implemented privately, and :func:`vendor_cache_dir`,
 the single resolver for ``<data_cache_dir>/<vendor>/`` (config-aware, with the
 ``~/.yialpha/cache`` fallback in exactly one place).
 
@@ -74,7 +75,7 @@ def vendor_cache_dir(name: str) -> str:
 def sanitize_cache_filename(filename: str) -> str:
     """Validate a cache filename against a strict allowlist and return it.
 
-    Cache filenames embed ticker-derived strings (e.g. ``daily_sh.600519.json``).
+    Cache filenames embed ticker-derived strings (e.g. ``daily_BTC-USD.json``).
     This allowlist (mirrors ``safe_ticker_component``'s contract) guarantees
     the value is a single plain path component: no separators, no ``..``, no
     absolute/drive forms. Raises ``ValueError`` on anything else.
@@ -174,6 +175,21 @@ def max_stale_days() -> float:
     return n if n >= 0 else 30.0
 
 
+def _age_seconds(mtime: float) -> float:
+    """Age of a cache file in seconds, clamped at zero.
+
+    On NTFS the stored mtime (100ns units, rounded up by the write path) can
+    sit a fraction of a millisecond AHEAD of the immediately following
+    ``time.time()`` reading, yielding a negative age. With the raw difference
+    a ``ttl_days=0`` caller ("always refetch") would see ``negative < 0`` and
+    wrongly serve the just-written bytes as fresh — the exact flake pinned by
+    ``test_disk_cache_persistent_denial_still_best_effort`` on Windows. A
+    negative age is indistinguishable from zero for every decision this
+    module makes, so clamp it.
+    """
+    return max(0.0, time.time() - mtime)
+
+
 def cached_or_fetch(
     base_dir: str,
     filename: str,
@@ -203,8 +219,8 @@ def cached_or_fetch(
     be a CALLABLE over the cached bytes (``bytes | None``, evaluated once per
     call after the cache read and before the freshness check) returning the
     effective TTL — content-aware TTL: a vendor whose payload proves the
-    series is already final (e.g. BaoStock's daily bar for the analysis date
-    is present, and daily bars are published post-close only) can extend the
+    series is already final (e.g. the analysis date's daily bar is present,
+    and daily bars are published post-close only) can extend the
     TTL based on what is cached instead of a blind wall-clock age. A plain
     float behaves exactly as before (byte-compatible for every existing
     caller).
@@ -229,8 +245,8 @@ def cached_or_fetch(
         stale = None
 
     ttl = ttl_days(stale) if callable(ttl_days) else ttl_days
-    if stale is not None and stale_mtime is not None and (
-        time.time() - stale_mtime
+    if stale is not None and stale_mtime is not None and _age_seconds(
+        stale_mtime
     ) < ttl * 86_400.0:
         return stale
 
@@ -241,7 +257,7 @@ def cached_or_fetch(
             # Age is computed from the captured mtime when possible; a file
             # that vanished since the read counts as infinitely old.
             age = (
-                (time.time() - stale_mtime) / 86_400.0
+                _age_seconds(stale_mtime) / 86_400.0
                 if stale_mtime is not None
                 else _mtime_age_days(validated)
             )

@@ -15,7 +15,7 @@
     python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 
 参数说明：
-    --tickers      代码列表，默认 AAPL NVDA（A股用 600519.SS）
+    --tickers      代码列表，默认 AAPL NVDA（仅支持美股与加密货币）
     --date         冒烟测试的单个日期 YYYY-MM-DD
     --start/--end  回测区间，默认 end=今天-60天，start=end-180天
     --step         再平衡间隔交易日，默认 10（约两周）
@@ -62,6 +62,10 @@ from yialpha.backtest.engine import run_backtest  # noqa: E402
 from yialpha.backtest.report import write_report  # noqa: E402
 from yialpha.backtest.validation_gate import evaluate_gate  # noqa: E402
 from yialpha.dataflows.config import submit_with_context  # noqa: E402
+from yialpha.dataflows.symbol_utils import (  # noqa: E402
+    UnsupportedMarketError,
+    require_supported_market,
+)
 from yialpha.default_config import DEFAULT_CONFIG  # noqa: E402
 from yialpha.graph.trading_graph import YiAlphaGraph  # noqa: E402
 from yialpha.monitoring.dashboard import write_dashboard  # noqa: E402
@@ -517,6 +521,18 @@ def main():
         p.error(f"--holding-days must be >= 1 (got {args.holding_days})")
     if args.workers < 1:
         p.error(f"--workers must be >= 1 (got {args.workers})")
+
+    # Market gate（本脚本绕过 prepare_batch_run 的 CLI 闸门）：仅支持美股 +
+    # 加密货币，入口处逐个校验 --tickers，命名违规 ticker 后立刻退出——
+    # 不让非美股符号在图跑到一半才死在 vendor 调用里。
+    for t in args.tickers:
+        try:
+            require_supported_market(t)
+        except UnsupportedMarketError as exc:
+            sys.exit(
+                f"✗ --tickers 含不支持的市场的标的 {t!r}（仅支持美股与加密"
+                f"货币，如 AAPL / BTCUSDT）: {exc}"
+            )
 
     end = args.end or (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
     start = args.start or (datetime.strptime(end, "%Y-%m-%d")

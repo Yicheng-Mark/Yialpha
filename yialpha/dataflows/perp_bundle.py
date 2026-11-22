@@ -85,8 +85,8 @@ _LSR_WINDOW_DAYS = 9
 #: issues >= 3 requests serially), and ``YIALPHA_BINANCE_HTTP_RETRIES >= 3``
 #: adds 2+4+8+16+32 = 62s of transport backoff — a legal slow leg read as
 #: TimeoutError -> core sentinel -> NO_TRADE. Raising it does not extend the
-#: worst-case wall clock (the join dominates). Fault-tolerant parse in the
-#: ``YIALPHA_BAOSTOCK_RETRIES`` style, with the repo-wide ``0 = explicit
+#: worst-case wall clock (the join dominates). Fault-tolerant parse with the
+#: repo-wide ``0 = explicit
 #: off`` convention (``YIALPHA_LLM_TIMEOUT_S`` / ``YIALPHA_HTTP_TIMEOUT_S``
 #: precedent): ``0`` maps to ``None`` — ``future.result(timeout=None)`` waits
 #: forever, identical to the pool join's own semantics. Negative or

@@ -179,7 +179,7 @@ _INDICATOR_LIST: list[IndicatorSpec] = [
         label="KDJ K",
         section="Momentum Indicators",
         description=(
-            "KDJ K: The %K line of the 9-period KDJ stochastic, an A-share favourite. "
+            "KDJ K: The %K line of the 9-period KDJ stochastic. "
             "Usage: K crossing above D from the low zone (below 20) is a classic buy trigger; above 80 is overbought. "
             "Tips: KDJ whipsaws in strong trends; require a D-line cross, not just the level."
         ),

@@ -6,35 +6,20 @@ behavior (a raised error or a logged warning):
 - H1/H2: yfinance news vendors must raise (not return an error string) so the
   core-category router can fail closed — an error string used to masquerade
   as successfully fetched news.
-- M1: a failed BaoStock quarterly fetch is logged, not silently skipped.
 - M2: the backtest benchmark SPY fallback is logged (alpha/beta against the
   wrong index must be observable).
 - M4: checkpoint cleanup failure is logged (stale-resume risk).
 - M5: fin_cot prompt-selection failure logs its fallback to the legacy prompt.
 - L4: an unparseable memory as_of_date logs why no history was injected.
-- L5: a failed Binance order-recovery lookup is logged even though None
-  already drives the fail-closed REJECTED path.
 """
 
 from __future__ import annotations
-
-from datetime import date
-from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
 import yialpha.dataflows.yfinance_news as ynews
 from yialpha.agents.utils.memory import TradingMemoryLog
 from yialpha.backtest.engine import _resolve_index_benchmark
-from yialpha.dataflows import baostock_vendor
-from yialpha.execution.binance_gateway import BinanceGateway
-from yialpha.execution.domain import (
-    Direction,
-    Exchange,
-    OrderRequest,
-    OrderType,
-)
 from yialpha.graph import checkpointer
 
 
@@ -83,33 +68,6 @@ def test_global_news_failure_raises_not_prose(monkeypatch, caplog):
           pytest.raises(RuntimeError, match="network down")):
         ynews.get_global_news_yfinance("2025-05-09", look_back_days=7, limit=10)
     assert any("global news retrieval failed" in r.message for r in caplog.records)
-
-
-# --------------------------------------------------------------------------- #
-# M1 — BaoStock quarterly fetch failure is logged, statement survives
-# --------------------------------------------------------------------------- #
-@pytest.mark.unit
-def test_baostock_quarter_fetch_failure_warns(caplog):
-    class FakeRs:
-        error_code = "0"
-
-        def next(self):
-            return False
-
-    def raising_query(**kwargs):
-        if (kwargs.get("year"), kwargs.get("quarter")) == ("2024", "1"):
-            raise RuntimeError("boom")
-        return FakeRs()
-
-    bs = SimpleNamespace(profit=raising_query)
-    with caplog.at_level("WARNING", logger="yialpha.dataflows.baostock_vendor"):
-        fetch = baostock_vendor._query_statement(
-            bs, "600519.SH", "profit", anchor=date(2025, 6, 1))
-    assert fetch.rows == []  # failed quarter skipped, the statement call survives
-    # The failed quarter is returned to the renderer for an in-band note.
-    assert fetch.failed == ["2024Q1"]
-    hits = [r for r in caplog.records if "fetch failed" in r.message]
-    assert hits and "600519.SH" in hits[0].message and "2024Q1" in hits[0].message
 
 
 # --------------------------------------------------------------------------- #
@@ -176,29 +134,3 @@ def test_memory_bad_as_of_date_warns(tmp_path, caplog):
         out = log.get_past_context("AAPL", as_of_date="not-a-date")
     assert out == ""    # fail closed: no history rather than a look-ahead leak
     assert any("unparseable as_of_date" in r.message for r in caplog.records)
-
-
-# --------------------------------------------------------------------------- #
-# L5 — Binance order-recovery lookup failure is logged (None -> REJECTED)
-# --------------------------------------------------------------------------- #
-@pytest.mark.unit
-def test_binance_recovery_failure_warns(caplog, monkeypatch):
-    monkeypatch.setattr("time.sleep", lambda _s: None)  # retry backoff
-    gw = BinanceGateway()
-    gw._client = MagicMock()
-    gw._client.rest_api.query_order.side_effect = RuntimeError("boom")
-    req = OrderRequest(
-        symbol="BTCUSDT",
-        exchange=Exchange.BINANCE,
-        direction=Direction.LONG,
-        type=OrderType.MARKET,
-        volume=0.5,
-    )
-    with caplog.at_level("WARNING", logger="yialpha.execution.binance_gateway"):
-        assert gw._safe_query_by_client_id(req, "coid-1") is None
-    # Round-8 S8 KI-2: the probe retries a bounded 3 times (visibility lag),
-    # then warns once with the final failure detail.
-    assert any(
-        "could not confirm" in r.message and "3 probe" in r.message
-        for r in caplog.records
-    )

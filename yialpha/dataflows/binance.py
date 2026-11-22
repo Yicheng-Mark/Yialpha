@@ -23,7 +23,7 @@ Design constraints:
     phase (this repo has a mid-response ``ssl.read`` hang precedent), with the
     outer ``run_robust`` watchdog as the OS-level backstop.
   - No new dependencies: plain ``requests`` + the already-present PySocks for
-    the SOCKS5 proxy. Track B (execution) will bring the official SDK.
+    the SOCKS5 proxy.
 """
 
 from __future__ import annotations

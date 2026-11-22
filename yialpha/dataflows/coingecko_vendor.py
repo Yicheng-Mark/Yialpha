@@ -3,7 +3,7 @@
 Supplies token-level fundamentals (market cap, supply schedule, FDV, ATH/ATL,
 developer & community footprint) for PURE-crypto instruments — the gap the
 stock fundamentals analyst cannot fill for BTCUSDT-style tickers. Same
-optional-category contract shape as ``a_share_native``:
+optional-category contract shape as ``sec_ownership``:
 
 * **Free / keyless** — the public API tier (no DEMO key). The edge rejects
   default/anonymous Python user agents with 403, so every request carries a

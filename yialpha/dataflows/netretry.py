@@ -7,8 +7,8 @@ goal is only to absorb single-packet hiccups (reset connections, DNS blips)
 so a batch run does not degrade a whole category over one dropped SYN.
 
 Vendors with richer contracts keep their own loops: binance honours
-Retry-After + weight headers, yfinance has ``yf_retry``, eastmoney maps its
-transport errors mid-loop. New simple HTTPS vendors should use this.
+Retry-After + weight headers, yfinance has ``yf_retry``. New simple HTTPS
+vendors should use this.
 """
 
 from __future__ import annotations

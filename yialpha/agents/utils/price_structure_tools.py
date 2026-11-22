@@ -28,7 +28,6 @@ from yialpha.dataflows.candlestick_patterns import (
     detect_double_top_bottom,
     scan_candlestick_patterns,
 )
-from yialpha.dataflows.market_regime import resolve_market_benchmark
 from yialpha.dataflows.stockstats_utils import compute_indicator, load_ohlcv
 from yialpha.dataflows.support_resistance import build_support_resistance
 from yialpha.dataflows.volume_features import obv, relative_volume, volume_divergence
@@ -367,11 +366,10 @@ def get_relative_strength(
     curr_date: Annotated[str, "The current trading date you are trading on, YYYY-mm-dd"],
 ) -> str:
     """
-    Relative strength vs the regional benchmark index: 1/3/6/12-month returns
-    of the ticker and of its benchmark (SPY for US, CSI 300 for A-shares, and
-    the regional index map elsewhere), the ticker/benchmark return ratio per
-    window, and whether the 3-month RS trend is improving or fading. Cite
-    THIS tool for any outperformance / underperformance claim.
+    Relative strength vs the SPY benchmark index: 1/3/6/12-month returns of
+    the ticker and of SPY, the ticker/benchmark return ratio per window, and
+    whether the 3-month RS trend is improving or fading. Cite THIS tool for
+    any outperformance / underperformance claim.
     """
     # PIT clamp: curr_date comes from the LLM; the pinned analysis date
     # (set_analysis_date ContextVar) is the authority a historical replay
@@ -394,7 +392,11 @@ def get_relative_strength(
             f"DATA_UNAVAILABLE: OHLCV for {symbol!r} as of {curr_date} could "
             f"not be loaded ({type(exc).__name__}: {exc})."
         )
-    benchmark = resolve_market_benchmark(symbol)
+    # US stocks + crypto only: SPY is the single stock benchmark (the regional
+    # suffix-map resolution was removed with the non-US market strip). Crypto
+    # spot pairs resolve the same way they always did here — plain load_ohlcv
+    # on the benchmark symbol — so they keep this SPY comparison unchanged.
+    benchmark = "SPY"
     try:
         bench_data = load_ohlcv(benchmark, curr_date)
     except Exception:  # noqa: BLE001 — benchmark unavailable: RS not computable

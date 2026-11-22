@@ -327,8 +327,8 @@ TIER_INVALID = "INVALID"
 
 #: Categories whose failure means the decision lacks CRITICAL inputs: the
 #: price/indicator books (price, ATR, perp/spot klines incl. mark/index) and
-#: core fundamentals. News, macro, prediction markets, social and the A-share
-#: enrichment stacks are deliberately absent — a Reddit or Binance Square
+#: core fundamentals. News, macro, prediction markets and social are
+#: deliberately absent — a Reddit or Binance Square
 #: outage must not veto an otherwise fully-priced BTC perp trade (freeze
 #: check #2). Extending this set is a reviewable semantic change.
 CRITICAL_CATEGORIES = frozenset({

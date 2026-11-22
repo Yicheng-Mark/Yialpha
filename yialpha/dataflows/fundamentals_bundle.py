@@ -20,9 +20,8 @@ Instrument routing: a Binance tokenized-stock perp (MUUSDT) reads the
 UNDERLYING equity (MU) via the same remap the tool layer applies; a
 high-confidence ETF (SPY, incl. SPYUSDT) additionally prefetches the fund
 snapshot (NAV/AUM/expense ratio/holdings — live runs only, the fund page
-is a today snapshot); an A-share ticker with ``a_share_native`` on also
-pulls the native PIT quarterly statements. Pure-crypto instruments never
-reach this module (the analyst node skips them first).
+is a today snapshot). Pure-crypto instruments never reach this module
+(the analyst node skips them first).
 """
 from __future__ import annotations
 
@@ -30,7 +29,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from .config import get_config, submit_with_context
+from .config import submit_with_context
 from .interface import route_to_vendor
 from .utils import is_historical_date
 
@@ -47,14 +46,6 @@ STATUS_SKIPPED_NOT_LISTED = "skipped_not_listed"
 
 #: Prompt-size cap per statement payload; the bound tools serve the full CSV.
 _MAX_PAYLOAD_CHARS = 4000
-
-#: Native A-share quarterly statements (optional category; only fetched when
-#: the a_share_native flag is on AND the ticker is a China A-share).
-_A_SHARE_JOBS = (
-    ("a_share_income", "get_a_share_income_statement_native"),
-    ("a_share_balance", "get_a_share_balance_sheet_native"),
-    ("a_share_cashflow", "get_a_share_cashflow_statement_native"),
-)
 
 _SENTINEL_PREFIXES = ("NO_DATA_AVAILABLE", "DATA_UNAVAILABLE")
 
@@ -129,8 +120,6 @@ def fetch_fundamentals_bundle(
     """
     from yialpha.graph.routing import describe_instrument
 
-    from .symbol_utils import is_a_stock
-
     # as_of wired: the descriptor can then answer "was this contract live on
     # curr_date?" from onboard-date evidence instead of always "unknown".
     descriptor = describe_instrument(asset_type, ticker, as_of=curr_date)
@@ -200,14 +189,6 @@ def fetch_fundamentals_bundle(
                     "get_cashflow", symbol, "quarterly", curr_date,
                 ),
             ),
-        ]
-    if get_config().get("a_share_native") and is_a_stock(symbol):
-        jobs += [
-            (
-                key,
-                (lambda m=method: _fetch_via_router(m, symbol, curr_date)),
-            )
-            for key, method in _A_SHARE_JOBS
         ]
     with ThreadPoolExecutor(max_workers=4) as pool:
         # submit_with_context carries the run's ContextVars (quality ledger,
@@ -284,14 +265,11 @@ def render_fundamentals_bundle_block(bundle: dict[str, Any]) -> str:
         lines += _section("Income statement (quarterly)", bundle.get("income_statement") or {})
         lines += _section("Balance sheet (quarterly)", bundle.get("balance_sheet") or {})
         lines += _section("Cash flow statement (quarterly)", bundle.get("cashflow") or {})
-    lines += _section("A-share income statement 利润表 (native)", bundle.get("a_share_income") or {})
-    lines += _section("A-share balance sheet 资产负债表 (native)", bundle.get("a_share_balance") or {})
-    lines += _section("A-share cash flow 现金流表 (native)", bundle.get("a_share_cashflow") or {})
 
     notes: list[str] = []
     for key in (
         "overview", "income_statement", "balance_sheet", "cashflow",
-        "etf_fund_data", "a_share_income", "a_share_balance", "a_share_cashflow",
+        "etf_fund_data",
     ):
         comp = bundle.get(key)
         if isinstance(comp, dict) and comp.get("status") not in (None, STATUS_OK):

@@ -28,10 +28,9 @@ def create_conservative_debator(llm):
         # Opt-in market-regime reading (env: YIALPHA_MARKET_REGIME, default
         # off). When off this stays "" and the prompt below is byte-identical
         # to the baseline. When on, the 2026-08-15 composite regime line is
-        # appended (trend + volatility state + benchmark turbulence +, on
-        # A-share live runs, market breadth — a superset of the old
-        # turbulence-only reading), a market-level ex-ante cue complementary
-        # to the portfolio-level reactive DrawdownBreaker.
+        # appended (trend + volatility state + benchmark turbulence — a
+        # superset of the old turbulence-only reading), a market-level ex-ante
+        # cue complementary to the portfolio-level reactive DrawdownBreaker.
         market_regime_line = ""
         if get_config().get("market_regime"):
             trade_date = state.get("trade_date")

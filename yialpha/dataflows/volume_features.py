@@ -3,7 +3,7 @@
 stockstats has no OBV column (verified against its source), so it is
 hand-rolled here along with the relative-volume gauge and a deterministic
 20-session divergence detector. "量在价先" — volume leads price — is the
-classic A-share read; the detector turns it into a tool-backed claim the
+classic volume read; the detector turns it into a tool-backed claim the
 analyst can cite instead of asserting a divergence from memory.
 """
 

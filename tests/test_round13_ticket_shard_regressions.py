@@ -22,7 +22,7 @@ Each test below was walked against the PRE-FIX behavior and must fail there
   unstamped report dirs bypassed the filter entirely.
 * [P3] ic_dataset validates the ticker against a filename whitelist before
   building the CSV path (path-hostile tickers used to reach ``Path / stem``).
-* [P3] analyze_nvda / analyze_window validate ticker (whitelist) and date(s)
+* [P3] analyze_window validates ticker (whitelist) and dates
   (is_canonical_ymd) before interpolating them into output filenames.
 
 Hermetic: report trees under tmp_path, YIALPHA_RESULTS_DIR redirected,
@@ -425,7 +425,7 @@ def test_export_cli_bad_ticker_exits_one(tmp_path, monkeypatch, patched_ohlcv, c
 
 
 # --------------------------------------------------------------------------- #
-# [P3] analyze_nvda / analyze_window: filename-interpolated ticker + dates
+# [P3] analyze_window: filename-interpolated ticker + dates
 # --------------------------------------------------------------------------- #
 
 class _FakeGraph:
@@ -437,41 +437,6 @@ class _FakeGraph:
 
     def propagate(self, ticker, date, portfolio_state=None):
         return {"final_trade_decision": "ok"}, "Buy"
-
-
-@pytest.mark.unit
-def test_analyze_nvda_rejects_bad_ticker_and_date(tmp_path, monkeypatch, capsys):
-    nvda = _load_script("analyze_nvda")
-
-    monkeypatch.setattr(
-        sys, "argv", ["analyze_nvda.py", "--ticker", "../evil", "--date", "2026-06-26"]
-    )
-    assert nvda.main() == 2
-    err = capsys.readouterr().err
-    assert "--ticker" in err and "../evil" in err
-
-    monkeypatch.setattr(
-        sys, "argv", ["analyze_nvda.py", "--ticker", "NVDA", "--date", "2026-6-26"]
-    )
-    assert nvda.main() == 2
-    assert "YYYY-MM-DD" in capsys.readouterr().err
-
-    # Valid args pass the gate and reach propagate (faked to return an empty
-    # state): that None-state exit proves execution went past validation
-    # without ever touching the real graph.
-    class _EmptyGraph(_FakeGraph):
-        def propagate(self, ticker, date, portfolio_state=None):
-            return None, None
-
-    monkeypatch.setattr(nvda, "YiAlphaGraph", _EmptyGraph)
-    monkeypatch.setattr(
-        sys, "argv",
-        ["analyze_nvda.py", "--ticker", "NVDA", "--date", "2026-06-26",
-         "--out", str(tmp_path)],
-    )
-    rc = nvda.main()
-    assert rc == 2
-    assert "propagate" in capsys.readouterr().err
 
 
 @pytest.mark.unit

@@ -583,7 +583,7 @@ def test_leg_timeout_default_and_env_parsing(monkeypatch):
                           ("garbage", 300.0)):
         monkeypatch.setenv("YIALPHA_PERP_BUNDLE_LEG_TIMEOUT_S", raw)
         importlib.reload(pb)
-        assert pb.LEG_TIMEOUT_S == expected, raw
+        assert expected == pb.LEG_TIMEOUT_S, raw
     monkeypatch.delenv("YIALPHA_PERP_BUNDLE_LEG_TIMEOUT_S", raising=False)
     importlib.reload(pb)
     assert pb.LEG_TIMEOUT_S == 300.0

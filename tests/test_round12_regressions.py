@@ -64,8 +64,8 @@ from tests.test_backtest_engine import (
     _flat_index,
     _rising_prices,
 )
-from tests.test_perp_engine import _PERP_KW, _funding, _funding_dropping
 from tests.test_perp_bundle import _kline_frame
+from tests.test_perp_engine import _PERP_KW, _funding, _funding_dropping
 from yialpha.agents.utils.structured import (
     EMPTY_RESPONSE_SENTINEL,
     STRUCTURED_FALLBACK,
@@ -101,9 +101,9 @@ def test_adl_request_params_carry_the_symbol():
     dict serves the ALL-symbols list whose [0] entry is an arbitrary symbol.
     The existing pin's comment claimed "params carry the canonical symbol"
     but only asserted the function ARG; this pins the actual request."""
-    import yialpha.dataflows.binance_brackets as bb
-
     import os
+
+    import yialpha.dataflows.binance_brackets as bb
 
     saved_key, saved_secret = (
         os.environ.get("BINANCE_API_KEY"),
@@ -590,10 +590,10 @@ def test_event_study_window_tracks_holding_days():
 def test_report_renders_event_study_window():
     from yialpha.backtest.report import render_backtest_report
 
-    metrics = dict(event_study_n=4, event_study_mean_car=0.01,
-                   event_study_t_stat=2.0, event_study_p_value=0.05,
-                   event_study_ci=(0.001, 0.02), event_study_benchmark="SPY",
-                   event_study_window=(0, 5))
+    metrics = {"event_study_n": 4, "event_study_mean_car": 0.01,
+               "event_study_t_stat": 2.0, "event_study_p_value": 0.05,
+               "event_study_ci": (0.001, 0.02), "event_study_benchmark": "SPY",
+               "event_study_window": (0, 5)}
     out = render_backtest_report(_fake_result_with_metrics(metrics))
     assert "CAR window: [0, +5]" in out
 

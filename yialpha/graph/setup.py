@@ -1,6 +1,7 @@
 # yialpha/graph/setup.py
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode

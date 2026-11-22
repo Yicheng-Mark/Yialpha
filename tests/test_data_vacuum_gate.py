@@ -6,18 +6,16 @@ Covers the pieces ``test_data_quality_evidence.py`` does not:
   behaviour on a node must be verifiable from the outside, not just assumed);
 * run_robust's inverted quality gate (default ON, ``--allow-degraded`` out);
 * direct-connect tool + Reddit degrade sentinels (the ledger blind spots);
-* the timeout defaults (yfinance 30s, BaoStock scoped 30s) and the default
-  multi-vendor fallback chains.
+* the timeout defaults (yfinance 30s) and the default multi-vendor fallback
+  chains.
 """
 
 from __future__ import annotations
 
 import importlib.util
-import socket
 import sys
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -255,28 +253,6 @@ def test_yf_timeout_env_zero_disables(monkeypatch):
         monkeypatch.delenv("YIALPHA_HTTP_TIMEOUT_S", raising=False)
         importlib.reload(ssu)  # restore the module default for later tests
     assert ssu.YF_HTTP_TIMEOUT == 30.0
-
-
-@pytest.mark.unit
-def test_baostock_timeout_default_and_scope():
-    import yialpha.dataflows.baostock_vendor as bs
-
-    assert bs.BS_SOCKET_TIMEOUT == 30.0
-
-    calls = SimpleNamespace(login=lambda: SimpleNamespace(error_code="0", error_msg=""),
-                            logout=lambda: None)
-    session = bs._BaostockSession.__new__(bs._BaostockSession)
-    session.bs = calls
-    prev = socket.getdefaulttimeout()
-    try:
-        with session:
-            # Scoped while the session is live: the raw TCP socket to
-            # baostock.com:9001 inherits the default timeout.
-            assert socket.getdefaulttimeout() == 30.0
-        # Restored after exit — the global default must not leak.
-        assert socket.getdefaulttimeout() == prev
-    finally:
-        socket.setdefaulttimeout(prev)
 
 
 # --------------------------------------------------------------------------- #

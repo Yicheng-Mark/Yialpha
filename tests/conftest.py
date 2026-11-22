@@ -55,8 +55,8 @@ def _isolate_config():
 def _isolated_vendor_cache(_isolate_config, tmp_path):
     """Point ``data_cache_dir`` at a per-test tmp directory.
 
-    Vendor disk caches (OHLCV per-symbol CSVs, eastmoney/sec/baostock/fred/
-    alphavantage/yfnews) must never read from — or write into — the
+    Vendor disk caches (OHLCV per-symbol CSVs, sec/fred/alphavantage/yfnews)
+    must never read from — or write into — the
     developer's real ``~/.yialpha/cache`` during tests: a fresh real-world
     cache file would bypass a test's mocked network path, and a mocked
     response would pollute the real cache. Tests that manage their own

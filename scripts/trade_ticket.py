@@ -121,10 +121,6 @@ def detect_asset_type(ticker: str) -> str:
     t = ticker.upper()
     if t.endswith("USDT") or t.endswith("USDC") or t.endswith("BUSD"):
         return "crypto_perp"
-    if t.endswith(".SS") or t.endswith(".SZ"):
-        return "cn_stock"
-    if t.endswith(".HK"):
-        return "hk_stock"
     return "us_stock"
 
 
@@ -741,11 +737,6 @@ def _execution_plan(t):
         # 这条永续合约提示——错误的执行语义）。
         parts.append("永续合约：留意资金费率（多头为正时持续扣费），隔夜成本会侵蚀收益；"
                      "设止损时给盘口噪音留 0.3–0.5% 缓冲，避免插针打穿。")
-    if t["asset_type"] == "cn_stock" and d == "short":
-        parts.append("⚠️ A 股做空通道受限：普通散户融券标的少、利率高，实务上可用反向 ETF / "
-                     "认沽期权替代裸做空；两融维持担保比别低于 1.5。")
-    if t["asset_type"] == "hk_stock" and d == "short":
-        parts.append("港股做空需融券，注意融券费率与可借券额度；流动性差的小盘股慎做空。")
     return "\n".join(f"- {p}" for p in parts)
 
 

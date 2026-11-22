@@ -493,10 +493,11 @@ def test_atr_stop_short_frame_returns_close_with_no_atr():
 def test_signature_config_keys_cover_input_affecting_flags():
     from yialpha.graph.trading_graph import _SIGNATURE_CONFIG_KEYS
 
-    # Round-8: web_search_enabled / a_stock / regime_context all change node
-    # INPUTS (tool bindings, prompt context); flipping one across a resumed
-    # checkpoint used to replay the old configuration's analyst reports.
-    assert {"web_search_enabled", "a_stock", "regime_context"} <= set(
+    # Round-8: web_search_enabled / regime_context (and formerly a_stock,
+    # removed with the A-share layer) change node INPUTS (tool bindings,
+    # prompt context); flipping one across a resumed checkpoint used to
+    # replay the old configuration's analyst reports.
+    assert {"web_search_enabled", "regime_context"} <= set(
         _SIGNATURE_CONFIG_KEYS
     )
 

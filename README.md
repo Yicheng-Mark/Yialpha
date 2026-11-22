@@ -37,14 +37,11 @@ YiAlpha deploys a team of specialized **LLM agents** that mirror how a real trad
 
 Give YiAlpha a **ticker + date** and it analyzes from four angles, runs multiple debate and risk-deliberation rounds, and outputs a structured trading decision with a rating, position size, and stop-loss. The full journey — input to on-disk report — is detailed in [Analysis pipeline](#analysis-pipeline).
 
-**Supported assets** (Yahoo Finance coverage via exchange-suffix tickers; company identity and the alpha benchmark are resolved per market automatically):
+**Supported assets** (US-listed equities/ETFs via Yahoo Finance, plus crypto; company identity and the alpha benchmark resolve automatically):
 
 | Market | Example ticker |
 | ------ | ------ |
 | US equities | `AAPL`, `SPY` |
-| A-shares | `600519.SS` (Kweichow Moutai), `000001.SZ` |
-| Hong Kong / Tokyo / London | `0700.HK` / `7203.T` / `AZN.L` |
-| India / Canada / Australia | `RELIANCE.NS` / `SHOP.TO` / `BHP.AX` |
 | Crypto | `BTC-USD`, `ETH-USD` |
 
 **Four analyst dimensions** (selectable):
@@ -69,18 +66,6 @@ Crypto has three opt-in modes. `crypto` (Yahoo spot) is the default; `crypto_spo
 | Binance perpetual | `crypto_perp` | Binance USDT-M perp (`fapi.binance.com`) + data.binance.vision deep-history archives | all runs: klines + funding + indicators + **vision deep-history archives** (OI / long-short / taker metrics + order-book depth, years back, PIT-correct); current date also: OI / long-short / taker flow / basis / mark-price premium index / depth snapshot | Analysis only. Backtests supported with full perp modeling (funding / costs / leverage / liquidation) |
 
 In crypto modes the Fundamentals Analyst is dropped for pure-crypto pairs (no company fundamentals) — but a Binance **tokenized-stock perp** (exchangeInfo `underlyingType=EQUITY`, e.g. `MUUSDT` tracking Micron) keeps it and analyzes the **underlying US equity** (symbol remapped automatically; the live listing is warmed once per run, with a static seed snapshot as the fail-open fallback). On those runs the News Analyst also deterministically pre-fetches **both news angles** — the underlying company and the perp contract itself (`MU` and `MUUSDT` queries over a 7-day window) — as labelled prompt blocks, so dual coverage does not depend on the model choosing to query both. All Binance requests are hand-written `requests` (not the official SDK) over the existing SOCKS5 proxy, with per-product-line rate limiting and reactive 429/418 backstop.
-
-### A-share native data
-
-Opt-in native data for A-share tickers: set `YIALPHA_A_SHARE_NATIVE=true` (default off; install the vendors with `pip install "yialpha[a-share]"`). The gate is flag **and** `is_a_stock(ticker)`, so US / crypto / HK runs stay byte-identical. When both hold, 12 PIT-correct read-only tools from Chinese vendors are appended to the analysts:
-
-| Analyst | Appended tools (vendor) |
-| ------ | ------ |
-| Market | northbound flows · sector fund-flow · realtime quote · market breadth (AKShare) |
-| Fundamentals | TTM PE/PB/dividend · forward-adjusted OHLCV · income / balance-sheet / cash-flow statements (BaoStock); money flow · dragon-tiger list (AKShare) |
-| News | per-stock Chinese headlines, Eastmoney via AKShare |
-
-A Tushare quality tier (`pip install "yialpha[a-share-tushare]"` + `TUSHARE_TOKEN`) is also available for fundamentals/news. Vendors are lazy-imported: without the extras, default-off runs are unaffected.
 
 ### Crypto-native fundamentals
 
@@ -175,7 +160,6 @@ pip install -e .
 # Optional extras
 pip install -e ".[web]"        # FastAPI + Uvicorn for the local Web UI
 pip install -e ".[bedrock]"    # Amazon Bedrock provider (AWS SigV4)
-pip install -e ".[a-share]"    # AKShare + BaoStock for A-share native data
 pip install -e ".[dev]"        # ruff / pytest
 ```
 
@@ -184,13 +168,6 @@ the lock instead:
 
 ```bash
 pip install -r requirements.lock   # core + dev + web, pinned (regenerate: uv pip compile)
-```
-
-Docker:
-
-```bash
-cp .env.example .env        # fill in API keys
-docker compose run --rm yialpha
 ```
 
 > `PySocks` is a load-bearing dependency: yfinance and the Binance vendor reach the network through a SOCKS5 proxy, and PySocks is what lets `requests` resolve hosts through it instead of hanging on DNS.
@@ -256,9 +233,6 @@ Analyze multiple tickers of the **same asset class** concurrently. Each ticker r
 ```bash
 # Multiple US equities, same date
 yialpha batch -t AAPL -t NVDA -t MSFT -d 2026-06-30
-
-# Multiple A-shares
-yialpha batch -t 600519.SS -t 000858.SZ -t 601318.SS -d 2026-06-30
 
 # A batch of crypto (Yahoo spot by default)
 yialpha batch -t BTC-USD -t ETH-USD -t SOL-USD -d 2026-06-30 -w 3
@@ -389,7 +363,7 @@ python scripts/run_baseline.py --baseline --tickers AAPL NVDA
 python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 ```
 
-Common options: `--tickers` (A-share `600519.SS`) / `--asset-type` (`stock` / `crypto` / `crypto_perp`) / `--start --end` / `--step` (rebalance interval, default 10) / `--rebalance` (number of rebalances, default 6) / `--holding-days` / `--cost-bps` (one-side cost, default 5bp) / `--runs` (LLM non-determinism — run each ticker several times for a distribution) / `--workers` (cross-ticker concurrency) / `--out` (default `./backtest_output`). Perp-only: `--leverage` (default 1.0; >1 enables isolated-margin liquidation modeling) / `--allow-short` / `--slippage-bps` (default 0) / `--bnb-discount`.
+Common options: `--tickers` / `--asset-type` (`stock` / `crypto` / `crypto_perp`) / `--start --end` / `--step` (rebalance interval, default 10) / `--rebalance` (number of rebalances, default 6) / `--holding-days` / `--cost-bps` (one-side cost, default 5bp) / `--runs` (LLM non-determinism — run each ticker several times for a distribution) / `--workers` (cross-ticker concurrency) / `--out` (default `./backtest_output`). Perp-only: `--leverage` (default 1.0; >1 enables isolated-margin liquidation modeling) / `--allow-short` / `--slippage-bps` (default 0) / `--bnb-discount`.
 
 > Each `propagate()` = one full LLM graph (4 analysts + debates + trader + risk debate + PM). Cost scales linearly with `tickers × dates × runs`. **Get preflight green first, then smoke, then scale up.**
 
@@ -445,7 +419,7 @@ One-line telemetry: `python scripts/run_baseline.py --smoke --profile --ticker <
 
 **Checkpoint resume (opt-in):** turn on with `--checkpoint`. LangGraph archives state after each node, so a crashed / interrupted run resumes from the last successful step; checkpoints are cleaned up on successful completion. Per-ticker SQLite databases live in `~/.yialpha/cache/checkpoints/<TICKER>.db` (override with `YIALPHA_CACHE_DIR`).
 
-**Analysis boundary:** `YIALPHA_ANALYSIS_ONLY=true` is the default and blocks every live execution path. The legacy and new execution switches must both be explicitly armed after analysis-only mode is disabled; gateways re-check them and `YIALPHA_KILL_SWITCH` on every submission. PoT host execution is also off, and is always refused on Windows until a real process-isolated sandbox exists.
+**Analysis boundary:** `YIALPHA_ANALYSIS_ONLY=true` is the default; this repository produces reports and backtests only — the live execution layer was removed (2026-11-22). PoT host execution is off, and is always refused on Windows until a real process-isolated sandbox exists.
 
 ---
 
@@ -477,7 +451,6 @@ One-line telemetry: `python scripts/run_baseline.py --smoke --profile --ticker <
 │   ├── risk/                 # kelly / atr_stop / breaker / cvar / manager (quant risk overlay)
 │   ├── backtest/             # engine / metrics / validation_gate / ic / report / cache
 │   ├── batch/                # multi-ticker concurrent runner + filelock
-│   ├── execution/            # domain/gateway/bridge (Binance SDK gateway) + browser_broker fallback
 │   ├── monitoring/           # dashboard (HTML dashboard)
 │   ├── llm_clients/          # multi-provider adapters + rate limiter + shared httpx
 │   ├── cli/                  # interactive CLI (analyze / batch / config-check / snapshot)

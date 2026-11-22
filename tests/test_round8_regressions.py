@@ -234,7 +234,7 @@ def test_atr_forming_guard_reads_date_column():
     assert latest_atr_from_frame(frame(20))[0] == pytest.approx(119.0)
 
 
-# --- tool-layer PIT clamp coverage: a_share / eastmoney / macro / sec_ownership #
+# --- tool-layer PIT clamp coverage: macro / sec_ownership #
 
 def _invoke_routed(monkeypatch, module, tool_name, payload):
     captured = {}
@@ -250,22 +250,15 @@ def _invoke_routed(monkeypatch, module, tool_name, payload):
 
 
 def test_thin_tool_layer_clamps_echoed_today_date(monkeypatch):
-    """a_share_native / eastmoney / macro / sec_ownership tools were the last
-    thin pass-throughs whose vendors PIT-filter by the passed curr_date
-    verbatim — an LLM echoing a today-date would admit post-decision rows
-    into a backtest. Each must clamp to the pinned analysis date, and stay
-    untouched in live mode."""
-    import yialpha.agents.utils.a_share_native_tools as a_share
-    import yialpha.agents.utils.eastmoney_tools as em
+    """macro / sec_ownership tools were thin pass-throughs whose vendors
+    PIT-filter by the passed curr_date verbatim — an LLM echoing a
+    today-date would admit post-decision rows into a backtest. Each must
+    clamp to the pinned analysis date, and stay untouched in live mode."""
     import yialpha.agents.utils.macro_data_tools as macro
     import yialpha.agents.utils.sec_ownership_tools as so
     from yialpha.dataflows.utils import set_analysis_date
 
     cases = [
-        (a_share, "get_a_share_fundamentals_native",
-         {"ticker": "600519.SS", "curr_date": "2026-09-28"}),
-        (em, "get_margin_trading",
-         {"ticker": "600519.SS", "curr_date": "2026-09-28"}),
         (macro, "get_macro_indicators",
          {"indicator": "cpi", "curr_date": "2026-09-28"}),
         (so, "get_form4_insider_trading",

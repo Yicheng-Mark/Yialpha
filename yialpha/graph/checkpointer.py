@@ -9,7 +9,7 @@ import hashlib
 import logging
 import sqlite3
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from langchain_core.runnables.config import RunnableConfig
@@ -114,13 +114,11 @@ def clear_all_checkpoints(data_dir: str | Path) -> int:
             continue
         deleted += 1
         for suffix in ("-wal", "-shm"):
-            try:
+            # Sidecar garbage outlives this sweep; harmless (a fresh DB
+            # never applies a stale salt-mismatched WAL) and the next
+            # sweep retries. Not a db-level failure — don't count it.
+            with suppress(PermissionError, FileNotFoundError):
                 db.with_name(db.name + suffix).unlink(missing_ok=True)
-            except (PermissionError, FileNotFoundError):
-                # Sidecar garbage outlives this sweep; harmless (a fresh DB
-                # never applies a stale salt-mismatched WAL) and the next
-                # sweep retries. Not a db-level failure — don't count it.
-                pass
     if failed:
         logger.warning(
             "clear_all_checkpoints: deleted %d of %d checkpoint DB(s); could "

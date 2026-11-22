@@ -5,8 +5,8 @@ Covers two 2026-09 fixes in dataflows:
 * ``_scoped_yf_socket_timeout``: the process-default socket timeout is a
   GLOBAL — per-call save/restore across threads let an interleaved exit
   permanently pin the YF timeout as the process default. The fix is a
-  depth-counted window (same pattern as ``timeout_shim``): only the outermost
-  entrant saves and only the outermost leaver restores.
+  depth-counted window: only the outermost entrant saves and only the
+  outermost leaver restores.
 * "today" for the yfinance OHLCV cache freshness rule and the y_finance
   history-window TTL is anchored to UTC, not the host-local clock: on a host
   whose local date runs ahead of UTC (e.g. Asia/Shanghai past midnight) a
