@@ -340,6 +340,20 @@ def baseline_backtest(tickers, start, end, step, n_dates, holding_days, cost_bps
     return failures == 0
 
 
+def _safe_filename_component(ticker: str) -> str:
+    """Ticker → legal filename component.
+
+    Same rule as yialpha/backtest/report.py:405-407 (``write_report``'s
+    ``safe`` local): keep alnum + ``.`` ``_`` ``-``, everything else → ``_``.
+    Round-13: ``gate_{t}.md`` interpolated the RAW ticker — ``BTC:USDT``
+    (colon: reserved on Windows) or ``a/b`` (path separator → nested dir)
+    raised OSError only at the report step, i.e. AFTER the full LLM spend of
+    the whole full_ab run. Sanitizing here mirrors the backtest report's
+    own defense instead of duplicating a different one.
+    """
+    return "".join(c if c.isalnum() or c in "._-" else "_" for c in ticker)
+
+
 def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, out, workers=1,
             asset_type="stock", perp_kwargs=None):
     """档 2：基线 vs 风控增强 + 闸门判定。
@@ -429,7 +443,12 @@ def full_ab(tickers, start, end, step, n_dates, holding_days, cost_bps, runs, ou
               f"| DSR {verdict.mean_dsr:.2f} | 跑赢B&H {verdict.beats_buyhold}")
         print(f"    建议: {verdict.recommendation[:160]}...")
         Path(out).mkdir(parents=True, exist_ok=True)
-        (Path(out) / f"gate_{t}.md").write_text(md, encoding="utf-8")
+        # Round-13: sanitize the ticker before it hits the filesystem (see
+        # _safe_filename_component) — the write is the LAST step of full_ab,
+        # after the entire LLM spend.
+        (Path(out) / f"gate_{_safe_filename_component(t)}.md").write_text(
+            md, encoding="utf-8"
+        )
         all_render += baselines + improved
         if not verdict.passes:
             all_pass = False

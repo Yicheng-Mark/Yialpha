@@ -26,13 +26,28 @@ synthetic data drawn from a fixed seed, so the script is verifiable without
 spending DeepSeek tokens. The synthetic data is constructed so the gate
 PASSES, demonstrating the pass path end-to-end.
 
-Exit code: 0 on PASS, 1 on FAIL. ``--dry-run`` always exits 0 (synthetic).
+Exit codes (round-13 #7: infra crashes are never conflated with a
+statistical FAIL):
+    0  PASS (all gate criteria met)
+    1  FAIL (a statistical/perf criterion was rejected)
+    2  usage error (bad --n / --max-threads / --date, caught before any spend)
+    3  infra crash — the harness itself broke before a verdict (graph build
+       failure, missing config key, report IO error, ...)
+``--dry-run`` always exits 0 (synthetic).
+
+Real-mode cost note (round-13 #3): each leg runs ONE extra uncounted
+warm-up propagate before its ``--n`` sampled runs, so a ticker costs
+``2 * (n + 1)`` full LLM runs. The warm-up absorbs one-off cold costs (data
+fetch, disk caches) that would otherwise land entirely on whichever leg
+runs first and bias the speedup criterion.
 
 Dependencies: this script needs ONLY the stdlib + (optionally) scipy /
 scikit-learn for the chi-square and TF-IDF fast paths. Neither scipy nor
 sklearn is required — zero-dependency fallbacks (manual chi-square via the
-Wilson-Hilferty approximation; manual TF-IDF + cosine) are implemented
-below and are the active path on this machine, where neither is installed.
+Wilson-Hilferty approximation; manual TF-IDF + cosine; exact-integer
+Fisher) are implemented below. When the accelerators ARE installed the
+scipy/sklearn paths run, and the sparse-table / same-space policies below
+keep both paths decision-consistent for the same input.
 The pure metric functions import no yialpha code, so the unit tests run
 without loading the heavy graph stack.
 """
@@ -170,8 +185,12 @@ def _chi_square_manual(hist_a: dict, hist_b: dict) -> float:
     Builds the union of categories, lays out a 2 x k contingency table, and
     computes the standard Pearson statistic
     ``sum_ij (O_ij - E_ij)^2 / E_ij`` with ``E_ij = row_i * col_j / total``
-    (df = k - 1). Returns the survival function (p-value). Smoothes any
-    zero expected cell by adding a tiny constant to avoid divide-by-zero.
+    (df = k - 1). NO continuity correction — matching the scipy path's
+    explicit ``correction=False`` (round-13 #6): scipy used to apply Yates
+    for 2x2 tables while this path never did, so the two paths could return
+    opposite verdicts for the same table. Returns the survival function
+    (p-value) via the Wilson-Hilferty approximation. Smoothes any zero
+    expected cell by adding a tiny constant to avoid divide-by-zero.
     """
     cats = list(set(hist_a) | set(hist_b))
     if len(cats) <= 1:
@@ -196,30 +215,137 @@ def _chi_square_manual(hist_a: dict, hist_b: dict) -> float:
     return _chi2_sf_wilson_hilferty(stat, df)
 
 
-def chi_square_p(hist_a: dict, hist_b: dict) -> float:
-    """Two-sample chi-square p-value on rating histograms.
+def _fisher_exact_2x2(a: int, b: int, c: int, d: int) -> float:
+    """Two-sided Fisher exact p-value for the 2x2 table ``[[a,b],[c,d]]``.
 
-    Prefers ``scipy.stats.chi2_contingency`` when scipy is importable; falls
-    back to :func:`_chi_square_manual` (Wilson-Hilferty) otherwise. Returns
-    1.0 when there are too few categories or samples to form a table (the
-    caller's "too few samples" branch then triggers the overlap fallback).
+    Exact integer arithmetic (``math.comb``) with the standard
+    observed-probability two-sided convention: sum the probabilities of all
+    tables no more probable than the observed one. Deliberately used on BOTH
+    the scipy and manual paths — identical on every machine, no floating
+    point ordering differences — and verified against
+    ``scipy.stats.fisher_exact`` (500 random tables, max |diff| < 1e-12).
     """
-    cats = list(set(hist_a) | set(hist_b))
-    if len(cats) <= 1:
+    row1 = a + b
+    col1 = a + c
+    col2 = b + d
+    n = row1 + c + d
+    if row1 <= 0 or (c + d) <= 0 or col1 <= 0 or col2 <= 0 or n <= 0:
         return 1.0
+    denom = math.comb(n, row1)
+    if denom == 0:  # pragma: no cover - unreachable with positive margins
+        return 1.0
+    p_obs = math.comb(col1, a) * math.comb(col2, b)
+    lo = max(0, row1 - col2)
+    hi = min(row1, col1)
+    total = 0
+    for x in range(lo, hi + 1):
+        px = math.comb(col1, x) * math.comb(col2, row1 - x)
+        if px <= p_obs:
+            total += px
+    return total / denom
+
+
+#: Below this minimum expected cell count the chi-square asymptotics are
+#: unreliable (the textbook "expected >= 5" rule). At the gate's default
+#: n=10 per leg spread over 5 rating categories this is the norm, not the
+#: exception — every cell expectation is ~1-4.
+_SPARSE_EXPECTED_MIN = 5.0
+
+
+def _contingency(hist_a: dict, hist_b: dict):
+    """Union-category 2 x k contingency layout from two histograms.
+
+    Returns ``(table, cats, min_expected)`` or ``None`` when no comparison
+    is possible (<=1 effective category, or an empty leg). Categories with a
+    zero count in BOTH legs are dropped (they contribute df without
+    information and can flip the sparse classification).
+    """
+    cats = sorted(
+        c for c in (set(hist_a) | set(hist_b))
+        if (hist_a.get(c, 0) or hist_b.get(c, 0))
+    )
+    if len(cats) <= 1:
+        return None
+    row_a = sum(hist_a.get(c, 0) for c in cats)
+    row_b = sum(hist_b.get(c, 0) for c in cats)
+    if row_a <= 0 or row_b <= 0:
+        return None
+    total = row_a + row_b
+    table = [[hist_a.get(c, 0) for c in cats], [hist_b.get(c, 0) for c in cats]]
+    min_expected = min(
+        row_total * col / total
+        for row_total in (row_a, row_b)
+        for col in (hist_a.get(c, 0) + hist_b.get(c, 0) for c in cats)
+    )
+    return table, cats, min_expected
+
+
+def chi_square_test(hist_a: dict, hist_b: dict) -> tuple[float, str]:
+    """Two-sample homogeneity test on rating histograms -> ``(p, method)``.
+
+    Round-13 #6 selection policy (consistent across the scipy and manual
+    paths, conservative when sparse):
+
+    * Degenerate table (<=1 effective category / empty leg): ``(1.0,
+      "degenerate")`` — cannot reject; the caller's small-sample overlap
+      fallback still applies.
+    * Any expected cell < 5 (sparse):
+        - exactly 2 categories → Fisher exact (two-sided), the conservative
+          exact test for 2x2; computed by :func:`_fisher_exact_2x2` on both
+          paths (machine-identical).
+        - >2 categories → chi-square with the unified no-correction policy
+          on both paths, and the method string DISCLOSES the sparse warning
+          (asymptotic p on sparse cells; treat borderline 0.03-0.07 with
+          caution — a general 2xk exact test is out of scope for stdlib).
+    * Otherwise chi-square, scipy path with explicit ``correction=False``
+      so both paths compute the same Pearson statistic (pre-round-13 the
+      scipy path silently applied Yates continuity for 2x2 tables while
+      the manual path never did — the two paths could disagree across the
+      0.05 threshold for the same table).
+    """
+    layout = _contingency(hist_a, hist_b)
+    if layout is None:
+        return 1.0, "degenerate (too few categories or samples)"
+    table, cats, min_expected = layout
+    sparse = min_expected < _SPARSE_EXPECTED_MIN
+
+    if sparse and len(cats) == 2:
+        (a, b), (c, d) = table[0], table[1]
+        return (
+            _fisher_exact_2x2(a, b, c, d),
+            "Fisher exact (2x2, sparse cells: "
+            f"min expected {min_expected:.2f} < {_SPARSE_EXPECTED_MIN:.0f})",
+        )
+
+    if sparse:
+        method = (
+            "chi-square (SPARSE cells: min expected "
+            f"{min_expected:.2f} < {_SPARSE_EXPECTED_MIN:.0f} — asymptotic "
+            "p, treat borderline 0.03-0.07 with caution)"
+        )
+    else:
+        method = "chi-square"
+
     if _HAS_SCIPY and _scipy_stats is not None:
-        try:  # pragma: no cover - exercised only when scipy is installed
-            row_a = sum(hist_a.get(c, 0) for c in cats)
-            row_b = sum(hist_b.get(c, 0) for c in cats)
-            if row_a == 0 or row_b == 0:
-                return 1.0
-            table = [[hist_a.get(c, 0) for c in cats],
-                     [hist_b.get(c, 0) for c in cats]]
-            _stat, p, _dof, _exp = _scipy_stats.chi2_contingency(table)
-            return float(p)
+        try:
+            _stat, p, _dof, _exp = _scipy_stats.chi2_contingency(
+                table, correction=False
+            )
+            return float(p), method
         except Exception:  # noqa: BLE001
             pass  # fall through to manual
-    return _chi_square_manual(hist_a, hist_b)
+    return _chi_square_manual(hist_a, hist_b), method
+
+
+def chi_square_p(hist_a: dict, hist_b: dict) -> float:
+    """Two-sample homogeneity p-value on rating histograms.
+
+    Thin wrapper over :func:`chi_square_test` (see its docstring for the
+    sparse-table policy). Returns 1.0 when there are too few categories or
+    samples to form a table (the caller's "too few samples" branch then
+    triggers the overlap fallback).
+    """
+    return chi_square_test(hist_a, hist_b)[0]
 
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -275,24 +401,51 @@ def _cosine(vec_a: dict[str, float], vec_b: dict[str, float]) -> float:
     return sum(w * vec_b.get(term, 0.0) for term, w in vec_a.items())
 
 
-def _tfidf_cosine_manual(texts_a: list[str], texts_b: list[str]) -> float:
-    """Mean pairwise cosine between TF-IDF vectors of two text sets.
+def _pairwise_cosines(texts: list[str]) -> list[list[float]]:
+    """N x N cosine-similarity matrix from ONE TF-IDF fit over ``texts``.
 
-    Builds ONE idf over the union corpus (so shared vocabulary gets
-    meaningful weight), then averages cosine over every (a, b) pair. Empty
-    inputs return 0.0.
+    Round-13 #1: the between/within criterion MUST compare vectors from a
+    SINGLE fitted space. The pre-fix code fitted the between leg on the
+    serial+parallel union (N = 2n) while each within leg was fitted on its
+    own texts (N = n): a term unique to one leg gets ~+ln2 idf in the union
+    fit, inflating that leg's vector norms while never matching anything
+    across legs — the between cosine was systematically biased LOW and the
+    criterion false-FAILED 39/40 Monte-Carlo i.i.d. pairs (scanner round 13).
+
+    Both backends fit ONE space with the SAME idf semantics: sklearn's
+    ``TfidfVectorizer()`` defaults (smooth_idf=True → ``idf =
+    ln((1+N)/(1+df)) + 1``, L2 norm) match :func:`_tfidf_vectors` exactly.
     """
-    if not texts_a or not texts_b:
-        return 0.0
-    vectors, _vocab = _tfidf_vectors(list(texts_a) + list(texts_b))
+    texts = list(texts)
+    if not texts:
+        return []
+    if _HAS_SKLEARN and _sk_text is not None and _sk_metrics is not None:
+        try:
+            mat = _sk_text.TfidfVectorizer().fit_transform(texts)
+            sim = _sk_metrics.cosine_similarity(mat)
+            return [[float(v) for v in row] for row in sim]
+        except Exception:  # noqa: BLE001
+            pass  # fall through to manual
+    vectors, _vocab = _tfidf_vectors(texts)
     normed = [_l2_normalize(v) for v in vectors]
-    a_vecs = normed[: len(texts_a)]
-    b_vecs = normed[len(texts_a):]
+    return [[_cosine(a, b) for b in normed] for a in normed]
+
+
+def _mean_block(sim: list[list[float]], r0: int, r1: int, c0: int, c1: int,
+                *, exclude_diagonal: bool = False) -> float:
+    """Mean over the [r0,r1) x [c0,c1) block of a similarity matrix.
+
+    ``exclude_diagonal`` is used for the square within-leg blocks (a text is
+    trivially identical to itself, so the diagonal must not inflate within
+    coherence). Empty range returns 0.0.
+    """
     total = 0.0
     count = 0
-    for va in a_vecs:
-        for vb in b_vecs:
-            total += _cosine(va, vb)
+    for i in range(r0, r1):
+        for j in range(c0, c1):
+            if exclude_diagonal and i == j:
+                continue
+            total += sim[i][j]
             count += 1
     return total / count if count else 0.0
 
@@ -300,40 +453,16 @@ def _tfidf_cosine_manual(texts_a: list[str], texts_b: list[str]) -> float:
 def tfidf_cosine_similarity(texts_a: list[str], texts_b: list[str]) -> float:
     """Mean pairwise TF-IDF cosine between two text sets.
 
-    Prefers scikit-learn (``TfidfVectorizer`` + ``cosine_similarity``) when
-    importable; falls back to :func:`_tfidf_cosine_manual` otherwise. The
-    fallback is the active path on machines without scikit-learn (incl. this
-    one) and is the path exercised by the unit tests.
+    ONE idf fit over the union corpus (so shared vocabulary gets meaningful
+    weight), then the mean cosine over every (a, b) pair. Empty inputs
+    return 0.0. sklearn path and manual path share the fit semantics (see
+    :func:`_pairwise_cosines`).
     """
     if not texts_a or not texts_b:
         return 0.0
-    if _HAS_SKLEARN and _sk_text is not None and _sk_metrics is not None:
-        try:  # pragma: no cover - exercised only when sklearn is installed
-            vec = _sk_text.TfidfVectorizer()
-            mat = vec.fit_transform(list(texts_a) + list(texts_b))
-            a = mat[: len(texts_a)]
-            b = mat[len(texts_a):]
-            sim = _sk_metrics.cosine_similarity(a, b)
-            return float(sim.mean())
-        except Exception:
-            pass  # fall through to manual
-    return _tfidf_cosine_manual(texts_a, texts_b)
-
-
-def _mean_pairwise_within(texts: list[str]) -> float:
-    """Mean pairwise cosine among texts in a single set (within-set coherence)."""
-    n = len(texts)
-    if n < 2:
-        return 1.0 if n == 1 else 0.0
-    vectors, _vocab = _tfidf_vectors(texts)
-    normed = [_l2_normalize(v) for v in vectors]
-    total = 0.0
-    count = 0
-    for i in range(n):
-        for j in range(i + 1, n):
-            total += _cosine(normed[i], normed[j])
-            count += 1
-    return total / count if count else 0.0
+    sim = _pairwise_cosines(list(texts_a) + list(texts_b))
+    n, m = len(texts_a), len(texts_b)
+    return _mean_block(sim, 0, n, n, n + m)
 
 
 def between_vs_within_similarity(
@@ -345,11 +474,31 @@ def between_vs_within_similarity(
     parallel leg is no further from the serial leg than each leg is from
     itself. A single-text set has within-similarity 1.0 (a text is identical
     to itself); an empty set has 0.0.
+
+    Round-13 #1: within and between are computed from the SAME set of
+    L2-normalized vectors fitted in ONE union space (serial+parallel
+    concatenated through :func:`_pairwise_cosines`), so the comparison is
+    apples-to-apples and identically-distributed legs pass the criterion
+    (Monte-Carlo H0 pass rate 20/20 on the regression-test construction;
+    the pre-fix split-space code passed 13/20 on the same seeds and 1/40 on
+    the scanner's construction).
     """
+    s = list(reports_serial)
+    p = list(reports_parallel)
+    n, m = len(s), len(p)
+    sim = _pairwise_cosines(s + p)
+
+    def within(r0: int, r1: int) -> float:
+        k = r1 - r0
+        if k < 2:
+            return 1.0 if k == 1 else 0.0
+        return _mean_block(sim, r0, r1, r0, r1, exclude_diagonal=True)
+
+    between = _mean_block(sim, 0, n, n, n + m) if (n and m) else 0.0
     return {
-        "within_serial": _mean_pairwise_within(reports_serial),
-        "within_parallel": _mean_pairwise_within(reports_parallel),
-        "between": tfidf_cosine_similarity(reports_serial, reports_parallel),
+        "within_serial": within(0, n),
+        "within_parallel": within(n, n + m),
+        "between": between,
     }
 
 
@@ -380,7 +529,7 @@ def parse_risk_overlay(decision_text: str) -> dict | None:
     return out
 
 
-def risk_overlay_determinism(runs: list[dict]) -> bool:
+def risk_overlay_determinism(runs: list[dict]) -> bool | None:
     """Within each rating group, the risk-overlay numbers must be identical.
 
     The overlay is a deterministic function of (rating, price, ATR), so two
@@ -390,11 +539,26 @@ def risk_overlay_determinism(runs: list[dict]) -> bool:
     ``risk_overlay is None`` (overlay disabled) are treated as vacuously
     consistent. Floats are compared with a tight tolerance (1e-9) to absorb
     formatting-only differences.
+
+    Returns tri-state (round-13 #5):
+
+    * ``True``  — at least one group was actually verified consistent (and
+      no group violated). All-vacuous runs (overlay disabled everywhere)
+      also return ``True`` — nothing claimed to be checked.
+    * ``False`` — a violation: mixed overlay-present/absent within a group,
+      or same-rating runs disagreeing on a parsed number.
+    * ``None``  — the overlay MARKER was present but no group yielded a
+      single parseable field, so nothing could be verified. The pre-fix code
+      compared ``None == None`` per field, silently treating such groups as
+      "equal" and PASSing criterion 3 vacuously; honest reporting requires
+      N/A instead (a parsing regression is not determinism evidence).
     """
     by_rating: dict[str, list[dict]] = {}
     for r in runs:
         rating = r.get("rating", "?")
         by_rating.setdefault(rating, []).append(r)
+    any_verified = False
+    any_na = False
     for _rating, group in by_rating.items():
         overlays = [g.get("risk_overlay") for g in group]
         # Skip groups where every overlay is missing (risk disabled).
@@ -403,6 +567,18 @@ def risk_overlay_determinism(runs: list[dict]) -> bool:
         # If some have an overlay and some don't, that's inconsistent.
         if any(o is None for o in overlays):
             return False
+        # Marker present in every run of this group, but did ANY run parse
+        # at least one number? An all-None-fields group is unverifiable —
+        # count it N/A rather than silently "equal" (round-13 #5).
+        group_parsed = any(
+            (o or {}).get(k) is not None
+            for o in overlays
+            for k in ("target_weight", "stop_loss", "entry_price")
+        )
+        if not group_parsed:
+            any_na = True
+            continue
+        any_verified = True
         # After the None-check above, all overlays are dicts.
         ref = overlays[0] or {}
         for o in overlays[1:]:
@@ -411,11 +587,18 @@ def risk_overlay_determinism(runs: list[dict]) -> bool:
                 a = ref.get(key)
                 b = o.get(key)
                 if a is None and b is None:
+                    # Neither run exposes this field: not evidence either
+                    # way (the field-level vacuous case, tolerated as
+                    # before — at least one field of the group IS parsed).
                     continue
                 if a is None or b is None:
                     return False
                 if abs(float(a) - float(b)) > 1e-9:
                     return False
+    if any_verified:
+        return True
+    if any_na:
+        return None
     return True
 
 
@@ -480,10 +663,14 @@ def summarize_gate(metrics: dict) -> tuple[bool, list[str]]:
                 f"min(within_serial {ws:.3f}, within_parallel {wp:.3f})"
             )
 
-    # 3) Risk-overlay determinism in BOTH legs.
-    if not metrics.get("risk_determinism_serial", False):
+    # 3) Risk-overlay determinism in BOTH legs. Tri-state (round-13 #5):
+    #    ``None`` = N/A — the overlay marker appeared but no numbers could
+    #    be parsed in any group, so there is nothing to compare. N/A does
+    #    not fail the gate (it is not a determinism violation) but it is
+    #    NOT a pass either; the report renders it explicitly.
+    if metrics.get("risk_determinism_serial") is False:
         fail("risk-overlay determinism FAILED in serial leg")
-    if not metrics.get("risk_determinism_parallel", False):
+    if metrics.get("risk_determinism_parallel") is False:
         fail("risk-overlay determinism FAILED in parallel leg")
 
     # 4) No empty / truncated reports.
@@ -610,6 +797,12 @@ def write_report(
     lines.append(
         f"- Chi-square p = {p:.4f}" if p is not None else "- Chi-square p = N/A"
     )
+    method = metrics.get("rating_test_method")
+    if method:
+        # Round-13 #6: disclose WHICH test produced the p-value (Fisher
+        # exact on sparse 2x2 tables / chi-square with its sparse-cells
+        # caveat) so a borderline verdict is auditable.
+        lines.append(f"- Rating test: {method}")
     if overlap is not None:
         lines.append(f"- Distribution overlap = {overlap:.2f}")
     lines.append("")
@@ -631,8 +824,16 @@ def write_report(
 
     lines.append("## Risk-overlay determinism")
     lines.append("")
-    lines.append(f"- Serial leg: {'PASS' if metrics.get('risk_determinism_serial') else 'FAIL'}")
-    lines.append(f"- Parallel leg: {'PASS' if metrics.get('risk_determinism_parallel') else 'FAIL'}")
+
+    def _det(v) -> str:
+        # Tri-state render (round-13 #5): N/A is honest about "marker hit
+        # but nothing parsed" — never shown as PASS, never hidden as FAIL.
+        if v is None:
+            return "N/A (overlay present but no numbers parsed; not verified)"
+        return "PASS" if v else "FAIL"
+
+    lines.append(f"- Serial leg: {_det(metrics.get('risk_determinism_serial'))}")
+    lines.append(f"- Parallel leg: {_det(metrics.get('risk_determinism_parallel'))}")
     lines.append("")
 
     overall, reasons = summarize_gate(metrics)
@@ -762,7 +963,7 @@ def _compute_metrics(
     p_ratings = [r["rating"] for r in parallel_ok]
     sh = rating_histogram(s_ratings)
     ph = rating_histogram(p_ratings)
-    p = chi_square_p(sh, ph)
+    p, rating_test_method = chi_square_test(sh, ph)
     overlap = _overlap_ratio(sh, ph)
 
     fields = ("market_report", "sentiment_report", "news_report", "fundamentals_report")
@@ -832,6 +1033,7 @@ def _compute_metrics(
         "serial_hist": sh,
         "parallel_hist": ph,
         "rating_p": p,
+        "rating_test_method": rating_test_method,
         "overlap_ratio": overlap,
         "per_field_similarity": per_field,
         "risk_determinism_serial": risk_overlay_determinism(serial_ok),
@@ -912,6 +1114,23 @@ def _build_graph(leg: str, args):
     from yialpha.graph.trading_graph import YiAlphaGraph  # noqa: E402
 
     config = DEFAULT_CONFIG.copy()
+    # Round-13 #2: force the per-call LLM disk cache OFF (same defensive
+    # shape as run_baseline.py's memory_enabled guard at :106-109, applied
+    # here to llm_cache). YIALPHA_LLM_CACHE=true would install the shared
+    # DiskLLMCache and replay byte-identical ChatGenerations per call: the
+    # parallel leg would replay the serial leg's responses, collapsing all
+    # four gate criteria into hollow PASSes (identical texts -> TF-IDF
+    # trivially equal; identical ratings -> chi-square p=1; ~zero wall
+    # spread -> speedup meaningless). The cache must NOT decide the default
+    # flip; hard-disable regardless of env/.env.
+    config["llm_cache"] = False
+    # Round-13 #4: force persistent memory OFF (mirrors run_baseline.py
+    # :106-109 — "validation runs must not depend on persistent lessons
+    # written by an earlier ticker/run ordering"). A shared memory log
+    # makes later runs depend on earlier ones: the legs stop being i.i.d.
+    # samples of the same distribution, which is the null hypothesis every
+    # criterion here tests.
+    config["memory_enabled"] = False
     # Force batch_workers=1 to isolate the analyst-parallel effect from
     # batch concurrency (the K-graph pool). The iron law is about the
     # analyst fan-out only.
@@ -929,13 +1148,37 @@ def _build_graph(leg: str, args):
 
 
 def _preflight_warn(args) -> None:
-    """Warn (not fail) when the shared rate limiter would throttle parallelism."""
+    """Warn (not fail) when environment config would hollow out the gate."""
     try:
         from yialpha.default_config import DEFAULT_CONFIG  # noqa: E402
     except Exception as exc:  # noqa: BLE001
         print(f"[preflight] could not import DEFAULT_CONFIG: {exc}", file=sys.stderr)
         return
     cfg = DEFAULT_CONFIG
+    if cfg.get("llm_cache"):
+        # Round-13 #2: loud, because the damage is silent — the gate keeps
+        # running, "passes", and the parallel default flips on evidence the
+        # cache fabricated. _build_graph hard-forces llm_cache=False so the
+        # run itself stays valid; this warning explains why the env var had
+        # no effect (the user turned it on for a reason and should know it
+        # was ignored here).
+        print(
+            "[preflight] WARNING: YIALPHA_LLM_CACHE=true is set. The per-call "
+            "disk cache replays byte-identical LLM responses across runs, "
+            "which would hollow out EVERY criterion of this gate (identical "
+            "reports, identical ratings, fake speedup). This script FORCES "
+            "llm_cache=False on both legs and ignores the env var.",
+            file=sys.stderr,
+        )
+    if cfg.get("memory_enabled"):
+        # Round-13 #4: same class of problem — a shared memory log makes the
+        # legs stateful, violating the i.i.d. null hypothesis.
+        print(
+            "[preflight] WARNING: memory_enabled=true. A shared memory log "
+            "makes later runs depend on earlier ones (non-i.i.d. legs). This "
+            "script FORCES memory_enabled=False on both legs.",
+            file=sys.stderr,
+        )
     if cfg.get("llm_rate_limiter") and int(cfg.get("llm_rpm", 60)) < 120:
         print(
             f"[preflight] WARNING: llm_rate_limiter is ON with llm_rpm="
@@ -1050,6 +1293,30 @@ def _capture_run(graph, ticker: str, date: str) -> dict:
 
 
 def _real_run(args) -> int:
+    """Real-mode driver. Infra crashes exit 3, statistical FAIL exits 1.
+
+    Round-13 #7: anything that escapes a single propagate (graph build
+    failure, missing config key, report IO error, ...) is an INFRA failure,
+    not a distributional verdict. Exit 1 is reserved for "the parallel leg
+    was measured and rejected"; conflating the two would let a broken
+    harness masquerade as a FAIL (blocking the default flip) or hide behind
+    it. Per-run propagate exceptions are already caught inside
+    :func:`_capture_run` (they become criterion-6 failures), so anything
+    raising out of the loop below is by construction harness-level.
+    """
+    try:
+        return _real_run_inner(args)
+    except Exception as exc:  # noqa: BLE001 - infra crash boundary
+        print(
+            f"\n[infra] A/B harness crashed before a verdict could be "
+            f"reached (this is NOT a statistical FAIL): {exc!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 3
+
+
+def _real_run_inner(args) -> int:
     _preflight_warn(args)
     out_dir = Path(args.out_dir).expanduser()
     overall_any = True
@@ -1062,9 +1329,24 @@ def _real_run(args) -> int:
         serial_runs: list[dict] = []
         parallel_runs: list[dict] = []
 
+        # Round-13 #3: one uncounted WARM-UP per leg, result discarded. The
+        # first propagate on a fresh graph pays one-off cold costs (data
+        # fetch, connection/DNS warm-up, disk caches) that have nothing to
+        # do with the analyst concurrency under test; with the leg order
+        # fixed serial-first they landed entirely on the serial leg and
+        # systematically inflated the speedup criterion. Warm-up (rather
+        # than interleaving serial/parallel samples) is the simpler and
+        # clearer remedy: each leg is measured warm, leg order stays fixed,
+        # both legs keep symmetric n-sample statistics, and no metric input
+        # changes shape. Cost: +2 propagates per ticker.
+        print(f"  [{ticker}] serial warm-up (discarded) ...", flush=True)
+        _capture_run(serial_graph, ticker, args.date)
         for i in range(args.n):
             print(f"  [{ticker}] serial run {i + 1}/{args.n} ...", flush=True)
             serial_runs.append(_capture_run(serial_graph, ticker, args.date))
+
+        print(f"  [{ticker}] parallel warm-up (discarded) ...", flush=True)
+        _capture_run(parallel_graph, ticker, args.date)
         for i in range(args.n):
             print(f"  [{ticker}] parallel run {i + 1}/{args.n} ...", flush=True)
             parallel_runs.append(_capture_run(parallel_graph, ticker, args.date))
