@@ -137,12 +137,22 @@ def _cached_json(filename: str, fetch, ttl_days: float) -> Any:
     if mtime != -1.0 and hit is not None and hit[0] == mtime:
         return hit[1]
     parsed = json.loads(raw)
+    # Round-13: bounded FIFO, same shape as binance's _HISTORY_MEMO_MAX —
+    # the key carries the cache dir, so a process whose config rotates
+    # data_cache_dir (or an unbounded artifact fan-out) would otherwise pin
+    # every parse it ever did for its whole lifetime. The OLDEST INSERTED
+    # key is evicted at the cap; a key already present is refreshed in
+    # place (no new slot), so the mtime-hit semantics above are untouched.
+    if len(_PARSE_MEMO) >= _PARSE_MEMO_MAX and key not in _PARSE_MEMO:
+        _PARSE_MEMO.pop(next(iter(_PARSE_MEMO)))
     _PARSE_MEMO[key] = (mtime, parsed)
     return parsed
 
 
 #: (cache dir, filename) -> (mtime, parsed payload); see _cached_json.
 _PARSE_MEMO: dict[tuple[str, str], tuple[float, Any]] = {}
+#: Round-13: FIFO cap for _PARSE_MEMO (binance._HISTORY_MEMO_MAX precedent).
+_PARSE_MEMO_MAX = 64
 
 
 def perp_base_symbol(ticker: str) -> str:

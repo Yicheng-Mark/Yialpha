@@ -65,6 +65,7 @@ from .errors import (
     VendorNotConfiguredError,
     VendorRateLimitError,
 )
+from .utils import current_pit_end
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,20 @@ _NEWS_WINDOW_CAP_DAYS = 90
 # by a lock because batch workers are threads.
 _PRO_HANDLE_LOCK = threading.Lock()
 _PRO_HANDLE_CACHE: dict[str, Any] = {}
+
+
+class _EmptyVendorPayload(Exception):
+    """Internal marker: the news API returned an empty frame.
+
+    Round-13 (same contract as y_finance._EmptyVendorPayload): raised from
+    inside the ``cached_or_fetch`` fetch callable so an empty result is NOT
+    persisted for the ~30-minute news TTL — the old code cached ``b""``, and
+    headlines published in the following minutes stayed invisible until the
+    TTL expired. When a *stale* cache exists, ``cached_or_fetch`` serves it
+    with the usual stale-serve warning before this marker ever propagates
+    (old headlines beat no headlines). Callers catch the marker and take the
+    existing honest-empty path.
+    """
 
 
 def _require_tushare():
@@ -238,6 +253,12 @@ def get_a_share_fundamentals_native(
     """
     pro = _require_tushare()
     ts_code = _to_tushare_code(ticker)
+    # PIT clamp (round-13, same defense as the BaoStock daily-series entries):
+    # a curr_date beyond the run's pinned analysis date must not widen the
+    # query window (the API's date params and the client-side filter both
+    # trust curr_date verbatim — future daily_basic rows would enter the
+    # prompt). No-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
     lower_d = upper_d - timedelta(days=int(look_back_days))
@@ -318,6 +339,11 @@ def get_a_share_news_native(
     # 6-digit code as the keyword and let the LLM judge relevance — same intent
     # as AKShare's per-stock feed but multi-source.
     keyword = _to_tushare_code(ticker).split(".")[0]
+    # PIT clamp (round-13, see get_a_share_fundamentals_native): the query
+    # window, the cache key and the client-side datetime filter all derive
+    # from curr_date, so a date beyond the pinned analysis date must be
+    # clamped before any of them are built. No-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
     upper_set = bool(upper)
@@ -333,19 +359,26 @@ def get_a_share_news_native(
             start_date=_ts_date(query_lower_d), end_date=_ts_date(upper_d),
         )
         if df is None or getattr(df, "empty", True):
-            # An empty frame round-trips as empty bytes; the caller's honest
-            # empty handling takes over (never cache a fabricated empty CSV).
-            return b""
+            # Round-13: raise the marker instead of returning b"" — a "truthy"
+            # empty fetch made cached_or_fetch persist b"" for the news TTL,
+            # blocking later retries from seeing headlines published since.
+            # See _EmptyVendorPayload for the stale-cache precedence.
+            raise _EmptyVendorPayload(
+                f"tushare news: empty frame {_ts_date(query_lower_d)}"
+                f"..{_ts_date(upper_d)}")
         return df.to_csv(index=False).encode("utf-8")
 
     # Cache key: the query window (start/end/src). The API call itself is not
     # ticker-specific (keyword filtering is client-side), so one window is
     # shared by every ticker in a batch run.
     filename = f"news_sina_{_ts_date(query_lower_d)}_{_ts_date(upper_d)}.csv"
-    raw = cached_or_fetch(
-        vendor_cache_dir("tushare"), filename, _fetch,
-        ttl_days=_NEWS_CACHE_TTL_DAYS, vendor="tushare",
-    )
+    try:
+        raw = cached_or_fetch(
+            vendor_cache_dir("tushare"), filename, _fetch,
+            ttl_days=_NEWS_CACHE_TTL_DAYS, vendor="tushare",
+        )
+    except _EmptyVendorPayload:
+        raw = b""
     if not raw or not raw.strip():
         df = pd.DataFrame()
     else:

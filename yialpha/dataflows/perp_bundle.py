@@ -664,13 +664,25 @@ def _fetch_adl(symbol: str) -> dict[str, Any]:
         )
         entry = {}
         if isinstance(data, list) and data:
+            # Round-13: ZERO matching entries means the payload is for some
+            # other contract than the one asked for (endpoint regression /
+            # mangling proxy). The round-12 matcher still fell back to
+            # data[0] in that case, rendering an arbitrary contract's
+            # quantiles as this one's ok-status ADL. Raise into this leg's
+            # fail-soft except instead, so the assembler records the honest
+            # optional-unavailable degradation note naming the contract we
+            # requested — never a wrong-contract ok.
             entry = next(
                 (
                     d for d in data
                     if isinstance(d, dict) and d.get("symbol") == canonical
                 ),
-                data[0] if isinstance(data[0], dict) else {},
+                None,
             )
+            if entry is None:
+                raise ValueError(
+                    f"adlQuantile response has no entry for {canonical}"
+                )
         raw = entry.get("adlQuantile") if isinstance(entry, dict) else None
         if not isinstance(raw, dict):
             raise ValueError("adlQuantile returned no quantiles")  # noqa: TRY301

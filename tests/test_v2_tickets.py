@@ -33,6 +33,10 @@ def test_frozen_field_set_is_complete():
         "estimated_cost", "net_edge", "proposed_size", "final_size",
         "leverage", "confidence", "prediction_ids", "evidence_ids",
         "regime_id", "cost_model_version", "veto_reasons", "resize_reasons",
+        # Round-13: the bps decomposition behind estimated_cost (additive
+        # optional, same rule; the outcome scorer requires it on production
+        # tickets — see build_candidate_ticket / outcome_compute).
+        "cost_detail",
         # V2.1 fair-value linkage (additive optionals; TICKET_VERSION stays v1)
         "underlying_target", "contract_target", "price_target_basis",
         "quote_fx", "basis_snapshot",

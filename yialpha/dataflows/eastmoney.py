@@ -48,6 +48,7 @@ import requests
 
 from .disk_cache import MinIntervalThrottle, cached_or_fetch, vendor_cache_dir
 from .errors import NoMarketDataError, VendorRateLimitError
+from .utils import current_pit_end
 
 logger = logging.getLogger(__name__)
 
@@ -220,8 +221,16 @@ _MARGIN_PAGE_SIZE = 400   # rows per request (most-recent-first)
 _MARGIN_MAX_PAGES = 5     # hard cap ≈ 8 years of daily rows; bounds fan-out
 
 
-def _parse_margin(raw: bytes, scode: str) -> list[dict]:
-    """Parse the RPTA_WEB_RZRQ_GGMX payload into per-day margin dicts."""
+def _parse_margin(raw: bytes, scode: str) -> tuple[list[dict], int]:
+    """Parse the RPTA_WEB_RZRQ_GGMX payload into per-day margin dicts.
+
+    Round-13: also returns the page's RAW API row count (before the empty-DATE
+    rows below are dropped). The pagination loop must terminate on the API's
+    own row count — it used to count the FILTERED rows, so a full 400-row page
+    carrying one invalid (empty-DATE) row parsed to 399 and was misread as the
+    report's last page, silently truncating older history out of long
+    look-back windows.
+    """
     try:
         j = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -230,7 +239,7 @@ def _parse_margin(raw: bytes, scode: str) -> list[dict]:
     if not j.get("success"):
         # success=False with empty data is "no margin data for this name" (e.g.
         # it is not on the 两融 list) -> treated as honest-empty by the caller.
-        return []
+        return [], 0
     rows = ((j.get("result") or {}).get("data")) or []
     out: list[dict] = []
     for r in rows:
@@ -247,7 +256,7 @@ def _parse_margin(raw: bytes, scode: str) -> list[dict]:
             "rzjme": r.get("RZJME"),    # 融资净买入额 (元)
             "rzyezb": r.get("RZYEZB"),  # 融资余额占比 (fraction)
         })
-    return out
+    return out, len(rows)
 
 
 def get_margin_trading(
@@ -277,6 +286,12 @@ def get_margin_trading(
     window — it self-heals within the TTL (review P3-2, accepted).
     """
     _, scode = _to_em_symbol(ticker)
+    # PIT clamp (round-13, same defense as the A-share daily-series vendors):
+    # a curr_date beyond the run's pinned analysis date must not widen the
+    # row window NOR stretch the same-day TTL below (both derive from
+    # curr_date verbatim — future margin rows would enter the prompt).
+    # No-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
     upper = (curr_date or "")[:10]
     upper_d = date.fromisoformat(upper) if upper else date.today()
     ttl_days = _SAME_DAY_TTL_DAYS if upper_d == date.today() else 1.0
@@ -299,7 +314,7 @@ def get_margin_trading(
         }
         cache_path = os.path.join(
             _cache_dir(), f"margin_{scode}_p{page}.json")
-        page_rows = _parse_margin(
+        page_rows, api_rows = _parse_margin(
             _cached_or_fetch(cache_path, _MARGIN_URL, params,
                              ttl_days=ttl_days),
             scode,
@@ -308,7 +323,10 @@ def get_margin_trading(
             if r["date"] not in seen_dates:
                 seen_dates.add(r["date"])
                 rows.append(r)
-        if len(page_rows) < _MARGIN_PAGE_SIZE:
+        # Round-13: terminate on the API's RAW row count — the filtered
+        # ``page_rows`` undercounts a full page that carried empty-DATE rows,
+        # which used to end pagination one (or more) pages early.
+        if api_rows < _MARGIN_PAGE_SIZE:
             break  # short page = the report's last page
         if page_rows and page_rows[-1]["date"] <= lower_iso:
             break  # window lower bound already covered

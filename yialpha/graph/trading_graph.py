@@ -2773,11 +2773,25 @@ class YiAlphaGraph:
                 )
 
             # Clear checkpoint on successful completion to avoid stale state.
+            # Round-13: fail-soft like the seams above — clear_checkpoint now
+            # warns through sqlite3.Error internally, but its own connect can
+            # still raise, and a cleanup failure at this seam must never
+            # discard the completed run (run_robust would re-bill the whole
+            # graph on retry). Residual cost: a stale checkpoint that a later
+            # resume skips past anyway.
             if self.config.get("checkpoint_enabled"):
-                clear_checkpoint(
-                    self.config["data_cache_dir"], company_name, str(trade_date),
-                    self._run_signature(asset_type),
-                )
+                try:
+                    clear_checkpoint(
+                        self.config["data_cache_dir"], company_name, str(trade_date),
+                        self._run_signature(asset_type),
+                    )
+                except Exception as exc:  # noqa: BLE001 — see note above
+                    logger.warning(
+                        "post-run checkpoint clear failed for %s on %s (run "
+                        "kept; a later resume may continue from stale graph "
+                        "state): %s",
+                        company_name, trade_date, exc,
+                    )
 
             return final_state, self.process_signal(final_state["final_trade_decision"])
         finally:
@@ -3056,10 +3070,22 @@ class YiAlphaGraph:
         if self.config.get("checkpoint_enabled"):
             from yialpha.graph.checkpointer import clear_checkpoint
 
-            clear_checkpoint(
-                self.config["data_cache_dir"], ticker, str(trade_date),
-                self._run_signature(asset_type),
-            )
+            # Round-13: fail-soft like _run_graph's finalize seams — a DB the
+            # cleanup cannot even open (unreadable beyond the sqlite3.Error
+            # handling inside clear_checkpoint) must not blow up an already-
+            # streamed, already-logged run. Only the cleanup is lost.
+            try:
+                clear_checkpoint(
+                    self.config["data_cache_dir"], ticker, str(trade_date),
+                    self._run_signature(asset_type),
+                )
+            except Exception as exc:  # noqa: BLE001 — cleanup seam, run stays
+                logger.warning(
+                    "post-run checkpoint clear failed for %s on %s (run "
+                    "kept; a later resume may continue from stale graph "
+                    "state): %s",
+                    ticker, trade_date, exc,
+                )
         # Round-6: mirror ``_run_graph``'s finally-block resets. The streamed
         # path used to leave the ledger run context / PIT analysis date /
         # run scope bound after the run — one-run-per-process today, but any

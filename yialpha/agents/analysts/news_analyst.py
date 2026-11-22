@@ -145,13 +145,21 @@ def _get_news_impl(ticker: str, start_date: str, end_date: str) -> str:
     return get_news(ticker, start_date, end_date)  # type: ignore[operator]
 
 
-def _fetch_company_news(underlying: str, start_date: str, end_date: str) -> str:
+def _fetch_company_news(underlying: str, start_date: str | None, end_date: str) -> str:
     """Company-angle coverage via the news vendor chain (date-bounded, PIT-safe).
 
     A hard failure degrades to an explicit per-angle placeholder instead of
     killing the node — the contract angle is fetched independently and still
-    reaches the report (per-angle fault isolation).
+    reaches the report (per-angle fault isolation). ``start_date is None``
+    (round-13: :func:`_lookback_start` refused to invent a window for an
+    unparseable trade date) takes the same per-angle degradation up front —
+    the vendor chain must not see an undefined window.
     """
+    if start_date is None:
+        return (
+            "<company-angle news unavailable: unparseable trade date; no "
+            "honest window could be derived>"
+        )
     try:
         return _cap_articles(
             _get_news_impl(underlying, start_date, end_date), _MAX_COMPANY_ARTICLES
@@ -208,17 +216,30 @@ def _fetch_perp_contract_news(ticker: str, current_date: str) -> str:
         return f"<contract-angle news unavailable: {type(exc).__name__}>"
 
 
-def _lookback_start(trade_date: str) -> str:
+def _lookback_start(trade_date: str) -> str | None:
     # trade_date is dual-form (live runs carry a full ISO timestamp, replays
     # a date-only string — the round-10 lesson from regime/compute.py), so
     # normalize to the date part before strptime (same idiom as
     # dataflows/utils.is_historical_date). A bare strptime would ValueError
     # on a programmatic live entry like propagate(t, "2026-08-01 16:00:00")
     # and kill the whole run before any LLM call.
+    #
+    # Round-13: the [:10] head of a genuinely malformed date ("2026/08/01")
+    # still fails strptime, so the ValueError is contained — WARNING + None,
+    # and :func:`_fetch_company_news` degrades the company angle to its
+    # per-angle placeholder (the contract angle already fails closed via
+    # is_historical_date's malformed-date branch). No date invented: None
+    # means "no honest window can be derived".
     trade_date = str(trade_date)[:10]
-    return (
-        datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=_STOCK_PERP_LOOKBACK_DAYS)
-    ).strftime("%Y-%m-%d")
+    try:
+        parsed = datetime.strptime(trade_date, "%Y-%m-%d")
+    except ValueError:
+        logger.warning(
+            "news lookback: trade_date %r is not a parseable YYYY-MM-DD "
+            "date; company-angle window degrades to unavailable", trade_date,
+        )
+        return None
+    return (parsed - timedelta(days=_STOCK_PERP_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
 
 
 def _stock_perp_news_section(

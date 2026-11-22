@@ -55,9 +55,10 @@ import os
 import socket
 import time
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from typing import NamedTuple, TypeVar
+from zoneinfo import ZoneInfo
 
 from .baostock_fields import (
     BALANCE_COLUMNS,
@@ -306,6 +307,22 @@ def _query_daily(bs, code: str) -> list[dict]:
     return rows
 
 
+def _cn_today() -> date:
+    """Today anchored to Beijing time (Asia/Shanghai), not the host clock.
+
+    Round-13 (mirrors stockstats_utils._utc_today / accuracy._us_equity_today):
+    this vendor serves China A-shares, and BaoStock publishes the daily bar on
+    the Beijing post-close clock. A host-local ``date.today()`` classifies
+    "same day" by whatever timezone the process runs in — on a host off
+    Beijing (e.g. UTC), the local date runs behind/ahead of the exchange
+    calendar for hours a day, so a live analysis of the Beijing today was
+    misclassified as an immutable historical date (1-day TTL, the day's bar
+    never refreshed) and vice versa. The exchange's own calendar is the
+    correct anchor for BOTH the same-day refresh rule and the finality gate.
+    """
+    return datetime.now(ZoneInfo("Asia/Shanghai")).date()
+
+
 def _daily_cache_ttl_days(
     curr_date: str | None, stale_bytes: bytes | None = None
 ) -> float:
@@ -327,14 +344,20 @@ def _daily_cache_ttl_days(
     whole session: robust retries (and the LLM response cache keyed on the
     rendered prompt) see identical data across attempts instead of a
     fresh/stale flip whenever the public service is flaky.
+
+    "Today" is the BEIJING date (:func:`_cn_today`, round-13) — both the
+    same-day test and the finality gate ask "does the exchange's calendar
+    still owe us a bar today?", which only the exchange's own timezone
+    answers.
     """
+    today = _cn_today()
     upper = (curr_date or "")[:10]
     try:
-        is_today = (not upper) or date.fromisoformat(upper) == date.today()
+        is_today = (not upper) or date.fromisoformat(upper) == today
     except ValueError:
         is_today = False  # malformed date: let the caller's validation handle it
     if is_today:
-        if stale_bytes is not None and _cache_has_bar(stale_bytes, date.today()):
+        if stale_bytes is not None and _cache_has_bar(stale_bytes, today):
             return _CACHE_TTL_S / 86_400.0
         return _SAME_DAY_REFRESH_S / 86_400.0
     return _CACHE_TTL_S / 86_400.0
@@ -452,6 +475,12 @@ def get_a_share_ohlc_native(
     within the look-back window. Non-A-share ticker -> :class:`NoMarketDataError`.
     """
     code = _to_baostock_code(ticker)
+    # PIT clamp (round-13, closes the round-11 gap on the two daily-series
+    # entries): a curr_date beyond the run's pinned analysis date must not
+    # widen the row window (future bars) nor stretch the same-day cache TTL —
+    # curr_date is handed to _cached_daily BEFORE the window math, so the
+    # clamp has to precede it. No-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
     rows = _cached_daily(code, curr_date)
 
     upper = (curr_date or "")[:10]
@@ -506,6 +535,11 @@ def get_a_share_fundamentals_native(
     ticker -> :class:`NoMarketDataError`.
     """
     code = _to_baostock_code(ticker)
+    # PIT clamp (round-13, see get_a_share_ohlc_native): the clamp must
+    # precede _cached_daily (TTL selection) and the window math so a curr_date
+    # beyond the pinned analysis date cannot serve future valuation rows.
+    # No-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
     rows = _cached_daily(code, curr_date)
 
     upper = (curr_date or "")[:10]

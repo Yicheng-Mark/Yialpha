@@ -63,6 +63,13 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> dict | str:
             *today's* and would leak the future on a past backtest date. The
             router turns this into the NO_DATA_AVAILABLE sentinel.
     """
+    # PIT clamp (round-13, same gate-side defense as y_finance.get_fundamentals
+    # round-8; the statement entries below got it in round-11): a curr_date
+    # beyond the run's pinned analysis date (e.g. an LLM echoing a cached
+    # header's "today") must be clamped before the leak gate judges it —
+    # unclamped, an inflated "today-ish" date passed as live mode and served
+    # the OVERVIEW snapshot into a historical run. No-op in live mode.
+    curr_date = current_pit_end(curr_date) or curr_date
     if overview_would_leak_future(curr_date):
         canonical = normalize_symbol(ticker)
         raise NoMarketDataError(

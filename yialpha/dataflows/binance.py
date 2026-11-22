@@ -1861,7 +1861,12 @@ def get_binance_spot_perp_basis(
     if start_date:
         start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=UTC)
     else:
-        start_dt = end_dt - timedelta(days=limit)
+        # Round-13: exactly `limit` calendar days END-INCLUSIVE (start
+        # limit-1 days back). The old `days=limit` spanned limit+1 days
+        # under a header claiming "last {limit} days" — the same
+        # end-inclusive off-by-one the round-12 funding fix corrected in
+        # perp_bundle._fetch_funding (`_window(7)` -> `_window(6)`).
+        start_dt = end_dt - timedelta(days=limit - 1)
     start_ms = int(start_dt.timestamp() * 1000)
     end_ms = int((end_dt.timestamp() + 86399) * 1000)  # end-of-day inclusive
 
@@ -1952,6 +1957,16 @@ def get_binance_spot_perp_basis(
 # contracts have no company fundamentals at all.
 
 _EQUITY_PERP_BASES_LOCK = threading.Lock()
+#: Round-13: single-flight gate around the exchangeInfo (re)fetch. The warm
+#: used to run its network request INSIDE _EQUITY_PERP_BASES_LOCK, so a slow
+#: or stalled exchangeInfo call froze every cache-only reader
+#: (equity_perp_bases / equity_perp_listing_info) for the request's whole
+#: duration. The gate replaces that coupling: the data lock is held only for
+#: the fresh-checks and the all-at-once cache swap, the network round trip
+#: runs outside it, and concurrent warmers still collapse to ONE request via
+#: the double-check inside the gate (the binance_filters._fetch_gate
+#: precedent — a per-key miss gate in front of a TTL cache).
+_EQUITY_PERP_WARM_GATE = threading.Lock()
 _EQUITY_PERP_BASES_CACHE: frozenset[str] | None = None
 #: Per-base listing facts from the LAST SUCCESSFUL exchangeInfo warm:
 #: ``{base: {"onboard_date": iso|None, "status": "TRADING"}}``. Cache-only like
@@ -2050,10 +2065,23 @@ def warm_equity_perp_bases() -> frozenset[str]:
     is honoured for ``_EQUITY_PERP_WARM_TTL_S`` (6h) and then re-fetched at
     the next perp-run start — a long-lived web subprocess must pick up newly
     listed equity perps without a restart.
+
+    Round-13: the exchangeInfo round trip runs OUTSIDE the data lock, behind
+    the single-flight ``_EQUITY_PERP_WARM_GATE`` — a stalled fetch no longer
+    freezes the cache-only readers, which keep serving the previous warmed
+    snapshot (or the seed) while the request is in flight. Concurrent warmers
+    collapse to one request; the cache swap itself stays atomic under the
+    data lock, so a reader sees the all-old or all-new snapshot triple,
+    never a torn mix.
     """
     global _EQUITY_PERP_BASES_CACHE, _EQUITY_PERP_LISTING_CACHE
     global _EQUITY_PERP_WARMED_AT_MONO
-    with _EQUITY_PERP_BASES_LOCK:
+
+    def _fresh() -> frozenset[str] | None:
+        """The warmed snapshot when the TTL still covers it, else None.
+
+        Caller holds the data lock (both fresh-checks and the swap need it).
+        """
         if (
             _EQUITY_PERP_BASES_CACHE is not None
             and _EQUITY_PERP_WARMED_AT_MONO is not None
@@ -2061,6 +2089,20 @@ def warm_equity_perp_bases() -> frozenset[str]:
             < _EQUITY_PERP_WARM_TTL_S
         ):
             return _EQUITY_PERP_BASES_CACHE
+        return None
+
+    with _EQUITY_PERP_BASES_LOCK:
+        fresh = _fresh()
+        if fresh is not None:
+            return fresh
+    with _EQUITY_PERP_WARM_GATE:
+        # Double-checked (binance_filters._fetch_gate precedent): a warmer
+        # that ran while we waited on the gate may have already swapped a
+        # fresh snapshot in — serve it instead of repeating the round trip.
+        with _EQUITY_PERP_BASES_LOCK:
+            fresh = _fresh()
+            if fresh is not None:
+                return fresh
         try:
             payload = _http_get(
                 "/fapi/v1/exchangeInfo",
@@ -2090,7 +2132,12 @@ def warm_equity_perp_bases() -> frozenset[str]:
                     "exchangeInfo returned no TRADING EQUITY symbols",
                 )
         except Exception as exc:  # noqa: BLE001 — fail-open floor, any failure
-            if _EQUITY_PERP_BASES_CACHE is not None:
+            # Re-read under the lock: the snapshot that existed at THIS
+            # call's entry may have been swapped (or reset) while the fetch
+            # was in flight.
+            with _EQUITY_PERP_BASES_LOCK:
+                previous = _EQUITY_PERP_BASES_CACHE
+            if previous is not None:
                 # A previous successful warm exists but aged past the TTL: a
                 # stale-but-real exchangeInfo snapshot beats the static seed —
                 # serve it for this call and re-attempt at the next perp-run
@@ -2099,9 +2146,9 @@ def warm_equity_perp_bases() -> frozenset[str]:
                     "warm_equity_perp_bases: exchangeInfo re-fetch failed "
                     "(%s); serving the previous warmed snapshot (%d bases) "
                     "for this call only",
-                    exc, len(_EQUITY_PERP_BASES_CACHE),
+                    exc, len(previous),
                 )
-                return _EQUITY_PERP_BASES_CACHE
+                return previous
             logger.warning(
                 "warm_equity_perp_bases: exchangeInfo fetch failed (%s); "
                 "serving the static seed snapshot for this call only "
@@ -2132,10 +2179,14 @@ def warm_equity_perp_bases() -> frozenset[str]:
         # not just EQUITY) into the PIT instrument registry — same response,
         # no second request. Fail-soft inside; flag-gated.
         _persist_instrument_registry(symbols)
-        _EQUITY_PERP_BASES_CACHE = bases
-        _EQUITY_PERP_LISTING_CACHE = listing
-        _EQUITY_PERP_WARMED_AT_MONO = time.monotonic()
-        return _EQUITY_PERP_BASES_CACHE
+        # Round-13: the ONLY write section holding the data lock — brief and
+        # atomic, so readers flip from the all-old snapshot triple to the
+        # all-new one and never observe a torn mix.
+        with _EQUITY_PERP_BASES_LOCK:
+            _EQUITY_PERP_BASES_CACHE = bases
+            _EQUITY_PERP_LISTING_CACHE = listing
+            _EQUITY_PERP_WARMED_AT_MONO = time.monotonic()
+            return _EQUITY_PERP_BASES_CACHE
 
 
 def stock_perp_underlying(ticker: str) -> str | None:

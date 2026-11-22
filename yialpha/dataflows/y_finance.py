@@ -380,6 +380,18 @@ def _get_stock_stats_bulk(
     derived = compute_derived(data, indicator, periods_per_year=ppy)
     if derived is not None:
         dates = pd.to_datetime(data["Date"]).dt.strftime("%Y-%m-%d")
+        # Round-13: the vol estimators clean their input first (vol_estimators.
+        # _clean_ohlcv dropna's OHLC and drops non-positive rows — a Low=0 bad
+        # tick, or a leading NaN High that load_ohlcv's forward-only gap fill
+        # cannot repair), so the derived series can come back SHORTER than the
+        # frame while keeping exactly the surviving rows' index labels. Reindex
+        # onto the frame's rows so a dropped day renders "N/A" instead of
+        # crashing the strict zip below — the ValueError used to surface to
+        # the router as NO_DATA_AVAILABLE for the WHOLE rvol_20/ewma_vol
+        # window over otherwise-good rows. No-op (byte-equivalent output) on
+        # the aligned path every well-formed frame takes.
+        if not derived.index.equals(data.index):
+            derived = derived.reindex(data.index)
         result_dict = {}
         for date_str, value in zip(dates, derived, strict=True):
             result_dict[date_str] = "N/A" if pd.isna(value) else str(float(value))

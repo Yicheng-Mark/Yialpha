@@ -18,6 +18,7 @@ so that:
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from enum import StrEnum
@@ -510,11 +511,28 @@ class PortfolioDecision(BaseModel):
         Each present branch is rescued through the same unit-interval
         coercer; one unusable (or missing) branch degrades the OPTIONAL
         ``probabilities`` block to None — the distribution is advisory, the
-        rating is the artifact."""
+        rating is the artifact.
+
+        Round-13 shape rescue: a weak model can serialize the container to
+        a JSON *string* ('``{"bull": 0.61, ...}``') instead of an object.
+        One ``json.loads`` re-parses that form; a load failure (or a payload
+        that is not an object) returns the ORIGINAL data so validation fails
+        exactly as before — garbage still vetoes honestly. Only the shape is
+        rescued, never the values: no branch is invented or defaulted.
+        """
         if not isinstance(data, dict) or "probabilities" not in data:
             return data
         raw = data.get("probabilities")
-        if raw is None or not isinstance(raw, dict):
+        if raw is None:
+            return data
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                return data
+            if not isinstance(raw, dict):
+                return data
+        if not isinstance(raw, dict):
             return data
         fixed: dict = {}
         for key in ("bull", "neutral", "bear"):
@@ -524,6 +542,25 @@ class PortfolioDecision(BaseModel):
         if any(v is None for v in fixed.values()):
             return {**data, "probabilities": None}
         return {**data, "probabilities": fixed}
+
+    @field_validator("invalidation", mode="before")
+    @classmethod
+    def _invalidation_single_str_wrapped(cls, v):
+        """Round-13 shape rescue (#1058 class): a weak model can emit the
+        1-3 triggers as ONE sentence ("closes below 180 support; funding
+        flips negative") instead of a JSON array — a bare ``str`` on
+        ``list[str]`` raised ValidationError and vetoed the WHOLE decision,
+        degrading every primary output (rating, thesis, targets) to the
+        regex free-text fallback. Wrap a single string as ``[s]``; a
+        nullish/blank string degrades to None ("not provided") the same way
+        the optional floats do. Anything non-str passes through untouched
+        and still fails honestly if unusable."""
+        if not isinstance(v, str):
+            return v
+        stripped = v.strip()
+        if not stripped or stripped.lower() in _NULLISH_FLOAT:
+            return None
+        return [v]
 
     @field_validator("price_target_currency")
     @classmethod

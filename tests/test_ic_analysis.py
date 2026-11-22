@@ -67,10 +67,16 @@ class TestQuantileSpread:
         qs = quantile_spread(factor, fwd)
         assert qs is not None
         assert qs["monotonic"] is True
-        assert qs["spread"] > 0
-        means = qs["quantile_means"]
-        assert len(means) == 5
-        assert all(b > a for a, b in zip(means, means[1:], strict=False))
+        # Hand-computed: qcut splits arange(500) into 5 exact buckets of 100
+        # (values 0-99, 100-199, ...); each bucket's mean forward return is
+        # its mean value / 1e4 = (100k + 49.5)/1e4, so the profile is
+        # [0.00495, 0.01495, 0.02495, 0.03495, 0.04495] and the Q5-Q1
+        # spread is exactly 400/1e4 = 0.04.
+        assert qs["quantile_means"] == pytest.approx(
+            [0.00495, 0.01495, 0.02495, 0.03495, 0.04495]
+        )
+        assert qs["spread"] == pytest.approx(0.04)
+        assert qs["n_quantiles"] == 5
 
     def test_noise_factor_is_not_monotone(self):
         rng = np.random.default_rng(5)
@@ -89,7 +95,11 @@ class TestQuantileSpread:
         fwd = -factor / 10_000.0
         qs = quantile_spread(factor, fwd)
         assert qs["monotonic"] is True
-        assert qs["spread"] < 0
+        # Mirror of the positive case above: means step by -0.01, Q5-Q1 = -0.04.
+        assert qs["spread"] == pytest.approx(-0.04)
+        assert qs["quantile_means"] == pytest.approx(
+            [-0.00495, -0.01495, -0.02495, -0.03495, -0.04495]
+        )
 
     def test_too_few_rows_returns_none(self):
         assert quantile_spread([1.0, 2.0], [0.01, 0.02]) is None
@@ -114,7 +124,11 @@ class TestFactorTurnover:
     def test_reshuffling_factor_has_high_turnover(self):
         rng = np.random.default_rng(9)
         perm = rng.permutation(300).astype(float)
-        assert factor_turnover(perm) > 0.2
+        # Seed-9 permutation of 300 elements: mean |Δrank| / 299 is
+        # deterministic, so pin the exact value (0.36008545765707317)
+        # instead of just "> 0.2" — a normalization regression (e.g. the
+        # denominator changing to len(s)) moves this number.
+        assert factor_turnover(perm) == pytest.approx(0.36008545765707317)
 
     def test_monotone_beats_reshuffled(self):
         rng = np.random.default_rng(9)
@@ -127,7 +141,12 @@ class TestFactorTurnover:
 
     def test_nan_rows_are_dropped(self):
         factor = [1.0, np.nan, 3.0, 2.0]
-        assert factor_turnover(factor) is not None
+        # Hand-computed on the finite rows [1.0, 3.0, 2.0]: ranks are
+        # [1, 3, 2], consecutive |Δrank| = [2, 1] (mean 1.5), and the
+        # normalizer is len(3) - 1 = 2 -> exactly 0.75. Pinning the value
+        # verifies both the drop AND the denominator recompute (a bug that
+        # kept the pre-drop length 4 in the denominator would give 0.5).
+        assert factor_turnover(factor) == pytest.approx(0.75)
 
 
 @pytest.mark.unit

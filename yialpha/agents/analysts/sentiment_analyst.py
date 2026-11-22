@@ -102,6 +102,14 @@ _HISTORICAL_BINANCE_SQUARE_UNAVAILABLE = (
     "<unavailable: Binance Square exposes a current feed without a trustworthy "
     "historical as-of boundary; omitted from this historical analysis>"
 )
+#: Round-13: an unparseable trade_date yields no honest query window, so the
+#: news leg degrades to this placeholder (fail-closed — the same posture
+#: ``is_historical_date`` takes for malformed dates) instead of a vendor
+#: ValueError on the undefined window aborting the whole run.
+_MALFORMED_TRADE_DATE_NEWS_UNAVAILABLE = (
+    "<unavailable: trade date could not be parsed into a YYYY-MM-DD window; "
+    "omitted from this analysis rather than querying an undefined date range>"
+)
 
 #: Policy placeholders — a source that is deliberately NOT queried must say
 #: so, so the model reports a policy gap instead of inventing coverage.
@@ -168,15 +176,31 @@ def _source_profile(asset_type: str | None, ticker: str) -> tuple[str, str]:
     return "square_only", ticker
 
 
-def _seven_days_back(trade_date: str) -> str:
+def _seven_days_back(trade_date: str) -> str | None:
     # trade_date is dual-form (live runs carry a full ISO timestamp, replays
     # a date-only string — the round-10 lesson from regime/compute.py), so
     # normalize to the date part before strptime (same idiom as
     # dataflows/utils.is_historical_date). A bare strptime would ValueError
     # on a programmatic live entry like propagate(t, "2026-08-01 16:00:00")
     # and kill the whole run before any LLM call.
+    #
+    # Round-13: the [:10] head of a genuinely malformed date ("2026/08/01" —
+    # a form an LLM can emit) still fails strptime, so the ValueError is now
+    # contained: WARNING + None, and the caller routes the news leg to the
+    # unavailable placeholder below (fail-closed, mirroring
+    # is_historical_date's malformed-date branch) instead of the bare raise
+    # aborting the run. No date is invented — None means "no honest window
+    # can be derived".
     trade_date = str(trade_date)[:10]
-    return (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+    try:
+        parsed = datetime.strptime(trade_date, "%Y-%m-%d")
+    except ValueError:
+        logger.warning(
+            "sentiment lookback: trade_date %r is not a parseable YYYY-MM-DD "
+            "date; news window degrades to unavailable", trade_date,
+        )
+        return None
+    return (parsed - timedelta(days=7)).strftime("%Y-%m-%d")
 
 
 def _get_news_impl(ticker: str, start_date: str, end_date: str) -> str:
@@ -215,6 +239,12 @@ def _fetch_sentiment_sources(
     endpoints are latest-feed APIs (filtering their current response after
     download cannot reconstruct what was discoverable on a past date), so
     they are fail-closed placeholders.
+
+    ``start_date is None`` (round-13) means the trade date was unparseable
+    and :func:`_seven_days_back` refused to invent a window: the news leg
+    degrades to an explicit placeholder and the social legs take the same
+    fail-closed branch a historical run does — the analyst reports gaps
+    instead of the run dying before any LLM call.
     """
     square_enabled = _binance_square_enabled(asset_type)
 
@@ -236,9 +266,15 @@ def _fetch_sentiment_sources(
     else:
         news_ticker = ticker
 
-    if is_historical_date(end_date):
+    if start_date is None or is_historical_date(end_date):
         return (
-            _get_news_impl(news_ticker, start_date, end_date),
+            # Round-13: no honest window (unparseable trade date) -> the
+            # explicit malformed-date placeholder; the vendor chain never
+            # sees the undefined window, so the core-category fail-closed
+            # contract cannot abort the run over a label nobody can query.
+            _MALFORMED_TRADE_DATE_NEWS_UNAVAILABLE
+            if start_date is None
+            else _get_news_impl(news_ticker, start_date, end_date),
             _HISTORICAL_STOCKTWITS_UNAVAILABLE,
             _HISTORICAL_REDDIT_UNAVAILABLE,
             _HISTORICAL_BINANCE_SQUARE_UNAVAILABLE if square_enabled else None,

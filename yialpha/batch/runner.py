@@ -72,9 +72,11 @@ def prepare_batch_run(
 
     Raises :class:`BatchInputError` with a user-facing message.
     """
-    from datetime import datetime as _dt
-
-    from yialpha.cli.utils import detect_asset_type, is_valid_ticker_input
+    from yialpha.cli.utils import (
+        detect_asset_type,
+        is_canonical_ymd,
+        is_valid_ticker_input,
+    )
     from yialpha.default_config import DEFAULT_CONFIG
 
     if not tickers:
@@ -85,10 +87,14 @@ def prepare_batch_run(
     bad = [t for t in tickers if not is_valid_ticker_input(t)]
     if bad:
         raise BatchInputError(f"Invalid ticker(s): {bad} (letters/digits and ._-^=)")
-    try:
-        _dt.strptime(date, "%Y-%m-%d")
-    except ValueError:
-        raise BatchInputError(f"Bad date (need YYYY-MM-DD): {date}") from None
+    # Round-13: bare strptime accepted non-zero-padded forms ("2026-9-1") —
+    # the batch ran to completion, but its full_states_log_<date>.json then
+    # never matches the web store's canonical _DATE_RE, so the run silently
+    # vanished from web history. Reuse the round-11 shared predicate so batch
+    # rejects exactly the set run_robust and the web endpoint reject (same
+    # BatchInputError -> exit-2 contract as every other input check here).
+    if not is_canonical_ymd(date):
+        raise BatchInputError(f"Bad date (need YYYY-MM-DD): {date}")
 
     resolved = asset_type
     if resolved == "auto":

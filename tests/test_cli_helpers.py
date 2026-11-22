@@ -347,6 +347,18 @@ class TestBatchValidation:
         assert result.exit_code == 2
         assert "Bad date" in result.output
 
+    def test_rejects_non_padded_date_exits_2(self, monkeypatch):
+        # Round-13: bare strptime happily parsed "2026-9-1" and the batch ran
+        # to completion, but full_states_log_2026-9-1.json never matches the
+        # web store's canonical _DATE_RE — the run silently vanished from web
+        # history. Batch must reject exactly what run_robust/web reject (the
+        # round-11 shared is_canonical_ymd predicate), exit 2.
+        monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")
+        result = runner.invoke(app, ["batch", "-t", "AAPL", "-d", "2026-9-1"])
+        assert result.exit_code == 2
+        assert "Bad date" in result.output
+
     def test_rejects_workers_below_one_exits_2(self, monkeypatch):
         monkeypatch.setenv("YIALPHA_LLM_PROVIDER", "deepseek")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")

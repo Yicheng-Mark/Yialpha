@@ -304,6 +304,22 @@ def test_prepare_batch_run_rejects_bad_date():
 
 
 @pytest.mark.unit
+def test_prepare_batch_run_rejects_non_canonical_date():
+    """Round-13: bare strptime parsed "2026-9-1" fine, the batch completed,
+    but full_states_log_2026-9-1.json never matches the web store's canonical
+    _DATE_RE — the run silently vanished from web history. The contract-level
+    guard is the round-11 shared is_canonical_ymd predicate, so batch rejects
+    exactly the set run_robust/web reject."""
+    with pytest.raises(BatchInputError, match="Bad date"):
+        prepare_batch_run(["AAPL"], "2026-9-1")
+    with pytest.raises(BatchInputError, match="Bad date"):
+        prepare_batch_run(["AAPL"], "2026-09-1")
+    # The canonical form itself still passes validation.
+    config, resolved = prepare_batch_run(["AAPL"], "2026-09-01")
+    assert resolved == "stock" and config is not None
+
+
+@pytest.mark.unit
 def test_prepare_batch_run_rejects_non_positive_workers():
     with pytest.raises(BatchInputError, match="at least 1"):
         prepare_batch_run(["AAPL"], "2026-01-10", workers=0)

@@ -74,6 +74,7 @@ from yialpha.agents.utils.sec_ownership_tools import (
     get_ftd_data,
     get_institutional_holdings,
 )
+from yialpha.agents.utils.structured import EMPTY_RESPONSE_SENTINEL
 from yialpha.agents.utils.technical_indicators_tools import get_indicators
 from yialpha.agents.utils.web_search_tools import (
     web_search,
@@ -424,16 +425,24 @@ def final_analyst_report(result: Any, *, agent_name: str, ticker: str) -> Any:
 
     Reproduces the historical contract exactly — ``""`` while tool calls are
     pending, ``result.content`` when the model produced its final answer — and
-    adds one guard: when the final message carries ``invalid_tool_calls`` (the
-    model emitted a corrupt tool call; ``tool_calls`` is empty and ``content``
-    is usually empty too), the analyst must not silently write an empty report
-    into state. Instead:
+    adds two guards. First: when the final message carries
+    ``invalid_tool_calls`` (the model emitted a corrupt tool call;
+    ``tool_calls`` is empty and ``content`` is usually empty too), the analyst
+    must not silently write an empty report into state. Instead:
 
     * a WARNING is logged with the agent / ticker context, and
     * if there is no usable content, the
       :data:`MALFORMED_TOOL_CALLS_SENTINEL` marker is returned so every
       downstream consumer (debate, trader, PM, reports) can see the analyst
       degraded rather than reading an empty report as "nothing to say".
+
+    Second (round-13): a final round with NO tool calls, NO invalid ones, and
+    empty ``content`` (a thinking model that answered entirely in reasoning
+    content) used to return ``""`` verbatim — downstream truthiness guards
+    then read the section as merely absent, the exact silent hole round-12's
+    :data:`EMPTY_RESPONSE_SENTINEL` closed for the structured free-text path
+    (structured.py). Same marker string, same semantics: the analyst ran and
+    was billed; consumers must see the degradation, not an empty string.
 
     Non-empty content alongside invalid tool calls is kept (it is real model
     text) but still logged, because the response is suspect.
@@ -450,6 +459,15 @@ def final_analyst_report(result: Any, *, agent_name: str, ticker: str) -> Any:
             )
             if isinstance(content, str) and not content.strip():
                 return MALFORMED_TOOL_CALLS_SENTINEL
+        elif isinstance(content, str) and not content.strip():
+            # Round-13 empty-final-round guard (see docstring): the loop has
+            # ended (no tool calls of any kind) yet the model wrote nothing.
+            logger.warning(
+                "%s (%s): final LLM response carried no content and no tool "
+                "calls; emitting empty-response marker",
+                agent_name, ticker,
+            )
+            return EMPTY_RESPONSE_SENTINEL
         return content
     return ""
 

@@ -10,11 +10,15 @@ DB state leaks between tests.
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 import pytest
 
 from yialpha.graph.checkpointer import (
     _db_path,
     clear_all_checkpoints,
+    clear_checkpoint,
     thread_id,
 )
 
@@ -95,3 +99,125 @@ class TestClearAllCheckpoints:
         assert clear_all_checkpoints(tmp_path) == 1
         # Non-db files are left alone.
         assert (tmp_path / "checkpoints" / "README.txt").exists()
+
+    def test_permission_error_skips_db_but_deletes_rest(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Round-13: one undeletable DB (a live SQLite handle on Windows)
+        must not abort the sweep — the rest still delete, the failure is
+        reported in a WARNING, and the return counts successes only."""
+        for t in ("AAPL", "MSFT", "NVDA"):
+            _db_path(tmp_path, t).touch()
+        held = _db_path(tmp_path, "MSFT")
+
+        real_unlink = Path.unlink
+
+        def guarded_unlink(self, missing_ok=False):
+            if self == held:
+                raise PermissionError(
+                    5, "Access is denied (another process holds the handle)"
+                )
+            return real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", guarded_unlink)
+        with caplog.at_level(logging.WARNING, logger="yialpha.graph.checkpointer"):
+            deleted = clear_all_checkpoints(tmp_path)
+        # The other two DBs were deleted despite the first failure.
+        assert deleted == 2
+        assert held.exists()
+        assert not _db_path(tmp_path, "AAPL").exists()
+        assert not _db_path(tmp_path, "NVDA").exists()
+        # The skipped file is named in the summary warning.
+        assert any(
+            "MSFT.db" in r.message and "could not remove" in r.message
+            for r in caplog.records
+        )
+
+    def test_vanishing_db_mid_sweep_is_skipped(self, tmp_path, monkeypatch):
+        """Round-13: a DB that disappears between glob and unlink (sibling
+        sweep racing us) counts as neither deleted nor failed — the sweep
+        finishes with the files that are actually still there."""
+        for t in ("AAPL", "MSFT"):
+            _db_path(tmp_path, t).touch()
+        vanished = _db_path(tmp_path, "AAPL")
+
+        real_unlink = Path.unlink
+
+        def guarded_unlink(self, missing_ok=False):
+            if self == vanished:
+                raise FileNotFoundError(2, "raced a sibling sweep")
+            return real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", guarded_unlink)
+        assert clear_all_checkpoints(tmp_path) == 1
+        assert not _db_path(tmp_path, "MSFT").exists()
+
+    def test_sidecar_unlink_failure_does_not_crash_or_undercount(
+        self, tmp_path, monkeypatch
+    ):
+        """Round-13: a -wal sidecar that cannot be removed is garbage-
+        collection noise, not a DB failure — the db still counts as deleted
+        and the sweep never crashes on it."""
+        db = _db_path(tmp_path, "AAPL")
+        db.touch()
+        wal = db.with_name(db.name + "-wal")
+        wal.touch()
+
+        real_unlink = Path.unlink
+
+        def guarded_unlink(self, missing_ok=False):
+            if self == wal:
+                raise PermissionError(5, "handle still open on the sidecar")
+            return real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", guarded_unlink)
+        assert clear_all_checkpoints(tmp_path) == 1
+        assert not db.exists()
+
+
+class TestClearCheckpointRobustness:
+    def test_corrupt_db_only_warns(self, tmp_path, caplog):
+        """Round-13: a corrupt DB makes SQLite raise DatabaseError (NOT an
+        OperationalError subclass) on the first execute; clear_checkpoint
+        must warn and return, never raise — its callers guard completed runs
+        and this is the innermost layer of that defense."""
+        import sqlite3
+
+        db = _db_path(tmp_path, "AAPL")
+        # Enough non-SQLite garbage that connect->execute refuses the file.
+        db.write_bytes(b"definitely not a sqlite database" * 8)
+        with caplog.at_level(logging.WARNING, logger="yialpha.graph.checkpointer"):
+            clear_checkpoint(tmp_path, "AAPL", "2026-01-01")  # must not raise
+        assert any(
+            "checkpoint cleanup failed" in r.message for r in caplog.records
+        )
+        # The corrupt file itself is untouched (deletion is not this API's job).
+        assert db.exists()
+
+    def test_operational_error_still_warns(self, tmp_path, caplog, monkeypatch):
+        """The pre-round-13 handled class (locked DB -> OperationalError)
+        keeps its warning path — widening the except must not narrow it."""
+        import sqlite3
+
+        _db_path(tmp_path, "AAPL").touch()
+
+        # Simulate the locked-DB failure by handing the module a connection
+        # whose first execute raises OperationalError.
+        class _LockedConn:
+            def execute(self, *a, **k):
+                raise sqlite3.OperationalError("database is locked")
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        import yialpha.graph.checkpointer as cp
+
+        monkeypatch.setattr(cp.sqlite3, "connect", lambda *a, **k: _LockedConn())
+        with caplog.at_level(logging.WARNING, logger="yialpha.graph.checkpointer"):
+            clear_checkpoint(tmp_path, "AAPL", "2026-01-01")  # must not raise
+        assert any(
+            "checkpoint cleanup failed" in r.message for r in caplog.records
+        )

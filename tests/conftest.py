@@ -52,7 +52,7 @@ def _isolate_config():
 
 
 @pytest.fixture(autouse=True)
-def _isolated_vendor_cache(tmp_path):
+def _isolated_vendor_cache(_isolate_config, tmp_path):
     """Point ``data_cache_dir`` at a per-test tmp directory.
 
     Vendor disk caches (OHLCV per-symbol CSVs, eastmoney/sec/baostock/fred/
@@ -62,6 +62,10 @@ def _isolated_vendor_cache(tmp_path):
     response would pollute the real cache. Tests that manage their own
     cache dir call ``set_config`` in the test body, which runs after this
     fixture and therefore wins.
+
+    Takes ``_isolate_config`` as an explicit argument so this fixture's
+    ``set_config`` is guaranteed to run after the config reset (previously
+    only guaranteed by alphabetical autouse ordering).
     """
     from yialpha.dataflows.config import set_config
 
@@ -95,12 +99,16 @@ def _isolated_binance_history_memo():
 
 
 @pytest.fixture(autouse=True)
-def _perp_bundle_off_by_default():
+def _perp_bundle_off_by_default(_isolate_config):
     """Hermetic tests: the deterministic perp market bundle (default ON in
     production for crypto_perp market analysts) issues real network
     prefetches. Keep it OFF here unless a test explicitly opts in with
     mocked fetchers (``set_config({"perp_market_bundle": True})`` in the
     test body — set_config merges, so the opt-in wins over this fixture).
+
+    Depends on ``_isolate_config`` explicitly (its reset restores the
+    production default True, so this fixture must run after it — previously
+    only guaranteed by alphabetical autouse ordering).
     """
     from yialpha.dataflows.config import set_config
 
@@ -109,16 +117,18 @@ def _perp_bundle_off_by_default():
 
 
 @pytest.fixture(autouse=True)
-def _runtime_prefetch_bundles_off():
+def _runtime_prefetch_bundles_off(_isolate_config):
     """Hermetic tests: the deterministic fundamentals bundle (default ON in
     production) issues real vendor prefetches through the router. Keep it
     OFF here unless a test explicitly opts in with mocked fetchers
     (``set_config({"fundamentals_bundle": True})`` in the test body —
     set_config merges, so the opt-in wins over this fixture).
 
-    Named to sort AFTER ``_isolate_config`` (pytest runs same-scope autouse
-    conftest fixtures alphabetically): the reset there restores the
-    production default True, so this fixture must run later to hold it off.
+    Takes ``_isolate_config`` as an explicit argument: the reset there
+    restores the production default True, so this fixture must run after it
+    to hold the flags off. (Previously this ordering was only guaranteed by
+    alphabetical autouse ordering — the fixture was *named* to sort after
+    ``_isolate_config``; the explicit dependency makes it name-independent.)
     """
     from yialpha.dataflows.config import set_config
 
@@ -129,7 +139,7 @@ def _runtime_prefetch_bundles_off():
 
 
 @pytest.fixture(autouse=True)
-def _optional_crypto_categories_off():
+def _optional_crypto_categories_off(_isolate_config):
     """Hermetic tests: optional crypto categories default OFF in production,
     but a dev-box ``.env`` (``YIALPHA_CRYPTO_NATIVE=true`` /
     ``YIALPHA_CRYPTO_FEAR_GREED=true``) is baked into ``DEFAULT_CONFIG`` at
@@ -137,9 +147,10 @@ def _optional_crypto_categories_off():
     production ones — and flag-off contracts (e.g. crypto runs drop the
     fundamentals analyst) go red locally while CI stays green. Pin both to
     the production default; tests opt in with ``set_config`` in the body
-    (set_config merges, so the opt-in wins over this fixture). Named to
-    sort AFTER ``_isolate_config`` (alphabetical autouse order): the reset
-    there re-bakes the .env values, so this fixture must run later.
+    (set_config merges, so the opt-in wins over this fixture). Takes
+    ``_isolate_config`` as an explicit argument: the reset there re-bakes
+    the .env values, so this fixture must run after it (previously only
+    guaranteed by alphabetical autouse ordering).
     """
     from yialpha.dataflows.config import set_config
 
@@ -148,18 +159,18 @@ def _optional_crypto_categories_off():
 
 
 @pytest.fixture(autouse=True)
-def _runtime_ledger_isolated(tmp_path):
+def _runtime_ledger_isolated(_isolate_config, tmp_path):
     """Point the V2 ledger DB at a per-test tmp file and hold the V2.1/V2.2
     record/shadow flags OFF (production defaults are ON).
 
     Same contract as ``_perp_bundle_off_by_default`` /
     ``_runtime_prefetch_bundles_off``: tests opt in with ``set_config`` in
-    the test body (set_config merges, so the opt-in wins). Named to sort
-    AFTER ``_isolate_config`` (pytest runs same-scope autouse conftest
-    fixtures alphabetically): the reset there restores the production
-    defaults, so this fixture must run later to hold them off. The ledger
-    connection cache is dropped around each test so a connection opened for
-    the previous test's tmp path never serves the current test.
+    the test body (set_config merges, so the opt-in wins). Takes
+    ``_isolate_config`` as an explicit argument: the reset there restores
+    the production defaults, so this fixture must run after it to hold them
+    off (previously only guaranteed by alphabetical autouse ordering). The
+    ledger connection cache is dropped around each test so a connection
+    opened for the previous test's tmp path never serves the current test.
     """
     from yialpha.dataflows.config import set_config
     from yialpha.ledger.sqlite import reset_ledger_state_for_test

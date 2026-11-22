@@ -32,6 +32,7 @@ from datetime import datetime
 from .errors import NoMarketDataError
 from .sec_edgar import get_fundamentals as _sec_fundamentals
 from .symbol_utils import normalize_symbol
+from .utils import current_pit_end
 from .y_finance import (
     _cached_ticker_info,
     _overview_lines,
@@ -74,6 +75,13 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
 
     yahoo_block: str | None = None
     yahoo_note: str | None = None
+    # PIT clamp (round-13, same gate-side defense as y_finance.get_fundamentals
+    # round-8): an LLM can echo a cached header's "Data retrieved on" date
+    # (today) instead of the pinned analysis date; unclamped, the gate below
+    # would judge that as live mode and append today's Yahoo snapshot to a
+    # historical run's overview. No-op in live mode. (The SEC half clamps
+    # itself — sec_edgar round-11.)
+    curr_date = current_pit_end(curr_date) or curr_date
     if overview_would_leak_future(curr_date):
         # Same PIT contract as the plain yfinance vendor: a past decision
         # date must not see today's snapshot. The aggregate then serves the

@@ -38,6 +38,24 @@ def _vendor_ticker(ticker: str) -> str:
     return stock_perp_underlying(ticker) or ticker
 
 
+def _iso_date_bound(value: str) -> str:
+    """Round-13: reduce a dual-form date bound to its ``YYYY-MM-DD`` head.
+
+    The graph entry normalizes ``propagate()``'s trade_date, but this tool
+    still sees timestamp forms ("2026-08-01 16:00:00") by two paths: the LLM
+    echoing the prompt's full-ISO header date into a bound tool call, and a
+    programmatic direct call (the sentiment / news prefetch legs, tests).
+    Both end at vendors that ``strptime`` the value verbatim —
+    ``yfinance_news.get_news_yfinance`` and Alpha Vantage's
+    ``format_datetime_for_api`` ValueError on the time part, and news_data
+    is a CORE category (fail-closed), so the error aborted the whole run.
+    ``str(x)[:10]`` is byte-identical on an already-canonical date; a
+    non-date string passes through and still fails at the vendor — we
+    normalize the SHAPE, never invent a date.
+    """
+    return str(value)[:10]
+
+
 @tool
 def get_news(
     ticker: Annotated[str, "Ticker symbol"],
@@ -54,7 +72,12 @@ def get_news(
     Returns:
         str: A formatted string containing news data
     """
-    return route_to_vendor("get_news", _vendor_ticker(ticker), start_date, end_date)
+    return route_to_vendor(
+        "get_news",
+        _vendor_ticker(ticker),
+        _iso_date_bound(start_date),
+        _iso_date_bound(end_date),
+    )
 
 @tool
 def get_global_news(
