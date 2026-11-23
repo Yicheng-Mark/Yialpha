@@ -51,9 +51,11 @@ YiAlpha 用一组分工明确的 **LLM 智能体**模拟真实交易团队的分
 | Market Analyst | 技术面：从 28 个指标目录（趋势 / 动量 / 波动率 / 成交量四类）按市况选最多 8 个互补指标；另常绑 5 个证据工具——周线级别、支撑/阻力、量价特征、K 线形态、基准相对强度 | yfinance / Alpha Vantage |
 | Sentiment Analyst | 社交情绪 | Reddit、StockTwits、币安广场 Binance Square（加密标的；仅当前日期分析） |
 | News Analyst | 个股新闻 + 宏观/全球新闻（美联储、地缘、央行政策等）+ 开放网络检索（定性上下文） | yfinance / Alpha Vantage News / Tavily |
-| Fundamentals Analyst | 财务基本面 | yfinance / Alpha Vantage |
+| Fundamentals Analyst | 财务基本面 | yfinance / Alpha Vantage / SEC EDGAR（回退链尾） |
 
 宏观数据走 FRED（美联储），事件概率走 Polymarket（预测市场），另类数据可走浏览器采集。新闻分析师还可搜索开放网络（Tavily 免费档）补充新闻源覆盖薄的动态——prompt 已约束：搜索片段仅作带 URL 引用的定性上下文，数字一律以结构化数据源为准。没有可靠 as-of 参数的数据源会在历史分析中被省略，不再用“今天的数据”冒充历史数据。
+
+几个可选开关可以在不动默认行为的前提下扩展分析师团队（全部默认关闭 = prompt 与工具清单字节等价）：`YIALPHA_POSITIONING_SPLIT` 增加第五个、仅 crypto_perp 的 **Positioning Analyst**（V2.3 拆分出的 perp 持仓结构半；结构化输出，位置钉在 Market 之后）；`YIALPHA_SEC_OWNERSHIP` 给 Fundamentals Analyst 暴露 PIT 正确、美股专属的所有权信号（Form 4 内幕交易 + FTD 未交付 + 13F 机构持仓，各自遵循真实发布滞后）；`YIALPHA_VALUATION_TOOLS` 给同一分析师一个确定性算术估值工具（针对它已采集的报表行项目）。
 
 ### 加密货币分析模式
 
@@ -87,19 +89,19 @@ YiAlpha 用一组分工明确的 **LLM 智能体**模拟真实交易团队的分
 | # | 阶段 | 参与节点 | 产出 |
 | --- | --- | --- | --- |
 | 1 | 输入与 PIT 上下文 | `propagate()` | 播种状态：分析日期钉死 vendor 层 as-of 截断（杜绝未来数据泄漏），确定性解析 instrument identity，注入历史记忆教训（可选，默认关闭） |
-| 2 | 分析师团队 | Market / Sentiment / News / Fundamentals Analyst | 每个分析师在自己的工具集上循环（`analyst ⇄ ToolNode`）直到产出报告；默认串行，开 `analyst_parallel` 后合并为一个并行 fan-out 节点。例外：Sentiment Analyst 直接预取 Reddit / StockTwits / Yahoo 头条（加密标的在实盘日期另加币安广场 Binance Square 情绪流），不走工具循环 |
+| 2 | 分析师团队 | Market / Sentiment / News / Fundamentals Analyst（开 `positioning_split` 后另含仅限 perp 的 Positioning Analyst） | 每个分析师在自己的工具集上循环（`analyst ⇄ ToolNode`）直到产出报告；默认串行，开 `analyst_parallel` 后合并为一个并行 fan-out 节点。例外：Sentiment Analyst 直接预取 Reddit / StockTwits / Yahoo 头条（加密标的在实盘日期另加币安广场 Binance Square 情绪流），不走工具循环 |
 | 3 | 多空研究辩论 | Bull ⇄ Bear Researcher | 多轮结构化辩论，`max_debate_rounds`（默认 2 → 4 次发言） |
 | 4 | 研究裁决 | Research Manager（deep LLM） | 结构化 `ResearchPlan` |
 | 5 | 交易提案 | Trader | `TraderProposal`——三档 Buy / Hold / Sell |
-| 6 | 风控辩论 | Aggressive · Conservative · Neutral | 三方裁决，`max_risk_discuss_rounds`（默认 2 → 6 次发言） |
+| 6 | 风控辩论 | Aggressive · Conservative · Neutral | 三方裁决，`max_risk_discuss_rounds`（默认 2 → 6 次发言）。两个默认关闭的 advisory 数据源可给 Conservative 辩手的数据段追加一行市场压力读数：`YIALPHA_MARKET_REGIME`（252 日动荡指数）与 `YIALPHA_CRYPTO_FEAR_GREED`（alternative.me 指数，仅加密运行） |
 | 7 | 最终裁决 | Portfolio Manager（deep LLM） | `PortfolioDecision`——五档评级、目标价、时间跨度 |
 | 8 | 量化叠加 | RiskManager（确定性，无 LLM） | Kelly ¼ 仓位 / ATR 止损 / 回撤熔断 / CVaR 重校仓位、止损与敞口；以标记区块追加进决策 |
 | 9 | 输出与证据 | 报告写入器 | 各阶段 markdown 报告 + 汇总报告 + 机器可读全状态日志；评级解析为信号 |
 
-**一次运行的产物**（CLI 默认 `./reports/<TICKER>_<stamp>/`，编程调用默认 `~/.yialpha/logs/reports/`）：
+**一次运行的产物**（所有入口统一落 `~/.yialpha/logs/reports/<TICKER>_<stamp>/`；根目录可用 `YIALPHA_RESULTS_DIR` 覆盖）：
 
 ```text
-1_analysts/{market,sentiment,news,fundamentals}.md
+1_analysts/{market,sentiment,news,fundamentals}.md   （开 positioning_split 时另含 positioning.md）
 2_research/{bull,bear,manager}.md
 3_trading/trader.md
 4_risk/{aggressive,conservative,neutral}.md
@@ -121,7 +123,7 @@ complete_report.md           ← 汇总报告；数据质量降级时顶部有 "
 ## 架构
 
 ```text
-数据层 (yfinance / Alpha Vantage / FRED / Polymarket / Reddit / StockTwits / Binance / Tavily)
+数据层 (yfinance / Alpha Vantage / SEC EDGAR / FRED / Polymarket / Reddit / StockTwits / Binance / CoinGecko / DefiLlama / Tavily)
         │
    ┌────▼───── Analyst Team（串行，或开并行的标志位）──────────┐
    │  Market · Sentiment · News · Fundamentals                 │
@@ -445,7 +447,7 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 .
 ├── yialpha/            # 核心包（内部包名，对外 import 名）
 │   ├── agents/               # analysts / researchers / managers / trader / risk_mgmt
-│   ├── dataflows/            # yfinance / Alpha Vantage / FRED / Polymarket / Reddit / StockTwits / Binance / 浏览器数据
+│   ├── dataflows/            # yfinance / Alpha Vantage / SEC EDGAR / FRED / Polymarket / Reddit / StockTwits / Binance / CoinGecko / DefiLlama / Tavily
 │   ├── graph/                # LangGraph 编排：trading_graph / propagation / reflection / signal_processing / perf_telemetry
 │   ├── risk/                 # kelly / atr_stop / breaker / cvar / manager（量化风控叠加层）
 │   ├── backtest/             # engine / metrics / validation_gate / ic / report / cache
@@ -455,7 +457,6 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 │   ├── cli/                  # 交互式 CLI（analyze / batch / config-check / snapshot）
 │   ├── default_config.py     # 配置 + env 映射
 │   └── reporting.py
-├── cli/                      # 源码兼容包装；正式入口是 yialpha.cli
 ├── web/                      # FastAPI Web UI（原地运行，不打包）
 ├── scripts/                  # run_baseline / run_robust / run_batch / export_ic_dataset / prune_indicators_cli / rank_signals / …
 ├── tests/                    # 测试套件——数据/风控/回测/闸门/多提供商/i18n/并发

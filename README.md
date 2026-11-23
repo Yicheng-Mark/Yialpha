@@ -51,9 +51,11 @@ Give YiAlpha a **ticker + date** and it analyzes from four angles, runs multiple
 | Market Analyst | Technical: picks up to 8 complementary indicators from a 28-name catalog (trend / momentum / volatility / volume) by market regime; five evidence tools always bound — weekly timeframe, support/resistance, volume features, candlestick patterns, benchmark relative strength | yfinance / Alpha Vantage |
 | Sentiment Analyst | Social sentiment | Reddit, StockTwits, Binance Square (crypto runs; current-date analysis only) |
 | News Analyst | Ticker news + macro/global news (Fed, geopolitics, central-bank policy …) + open-web search for qualitative context | yfinance / Alpha Vantage News / Tavily |
-| Fundamentals Analyst | Financial fundamentals | yfinance / Alpha Vantage |
+| Fundamentals Analyst | Financial fundamentals | yfinance / Alpha Vantage / SEC EDGAR (fallback tail) |
 
 Macro data flows through FRED (Federal Reserve), event probabilities through Polymarket (prediction markets), and alternative data can be collected via browser. The news analyst can also search the open web (Tavily, free tier) for developments the news vendors cover thinly — snippets are prompt-constrained to qualitative, URL-cited context; numbers always come from the structured data tools. Sources without a trustworthy as-of parameter are omitted from historical runs rather than silently substituting today's data.
+
+A few opt-in flags extend the analyst team without touching defaults (all default-off = byte-identical prompts and tool lists): `YIALPHA_POSITIONING_SPLIT` adds a fifth, crypto-perp-only **Positioning Analyst** (V2.3 split of the perp positioning half; structured output, right after Market), `YIALPHA_SEC_OWNERSHIP` exposes point-in-time-correct, US-only ownership signals to the Fundamentals Analyst (Form 4 insider trades + fails-to-deliver + 13F institutional holdings, each honoring its real publication lag), and `YIALPHA_VALUATION_TOOLS` gives the same analyst a deterministic arithmetic valuation sink for line items it already gathers.
 
 ### Crypto analysis modes
 
@@ -87,19 +89,19 @@ Every entry point — interactive `yialpha analyze`, `yialpha batch`, and the We
 | # | Stage | Who | Produces |
 | --- | --- | --- | --- |
 | 1 | Input & PIT context | `propagate()` | State seeded: the analysis date pins the vendor-layer as-of clamp (no future data leaks in), instrument identity resolved deterministically, past memory-log lessons injected (opt-in, off by default) |
-| 2 | Analyst team | Market / Sentiment / News / Fundamentals Analyst | Each analyst loops against its own tool set (`analyst ⇄ ToolNode`) until it emits its report; serial by default, collapsed into one parallel fan-out node behind `analyst_parallel`. Exception: the Sentiment Analyst pre-fetches Reddit / StockTwits / Yahoo headlines directly (plus the Binance Square crypto feed on live crypto runs), no tool loop |
+| 2 | Analyst team | Market / Sentiment / News / Fundamentals Analyst (+ optional perp-only Positioning Analyst behind `positioning_split`) | Each analyst loops against its own tool set (`analyst ⇄ ToolNode`) until it emits its report; serial by default, collapsed into one parallel fan-out node behind `analyst_parallel`. Exception: the Sentiment Analyst pre-fetches Reddit / StockTwits / Yahoo headlines directly (plus the Binance Square crypto feed on live crypto runs), no tool loop |
 | 3 | Research debate | Bull ⇄ Bear Researchers | Multi-round structured debate, `max_debate_rounds` (default 2 → 4 speeches) |
 | 4 | Research verdict | Research Manager (deep LLM) | Structured `ResearchPlan` |
 | 5 | Trade proposal | Trader | `TraderProposal` — three-tier Buy / Hold / Sell |
-| 6 | Risk debate | Aggressive · Conservative · Neutral | Three-way deliberation, `max_risk_discuss_rounds` (default 2 → 6 speeches) |
+| 6 | Risk debate | Aggressive · Conservative · Neutral | Three-way deliberation, `max_risk_discuss_rounds` (default 2 → 6 speeches). Two default-off advisory feeds can append a market-stress line to the Conservative debater's data section: `YIALPHA_MARKET_REGIME` (252-day turbulence reading) and `YIALPHA_CRYPTO_FEAR_GREED` (alternative.me index, crypto runs) |
 | 7 | Final call | Portfolio Manager (deep LLM) | `PortfolioDecision` — five-tier rating, price target, time horizon |
 | 8 | Quant overlay | RiskManager (deterministic, no LLM) | Kelly ¼ sizing / ATR stop / drawdown breaker / CVaR recalibrate position, stop and exposure; appended to the decision under a marked section |
 | 9 | Output & evidence | report writer | Per-stage markdown reports + consolidated report + machine-readable full-state log; rating parsed into a signal |
 
-**What a run produces** (under `./reports/<TICKER>_<stamp>/` for CLI runs, `~/.yialpha/logs/reports/` programmatically):
+**What a run produces** (every entry point lands reports under `~/.yialpha/logs/reports/<TICKER>_<stamp>/`; override the root with `YIALPHA_RESULTS_DIR`):
 
 ```text
-1_analysts/{market,sentiment,news,fundamentals}.md
+1_analysts/{market,sentiment,news,fundamentals}.md   (+ positioning.md when positioning_split is on)
 2_research/{bull,bear,manager}.md
 3_trading/trader.md
 4_risk/{aggressive,conservative,neutral}.md
@@ -121,7 +123,7 @@ Two optional loops close the cycle after a run: the causal memory log (`memory_e
 ## Architecture
 
 ```text
-Data layer (yfinance / Alpha Vantage / FRED / Polymarket / Reddit / StockTwits / Binance / Tavily)
+Data layer (yfinance / Alpha Vantage / SEC EDGAR / FRED / Polymarket / Reddit / StockTwits / Binance / CoinGecko / DefiLlama / Tavily)
         │
    ┌────▼───── Analyst Team (serial, or parallel behind a flag) ─────┐
    │  Market · Sentiment · News · Fundamentals                       │
@@ -446,7 +448,7 @@ One-line telemetry: `python scripts/run_baseline.py --smoke --profile --ticker <
 .
 ├── yialpha/            # core package (internal package name; import name)
 │   ├── agents/               # analysts / researchers / managers / trader / risk_mgmt
-│   ├── dataflows/            # yfinance / Alpha Vantage / FRED / Polymarket / Reddit / StockTwits / Binance / browser
+│   ├── dataflows/            # yfinance / Alpha Vantage / SEC EDGAR / FRED / Polymarket / Reddit / StockTwits / Binance / CoinGecko / DefiLlama / Tavily
 │   ├── graph/                # LangGraph orchestration: trading_graph / propagation / reflection / signal_processing / perf_telemetry
 │   ├── risk/                 # kelly / atr_stop / breaker / cvar / manager (quant risk overlay)
 │   ├── backtest/             # engine / metrics / validation_gate / ic / report / cache
@@ -456,7 +458,6 @@ One-line telemetry: `python scripts/run_baseline.py --smoke --profile --ticker <
 │   ├── cli/                  # interactive CLI (analyze / batch / config-check / snapshot)
 │   ├── default_config.py     # config + env mapping
 │   └── reporting.py
-├── cli/                      # source compatibility shims; packaged CLI is yialpha.cli
 ├── web/                      # FastAPI Web UI (run in place, not packaged)
 ├── scripts/                  # run_baseline / run_robust / run_batch / export_ic_dataset / prune_indicators_cli / rank_signals / …
 ├── tests/                    # test suite — data / risk / backtest / gate / multi-provider / i18n / concurrency
