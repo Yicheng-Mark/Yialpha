@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yialpha"
-version = "0.3.0"
+version = "1.0.0"
 description = "YiAlpha: Multi-Agent LLM Financial Analysis Framework"
 readme = "README.md"
 # Floor is 3.11, not 3.10: pandas 3.x (the line this project develops and
