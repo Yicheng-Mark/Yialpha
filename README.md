@@ -512,7 +512,7 @@ If this framework helps your work, please cite:
       title={YiAlpha: A Research-Oriented Multi-Agent LLM Quantitative Trading Framework},
       author={Mark},
       year={2026},
-      url={https://github.com/zhang12120113-creator/Yialpha},
+      url={https://github.com/Yicheng-Mark/Yialpha},
 }
 ```
 

@@ -511,7 +511,7 @@ YiAlpha 的每一层关键机制都对应已发表的研究成果，而非凭空
       title={YiAlpha: A Research-Oriented Multi-Agent LLM Quantitative Trading Framework},
       author={Mark},
       year={2026},
-      url={https://github.com/zhang12120113-creator/Yialpha},
+      url={https://github.com/Yicheng-Mark/Yialpha},
 }
 ```
 
