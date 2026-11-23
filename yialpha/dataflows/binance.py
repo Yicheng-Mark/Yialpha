@@ -223,8 +223,13 @@ def _paginate_history(
             break
         out.extend(page)
         try:
-            last_ms = cursor_of(page[-1])
-        except (TypeError, KeyError, IndexError):
+            # int() inside the guard: a cursor value that EXTRACTS but does
+            # not convert (e.g. a funding row with ``fundingTime: null`` — a
+            # payload the row parsers below explicitly tolerate) must stop
+            # the walk like any malformed tail, not crash it with a raw
+            # TypeError (round-15).
+            nxt = int(cursor_of(page[-1])) + 1
+        except (TypeError, KeyError, IndexError, ValueError):
             # Malformed tail: the cursor extractor failed on the last page,
             # indistinguishable from a normal final page by shape alone, so
             # the walk stops here — and whatever the exchange would still
@@ -239,7 +244,6 @@ def _paginate_history(
                 path, symbol_for_error, len(out),
             )
             break
-        nxt = int(last_ms) + 1
         if nxt <= cursor:  # no forward progress — avoid an infinite loop
             break
         cursor = nxt
@@ -835,7 +839,10 @@ def get_binance_funding_rate(
     inferred_h = _funding_cadence_hours(rows)
     cadence_note = ""
     if inferred_h is not None:
-        cadence_h = inferred_h
+        # Union up front: the else-branch below may fall back to the
+        # fundingInfo cadence, which is None when that endpoint is
+        # unavailable — the header's `is not None` check relies on it.
+        cadence_h: int | None = inferred_h
         cadence_src = "inferred from settlement spacing"
         if authoritative_h is not None and authoritative_h != inferred_h:
             cadence_note = (
@@ -2352,14 +2359,16 @@ def derivatives_stress_series(
         start_ms, _now_ms() - _FUTURES_DATA_RETENTION_DAYS * 86_400_000
     )
 
-    def _trim_to_end(rows: list, bound_ms: int) -> list:
+    def _trim_to_end(rows: object, bound_ms: int) -> list:
         # Round-7: belt-and-suspenders endTime trim, same defence the four
         # /futures/data tool consumers carry — a vendor (or mock) that
         # ignores the endTime must never leak rows past the window end.
         # Unparseable timestamps stay (their row is the record parser's
-        # business, not this filter's).
+        # business, not this filter's). ``_http_get`` returns parsed JSON
+        # typed ``object``; a non-array payload narrows to empty here the
+        # same way ``_stress_series_from_records`` narrows its own rows.
         trimmed = []
-        for r in rows:
+        for r in rows if isinstance(rows, list) else []:
             try:
                 if int(r["timestamp"]) > bound_ms:
                     continue

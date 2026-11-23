@@ -405,6 +405,12 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> str:
         # _render_statement does (quarterly target), not by array order.
         end = max(r.get("end", "") for r in recs)
         chosen = _pick_period_record(recs, end, 90)
+        if chosen is None:
+            # Reachable when every surviving record lacks an "end" key: the
+            # max() above then yields the "" default, which no record's
+            # r.get("end") (None) can match — degrade to the n/a row like
+            # the empty-recs case above instead of crashing on None.
+            return None, ""
         return chosen["val"], chosen.get("end", "")
 
     out = io.StringIO()

@@ -115,11 +115,20 @@ def _parse_series(raw: bytes) -> list[dict]:
     """Parse the payload into ``{"ts": int, "value": int, "label": str}``
     entries, newest-first as served. Malformed entries are skipped — never
     zero-filled, never fabricated. (API fields are strings; ``int(float(...))``
-    coerces defensively without rejecting a future numeric body.)"""
+    coerces defensively without rejecting a future numeric body.) A body that
+    is not a JSON object, or whose ``data`` is not a list, is malformed too:
+    return empty — ``AttributeError``/``TypeError`` escaping here would break
+    the module's fail-soft contract (``format_fear_greed_line`` must return
+    ``None`` for ANY unparseable body, not raise)."""
     try:
-        data = json.loads(raw).get("data") or []
+        body = json.loads(raw)
     except ValueError:
         return []
+    if not isinstance(body, dict):
+        return []
+    data = body.get("data")
+    if not isinstance(data, list):
+        data = []
     out: list[dict] = []
     for item in data:
         try:

@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from yialpha.risk.breaker import BreakerState, DrawdownBreaker
 from yialpha.risk.cvar import cvar_position_multiplier
@@ -207,13 +207,22 @@ class RiskManager:
 
         # 2. Kelly sizing (rating conviction x optional historical win rate).
         wins, losses, avg_win, avg_loss = _trade_stats(state.trade_history)
-        kelly_raw, kelly_preclip = kelly_sizing(
-            rating,
-            wins=wins if wins or losses else None,
-            losses=losses if wins or losses else None,
-            avg_win=avg_win, avg_loss=avg_loss,
-            kelly_fraction_mult=self.kelly_fraction,
-            return_raw=True,
+        # kelly_sizing annotates its return as ``float | tuple[float, float]``
+        # because the keyword-only ``return_raw`` selects the mode; with
+        # ``return_raw=True`` every return path in kelly.py yields the
+        # ``(clipped, raw)`` tuple (mypy cannot narrow through that flag).
+        # The cast states the tuple mode this call always gets — cast is a
+        # runtime no-op, so sizing decisions are untouched.
+        kelly_raw, kelly_preclip = cast(
+            tuple[float, float],
+            kelly_sizing(
+                rating,
+                wins=wins if wins or losses else None,
+                losses=losses if wins or losses else None,
+                avg_win=avg_win, avg_loss=avg_loss,
+                kelly_fraction_mult=self.kelly_fraction,
+                return_raw=True,
+            ),
         )
 
         # 3. CVaR de-risking from the returns history.

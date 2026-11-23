@@ -432,8 +432,12 @@ class OpenAIClient(BaseLLMClient):
             # The Responses API only exists on native OpenAI; if the user points
             # the openai provider at a custom base_url (proxy/gateway/local), it
             # only speaks Chat Completions, so keep Responses off there (#1024).
-            if spec.use_responses_api and _is_native_openai_base_url(base_url):
-                llm_kwargs["use_responses_api"] = True
+            # The False must be EXPLICIT: langchain-openai's own default is
+            # None = auto, and auto may upgrade a custom endpoint to the
+            # Responses API it cannot speak — the never-collected #1024 test
+            # caught exactly that after the upstream default flip (round-14).
+            if spec.use_responses_api:
+                llm_kwargs["use_responses_api"] = _is_native_openai_base_url(base_url)
         elif self.base_url:
             llm_kwargs["base_url"] = self.base_url
 

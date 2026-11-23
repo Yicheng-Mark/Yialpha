@@ -209,7 +209,11 @@ def _parse_form4(raw: bytes) -> dict:
     except ET.ParseError as exc:
         raise NoMarketDataError("form4", detail=f"could not parse Form 4 XML: {exc}") from exc
     except ValueError as exc:
-        raise NoMarketDataError("form4", detail=str(exc)) from exc
+        # "could not parse" must lead the detail: _scan_form4_segment's skip
+        # predicate matches on it, so a DTD/ENTITY-refused filing degrades to
+        # one skipped filing instead of failing the whole tool (the same
+        # per-filing degrade as an unparseable or 404'd filing).
+        raise NoMarketDataError("form4", detail=f"could not parse Form 4 XML: {exc}") from exc
 
     owner = _txt(root.find("reportingOwner/reportingOwnerId/rptOwnerName"))
     title = _txt(root.find("reportingOwner/reportingOwnerRelationship/officerTitle"))
@@ -353,7 +357,7 @@ def get_form4_insider_trading(
     recent = (subs.get("filings") or {}).get("recent") or {}
     forms = recent.get("form") or []
 
-    rows = []
+    rows: list[dict] = []
     fetched = 0
     skipped: list[str] = []
     # Parallel arrays, most-recent-first in submissions; take the first N that
@@ -377,6 +381,10 @@ def get_form4_insider_trading(
             archive_gap = True
         for seg in reversed(segs):
             if fetched >= _MAX_FORM4:
+                # Budget spent mid-backfill: older segments remain unscanned,
+                # so the window is incomplete — the disclosure note must fire
+                # (its own text lists "fetch budget reached" as a case).
+                archive_gap = True
                 break
             name = (seg or {}).get("name") or ""
             if not name:

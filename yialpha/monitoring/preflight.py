@@ -48,6 +48,11 @@ def _resolve_proxy_probe() -> tuple[str, int]:
         )
         if ":" in host_port:
             host = host_port.rsplit(":", 1)[0] or host
+            if host.startswith("[") and host.endswith("]"):
+                # RFC 3986: brackets delimit an IPv6 literal in authority,
+                # they are not part of the address — socket.getaddrinfo (and
+                # therefore create_connection) cannot resolve "[::1]".
+                host = host[1:-1]
             with contextlib.suppress(ValueError):
                 port = int(host_port.rsplit(":", 1)[1])
     return host, port

@@ -99,6 +99,28 @@ def _isolated_binance_history_memo():
 
 
 @pytest.fixture(autouse=True)
+def _isolated_quality_run_context():
+    """Reset the data-quality sentinel ContextVars around every test.
+
+    ``record_sentinel`` lazily *sets* a fresh event list in the calling
+    context when none is bound (production always binds one via
+    ``ensure_run_context`` at graph submit and clears it via ``reset_quality``
+    after the snapshot). A test that exercises a sentinel-recording failure
+    path without going through the graph therefore leaves that list bound in
+    the shared pytest context, and any LATER test that reads
+    ``snapshot_quality()`` — e.g. a direct ``_apply_risk_overlay`` call —
+    classifies the stale events as this run's own DEGRADED evidence
+    (observed: test_atr_memoization.py → test_candidate_authority.py
+    ordering flipped APPROVED tickets to VETOED; each file passes alone).
+    """
+    from yialpha.dataflows.quality import reset_quality
+
+    reset_quality()
+    yield
+    reset_quality()
+
+
+@pytest.fixture(autouse=True)
 def _perp_bundle_off_by_default(_isolate_config):
     """Hermetic tests: the deterministic perp market bundle (default ON in
     production for crypto_perp market analysts) issues real network

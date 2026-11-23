@@ -76,12 +76,21 @@ def _top_holdings(ticker: str) -> str | None:
         frame = holdings.reset_index().head(10)
         cols = [str(c) for c in frame.columns]
         symbol_col = next((c for c in cols if "symbol" in c.lower()), None)
+        # Column detection must handle the shape yfinance ACTUALLY serves
+        # (verified 1.7.0 scrapers/funds.py: "Symbol" index + "Name" +
+        # "Holding Percent"), not just the "Holding Name"/"% Assets" variant:
+        # requiring the "holding" prefix on the name column and "%" alone on
+        # the weight column left "Name" unmatched and "Holding Percent"
+        # invisible, so the PERCENT rendered in holding_name and weight_pct
+        # was silently dropped.
         name_col = next(
-            (c for c in cols if "holding" in c.lower() and "name" in c.lower()),
+            (c for c in cols if "name" in c.lower() and "symbol" not in c.lower()),
             cols[-1] if cols else None,
         )
         weight_col = next(
-            (c for c in cols if "%" in c or "weight" in c.lower()), None,
+            (c for c in cols if "%" in c or "weight" in c.lower()
+             or "percent" in c.lower()),
+            None,
         )
         lines = ["symbol,holding_name,weight_pct"]
         for _, row in frame.iterrows():

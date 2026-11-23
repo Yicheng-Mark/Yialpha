@@ -115,13 +115,16 @@ _SIGNATURE_CONFIG_KEYS = (
 @lru_cache(maxsize=4096)
 def _memoized_close_and_atr(
     ticker: str, trade_date: str, asset_type: str = "stock",
-) -> tuple[float, float]:
+) -> tuple[float, float | None]:
     """Load and compute the deterministic PIT ``(close, atr)`` for one date.
 
     Module-level LRU keyed by ``(ticker, trade_date, asset_type)`` — see
     ``YiAlphaGraph._latest_close_and_atr`` for the PIT-safety argument.
     Raises on any failure so failures are never cached (the caller converts
-    them to ``(None, None)`` and retries on the next run).
+    them to ``(None, None)`` and retries on the next run). ``atr`` is ``None``
+    when the frame has fewer than 15 completed bars
+    (:func:`yialpha.risk.atr_stop.latest_atr_from_frame` contract — the close
+    is still returned, and the risk overlay simply skips the ATR stop).
 
     ``asset_type`` selects the price venue. A crypto_perp run must not price
     its overlay (entry reference / ATR stop / position value) on the Yahoo
@@ -2967,7 +2970,11 @@ class YiAlphaGraph:
 
         # Save to file. Reject ticker values that would escape the
         # results directory when joined as a path component.
-        safe_ticker = safe_ticker_component(self.ticker)
+        # ``self.ticker`` is ``str | None`` until propagate()/the streamed
+        # entry sets it; these writers are only reachable after that, and a
+        # None coerced to "" is rejected by safe_ticker_component with the
+        # same ValueError contract None itself hits (first guard branch).
+        safe_ticker = safe_ticker_component(self.ticker or "")
         directory = Path(self.config["results_dir"]) / safe_ticker / "YiAlphaStrategy_logs"
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -3065,12 +3072,22 @@ class YiAlphaGraph:
         Sits beside ``full_states_log_<trade_date>.json`` in the same per-ticker
         ``YiAlphaStrategy_logs`` directory (same venue suffix, so a same-date
         perp+spot pair keeps two telemetry files like it keeps two logs).
-        Callers gate on ``self.perf_tracker is not None``; this method assumes
-        a live tracker.
+        Callers gate on ``self.perf_tracker is not None``; the in-method guard
+        keeps that no-op contract total for any future caller that skips the
+        gate (a None tracker would otherwise die inside ``dump_perf_report``
+        on ``tracker.serialize()``).
         """
         from yialpha.graph.perf_telemetry import dump_perf_report
 
-        safe_ticker = safe_ticker_component(self.ticker)
+        if self.perf_tracker is None:
+            # Telemetry off: nothing to serialize, no file to write.
+            return
+
+        # ``self.ticker`` is ``str | None`` until propagate()/the streamed
+        # entry sets it; these writers are only reachable after that, and a
+        # None coerced to "" is rejected by safe_ticker_component with the
+        # same ValueError contract None itself hits (first guard branch).
+        safe_ticker = safe_ticker_component(self.ticker or "")
         directory = Path(self.config["results_dir"]) / safe_ticker / "YiAlphaStrategy_logs"
         directory.mkdir(parents=True, exist_ok=True)
         stem = self._states_log_stem(trade_date, asset_type).replace(

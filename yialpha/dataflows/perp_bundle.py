@@ -94,6 +94,7 @@ _LSR_WINDOW_DAYS = 9
 _LEG_TIMEOUT_ENV = os.environ.get("YIALPHA_PERP_BUNDLE_LEG_TIMEOUT_S")
 LEG_TIMEOUT_S: float | None = 300.0
 if _LEG_TIMEOUT_ENV is not None and _LEG_TIMEOUT_ENV != "":
+    _parsed_leg_timeout: float | None
     try:
         _parsed_leg_timeout = float(_LEG_TIMEOUT_ENV)
     except ValueError:
@@ -662,7 +663,10 @@ def _fetch_adl(symbol: str) -> dict[str, Any]:
         data = signed_fapi_get(
             "/fapi/v1/adlQuantile", {"symbol": canonical}, symbol, canonical,
         )
-        entry = {}
+        # dict[str, Any] | None: the round-13 matcher may find no matching
+        # entry (None -> raise below); {} when the payload is not a list
+        # (the isinstance(entry, dict) guard downstream keeps that honest).
+        entry: dict[str, Any] | None = {}
         if isinstance(data, list) and data:
             # Round-13: ZERO matching entries means the payload is for some
             # other contract than the one asked for (endpoint regression /

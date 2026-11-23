@@ -80,6 +80,10 @@ def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict
     # PIT guard: clamp the window to the run's pinned analysis date (see
     # get_news above); no-op in live mode.
     curr_date = current_pit_end(curr_date) or curr_date
+    # Double-form guard (same normalize as yfinance_news): curr_date may
+    # arrive as "2026-09-30 16:00:00" — reduce to the ISO date so the
+    # strptime below never sees a bare ValueError on a datetime-form value.
+    curr_date = str(curr_date)[:10]
 
     # Calculate start date
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")

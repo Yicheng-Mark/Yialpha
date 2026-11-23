@@ -12,7 +12,7 @@ from yialpha.llm_clients.openai_client import (
 
 
 @pytest.mark.unit
-class NativeBaseUrlTests:
+class TestNativeBaseUrl:
     def test_unset_is_native(self):
         assert _is_native_openai_base_url(None) is True
         assert _is_native_openai_base_url("") is True
@@ -28,7 +28,7 @@ class NativeBaseUrlTests:
 
 
 @pytest.mark.unit
-class ResponsesApiSelectionTests:
+class TestResponsesApiSelection:
     def test_native_openai_enables_responses_api(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         llm = OpenAIClient("gpt-5.5", provider="openai").get_llm()
