@@ -1367,7 +1367,7 @@ class TestResponseCacheWriteFailures:
         assert list(tmp_path.iterdir()) == []
         assert len(caplog.records) == 1
         assert "could not write" in caplog.records[0].getMessage()
-        assert sleeps == [0.05, 0.05, 0.1, 0.2, 0.4]  # ~0.8s of back-off, not slept here
+        assert sleeps == [0.05, 0.1, 0.2, 0.4]  # 0.75s of back-off, not slept here
 
 
 class TestResponseCacheConcurrentWriters:

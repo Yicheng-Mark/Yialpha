@@ -6,24 +6,26 @@ indicator_ic_context advisory block.
 from __future__ import annotations
 
 import json
-from contextlib import nullcontext
+import warnings
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
 import pandas as pd
 import pytest
 
-from yialpha.backtest import ic as ic_module
 from yialpha.dataflows import stockstats_utils
 
 
+@contextmanager
 def _constant_input_warning():
-    """Expected-warning context for a constant Spearman input (the ``flat_junk``
-    column below): ``scipy.stats.spearmanr`` warns before returning NaN; the numpy
-    fallback taken without scipy (an optional accelerator) is silent."""
-    if ic_module._HAVE_SCIPY:
-        return pytest.warns(RuntimeWarning, match="An input array is constant")
-    return nullcontext()
+    """Context for a constant Spearman input (the ``flat_junk`` column below):
+    nothing may warn, with or without scipy. A constant input is refused before
+    ``scipy.stats.spearmanr`` is reached (round-17 follow-up)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        warnings.simplefilter("error", UserWarning)  # scipy's ConstantInputWarning
+        yield
 
 
 def _ohlcv(days: int = 60, start_close: float = 100.0) -> pd.DataFrame:

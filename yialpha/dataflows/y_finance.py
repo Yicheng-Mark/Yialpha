@@ -97,7 +97,7 @@ def _cached_ticker_info(ticker: str, canonical: str) -> dict:
 
     def _fetch() -> bytes:
         ticker_obj = yf.Ticker(canonical)
-        info = yf_retry(lambda: ticker_obj.info)
+        info = yf_retry(lambda: ticker_obj.info, symbol=ticker, canonical=canonical)
         if not info:
             raise _EmptyVendorPayload(f"{canonical}: empty info")
         return json.dumps(info, default=str).encode("utf-8")
@@ -138,7 +138,7 @@ def _cached_yf_frame(
     via :class:`_EmptyVendorPayload` (see its docstring).
     """
     def _fetch() -> bytes:
-        frame = yf_retry(loader)
+        frame = yf_retry(loader, symbol=canonical, canonical=canonical)
         if frame is None or frame.empty:
             raise _EmptyVendorPayload(f"{canonical}: empty frame for {filename}")
         return frame.to_csv().encode("utf-8")
@@ -176,7 +176,10 @@ def get_YFin_history_cached(symbol: str, start_date: str, end_date: str) -> pd.D
 
     def _fetch() -> bytes:
         ticker = yf.Ticker(symbol)
-        frame = yf_retry(lambda: ticker.history(start=start_date, end=end_date))
+        frame = yf_retry(
+            lambda: ticker.history(start=start_date, end=end_date),
+            symbol=symbol,
+        )
         if frame is None or frame.empty:
             raise _EmptyVendorPayload(
                 f"{symbol}: empty history {start_date}..{end_date}"

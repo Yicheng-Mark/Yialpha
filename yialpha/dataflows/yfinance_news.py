@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 #: stays fresh enough for an intraday analysis.
 _SEARCH_CACHE_TTL_DAYS = 30.0 / (24.0 * 60.0)
 
+#: A fetch failure may serve a cached Search result for at most this long —
+#: three times the TTL, as for the social feeds (binance_square,
+#: stocktwits). Beyond it the error propagates to the router, which tries the
+#: next news vendor or records the miss; the global 30-day stale cap used to
+#: replay weeks-old headlines as today's.
+_SEARCH_MAX_STALE_DAYS = 3.0 * _SEARCH_CACHE_TTL_DAYS
+
 
 def _cached_search_news(query: str, news_count: int) -> list[dict]:
     """Run one yfinance Search with a short on-disk cache.
@@ -41,13 +48,16 @@ def _cached_search_news(query: str, news_count: int) -> list[dict]:
         search = yf_retry(
             lambda: yf.Search(
                 query, news_count=news_count, enable_fuzzy_query=True,
-            )
+            ),
+            # No ticker here; the query is the target the error should name.
+            symbol=f"news search: {query}",
         )
         return json.dumps(search.news, default=str).encode("utf-8")
 
     raw = cached_or_fetch(
         vendor_cache_dir("yfnews"), filename, _fetch,
         ttl_days=_SEARCH_CACHE_TTL_DAYS, vendor="yfnews",
+        stale_cap_days=_SEARCH_MAX_STALE_DAYS,
     )
     assert raw is not None  # fail_open never set: fetch errors re-raise
     return json.loads(raw)
@@ -163,7 +173,11 @@ def get_news_yfinance(
     resolved = "" if canonical == ticker else f" (resolved to {canonical})"
     try:
         stock = yf.Ticker(canonical)
-        news = yf_retry(lambda: stock.get_news(count=article_limit))
+        news = yf_retry(
+            lambda: stock.get_news(count=article_limit),
+            symbol=ticker,
+            canonical=canonical,
+        )
 
         if not news:
             # EMPTY is a typed soft-miss, not a success: raising lets the

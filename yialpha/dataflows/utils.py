@@ -204,29 +204,62 @@ def pinned_analysis_date(curr_date: str | None):
         set_analysis_date(previous)
 
 
+#: Basic ISO calendar form (``20260628``): LLMs echo it for an end date, and the
+#: lenient parsers downstream (``pd.Timestamp``) accept it.
+_PIT_COMPACT_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
+
+
+def _parse_pit_end(value) -> datetime | None:
+    """``value`` read as a calendar date, or ``None`` when it is not one.
+
+    Accepted: ``YYYY-MM-DD`` (optionally followed by a time), basic ISO
+    (``20260628``) and the slash-separated form (``2026/06/28``) — the three
+    spellings a lenient parser reads as a date, which is exactly why the clamp
+    has to read them too.
+    """
+    text = str(value)[:10]
+    compact = _PIT_COMPACT_RE.match(text)
+    if compact:
+        text = "-".join(compact.groups())
+    try:
+        return datetime.strptime(text.replace("/", "-"), "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
 def clamp_end_date(end_date: str | None, curr_date: str | None = None) -> str | None:
     """Return ``end_date`` capped to the analysis date ``curr_date``.
 
     The third PIT guard (after :func:`is_filing_public` and
     :func:`overview_would_leak_future`): a vendor fetch window must not extend
     past the analysis date. When ``curr_date`` is empty/``None`` (live mode)
-    or either date is unparseable, the value is returned unchanged — fail open
-    *only* for live, where there is no as-of constraint to violate. On a
-    parseable historical analysis date, an ``end_date`` strictly after it is
-    clamped down to it so the vendor never returns rows the backtest could not
-    have seen.
+    or is not a ``YYYY-MM-DD`` date, the value is returned unchanged — fail
+    open *only* for live, where there is no as-of constraint to violate (an
+    unparseable pinned analysis date is a caller bug: there is no as-of date
+    to clamp to). On a parseable analysis date, an ``end_date`` strictly after
+    it is clamped down to it so the vendor never returns rows the backtest
+    could not have seen.
+
+    Round-17 follow-up: an ``end_date`` this clamp cannot read is capped at
+    the analysis date as well. It used to pass through unchanged for the
+    vendor's own parser to decide, and a lenient one (``pd.Timestamp``) read
+    ``20260628`` as the day after the analysis date — so the guard held only
+    for well-formed input, and the CoinGecko vendor rendered rows past the
+    analysis date. Basic ISO and slash dates are now read directly; anything
+    else unreadable (``latest``, ``garbage``) comes back as the analysis date.
     """
     if not curr_date or not end_date:
         return end_date
     try:
         as_of = datetime.strptime(str(curr_date)[:10], "%Y-%m-%d")
-        requested = datetime.strptime(str(end_date)[:10], "%Y-%m-%d")
     except (ValueError, TypeError):
         return end_date
-    if requested <= as_of:
+    requested = _parse_pit_end(end_date)
+    if requested is not None and requested <= as_of:
         return end_date
     logger.debug(
-        "PIT clamp: end_date %s past analysis date %s; clamped", end_date, curr_date,
+        "PIT clamp: end_date %s past or unreadable at analysis date %s; clamped",
+        end_date, curr_date,
     )
     return as_of.strftime("%Y-%m-%d")
 
@@ -352,10 +385,13 @@ def replace_retry_on_windows(
             last = exc
             # Round-10: escalating back-off WITHIN the same attempt budget —
             # a flat 5 x 0.05s = 0.25s was thin for a web reader / AV scan
-            # holding a multi-MB full_states_log; 0.05/0.05/0.1/0.2/0.4
-            # (~0.8s total) rides out the same window without changing the
-            # attempts count or the re-raise-last-PermissionError contract.
-            time.sleep(delay_s * 2 ** max(0, attempt - 1))
+            # holding a multi-MB full_states_log; the doubling steps
+            # 0.05/0.1/0.2/0.4s (0.75s before the last attempt) ride out the
+            # same window without changing the attempts count or the
+            # re-raise-last-PermissionError contract. Nothing is slept after
+            # the last failure: a retry that is not coming cannot be waited for.
+            if attempt < attempts - 1:
+                time.sleep(delay_s * 2 ** attempt)
     if last is None:
         # Unreachable for attempts >= 1, but honest under ``python -O`` where
         # an ``assert`` would be stripped and ``raise None`` a TypeError.

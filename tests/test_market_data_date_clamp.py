@@ -53,8 +53,21 @@ class TestClampEndDate:
         # but a malformed analysis date is a caller bug, not a leak to hide).
         assert clamp_end_date("2030-01-01", "not-a-date") == "2030-01-01"
 
-    def test_unparseable_end_date_passes_through(self):
-        assert clamp_end_date("garbage", "2020-01-02") == "garbage"
+    def test_unparseable_end_date_is_capped_at_analysis_date(self):
+        # A pinned analysis date is the as-of limit whatever the caller wrote
+        # for the end: text the clamp cannot read used to pass through for the
+        # vendor's lenient parser, which then read past the analysis date.
+        assert clamp_end_date("garbage", "2020-01-02") == "2020-01-02"
+        assert clamp_end_date("latest", "2020-01-02") == "2020-01-02"
+
+    def test_basic_iso_and_slash_end_dates_are_read(self):
+        # Three spellings a lenient parser accepts as a date; the clamp reads
+        # them the same way, so none of them ends after the analysis date.
+        for spelled in ("20200615", "2020/06/15", "2020-06-15"):
+            assert clamp_end_date(spelled, "2020-01-02") == "2020-01-02"
+        # On or before the analysis date the caller's own text is kept.
+        assert clamp_end_date("20191231", "2020-01-02") == "20191231"
+        assert clamp_end_date("2019/12/31", "2020-01-02") == "2019/12/31"
 
 
 class TestCurrentPitEnd:

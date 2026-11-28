@@ -78,6 +78,32 @@ def _results_dir() -> Path:
     return Path(os.getenv("YIALPHA_RESULTS_DIR", os.path.join(home, "logs"))) / "reports"
 
 
+def _complete_runs(root: Path) -> list[Path]:
+    """``root`` 下带 complete_report.md 的 run 目录，最新的在前。
+
+    「最新」取 complete_report.md 自己的 mtime（run 完成时写入），不是目录的
+    mtime——目录里之后写入任何文件都会改动它；打平按目录名定先后。
+    rank_signals.latest_for_ticker 用同一个函数，两个脚本不会挑出不同的 run
+    （round-17 后续：此前一个看报告文件、一个看目录）。
+    """
+    runs: list[tuple[float, str, Path]] = []
+    for d in root.iterdir():
+        if not d.is_dir():
+            continue
+        report = d / "complete_report.md"
+        # 跳过没有 complete_report.md 的半截/中断 run（Round-9 S4）——一个
+        # 崩溃的较新 run 否则会遮住最后一份完整报告。
+        if not report.is_file():
+            continue
+        try:
+            mtime = report.stat().st_mtime
+        except OSError:
+            continue
+        runs.append((mtime, d.name, d))
+    runs.sort(key=lambda run: (run[0], run[1]), reverse=True)
+    return [run[2] for run in runs]
+
+
 def find_report(ticker: str | None = None, report_dir: str | None = None) -> Path:
     """定位报告目录。优先 report_dir > 按 ticker 最新 > 全局最新。"""
     if report_dir:
@@ -92,12 +118,7 @@ def find_report(ticker: str | None = None, report_dir: str | None = None) -> Pat
             f"未找到报告根目录 {root}。用 --report-dir 指定，或先跑一次分析。"
         )
 
-    dirs = sorted([d for d in root.iterdir() if d.is_dir()],
-                  key=lambda d: d.stat().st_mtime, reverse=True)
-    # Round-9 S4：跳过没有 complete_report.md 的半截/中断 run（rank_signals
-    # 的 latest_for_ticker 同款过滤）——一个崩溃的较新 run 否则会遮住最后
-    # 一份完整报告，让票据退化为 missing_levels 而不是出单。
-    complete = [d for d in dirs if (d / "complete_report.md").is_file()]
+    complete = _complete_runs(root)
     if ticker:
         tk = ticker.upper()
         for d in complete:
@@ -154,7 +175,11 @@ def _fnum(s) -> float | None:
     # (?:[eE][-+]?\d+)? 兼容科学计数法：overlay 用 %g 渲染价格，低于 1e-4
     # 时输出 "1.14e-05"（PEPEUSDT 级微价合约的止损/入场），旧字符类在 e 处
     # 截断会把止损解析成 1.14——名义本金/TP/爆仓价全部差 5 个数量级。
-    m = re.search(r"-?\d[\d,]*\.?\d*(?:[eE][-+]?\d+)?", s)
+    # 第二个分支 ``.\d+``（round-17 后续）：没有前导零的小数 ".5" / "-.5" /
+    # ".0050" 原先只读到数字部分（5.0 / 50.0），入场 / 止损 / 目标因此差
+    # 10–10000 倍。overlay 自己渲染的数字总写作 "0.5"，只有 LLM 手写的
+    # 字段会出现这种写法；代价是 "No.5" 这类文本也会读成 0.5。
+    m = re.search(r"-?(?:\d[\d,]*\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", s)
     if not m:
         return None
     try:

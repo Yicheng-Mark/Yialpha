@@ -529,7 +529,14 @@ def _fetch_taker(symbol: str, end_date: str) -> dict[str, Any]:
 
 def _fetch_premium_snapshot(symbol: str) -> dict[str, Any]:
     """Live mark/index snapshot (``/fapi/v1/premiumIndex``): the rate in
-    effect for the NEXT settlement + the mark displacement vs index."""
+    effect for the NEXT settlement + the mark displacement vs index.
+
+    Binance labels that field ``lastFundingRate`` ("Latest funding rate"),
+    which reads like the last SETTLED rate. It is not: measured on
+    2026-11-28, it differed from the most recent settled rate and moved
+    during the funding period — it is the rate quoted for the period that
+    ends at ``nextFundingTime``. "Next funding" is the right reading.
+    """
     from .symbol_utils import normalize_symbol_for_venue
 
     canonical = normalize_symbol_for_venue(symbol, "binance_perp")

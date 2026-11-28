@@ -43,6 +43,13 @@ _UA = "yialpha/0.3 (+https://github.com/zhang12120113-creator/YiAlpha)"
 #: retries) collapse to one network hit while the stream stays near-live.
 _CACHE_TTL_DAYS = 5.0 / 1440.0
 
+#: Minute-scale chatter must never be served as "current" when it is not: a
+#: fetch failure may serve stale cache for at most this many minutes (three
+#: times the TTL, the same rule as binance_square._MAX_STALE_MINUTES), after
+#: which the placeholder below is returned instead of wearing today's clock on
+#: days-old bytes. Tighter than the global data_cache_max_stale_days on purpose.
+_MAX_STALE_MINUTES = 15.0
+
 
 def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.0) -> str:
     """Fetch recent StockTwits messages for ``ticker`` and return them as a
@@ -72,6 +79,7 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
             _fetch,
             ttl_days=_CACHE_TTL_DAYS,
             vendor="stocktwits",
+            stale_cap_days=_MAX_STALE_MINUTES / (60.0 * 24.0),
         )
         assert raw is not None  # fail_open never set: fetch errors re-raise
         data = json.loads(raw)

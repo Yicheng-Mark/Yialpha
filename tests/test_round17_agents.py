@@ -539,50 +539,72 @@ class TestSchemasNonFiniteOptionalFloat:
 
 
 @pytest.mark.parametrize(
-    ("schema", "payload", "field", "variant"),
+    ("schema", "payload", "field", "variant", "expected"),
     [
-        pytest.param(PortfolioDecision, _PM_MINIMAL, "rating", "buy", id="pm-rating-lower"),
-        pytest.param(PortfolioDecision, _PM_MINIMAL, "rating", "BUY", id="pm-rating-upper"),
-        pytest.param(PortfolioDecision, _PM_MINIMAL, "rating", " buy ", id="pm-rating-padded"),
+        pytest.param(PortfolioDecision, _PM_MINIMAL, "rating", "buy", "Buy", id="pm-rating-lower"),
+        pytest.param(PortfolioDecision, _PM_MINIMAL, "rating", "BUY", "Buy", id="pm-rating-upper"),
+        pytest.param(PortfolioDecision, _PM_MINIMAL, "rating", " buy ", "Buy", id="pm-rating-padded"),
         pytest.param(
             ResearchPlan, {"rationale": "r", "strategic_actions": "a"},
-            "recommendation", "hold", id="research-recommendation-lower",
+            "recommendation", "hold", "Hold", id="research-recommendation-lower",
         ),
-        pytest.param(TraderProposal, {"reasoning": "r"}, "action", "sell", id="trader-action-lower"),
+        pytest.param(TraderProposal, {"reasoning": "r"}, "action", "sell", "Sell", id="trader-action-lower"),
         pytest.param(
             SentimentReport, {"overall_score": 7.0, "confidence": "high", "narrative": "n"},
-            "overall_band", "bullish", id="sentiment-band-lower",
+            "overall_band", "bullish", "Bullish", id="sentiment-band-lower",
         ),
         pytest.param(
             SentimentReport, {"overall_score": 7.0, "confidence": "high", "narrative": "n"},
-            "overall_band", "Mildly bullish", id="sentiment-band-inner-case",
+            "overall_band", "Mildly bullish", "Mildly Bullish", id="sentiment-band-inner-case",
         ),
         pytest.param(
-            PositioningReport, _POSITIONING_MINIMAL, "funding_bias", "NEUTRAL",
+            PositioningReport, _POSITIONING_MINIMAL, "funding_bias", "NEUTRAL", "neutral",
             id="positioning-bias-upper",
         ),
         pytest.param(
-            PositioningReport, _POSITIONING_MINIMAL, "funding_bias", "neutral ",
+            PositioningReport, _POSITIONING_MINIMAL, "funding_bias", "neutral ", "neutral",
             id="positioning-bias-padded",
+        ),
+        pytest.param(
+            PositioningReport, _POSITIONING_MINIMAL, "crowding", "Crowded_Long", "crowded_long",
+            id="positioning-crowding-mixed-case",
+        ),
+        pytest.param(
+            PositioningReport, _POSITIONING_MINIMAL, "liquidity_risk", " DEEP ", "deep",
+            id="positioning-liquidity-padded-upper",
         ),
     ],
 )
-def test_r17_schemas_enum_labels_have_no_case_rescue(schema, payload, field, variant):
-    # Pinned as the current contract, not endorsed: the round-7 case rescue
-    # exists only on the two ``confidence`` Literals. Every OTHER label field
-    # (the PM rating included) is validated case- and whitespace-sensitively by
-    # pydantic, so a case variant vetoes the WHOLE structured result and the
-    # caller re-asks as free text (``invoke_structured_or_freetext``). The
-    # error is located on the field, i.e. nothing else in the payload is lost.
+def test_r17_schemas_enum_labels_are_matched_ignoring_case(schema, payload, field, variant, expected):
+    # Round-17 follow-up: every enum-typed label field now rescues the case and
+    # the padding (the round-7 rescue used to exist on the two ``confidence``
+    # Literals only, so a case variant vetoed the WHOLE structured result and the
+    # caller re-asked as free text -- ``invoke_structured_or_freetext``).
+    assert getattr(schema.model_validate({**payload, field: variant}), field) == expected
+    assert getattr(schema.model_validate({**payload, field: expected}), field) == expected
+
+
+@pytest.mark.parametrize(
+    ("schema", "payload", "field"),
+    [
+        pytest.param(PortfolioDecision, _PM_MINIMAL, "rating", id="pm-rating"),
+        pytest.param(
+            ResearchPlan, {"rationale": "r", "strategic_actions": "a"},
+            "recommendation", id="research-recommendation"),
+        pytest.param(TraderProposal, {"reasoning": "r"}, "action", id="trader-action"),
+        pytest.param(
+            SentimentReport, {"overall_score": 7.0, "confidence": "high", "narrative": "n"},
+            "overall_band", id="sentiment-band",
+        ),
+        pytest.param(PositioningReport, _POSITIONING_MINIMAL, "funding_bias", id="positioning-bias"),
+    ],
+)
+def test_r17_schemas_label_case_rescue_never_invents_a_value(schema, payload, field):
+    # Only the spelling is rescued: a word that is not in the field's vocabulary
+    # still fails on that field, and nothing else in the payload is lost.
     with pytest.raises(ValidationError) as excinfo:
-        schema.model_validate({**payload, field: variant})
+        schema.model_validate({**payload, field: "Strong Buy"})
     assert [error["loc"] for error in excinfo.value.errors()] == [(field,)]
-    # The canonical spelling of the same label validates.
-    canonical = {
-        "rating": "Buy", "recommendation": "Hold", "action": "Sell",
-        "overall_band": "Bullish", "funding_bias": "neutral",
-    }[field]
-    assert getattr(schema.model_validate({**payload, field: canonical}), field) == canonical
 
 
 def test_r17_schemas_case_variant_key_is_not_folded():

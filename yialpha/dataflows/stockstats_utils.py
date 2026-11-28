@@ -272,13 +272,25 @@ def _needs_same_day_refresh(data_file, curr_date_dt, today_date) -> bool:
 
     The cache is now ONE fixed-name file per symbol (see ``_ohlcv_cache_path``),
     so without this a run started before the day's bar was final would keep
-    serving that snapshot to every later run (#1150). Only the current day is
-    affected: a historical date's rows are immutable, so the cache is reused
-    unconditionally.
+    serving that snapshot to every later run (#1150). The current day is
+    governed by the file's age (``OHLCV_CACHE_TTL_SECONDS``).
+
+    A historical date's rows are immutable — but only in a cache written AFTER
+    that date ended. Round-17 follow-up: this used to return ``False`` for
+    every past date unconditionally, so a bar downloaded intraday on day D (an
+    unclosed snapshot) was read as D's close by the next day's "previous
+    session" analysis, and a cache last written on day X served an analysis
+    for a later day Y with X's prices. A past analysis date therefore refreshes
+    when the file's UTC write date is on or before it: such a file cannot be
+    trusted to hold the final bar. A file written on a later UTC day already
+    holds every final bar up to the analysis date and is reused as before, so
+    a backtest still downloads each symbol once.
     """
+    mtime = os.path.getmtime(data_file)
     if curr_date_dt.date() < today_date.date():
-        return False
-    return time.time() - os.path.getmtime(data_file) > OHLCV_CACHE_TTL_SECONDS
+        written_utc = pd.Timestamp(mtime, unit="s", tz="UTC").date()
+        return written_utc <= curr_date_dt.date()
+    return time.time() - mtime > OHLCV_CACHE_TTL_SECONDS
 
 
 def _ohlcv_cache_window() -> tuple[str, str]:

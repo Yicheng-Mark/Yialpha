@@ -387,14 +387,19 @@ def fetch_returns_yf(
             actual_days = holding_days
         else:
             actual_days = min(holding_days, len(stock) - 1, len(bench) - 1)
-        raw = float(
-            (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
-            / stock["Close"].iloc[0]
+        # Round-17 follow-up: a close that is NaN, zero or infinite is a bad
+        # row, not a return. The raw value used to go out as nan / inf, the
+        # reflection layer wrote ``+nan%`` into the memory log and retired the
+        # entry -- a label that later reaches the same ticker's prompt. Both
+        # legs of both ends must be finite and positive to score the entry.
+        legs = (
+            float(stock["Close"].iloc[0]), float(stock["Close"].iloc[actual_days]),
+            float(bench["Close"].iloc[0]), float(bench["Close"].iloc[actual_days]),
         )
-        bench_ret = float(
-            (bench["Close"].iloc[actual_days] - bench["Close"].iloc[0])
-            / bench["Close"].iloc[0]
-        )
+        if not all(math.isfinite(v) and v > 0 for v in legs):
+            return None, None, None
+        raw = float((legs[1] - legs[0]) / legs[0])
+        bench_ret = float((legs[3] - legs[2]) / legs[2])
         return raw, raw - bench_ret, actual_days
     except Exception as exc:  # noqa: BLE001 -- outcome resolution is best-effort
         logger.warning(

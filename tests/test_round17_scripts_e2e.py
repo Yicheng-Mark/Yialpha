@@ -2971,12 +2971,29 @@ class TestRobustParseArgs:
 
         assert opts.reports_root == str(root / "reports")
 
-    def test_r17_robust_parse_tickers_are_not_validated_here(self, rr, monkeypatch, capsys):
-        """No charset / market gate in the orchestrator: the child validates (exit 2)."""
-        opts = _robust_parse(rr, monkeypatch, "--tickers", "AAPL,MSFT", "0700.HK", "", "brk.b")
+    def test_r17_robust_parse_leaves_case_and_market_to_the_child(self, rr, monkeypatch, capsys):
+        """No market gate in the orchestrator: the child owns it (exit 2 there).
+        Only what cannot be part of a log file name is refused here (next test)."""
+        opts = _robust_parse(rr, monkeypatch, "--tickers", "0700.HK", "brk.b", "BTC-USD", "btcusdt")
 
-        assert opts.tickers == ["AAPL,MSFT", "0700.HK", "", "brk.b"]
+        assert opts.tickers == ["0700.HK", "brk.b", "BTC-USD", "btcusdt"]
         assert capsys.readouterr().err == ""
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["AAPL,MSFT", "a/b", "BTC:USDT", "..", "A B", "x" * 40, ""],
+    )
+    def test_r17_robust_parse_refuses_a_ticker_that_cannot_be_a_file_name(
+        self, rr, monkeypatch, capsys, bad
+    ):
+        """Round-17 follow-up: each ticker names a log file (``robust_<ticker>_...``).
+        A path separator became a spawn failure and a colon wrote the log into an
+        NTFS alternate data stream. Exit 2, before any child is started."""
+        with pytest.raises(SystemExit) as excinfo:
+            _robust_parse(rr, monkeypatch, "--tickers", bad)
+
+        assert excinfo.value.code == 2
+        assert f"--tickers entry {bad!r} is not a usable ticker" in capsys.readouterr().err
 
     @pytest.mark.parametrize(
         ("tickers", "kept", "dropped"),
@@ -3083,7 +3100,7 @@ class TestRobustFindNewReport:
 
         assert rr._find_new_report(tmp_path, "AAPL", 0.0) is None
 
-    def test_r17_robust_find_new_report_newest_wins_and_ties_lose(self, rr, tmp_path):
+    def test_r17_robust_find_new_report_newest_wins_and_ties_break_by_name(self, rr, tmp_path):
         older = _touch(tmp_path / "AAPL_20260701_090000" / "complete_report.md", 100.0)
         newer = _touch(tmp_path / "AAPL_20260701_100000" / "complete_report.md", 200.0)
 
@@ -3092,14 +3109,15 @@ class TestRobustFindNewReport:
         # A report whose mtime equals the pre-attempt snapshot is not "new".
         assert rr._find_new_report(tmp_path, "AAPL", 200.0) is None
 
-        # Two reports with the same mtime: neither is newer than the snapshot, and
-        # which of them a directory listing yields first is the file system's choice
-        # (sorted on NTFS, creation order on a fresh WSL disk, neither on a hosted
-        # runner's ext4 -- where asserting a particular one failed).
+        # Two reports with the same mtime: the one whose directory name sorts last
+        # wins -- a rule that does not depend on the order a file system lists
+        # directories in (sorted on NTFS, creation order on a fresh WSL disk, neither
+        # on a hosted runner's ext4). Until the round-17 follow-up the first one
+        # ``Path.glob`` happened to yield won.
         tied = _touch(tmp_path / "AAPL_20260701_100500" / "complete_report.md", 200.0)
 
-        assert rr._find_new_report(tmp_path, "AAPL", 0.0) in {newer, tied}
-        assert rr._find_new_report(tmp_path, "AAPL", 100.0) in {newer, tied}
+        assert rr._find_new_report(tmp_path, "AAPL", 0.0) == tied
+        assert rr._find_new_report(tmp_path, "AAPL", 100.0) == tied
         assert rr._find_new_report(tmp_path, "AAPL", 200.0) is None
         assert older.exists()
 
@@ -3714,7 +3732,7 @@ class TestRobustOneVerdict:
         names = sorted(p.name for p in _log_dir(run).iterdir())
         assert [n[-7:] for n in names] == [f"_a{i}.log" for i in range(1, max_attempts + 1)]
 
-    @pytest.mark.parametrize("code", [1, 2, -9, 137])
+    @pytest.mark.parametrize("code", [1, -9, 137])
     def test_r17_robust_one_non_zero_exit_is_retried_then_reported_with_its_code(
         self, run, rr, capsys, code
     ):
@@ -3729,6 +3747,38 @@ class TestRobustOneVerdict:
         out = capsys.readouterr().out.splitlines()
         assert out[1] == f"[AAPL] {_WARN} attempt 1 failed (exit {code}, wall 0s) → retry"
         assert out[-1] == f"[AAPL] {_WARN} attempt 2 failed (exit {code}, wall 0s) → retry"
+
+    def test_r17_robust_one_usage_error_in_the_child_is_not_retried(self, run, rr, capsys):
+        """Round-17 follow-up: exit 2 is argparse's / BatchInputError's code -- the
+        child refused its own arguments. It used to be retried like a crash (the
+        full --max-attempts, every backoff) with only "exit 2" in the summary; the
+        last line of the child's log is the reason and now travels with it."""
+        run.scripts = [[None, 2]]  # alive at the first poll, then exit 2
+        run.opts.max_attempts = 3
+
+        def on_poll(child, code):
+            if code == 2:
+                # What the child wrote to its log before exiting (the handle the
+                # orchestrator opened for it is already closed on this side).
+                Path(run.spawns[0]["stdout"].name).write_text(
+                    "$ python scripts/run_batch.py --tickers 0700.HK ...\n"
+                    "run_batch.py: error: 0700.HK: not a US-listed equity\n\n",
+                    encoding="utf-8",
+                )
+            return code
+
+        run.on_poll = on_poll
+
+        result = _one(run, rr)
+
+        reason = ("exit 2 (the child rejected its arguments; not retried): "
+                  "run_batch.py: error: 0700.HK: not a US-listed equity")
+        assert result["ok"] is False and result["attempts"] == 1
+        assert result["reason"] == reason
+        assert len(run.spawns) == 1  # one child, no retry
+        assert run.clock.sleeps == [5]  # only the watchdog's poll interval, no backoff
+        assert run.reports.calls == 0
+        assert capsys.readouterr().out.splitlines()[1] == f"[AAPL] ❌ attempt 1 {reason}"
 
     def test_r17_robust_one_strict_and_evidence_unavailable_retries(self, run, rr, capsys):
         run.sentinels = _Seq(None)
@@ -4265,18 +4315,18 @@ class TestTradeTicketFnum:
     @pytest.mark.parametrize(
         ("text", "expected"),
         [
-            pytest.param(".5", 5.0, id="leading-dot"),
-            pytest.param("-.5", 5.0, id="minus-leading-dot-loses-sign-and-magnitude"),
-            pytest.param("Entry .0050", 50.0, id="sub-dollar-leading-dot"),
+            pytest.param(".5", 0.5, id="leading-dot"),
+            pytest.param("-.5", -0.5, id="minus-leading-dot"),
+            pytest.param("Entry .0050", 0.005, id="sub-dollar-leading-dot"),
+            pytest.param("No.5", 0.5, id="accepted-cost"),
         ],
     )
-    def test_r17_fnum_leading_dot_decimal_reads_only_the_digits(self, tt, text, expected):
-        """Pins the current seam (reported, not changed): the pattern needs a digit
-        before the dot, so ``.5`` is read as 5, ``-.5`` loses its sign and
-        ``.0050`` is read as 50. The overlay renders with ``%g`` (always
-        ``0.5``); an LLM writing ``.5`` in a parsed field (entry / stop /
-        price target) would be read ten times too large. No local report or
-        state log contains the form."""
+    def test_r17_fnum_leading_dot_decimal_is_read_as_a_decimal(self, tt, text, expected):
+        """Round-17 follow-up: the pattern needs a digit before the dot OR a dot
+        followed by digits, so ``.5`` is 0.5, ``-.5`` keeps its sign and
+        ``.0050`` is 0.005. Until then ``.5`` read as 5 -- an LLM writing the
+        form in a parsed field (entry / stop / price target) was read ten times
+        too large. The price of the second branch: ``No.5`` reads as 0.5."""
         assert tt._fnum(text) == expected
 
     @pytest.mark.parametrize(
@@ -4925,10 +4975,11 @@ _SIMPLE_REPORT = "\n".join([
     "## Quantile spread & turnover (primary horizon)",
     "",
     "| Indicator | Q1 | Q2 | Q3 | Q4 | Q5 | Q_hi-Q_lo | Monotonic | Turnover |",
-    # 9 header cells, 10 delimiter cells (``---:|`` is repeated once too often): a display
-    # defect, pinned as is -- GFM drops the excess, so Monotonic renders right- and Turnover
-    # left-aligned.
-    "|---|---:|---:|---:|---:|---:|---:|---:|---|---:|",
+    # 9 header cells, 9 delimiter cells: text left, the quantiles and the spread
+    # right, Monotonic (yes/no) left, Turnover right. Until the round-17 follow-up
+    # the row had 10 cells (one "---:|" too many) and the last two columns were
+    # misaligned.
+    "|---|---:|---:|---:|---:|---:|---:|---|---:|",
     "| good | -0.9273 | -0.5302 | 0.0748 | 0.6273 | 0.9463 | 1.8736 | yes | 0.101 |",
     "| noise | 0.0577 | 0.1998 | -0.1080 | -0.0304 | 0.0718 | 0.0141 | no | 0.329 |",
     "",
@@ -5136,68 +5187,49 @@ class TestPruneMainReport:
         good = verdict["per_indicator"]["good"]
         assert (good["mean_abs_ic"], good["finite_windows"], good["longest_low_run"]) == (1.0, 61, 0)
 
-    @pytest.mark.parametrize(
-        ("value", "kept", "pruned"),
-        [
-            pytest.param("0", 2, 0, id="zero-threshold-keeps-all"),
-            pytest.param("-1", 2, 0, id="negative-keeps-all"),
-            pytest.param("nan", 2, 0, id="nan-keeps-all"),
-            pytest.param("inf", 0, 2, id="inf-prunes-all"),
-        ],
-    )
-    def test_r17_prune_degenerate_threshold_still_emits_a_verdict(
-        self, prune, capsys, tmp_path, value, kept, pruned
+    @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf"])
+    def test_r17_prune_degenerate_threshold_is_refused(
+        self, prune, capsys, tmp_path, value
     ):
-        """Pins the current seam (reported, not changed): ``--min-abs-ic`` has no guard.
-        NaN fails every ``abs(IC) < threshold`` comparison and 0 / negatives never
-        trip, so everything is KEPT; +inf prunes everything -- all with exit 0."""
+        """Round-17 follow-up: ``--min-abs-ic`` must be a finite number > 0. NaN
+        fails every ``abs(IC) < threshold`` comparison and 0 / negatives never
+        trip, so everything used to be KEPT; +inf pruned everything -- all with
+        exit 0, a verdict that came from the flag rather than the evidence."""
         path = _simple_csv(tmp_path / "ic.csv")
 
-        assert prune.main([str(path), *_WINDOW, "--min-abs-ic", value]) == 0
+        # ``--flag=value``: a bare ``-inf`` would be read as an option name by argparse.
+        assert prune.main([str(path), *_WINDOW, f"--min-abs-ic={value}"]) == 1
 
-        out = capsys.readouterr().out
-        assert f"- **Kept**: {kept} indicator(s)" in out
-        assert f"- **Pruned**: {pruned} indicator(s)" in out
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == (
+            f"Error: --min-abs-ic must be a finite number > 0 (got {float(value)})\n"
+        )
+        assert not (tmp_path / "v.json").exists()
 
 
 class TestPruneConsole:
-    @staticmethod
-    def _stream(encoding):
-        calls = []
-        stream = SimpleNamespace(encoding=encoding, reconfigure=lambda **kwargs: calls.append(kwargs))
-        return stream, calls
+    def test_r17_prune_main_runs_with_a_stdout_that_cannot_be_reconfigured(
+        self, prune, capsys, tmp_path
+    ):
+        """Round-17 follow-up: ``main()`` used to reconfigure both console streams
+        itself, without the ``getattr`` guard ``_bootstrap.bootstrap()`` has, so a
+        replaced stdout (``redirect_stdout(StringIO())``) made it fail with
+        AttributeError before argparse even started. The bootstrap at import is
+        the one place that does it now."""
+        from contextlib import redirect_stdout
 
-    @pytest.mark.parametrize("encoding", ["utf-8", "UTF-8", "utf8", "UTF8"])
-    def test_r17_prune_console_already_utf8_is_left_alone(self, prune, monkeypatch, encoding):
-        out, out_calls = self._stream(encoding)
-        err, err_calls = self._stream(encoding)
-        monkeypatch.setattr(sys, "stdout", out)
-        monkeypatch.setattr(sys, "stderr", err)
+        path = _simple_csv(tmp_path / "ic.csv")
+        json_file = tmp_path / "v.json"
+        buffer = io.StringIO()
 
-        prune._ensure_unicode_stdout()
+        with redirect_stdout(buffer):
+            code = prune.main([str(path), *_WINDOW, "--json-out", str(json_file)])
 
-        assert (out_calls, err_calls) == ([], [])
-
-    @pytest.mark.parametrize("encoding", ["cp1252", "gbk", "ascii", "utf-16", None])
-    def test_r17_prune_console_other_encodings_are_switched_to_utf8(self, prune, monkeypatch, encoding):
-        out, out_calls = self._stream(encoding)
-        err, err_calls = self._stream(encoding)
-        monkeypatch.setattr(sys, "stdout", out)
-        monkeypatch.setattr(sys, "stderr", err)
-
-        prune._ensure_unicode_stdout()
-
-        assert out_calls == [{"encoding": "utf-8", "errors": "replace"}]
-        assert err_calls == [{"encoding": "utf-8", "errors": "replace"}]
-
-    def test_r17_prune_console_stream_without_reconfigure_crashes(self, prune, monkeypatch):
-        """Pins the current seam: unlike ``_bootstrap.bootstrap()`` there is no
-        ``getattr`` guard here, so a replaced stdout that lacks ``reconfigure``
-        (``redirect_stdout(StringIO())``) makes ``main()`` fail before it starts."""
-        monkeypatch.setattr(sys, "stdout", io.StringIO())
-
-        with pytest.raises(AttributeError, match="reconfigure"):
-            prune._ensure_unicode_stdout()
+        assert code == 0
+        assert buffer.getvalue().startswith("# IC Indicator Pruning Report")
+        assert json_file.is_file()
+        assert capsys.readouterr().err == f"\nJSON verdict written to {json_file}\n"
 
 
 def test_r17_prune_main_guard_exits_with_main_code(monkeypatch, capsys, tmp_path):
@@ -5323,9 +5355,10 @@ class TestRankLatestForTicker:
         assert rs.latest_for_ticker(ticker) is None
 
     def test_r17_rank_latest_counts_an_unstamped_sibling(self, rs, tmp_path):
-        """Pins the current seam: the lookup is ``glob("<ticker>_*")`` with no stamp-shape
-        check, so ``AAA_notes`` (or a backed-up copy) can be ranked as AAA's report; its
-        date then renders as a dash and ``--since`` excludes it."""
+        """By design (round 13): a stamp-less but complete sibling (a backed-up
+        or manually saved copy) ranks as the ticker's report; its date renders as
+        a dash and ``--since`` excludes it. The lookup matches ``<TICKER>_`` like
+        ``trade_ticket.find_report`` does, so the two scripts pick the same run."""
         root = tmp_path / "reports"
         _report(root, "AAA", "20260918_120000", mtime=100.0, rating="Buy")
         (root / "AAA_notes").mkdir()
@@ -5335,6 +5368,40 @@ class TestRankLatestForTicker:
         assert rs.latest_for_ticker("AAA") == root / "AAA_notes"
         row = rs.analyze_ticker("AAA")
         assert row["report_dir"] == str(root / "AAA_notes") and row["report_date"] is None
+
+    def test_r17_rank_latest_matches_the_ticker_case_insensitively(self, rs, tmp_path):
+        """Round-17 follow-up: the lookup used to be ``glob("<ticker>_*")`` --
+        case-sensitive on Linux, insensitive on Windows. It is insensitive on
+        both now, like ``trade_ticket.find_report``."""
+        root = tmp_path / "reports"
+        _report(root, "aapl", "20260918_120000", mtime=100.0, rating="Buy")
+
+        assert rs.latest_for_ticker("AAPL") == root / "aapl_20260918_120000"
+        assert rs.latest_for_ticker("aapl") == root / "aapl_20260918_120000"
+        assert rs.latest_for_ticker("AAP") is None
+
+    def test_r17_latest_report_is_ordered_by_the_report_file_not_the_directory(self, rs, tt, tmp_path):
+        """Round-17 follow-up: ``find_report`` ordered runs by the DIRECTORY mtime
+        and ``latest_for_ticker`` by the report file's, so the two scripts could
+        name different runs. Both go through ``trade_ticket._complete_runs``."""
+        root = tmp_path / "reports"
+        newer_report = _report(root, "AAPL", "20260918_120000", mtime=300.0, rating="Buy")
+        older_report = _report(root, "AAPL", "20260919_120000", mtime=100.0, rating="Sell")
+        # A file written into the older run's directory afterwards makes that
+        # directory the most recently modified one.
+        (older_report / "notes.txt").write_text("touched later", encoding="utf-8")
+
+        assert tt.find_report("AAPL") == newer_report
+        assert tt.find_report() == newer_report
+        assert rs.latest_for_ticker("AAPL") == newer_report
+
+    def test_r17_latest_report_ties_break_by_directory_name(self, rs, tt, tmp_path):
+        root = tmp_path / "reports"
+        _report(root, "AAPL", "20260918_120000", mtime=200.0, rating="Buy")
+        _report(root, "AAPL", "20260919_120000", mtime=200.0, rating="Sell")
+
+        assert tt.find_report("AAPL") == root / "AAPL_20260919_120000"
+        assert rs.latest_for_ticker("AAPL") == root / "AAPL_20260919_120000"
 
     def test_r17_rank_report_date_shows_a_malformed_stamp_as_is(self, rs, tmp_path):
         """Pins the current seam: the stamp is sliced, never validated."""

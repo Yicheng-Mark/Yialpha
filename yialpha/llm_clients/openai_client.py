@@ -176,7 +176,13 @@ class MinimaxChatOpenAI(NormalizedChatOpenAI):
         return payload
 
 
-# Kwargs forwarded from user config to ChatOpenAI
+# Kwargs forwarded from user config to ChatOpenAI.
+#
+# ``temperature`` is a no-op for this provider's whole catalog: every model
+# listed for it is a gpt-5.x, and langchain-openai (1.6.0) drops the kwarg when
+# it builds ``ChatOpenAI`` for gpt-5 models ("gpt-5 models only allow
+# temperature=1 or unset"). It is forwarded anyway -- harmless, and it applies
+# again the day the catalog gains a model that honours it.
 _PASSTHROUGH_KWARGS = (
     "timeout", "max_retries", "reasoning_effort", "temperature",
     "api_key", "callbacks", "http_client", "http_async_client", "rate_limiter",

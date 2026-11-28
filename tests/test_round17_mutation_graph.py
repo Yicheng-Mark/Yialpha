@@ -958,12 +958,11 @@ def test_r17_mut_perp_ticket_unknown_profile_cap_is_pinned():
     -> ``..., 20.0)``.
 
     A risk profile that is not in the table (a config typo in
-    ``risk_profile``, which nothing validates) falls back to the flat 5x
-    conviction cap. For a strong rating that equals the conservative cap
-    (the documented default profile's 5x); with a 25x liquidation-distance
-    and a 15x volatility cap, the conviction cap binds. (For a weak rating
-    the flat 5x is LOOSER than conservative's 3x — reported, not pinned
-    here.)
+    ``risk_profile``) is sized under the conservative profile — the documented
+    default (round-17 follow-up; it used to fall back to the flat 5x cap,
+    which for a weak rating was LOOSER than conservative's 3x). For a strong
+    rating that is the same 5x; with a 25x liquidation-distance and a 15x
+    volatility cap, the conviction cap binds.
     """
     lev, caps = compute_leverage(0.02, 0.02, "crypto_perp", 2, profile="yolo")
     assert caps["L_conv"] == 5.0

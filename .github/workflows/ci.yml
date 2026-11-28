@@ -10,9 +10,11 @@ on:
     # version only breaks on interpreter-specific regressions, which this
     # scheduled run catches within a week instead of burning an extra
     # full-suite run on every push (the suite ran 5x per push before). The
-    # same run does the scrambled-directory-order screen.
+    # same run does the scrambled-directory-order screen and audits
+    # requirements.lock with pip-audit.
     - cron: "15 3 * * 0"
-  # By hand: runs the push set plus the scrambled-directory-order job.
+  # By hand: runs the push set plus the scrambled-directory-order and
+  # pip-audit jobs.
   workflow_dispatch:
 
 concurrency:
@@ -169,6 +171,32 @@ jobs:
             echo "### Tail of pytest output"
             tail -n 40 pytest.log
           } >> "$GITHUB_STEP_SUMMARY"
+
+  dependency-audit:
+    # Weekly (and by hand): known-vulnerability audit of requirements.lock --
+    # the file the README tells users to install from. Deliberately NOT on
+    # push / PR: a new advisory is published on someone else's schedule, so
+    # gating pushes on it turns main red for a change nobody made. A red run
+    # here is the signal to regenerate the lock. Until 2026-11-28 the audit was
+    # run by hand on push days only.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: pip-audit (requirements.lock)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Audit the lockfile against the vulnerability databases
+        # --no-deps: the lock already pins the whole graph with hashes. Without
+        # it pip-audit resolves and INSTALLS an unconstrained dependency set
+        # and audits that instead of the lock.
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+          pip-audit -r requirements.lock --no-deps
 
   test-windows:
     # The project is developed on Windows (Git Bash), yet the suite only ever

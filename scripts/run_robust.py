@@ -33,6 +33,7 @@ for _stream in (sys.stdout, sys.stderr):
 # noqa: E402 — imports follow the UTF-8 reconfigure guard above; reordering would
 # re-introduce UnicodeEncodeError when printing ❌/✅/中文 on a GBK Windows console.
 from yialpha.cli.utils import is_canonical_ymd  # noqa: E402
+from yialpha.dataflows.utils import safe_ticker_component  # noqa: E402
 from yialpha.logging_config import setup_logging  # noqa: E402
 
 setup_logging()  # noqa: E402 — centralised logging before any other import fires
@@ -175,6 +176,16 @@ def _parse_args() -> argparse.Namespace:
     # accepts exactly what it accepts.
     if not is_canonical_ymd(opts.date):
         p.error(f"--date must be YYYY-MM-DD (got {opts.date!r})")
+    # Round-17 follow-up: each ticker becomes part of a log file name
+    # (robust_<ticker>_<stamp>_a<n>.log). A path separator in it turned into a
+    # spawn failure ("a/b"), and on Windows "BTC:USDT" wrote the log into an
+    # NTFS alternate data stream of a file called "robust_BTC". Reject here,
+    # with exit 2 and before any child is started, what cannot be a ticker.
+    for t in opts.tickers:
+        try:
+            safe_ticker_component(t.strip())
+        except ValueError as exc:
+            p.error(f"--tickers entry {t!r} is not a usable ticker: {exc}")
     # Quality gate is ON by default now: the only way back to the old
     # "accept a degraded report" semantics is the explicit --allow-degraded
     # escape hatch. (--require-data-quality stays accepted as a no-op for
@@ -291,7 +302,11 @@ def _complete_mtime(reports_root: Path, ticker: str) -> float:
 
 
 def _find_new_report(reports_root: Path, ticker: str, pre_mtime: float) -> Path | None:
-    """找一份 mtime 比 pre_mtime 新且含 complete_report.md 的 <TICKER>_<stamp>/。"""
+    """找一份 mtime 比 pre_mtime 新且含 complete_report.md 的 <TICKER>_<stamp>/。
+
+    mtime 打平时取目录名靠后的那个（时间戳更晚）：``Path.glob`` 的遍历顺序
+    属于文件系统（NTFS 按名字、ext4 两者都不是），不拿它定胜负。
+    """
     best: Path | None = None
     best_mtime = pre_mtime
     stamp_re = _report_dir_re(ticker)
@@ -303,9 +318,30 @@ def _find_new_report(reports_root: Path, ticker: str, pre_mtime: float) -> Path 
             continue
         with contextlib.suppress(OSError):
             m = cr.stat().st_mtime
-            if m > best_mtime:
+            newer = m > best_mtime if best is None else (m, d.name) > (best_mtime, best.parent.name)
+            if newer:
                 best_mtime, best = m, cr
     return best
+
+
+#: Exit code of a child that rejected its own arguments (argparse, and
+#: BatchInputError in run_batch). Nothing a retry can change.
+_USAGE_ERROR_EXIT = 2
+
+
+def _last_log_line(log_path: Path, limit: int = 200) -> str:
+    """子进程日志里最后一行非空文本（截到 ``limit`` 个字符）；读不到则空串。"""
+    try:
+        with open(log_path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 4096))  # the last 4 KiB, not past the end
+            tail = fh.read(4096)
+    except OSError:
+        return ""
+    for line in reversed(tail.decode("utf-8", errors="replace").splitlines()):
+        if line.strip():
+            return line.strip()[:limit]
+    return ""
 
 
 def _core_sentinel_count(
@@ -770,6 +806,17 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                 # that HAD written a report -- only its data was degraded.
                 result["reason"] = "exit 0 but no new complete_report.md"
                 print(f"[{ticker}] ⚠️ {result['reason']} → retry", flush=True)
+        elif rc == _USAGE_ERROR_EXIT:
+            # Round-17 follow-up: exit 2 means the child refused its arguments
+            # (an unsupported market, a malformed date). It used to be retried
+            # like a crash -- the full --max-attempts with every backoff -- and
+            # the summary said only "exit 2", leaving the reason in the log.
+            result["reason"] = (
+                f"exit 2 (the child rejected its arguments; not retried): "
+                f"{_last_log_line(log_path) or 'see log'}"
+            )
+            print(f"[{ticker}] ❌ attempt {attempt} {result['reason']}", flush=True)
+            break
         else:
             result["reason"] = f"exit {rc}"
             print(

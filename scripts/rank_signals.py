@@ -40,6 +40,7 @@ _bootstrap.bootstrap()  # project-root sys.path + UTF-8 console (Windows GBK)
 
 # 复用 trade_ticket.py 的全部解析（scripts/ 不是包，sys.path 注入）
 from trade_ticket import (  # noqa: E402
+    _complete_runs,
     _results_dir,
     decide_direction,
     detect_asset_type,
@@ -80,22 +81,21 @@ _DIR_STAMP_RE = re.compile(r"_(\d{8})_(\d{6})$")
 # ---------------------------------------------------------------------------
 
 def latest_for_ticker(ticker: str) -> Path | None:
-    """该 ticker 现存报告中 complete_report.md mtime 最新的目录（无则 None）。"""
+    """该 ticker 最新一份完整报告的目录；没有则 None。
+
+    「最新」与 trade_ticket.find_report 同一口径（``_complete_runs``）：
+    complete_report.md 的 mtime，打平按目录名。匹配也相同——``<TICKER>_`` 前缀，
+    大小写不敏感。没有时间戳的目录（手工另存的报告）照旧算数，只是日期未知。
+    """
     root = _results_dir()
     if not root.is_dir():
         return None
-    best, best_mt = None, 0.0
-    for d in root.glob(f"{ticker}_*"):  # ticker 原样匹配（美股/加密均无路径特殊字符）
-        cr = d / "complete_report.md"
-        if not cr.is_file():
-            continue  # 跳半截 / 中断 run
-        try:
-            mt = cr.stat().st_mtime
-        except OSError:
-            continue
-        if mt > best_mt:
-            best, best_mt = d, mt
-    return best
+    wanted = ticker.upper()
+    for d in _complete_runs(root):
+        name = d.name.upper()
+        if name.startswith(wanted + "_") or name == wanted:
+            return d
+    return None
 
 
 def report_date(report_dir: Path) -> str | None:

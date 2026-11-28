@@ -50,7 +50,7 @@ def test_ticker_news_failure_raises_not_prose(monkeypatch, caplog):
             raise RuntimeError("network down")
 
     monkeypatch.setattr(ynews.yf, "Ticker", lambda t: BoomTicker())
-    monkeypatch.setattr(ynews, "yf_retry", lambda fn: fn())
+    monkeypatch.setattr(ynews, "yf_retry", lambda fn, **kw: fn())
     with (caplog.at_level("ERROR", logger="yialpha.dataflows.yfinance_news"),
           pytest.raises(RuntimeError, match="network down")):
         ynews.get_news_yfinance("AAPL", "2025-01-01", "2025-01-10")
@@ -63,7 +63,7 @@ def test_global_news_failure_raises_not_prose(monkeypatch, caplog):
         raise RuntimeError("network down")
 
     monkeypatch.setattr(ynews.yf, "Search", boom_search)
-    monkeypatch.setattr(ynews, "yf_retry", lambda fn: fn())
+    monkeypatch.setattr(ynews, "yf_retry", lambda fn, **kw: fn())
     with (caplog.at_level("ERROR", logger="yialpha.dataflows.yfinance_news"),
           pytest.raises(RuntimeError, match="network down")):
         ynews.get_global_news_yfinance("2025-05-09", look_back_days=7, limit=10)

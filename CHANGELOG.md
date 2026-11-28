@@ -483,6 +483,88 @@ Breaking changes within the 0.x line are called out explicitly.
       the header region is fixed at 3 rows (border, text, border); a vertical
       padding of 1 made the panel 5 rows and the layout cropped the middle —
       the text itself. The padding is 0.
+- **Follow-ups to the round-17 observations (decisions taken 2026-11-28).** The
+  audit left a ledger of defects whose fix was a design call. The calls were
+  taken and these landed. Each has a regression test in
+  `tests/test_round17_followups.py` or in the round-17 card file that had pinned
+  the old behaviour.
+  - *Point-in-time:* `clamp_end_date` (`yialpha/dataflows/utils.py`) now reads
+    basic-ISO and slash dates, and caps at the analysis date an end date it
+    cannot read. It used to pass unreadable text through for the vendor's own
+    parser, and a lenient one read `20260628` as the day after the analysis
+    date — the CoinGecko vendor rendered rows past it.
+  - *Point-in-time:* `load_ohlcv` and `read_cached_ohlcv`
+    (`yialpha/dataflows/stockstats_utils.py`) never refreshed the per-symbol
+    cache for a past analysis date. A bar downloaded intraday on day D was read
+    as D's close by the next day's "previous session" analysis, and a cache last
+    written before the analysis date served it with older prices. A past date
+    now refreshes when the cache file was written on or before it (UTC); a
+    cache written later is reused as before, so a backtest still downloads each
+    symbol once.
+  - `accuracy.fetch_returns_yf` scored an outcome over a NaN, zero or infinite
+    close (nan, −100% or inf), and the reflection layer wrote `+nan%` into the
+    memory log. Such an entry stays pending.
+  - A failed StockTwits or yfinance global-news fetch replayed its cache for up
+    to the 30-day global cap and rendered days-old items as current. Both feeds
+    now cap a stale serve at three times their TTL (15 and 90 minutes), the rule
+    the Binance Square feed already followed.
+  - Five `yf_retry` call sites in `y_finance.py` and `yfinance_news.py` passed
+    no symbol, so the error the model read was `No usable market data for '?'`.
+  - `replace_retry_on_windows` slept its last back-off step after the final
+    attempt: 0.4 of its 0.8 s went to a retry that was not coming, and a reader
+    holding the target for 0.5 s defeated it. The steps now double
+    (0.05 / 0.1 / 0.2 / 0.4 s) and nothing follows the last failure.
+  - `classify_trend_state` compared a negative close against its averages and
+    reported a downtrend. A non-positive close is a bad bar and yields no trend.
+  - `compute_leverage` (`yialpha/risk/perp_ticket.py`) sized an unknown
+    `risk_profile` at a flat 5x — for a weak rating looser than the conservative
+    3x, so a misspelt profile raised the per-ticket leverage ceiling. An unknown
+    profile is sized under the conservative one and warns; `yialpha config-check`
+    reports the profile.
+  - `build_backtest_weight_fn` (`yialpha/risk/manager.py`) wrote the chosen
+    weight into its position map for an `is_new` check that never read it — the
+    engine's own position value overwrote the entry on the next call. The write
+    is gone. The module docstring now also says that the per-sector cap applies
+    only to a caller that passes `sector=`, which no production path does.
+  - `trade_ticket._fnum` read `.5`, `-.5` and `.0050` as 5, 5 and 50: an entry,
+    stop or target written without a leading zero came out 10 to 10,000 times
+    too large. (The accepted cost: `No.5` reads as 0.5.)
+  - `scripts/run_robust.py` retried a child that exited 2 — its own usage error,
+    an unsupported market say — through the full `--max-attempts` with every
+    backoff, and the summary said only "exit 2". It now stops at the first exit
+    2 and carries the child's last log line into the summary. It also refuses,
+    with exit 2 before any child starts, a ticker that cannot be part of a log
+    file name (`a/b` became a spawn failure; `BTC:USDT` wrote the log into an
+    NTFS alternate data stream). `_find_new_report` breaks equal mtimes by
+    directory name instead of by the file system's listing order.
+  - `BatchRunner.run` handed the graph the ticker exactly as given, although
+    the batch entry points validate the stripped one: `--tickers " AAPL "`
+    reached `propagate()` with its spaces. The tickers are stripped where every
+    entry point hands them over.
+  - `rank_signals.latest_for_ticker` and `trade_ticket.find_report` ordered runs
+    differently (by the report file and by its directory), so the two could name
+    different runs. Both go through `trade_ticket._complete_runs` now, and the
+    lookup no longer depends on the platform's case sensitivity.
+  - `scripts/prune_indicators_cli.py`: a `--min-abs-ic` of 0, a negative value,
+    NaN or inf produced a keep-all or prune-all verdict with exit 0 (refused
+    now); `main()` crashed with `AttributeError` on a replaced stdout before it
+    started; the quantile table's delimiter row had one column too many.
+  - The Web tickers and compare listings answered 500 when one entry under the
+    logs root could not be stat-ed (Python ≤ 3.13 re-raises from
+    `Path.is_dir()`); three file readers had the same seam. They answer "not
+    there" now, as `list_reports` already did.
+  - Structured-output labels: a lowercase `buy` from the Portfolio Manager, a
+    lowercase action from the Trader, a sentiment band or a positioning label in
+    any case but the canonical one vetoed the whole structured result and cost
+    a free-text re-ask. Every enum-typed label field now matches ignoring case
+    and padding; a word outside the field's vocabulary still fails on it.
+  - `information_coefficient` warned ("An input array is constant") before
+    returning `None` for a constant input, and `compute_metrics` let numpy's
+    divide-by-zero warnings through on a curve that contains a zero. The results
+    are unchanged.
+  - `verify-history`, `scoreboard` and the interactive CLI printed file paths
+    through Rich, which folded them at the console width and could split the
+    file name itself in a narrow terminal. Paths are printed with `soft_wrap`.
 
 ### Security
 
@@ -593,6 +675,15 @@ Breaking changes within the 0.x line are called out explicitly.
   defaults and the funding thresholds' endpoints, in the perp advisory
   ticket's liquidation checks, and in the telemetry wall clock (the existing
   tests asserted `wall_seconds >= 0`, which a constant 0 satisfies).
+- **A weekly dependency audit** (CI job `pip-audit (requirements.lock)`). The
+  lock is what the README tells users to install from, and until now it was
+  audited by hand on push days. The job runs `pip-audit -r requirements.lock
+  --no-deps` in the weekly scheduled run and on a manual dispatch. It is not a
+  push or PR gate: a new advisory is published on someone else's schedule, and
+  gating pushes on it turns `main` red for a change nobody made. The audit on
+  2026-11-28 (pip-audit 2.10.1) reports no known vulnerability.
+- `tests/test_round17_followups.py`, the regression tests for the follow-ups
+  listed under Fixed.
 
 ### Changed
 
@@ -610,6 +701,15 @@ Breaking changes within the 0.x line are called out explicitly.
   statements, so 90 was a wide cushion. The first green run on GitHub (2026-11-28)
   measured 99.87% of 22,287 statements on each of its three test jobs, and the
   floor now sits at 98: room for about 400 untested statements.
+- **Behaviour that changes with the follow-ups under Fixed.** An analysis for a
+  past date downloads a symbol's price history again when the cache file was
+  written on or before that date — once per symbol. An end date that is not a
+  date (`latest`, a typo) is the analysis date in a pinned run instead of being
+  handed to the vendor. When StockTwits or Yahoo's news search is down, a cached
+  result is replayed for minutes (15 and 90), not for up to 30 days; after that
+  the source is reported unavailable. `run_robust.py` does not retry a usage
+  error and rejects tickers that cannot be file names. An unknown `risk_profile`
+  is sized under the conservative profile.
 
 ## [1.0.0] — 2026-11-23
 

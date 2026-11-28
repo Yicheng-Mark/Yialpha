@@ -6,13 +6,13 @@ Pure numpy/pandas, no network, no LLM, scipy optional. Marked
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+import warnings
+from contextlib import contextmanager
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from yialpha.backtest import ic as ic_module
 from yialpha.backtest.ic import (
     build_ic_report,
     consecutive_below_threshold,
@@ -22,15 +22,17 @@ from yialpha.backtest.ic import (
 )
 
 
+@contextmanager
 def _constant_input_warning():
-    """Expected-warning context for ``information_coefficient`` on a constant input.
-
-    ``scipy.stats.spearmanr`` warns before returning NaN; the numpy fallback taken
-    without scipy (an optional accelerator) is silent.
+    """Context for ``information_coefficient`` on a constant input: nothing may
+    warn, with or without scipy. A constant input is refused before
+    ``scipy.stats.spearmanr`` is reached (round-17 follow-up); it used to warn
+    and return NaN.
     """
-    if ic_module._HAVE_SCIPY:
-        return pytest.warns(RuntimeWarning, match="An input array is constant")
-    return nullcontext()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        warnings.simplefilter("error", UserWarning)  # scipy's ConstantInputWarning
+        yield
 
 # ---------------------------------------------------------------------------
 # information_coefficient

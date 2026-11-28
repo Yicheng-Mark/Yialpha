@@ -152,8 +152,9 @@ class TestUtcTodayBoundaries:
 
     def test_same_day_refresh_classifies_by_utc_date(self, monkeypatch, tmp_path):
         """A cache file missing the requested UTC day must refresh; a
-        historical day must never refresh — regardless of what the (poisoned)
-        host-local clock claims today is."""
+        historical day refreshes only when the cache was written on or before
+        it (this file was written today, so it is reused) — regardless of what
+        the (poisoned) host-local clock claims today is."""
         import os
         import time as _time
 

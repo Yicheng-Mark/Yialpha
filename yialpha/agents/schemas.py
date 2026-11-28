@@ -156,6 +156,32 @@ class TraderAction(StrEnum):
     SELL = "Sell"
 
 
+def _label_in_canonical_case(value, labels: tuple[str, ...]):
+    """``value`` matched against ``labels`` ignoring case and surrounding
+    whitespace ("buy" / "BUY" / " Buy " -> ``"Buy"``).
+
+    Any other value is returned unchanged, so validation fails on it exactly
+    as before: only the spelling is rescued, never the value.
+
+    Round-17 follow-up: the round-7 case rescue existed on the two
+    ``confidence`` Literals only. Every other label field was validated
+    case- and whitespace-sensitively, so a lowercase "buy" from the PM vetoed
+    the WHOLE structured decision and the caller re-asked as free text (one
+    more LLM call, and the typed fields were lost).
+    """
+    if isinstance(value, str):
+        wanted = value.strip().casefold()
+        for label in labels:
+            if label.casefold() == wanted:
+                return label
+    return value
+
+
+#: The label vocabulary of the rating and the transaction action.
+_RATING_LABELS = tuple(rating.value for rating in PortfolioRating)
+_ACTION_LABELS = tuple(action.value for action in TraderAction)
+
+
 # ---------------------------------------------------------------------------
 # Research Manager
 # ---------------------------------------------------------------------------
@@ -191,6 +217,11 @@ class ResearchPlan(BaseModel):
             "including position sizing guidance consistent with the rating."
         ),
     )
+
+    @field_validator("recommendation", mode="before")
+    @classmethod
+    def _label_case_rescue(cls, v):
+        return _label_in_canonical_case(v, _RATING_LABELS)
 
 
 def render_research_plan(plan: ResearchPlan) -> str:
@@ -239,6 +270,11 @@ class TraderProposal(BaseModel):
         default=None,
         description="Optional sizing guidance, e.g. '5% of portfolio'.",
     )
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def _label_case_rescue(cls, v):
+        return _label_in_canonical_case(v, _ACTION_LABELS)
 
     @field_validator("entry_price", "stop_loss", mode="before")
     @classmethod
@@ -481,6 +517,12 @@ class PortfolioDecision(BaseModel):
     def _expected_return_percent_rescue(cls, v):
         return _coerce_signed_percent_float(v)
 
+    @field_validator("rating", mode="before")
+    @classmethod
+    def _rating_case_rescue(cls, v):
+        """"buy" is the rating "Buy": a case variant must not veto the decision."""
+        return _label_in_canonical_case(v, _RATING_LABELS)
+
     @field_validator("confidence", "evidence_coverage", mode="before")
     @classmethod
     def _unit_interval_rescue(cls, v):
@@ -682,6 +724,9 @@ class SentimentBand(StrEnum):
     BEARISH = "Bearish"
 
 
+_BAND_LABELS = tuple(band.value for band in SentimentBand)
+
+
 class SentimentReport(BaseModel):
     """Structured sentiment report produced by the Sentiment Analyst.
 
@@ -734,6 +779,11 @@ class SentimentReport(BaseModel):
         if isinstance(v, bool):
             raise ValueError("overall_score must be a number, not a boolean")
         return v
+
+    @field_validator("overall_band", mode="before")
+    @classmethod
+    def _band_case_rescue(cls, v):
+        return _label_in_canonical_case(v, _BAND_LABELS)
 
     @field_validator("confidence", mode="before")
     @classmethod
@@ -863,6 +913,18 @@ class PositioningReport(BaseModel):
             return v
         normalized = v.strip().lower()
         return normalized if normalized in ("low", "medium", "high") else "low"
+
+    @field_validator("funding_bias", "crowding", "liquidity_risk", mode="before")
+    @classmethod
+    def _fabric_label_case_rescue(cls, v, info):
+        """Each of the three fabric labels in its own vocabulary, whatever the
+        case or padding the model used ("NEUTRAL" -> ``neutral``)."""
+        vocab = {
+            "funding_bias": ("long_pays_expensive", "neutral", "long_gets_paid"),
+            "crowding": ("crowded_long", "balanced", "crowded_short"),
+            "liquidity_risk": ("thin", "normal", "deep"),
+        }[info.field_name]
+        return _label_in_canonical_case(v, vocab)
 
 
 def render_positioning_report(report: PositioningReport) -> str:

@@ -260,9 +260,10 @@ def classify_trend_state(df) -> dict | None:
         adx = float(sdf["adx"].iloc[-1])
     except Exception:  # noqa: BLE001 — advisory component, fail-soft
         return None
-    # A zero close (a bar with no prints, a bad tick) is not a price: compared
-    # against the averages it would print a downtrend out of one bad bar.
-    if close == 0 or not all(math.isfinite(v) for v in (close, sma50, sma200, adx)):
+    # A zero or negative close (a bar with no prints, a bad tick) is not a
+    # price: compared against the averages it would print a downtrend out of
+    # one bad bar.
+    if close <= 0 or not all(math.isfinite(v) for v in (close, sma50, sma200, adx)):
         return None
 
     if close > sma50 > sma200:

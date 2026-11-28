@@ -923,6 +923,25 @@ class TestRound15VerifyHistoryCommand:
         assert "10 scanned | 4 scored | 6 pending" in result.output
         assert "accuracy_report.json" in result.output
 
+    def test_paths_stay_whole_in_a_narrow_console(self, monkeypatch, tmp_path):
+        # Round-17 follow-up: the command used to fold a long path at the console
+        # width, so in a narrow terminal the file name itself came out split
+        # ("accuracy_report.jso" / "n"). Paths are printed with soft_wrap now: one
+        # line whatever the width (the terminal wraps it visually).
+        monkeypatch.setenv("COLUMNS", "40")
+        import yialpha.accuracy as accuracy_mod
+
+        json_path = tmp_path / "accuracy_report.json"
+        md_path = tmp_path / "accuracy_report.md"
+        fake = mock.Mock(
+            return_value=(self._report(0.75, 3, 4), json_path, md_path)
+        )
+        monkeypatch.setattr(accuracy_mod, "verify_history", fake)
+        result = runner.invoke(app, ["verify-history", "--holding-days", "5"])
+        assert result.exit_code == 0, result.output
+        assert f"JSON: {json_path}" in result.output
+        assert f"Markdown: {md_path}" in result.output
+
     def test_no_elapsed_decisions_branch(self, monkeypatch, tmp_path):
         import yialpha.accuracy as accuracy_mod
 

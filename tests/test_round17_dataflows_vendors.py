@@ -556,25 +556,17 @@ class TestR17ClassifyTrendState:
         assert mr.classify_trend_state(unreadable) is None
         assert mr.classify_trend_state(frame.drop(columns=["Close"])) is None
 
-    @pytest.mark.parametrize("bad_close", [math.nan, math.inf, 0.0, -0.0])
+    @pytest.mark.parametrize("bad_close", [math.nan, math.inf, 0.0, -0.0, -1.0])
     def test_r17_trend_state_unusable_latest_close_is_omitted_not_read_as_a_trend(self, bad_close):
         # Before the fix a zero close compared below both averages and rendered
         # "trend=downtrend (bear_stack)" -- a trend manufactured out of one bad
         # bar, on the default-on regime line of the market analyst's prompt.
+        # Round-17 follow-up: a negative close is refused the same way (it used
+        # to be compared; the downtrend fixture that relied on that in
+        # tests/test_price_structure_and_regime.py now stays positive).
         frame = _g0_ohlcv(_g0_walk(300) + [_g0_walk(300)[-1]])
         frame.loc[frame.index[-1], "Close"] = bad_close
         assert mr.classify_trend_state(frame) is None
-
-    def test_r17_trend_state_negative_close_is_still_read_as_a_price(self):
-        # Observation, pinned as is: only a zero close is refused. A negative one
-        # is still compared (a downtrend here). The existing downtrend fixture in
-        # tests/test_price_structure_and_regime.py prints negative closes for its
-        # last 200 rows and relies on this.
-        frame = _g0_ohlcv(_g0_walk(300) + [_g0_walk(300)[-1]])
-        frame.loc[frame.index[-1], "Close"] = -1.0
-        out = mr.classify_trend_state(frame)
-        assert out is not None
-        assert (out["trend"], out["close"]) == ("downtrend", -1.0)
 
 
 class TestR17ClassifyVolState:
@@ -1746,12 +1738,10 @@ class TestR17G1StocktwitsFailure:
 
 
 class TestR17G1StocktwitsStaleCache:
-    """Pinned and reported (not fixed): StockTwits passes no ``stale_cap_days``
-    to the shared disk cache, so the GLOBAL cap (30 days) governs a
-    5-minute-TTL social feed. Binance Square, the other social feed, caps its
-    stale serves at 15 minutes and renders a STALE marker; StockTwits renders
-    old messages under "most-recent messages" with only the ledger and the
-    log to say so."""
+    """Round-17 follow-up: StockTwits passes ``stale_cap_days`` (15 minutes =
+    three times its TTL, the rule Binance Square already followed), so a failed
+    fetch replays the cache for minutes, not for the 30 days of the global
+    cap."""
 
     _STALE_RENDER = (
         "Bullish: 1 (100%) · Bearish: 0 (0%) · Unlabeled: 0 · "
@@ -1759,27 +1749,50 @@ class TestR17G1StocktwitsStaleCache:
         "[2026-08-15T10:00:00Z · @then · Bullish] old chatter"
     )
 
-    def test_r17_stocktwits_day_old_stream_is_served_when_the_fetch_fails(
+    def test_r17_stocktwits_ten_minute_old_stream_is_served_when_the_fetch_fails(
         self, tmp_path, caplog,
     ):
         set_config({"data_cache_max_stale_days": 30})
         payload = _g1_st_payload(_g1_st_message("old chatter", "Bullish", user="then"))
-        cache_file = _g1_age_stocktwits_cache(tmp_path, payload, age_days=1)
+        cache_file = _g1_age_stocktwits_cache(tmp_path, payload, age_days=10 / 1440)
         rate_limited = _g1_http_error(429, "Too Many Requests")
         with caplog.at_level(logging.WARNING), \
              patch.object(stocktwits, "urlopen", return_value=_g1_raise(rate_limited)) as op:
             out = stocktwits.fetch_stocktwits_messages("NVDA")
         assert op.call_count == 1
         assert out == self._STALE_RENDER
-        assert "STALE" not in out
         assert [(r.name, r.getMessage()) for r in caplog.records] == [(
             "yialpha.dataflows.disk_cache",
-            f"stocktwits: fetch failed; serving STALE cache for {cache_file} (age 1.0 days)",
+            f"stocktwits: fetch failed; serving STALE cache for {cache_file} (age 0.0 days)",
         )]
         assert quality.snapshot_quality() == [{
             "method": "stocktwits/stream_NVDA.json",
             "kind": quality.KIND_STALE_CACHE,
-            "detail": "served stale cache (age 1.0 days) after fetch failure",
+            "detail": "served stale cache (age 0.0 days) after fetch failure",
+            "qualifier": "",
+        }]
+
+    def test_r17_stocktwits_day_old_stream_is_refused(self, tmp_path, caplog):
+        """A day-old stream used to be rendered as the current one."""
+        set_config({"data_cache_max_stale_days": 30})
+        payload = _g1_st_payload(_g1_st_message("old chatter", "Bullish", user="then"))
+        cache_file = _g1_age_stocktwits_cache(tmp_path, payload, age_days=1)
+        rate_limited = _g1_http_error(429, "Too Many Requests")
+        with caplog.at_level(logging.WARNING), \
+             patch.object(stocktwits, "urlopen", return_value=_g1_raise(rate_limited)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA")
+        assert out == "<stocktwits unavailable: HTTPError>"
+        assert sorted((r.name, r.getMessage()) for r in caplog.records) == sorted([
+            ("yialpha.dataflows.disk_cache",
+             f"stocktwits: fetch failed and cache {cache_file} is 1.0 days old "
+             "(over the 0.0104-day cap); refusing to serve stale data"),
+            ("yialpha.dataflows.stocktwits",
+             "StockTwits fetch failed for NVDA: HTTP Error 429: Too Many Requests"),
+        ])
+        assert quality.snapshot_quality() == [{
+            "method": "fetch_stocktwits_messages",
+            "kind": quality.KIND_OPTIONAL_UNAVAILABLE,
+            "detail": "transport/parse failure: HTTPError: HTTP Error 429: Too Many Requests",
             "qualifier": "",
         }]
 
@@ -1795,7 +1808,7 @@ class TestR17G1StocktwitsStaleCache:
         assert sorted((r.name, r.getMessage()) for r in caplog.records) == sorted([
             ("yialpha.dataflows.disk_cache",
              f"stocktwits: fetch failed and cache {cache_file} is 31.0 days old "
-             "(over the 30.0000-day cap); refusing to serve stale data"),
+             "(over the 0.0104-day cap); refusing to serve stale data"),
             ("yialpha.dataflows.stocktwits",
              "StockTwits fetch failed for NVDA: HTTP Error 429: Too Many Requests"),
         ])
@@ -2487,18 +2500,14 @@ class TestR17G1TavilyRender:
         }]
 
 
-class TestR17G1YfNewsUnnamedRetryTarget:
-    """Pinned and reported (not fixed): both ``yf_retry`` calls in
-    yfinance_news omit ``symbol`` / ``canonical``, so a Yahoo transport
-    failure or an exhausted rate limit raises ``NoMarketDataError('?', ...)``
-    — stockstats_utils.yf_retry's placeholder — and the router's sentinel, the
-    text the model reads, names the target '?'. The vendor function has the
-    ticker in scope and names it in its own soft-misses. The one-line fix
-    (pass ``symbol=ticker, canonical=canonical``) is left to the coordinator:
-    it breaks two existing pins that stub ``yf_retry`` as ``lambda fn: fn()``.
-    """
+class TestR17G1YfNewsRetryTarget:
+    """Round-17 follow-up: both ``yf_retry`` calls in yfinance_news pass the
+    instrument (``symbol`` / ``canonical`` for the ticker news, the query for
+    the global Search), so the router's sentinel -- the text the model reads --
+    names the target. Until then both raised ``NoMarketDataError('?', ...)``,
+    stockstats_utils.yf_retry's placeholder."""
 
-    def test_r17_yfinance_news_ticker_transport_failure_sentinel_names_a_question_mark(
+    def test_r17_yfinance_news_ticker_transport_failure_sentinel_names_the_ticker(
         self, monkeypatch,
     ):
         set_config({
@@ -2514,7 +2523,7 @@ class TestR17G1YfNewsUnnamedRetryTarget:
         )
         out = route_to_vendor("get_news", "NVDA", "2025-05-01", "2025-05-09")
         assert out == (
-            "NO_DATA_AVAILABLE: No usable market data for '?' from any configured vendor "
+            "NO_DATA_AVAILABLE: No usable market data for 'NVDA' from any configured vendor "
             "(Yahoo unreachable (OSError)). The symbol may be invalid, delisted, not covered, "
             "or the vendor returned stale data. Do not estimate or fabricate values — report "
             "that data is unavailable for this symbol."
@@ -2526,7 +2535,7 @@ class TestR17G1YfNewsUnnamedRetryTarget:
             "detail": "Yahoo unreachable (OSError)", "qualifier": "",
         }]
 
-    def test_r17_yfinance_news_rate_limit_sentinel_names_a_question_mark(self, monkeypatch):
+    def test_r17_yfinance_news_rate_limit_sentinel_names_the_ticker(self, monkeypatch):
         set_config({
             "data_vendors": {"news_data": "yfinance"},
             "tool_vendors": {"get_news": "yfinance"},
@@ -2544,13 +2553,13 @@ class TestR17G1YfNewsUnnamedRetryTarget:
         out = route_to_vendor("get_news", "NVDA", "2025-05-01", "2025-05-09")
         assert len(attempts) == 4             # the call plus three rate-limit retries
         assert out == (
-            "NO_DATA_AVAILABLE: No usable market data for '?' from any configured vendor "
+            "NO_DATA_AVAILABLE: No usable market data for 'NVDA' from any configured vendor "
             "(Yahoo Finance rate-limited after retries). The symbol may be invalid, "
             "delisted, not covered, or the vendor returned stale data. Do not estimate or "
             "fabricate values — report that data is unavailable for this symbol."
         )
 
-    def test_r17_yfinance_news_global_transport_failure_sentinel_names_a_question_mark(
+    def test_r17_yfinance_news_global_transport_failure_sentinel_names_the_query(
         self, monkeypatch,
     ):
         set_config({
@@ -2563,11 +2572,12 @@ class TestR17G1YfNewsUnnamedRetryTarget:
 
         monkeypatch.setattr(yfinance_news.yf, "Search", _unreachable)
         out = route_to_vendor("get_global_news", "2025-05-09")
+        first_query = get_config()["global_news_queries"][0]
         assert out == (
-            "NO_DATA_AVAILABLE: No usable market data for '?' from any configured vendor "
-            "(Yahoo unreachable (OSError)). The symbol may be invalid, delisted, not covered, "
-            "or the vendor returned stale data. Do not estimate or fabricate values — report "
-            "that data is unavailable for this symbol."
+            f"NO_DATA_AVAILABLE: No usable market data for 'news search: {first_query}' "
+            "from any configured vendor (Yahoo unreachable (OSError)). The symbol may be "
+            "invalid, delisted, not covered, or the vendor returned stale data. Do not "
+            "estimate or fabricate values — report that data is unavailable for this symbol."
         )
         assert [e["method"] for e in quality.snapshot_quality()] == ["get_global_news"]
 
@@ -2613,14 +2623,15 @@ class TestR17G1SocialPitBoundary:
 
 
 class TestR17G1YfNewsStaleSearchCache:
-    def test_r17_yfinance_news_stale_search_cache_is_served_when_yahoo_fails(
+    """Round-17 follow-up: the global-news Search cache passes
+    ``stale_cap_days`` (90 minutes = three times its TTL). A fetch failure
+    serves the stale payload for that long -- the window filter still runs on
+    it -- and is refused after, instead of falling back to the global 30-day
+    cap."""
+
+    def test_r17_yfinance_news_hour_old_search_cache_is_served_when_yahoo_fails(
         self, monkeypatch, caplog,
     ):
-        """Pinned and reported (not fixed): like StockTwits, the global-news
-        Search cache passes no ``stale_cap_days``, so a fetch failure serves a
-        stale search payload under the global 30-day cap. The window filter
-        still runs on it: an in-window stale headline is rendered as current
-        global news, with only the ledger and the log to say it is stale."""
         set_config({"data_cache_max_stale_days": 30})
         headline = [_g1_flat("YESTERDAY'S STORY", _g1_epoch("2025-05-08"), link="")]
         _g1_fake_search(monkeypatch, lambda q: headline)
@@ -2631,7 +2642,7 @@ class TestR17G1YfNewsStaleSearchCache:
         )
         entries = list((Path(get_config()["data_cache_dir"]) / "yfnews").iterdir())
         assert len(entries) == 1
-        backdated = time.time() - 86_400
+        backdated = time.time() - 3600
         os.utime(entries[0], (backdated, backdated))
 
         def _down(*args, **kwargs):
@@ -2643,14 +2654,40 @@ class TestR17G1YfNewsStaleSearchCache:
         assert again == first
         assert [(r.name, r.getMessage()) for r in caplog.records] == [(
             "yialpha.dataflows.disk_cache",
-            f"yfnews: fetch failed; serving STALE cache for {entries[0]} (age 1.0 days)",
+            f"yfnews: fetch failed; serving STALE cache for {entries[0]} (age 0.0 days)",
         )]
         assert quality.snapshot_quality() == [{
             "method": f"yfnews/{entries[0].name}",
             "kind": quality.KIND_STALE_CACHE,
-            "detail": "served stale cache (age 1.0 days) after fetch failure",
+            "detail": "served stale cache (age 0.0 days) after fetch failure",
             "qualifier": "",
         }]
+
+    def test_r17_yfinance_news_day_old_search_cache_is_refused(self, monkeypatch, caplog):
+        """A day-old search used to be rendered as current global news."""
+        set_config({"data_cache_max_stale_days": 30})
+        headline = [_g1_flat("YESTERDAY'S STORY", _g1_epoch("2025-05-08"), link="")]
+        _g1_fake_search(monkeypatch, lambda q: headline)
+        yfinance_news.get_global_news_yfinance("2025-05-09", limit=1)
+        entries = list((Path(get_config()["data_cache_dir"]) / "yfnews").iterdir())
+        backdated = time.time() - 86_400
+        os.utime(entries[0], (backdated, backdated))
+
+        def _down(*args, **kwargs):
+            raise OSError("yahoo down")
+
+        monkeypatch.setattr(yfinance_news.yf, "Search", _down)
+        # This module stubs yf_retry as a pass-through, so the fetch error surfaces raw.
+        with caplog.at_level(logging.WARNING), pytest.raises(OSError, match="yahoo down"):
+            yfinance_news.get_global_news_yfinance("2025-05-09", limit=1)
+        assert [(r.name, r.getMessage()) for r in caplog.records] == [(
+            "yialpha.dataflows.disk_cache",
+            f"yfnews: fetch failed and cache {entries[0]} is 1.0 days old "
+            "(over the 0.0625-day cap); refusing to serve stale data",
+        ), (
+            "yialpha.dataflows.yfinance_news", "global news retrieval failed",
+        )]
+        assert quality.snapshot_quality() == []
 
 
 def _g2_ohlcv(rows: int = 80, end: str = "2026-05-13", flat: bool = False) -> pd.DataFrame:
@@ -3539,10 +3576,10 @@ class TestR17G2YFinanceOverviewGate:
     def test_r17_y_finance_statement_transport_failure_is_a_typed_no_data(self, monkeypatch):
         """What the caller sees when Yahoo's transport fails: the REAL yf_retry
         turns the OSError into a typed NoMarketDataError the router degrades to
-        its sentinel, and nothing is cached. Pinned (reported): that error carries
-        yf_retry's '?' placeholder for the instrument, because
-        ``_cached_yf_frame`` calls it without symbol / canonical — so the
-        model-facing sentinel blames a symbol called '?'."""
+        its sentinel, and nothing is cached. Round-17 follow-up: that error
+        names the instrument (``_cached_yf_frame`` now passes it to
+        ``yf_retry``), so the model-facing sentinel blames AAPL, not a symbol
+        called '?'."""
         def _reset(self):
             raise ConnectionResetError("reset by peer")
 
@@ -3551,13 +3588,13 @@ class TestR17G2YFinanceOverviewGate:
         with pytest.raises(NoMarketDataError) as caught:
             y_finance.get_cashflow("AAPL")
         assert caught.value.detail == "Yahoo unreachable (ConnectionResetError)"
-        assert (caught.value.symbol, caught.value.canonical) == ("?", "?")
+        assert (caught.value.symbol, caught.value.canonical) == ("AAPL", "AAPL")
         assert not (Path(vendor_cache_dir("yfinance")) / "stmt_AAPL_cashflow_quarterly.csv").exists()
 
         set_config({"data_vendors": {"fundamental_data": "yfinance"}})
         sentinel = route_to_vendor("get_cashflow", "AAPL", "quarterly")
         assert sentinel.startswith(
-            "NO_DATA_AVAILABLE: No usable market data for '?' from any configured vendor "
+            "NO_DATA_AVAILABLE: No usable market data for 'AAPL' from any configured vendor "
             "(Yahoo unreachable (ConnectionResetError)).",
         )
 
@@ -5420,12 +5457,13 @@ def test_r17_disk_cache_same_drive_escape_refuses_before_any_fetch(monkeypatch):
 # --------------------------------------------------------------------------- #
 # utils.replace_retry_on_windows
 # --------------------------------------------------------------------------- #
-def test_r17_utils_replace_retry_budget_is_half_spent_on_attempts(tmp_path, monkeypatch):
-    """Pins the exhaustion schedule (report-only). The five attempts fall at
-    0 / 0.05 / 0.10 / 0.20 / 0.40 s, then the loop sleeps its last 0.4 s step
-    with NO attempt after it. The round-10 comment budgets "~0.8s total" for a
-    holder of the target, but a reader holding it longer than 0.40 s defeats
-    the writer, which then spends as long again sleeping for nothing."""
+def test_r17_utils_replace_retry_budget_ends_on_an_attempt(tmp_path, monkeypatch):
+    """Pins the exhaustion schedule. The five attempts fall at
+    0 / 0.05 / 0.15 / 0.35 / 0.75 s and the loop ends on the last one: no
+    sleep follows a failed final attempt. (Until the round-17 follow-up the
+    steps were 0.05 / 0.05 / 0.1 / 0.2 / 0.4 with a wasted 0.4 s sleep after
+    the last try, so a reader holding the target for 0.5 s defeated the
+    writer while it still spent 0.8 s in the call.)"""
     events: list[tuple[str, float]] = []
     clock = {"t": 0.0}
 
@@ -5442,13 +5480,12 @@ def test_r17_utils_replace_retry_budget_is_half_spent_on_attempts(tmp_path, monk
     (tmp_path / "a.json").write_text("old", encoding="utf-8")
     with pytest.raises(PermissionError, match="target open in a reader"):
         df_utils.replace_retry_on_windows(tmp_path / "a.tmp", tmp_path / "a.json")
-    assert events == [
-        ("try", 0.0), ("sleep", 0.05), ("try", 0.05), ("sleep", 0.05),
-        ("try", 0.1), ("sleep", 0.1), ("try", 0.2), ("sleep", 0.2),
-        ("try", 0.4), ("sleep", 0.4),
-    ]
-    assert clock["t"] == pytest.approx(0.8)
-    assert events[-1][0] == "sleep"
+    assert [kind for kind, _ in events] == ["try", "sleep"] * 4 + ["try"]
+    assert [seconds for kind, seconds in events if kind == "sleep"] == [0.05, 0.1, 0.2, 0.4]
+    # Each attempt happens after every sleep before it.
+    assert [t for kind, t in events if kind == "try"] == pytest.approx([0.0, 0.05, 0.15, 0.35, 0.75])
+    assert clock["t"] == pytest.approx(0.75)
+    assert events[-1][0] == "try"
     assert (tmp_path / "a.json").read_text(encoding="utf-8") == "old"
 
 
@@ -5482,23 +5519,20 @@ def test_r17_utils_replace_retry_cross_device_oserror_is_not_retried(tmp_path, m
         ("2026-06-27", "2026-06-27"),  # on the analysis date: inclusive
         ("2026-06-27 15:30:00", "2026-06-27 15:30:00"),  # datetime label on the pin
         ("2026-06-28", "2026-06-27"),  # the day after: clamped
-        # An end date the clamp cannot read is handed back EXACTLY as asked: the
-        # documented fail-open (the vendor's own parser decides), pinned by
-        # tests/test_market_data_date_clamp.py.
-        ("20260628", "20260628"),  # basic ISO, the day after the pin
-        ("20261125", "20261125"),  # basic ISO, months later
-        ("2026/06/28", "2026/06/28"),  # slash separator, later
-        ("latest", "latest"),  # a keyword echo
-        ("garbage", "garbage"),
+        # Basic ISO and slash spellings are read like YYYY-MM-DD (a lenient
+        # vendor parser reads them too), and text the clamp cannot read at all
+        # is capped as well -- it used to pass through and let that parser
+        # read past the analysis date (round-17 follow-up).
+        ("20260628", "2026-06-27"),  # basic ISO, the day after the pin
+        ("20261125", "2026-06-27"),  # basic ISO, months later
+        ("2026/06/28", "2026-06-27"),  # slash separator, later
+        ("latest", "2026-06-27"),  # a keyword echo
+        ("garbage", "2026-06-27"),
     ],
 )
 def test_r17_utils_clamp_end_date_with_pinned_analysis_date(end_date, expected):
-    """With an analysis date pinned, an end date the clamp can read never ends
-    after it. One it cannot read passes through unchanged, so the third PIT
-    guard holds for well-formed input only -- see
-    ``test_r17_utils_compact_echo_reaches_the_vendor_unchanged`` for what a
-    lenient parser then makes of such text. Pinned as is: capping unreadable
-    text flips an explicit pin, which is a design decision (round-17 ledger)."""
+    """With an analysis date pinned, no end date ends after it -- whichever of
+    the three date spellings it uses, and also when it is unreadable."""
     assert df_utils.clamp_end_date(end_date, "2026-06-27") == expected
 
 
@@ -5515,15 +5549,12 @@ def test_r17_utils_clamp_unreadable_analysis_date_and_live_mode_still_pass_throu
     assert df_utils.clamp_end_date("2030-01-01", "2020/01/02") == "2030-01-01"
 
 
-def test_r17_utils_compact_echo_reaches_the_vendor_unchanged(monkeypatch):
-    """Observation, pinned as is. The run is pinned to 2026-06-01 and the LLM
-    echoes the window end as ``20260602``. The clamp cannot read that form, so
-    ``get_binance_indicators`` hands it to ``binance_klines_frame`` as the
-    window end: the guard does not apply at all. That layer parses strictly
-    and refuses the text (a lost call, no leak). A lenient parser such as
-    ``pd.Timestamp`` reads the same text as 2026-06-02, one day past the
-    analysis date -- the leak the CoinGecko vendor had before it canonicalised
-    its own label."""
+def test_r17_utils_compact_echo_is_capped_before_the_vendor(monkeypatch):
+    """The run is pinned to 2026-06-01 and the LLM echoes the window end as
+    ``20260602`` (basic ISO; a lenient parser such as ``pd.Timestamp`` reads
+    it as 2026-06-02, one day past the analysis date). The clamp now reads
+    that form, so ``get_binance_indicators`` hands ``binance_klines_frame``
+    the analysis date as the window end instead of the echoed text."""
     seen: dict[str, str] = {}
 
     def fake_frame(symbol, start, end, interval="1d", venue="binance_perp"):
@@ -5533,11 +5564,9 @@ def test_r17_utils_compact_echo_reaches_the_vendor_unchanged(monkeypatch):
     monkeypatch.setattr(bit, "binance_klines_frame", fake_frame)
     with df_utils.pinned_analysis_date("2026-06-01"):
         out = bit._indicators_core("BTCUSDT", "20260602", 30, "perp", "")
-    # Measured: a lenient parser reads the basic form one day past the pin.
-    assert pd.Timestamp("20260602") == pd.Timestamp("2026-06-02")
-    assert seen["end"] == "20260602"
+    assert seen["end"] == "2026-06-01"
     assert out.startswith(
-        "DATA_UNAVAILABLE: Binance klines for 'BTCUSDT' (perp) up to 20260602"
+        "DATA_UNAVAILABLE: Binance klines for 'BTCUSDT' (perp) up to 2026-06-01"
     )
 
 
@@ -5688,7 +5717,7 @@ def test_r17_binance_vision_store_manifest_publish_denied_fails_closed_and_self_
     monkeypatch.setattr(df_utils.time, "sleep", lambda s: sleeps.append(s))
     with pytest.raises(PermissionError, match="manifest open in a reader"):
         store.sync("metrics", "BTCUSDT", start, end, budget=5)
-    assert sleeps == [0.05, 0.05, 0.1, 0.2, 0.4]
+    assert sleeps == [0.05, 0.1, 0.2, 0.4]
     assert len(store.load("metrics", "BTCUSDT", start, end)) == 2
     assert store._read_manifest("metrics", "BTCUSDT")["days"] == {}
     assert (store._dir("metrics", "BTCUSDT") / "manifest.json.tmp").exists()

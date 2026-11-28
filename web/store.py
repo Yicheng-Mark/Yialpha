@@ -79,10 +79,33 @@ def _strategy_dir(ticker: str) -> Path:
     return LOGS_ROOT / ticker / "YiAlphaStrategy_logs"
 
 
+def _is_dir(path: Path) -> bool:
+    """``path.is_dir()`` that answers "no" instead of raising.
+
+    On Python <= 3.13 ``Path.is_dir()`` re-raises any stat error other than
+    "not found" / "not a directory" (an unusable link target, an odd ACL). One
+    such entry under the logs root took the whole tickers page down with a
+    500 -- round-17 fixed the same thing in ``list_reports``; this is the
+    general form (round-17 follow-up).
+    """
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _is_file(path: Path) -> bool:
+    """``path.is_file()`` that answers "no" instead of raising (see ``_is_dir``)."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def _dates_for(ticker: str) -> list[str]:
     """Sorted (ascending) analysis dates with a saved full_states_log."""
     sdir = _strategy_dir(ticker)
-    if not sdir.is_dir():
+    if not _is_dir(sdir):
         return []
     dates: list[str] = []
     for f in sdir.glob("full_states_log_*.json"):
@@ -155,7 +178,7 @@ def _latest_rating(ticker: str, latest_date: str) -> str | None:
     appears, matching ``load_run``'s behavior).
     """
     path = _strategy_dir(ticker) / f"full_states_log_{latest_date}.json"
-    if not path.is_file():
+    if not _is_file(path):
         return None
     state = _read_json_object(path)
     if state is None:
@@ -169,7 +192,7 @@ def list_tickers() -> list[dict]:
     if not LOGS_ROOT.is_dir():
         return out
     for d in sorted(LOGS_ROOT.iterdir(), key=lambda p: p.name.lower()):
-        if not d.is_dir() or d.name in _NON_TICKER_DIRS:
+        if not _is_dir(d) or d.name in _NON_TICKER_DIRS:
             continue
         dates = _dates_for(d.name)
         if not dates:
@@ -256,7 +279,7 @@ def list_compare() -> dict:
     if not LOGS_ROOT.is_dir():
         return {"tickers": out}
     for d in sorted(LOGS_ROOT.iterdir(), key=lambda p: p.name.lower()):
-        if not d.is_dir() or d.name in _NON_TICKER_DIRS:
+        if not _is_dir(d) or d.name in _NON_TICKER_DIRS:
             continue
         date_ratings = [
             {"date": dt, "rating": _latest_rating(d.name, dt)} for dt in _dates_for(d.name)
@@ -297,7 +320,7 @@ def load_accuracy_report() -> dict:
 def load_node_perf(ticker: str, date: str) -> dict | None:
     """Per-node wall-clock + token telemetry, if ``--profile`` wrote it."""
     path = _strategy_dir(ticker) / f"node_perf_{date}.json"
-    if not path.is_file():
+    if not _is_file(path):
         return None
     # Same tolerant reader as the states log (perf_telemetry also dumps with
     # ``allow_nan`` on); a non-object root reads as "no telemetry".
@@ -494,7 +517,7 @@ def load_positions() -> dict:
 def load_run(ticker: str, date: str) -> dict | None:
     """Full report view: rating badge + overlay card + 5 collapsible sections."""
     path = _strategy_dir(ticker) / f"full_states_log_{date}.json"
-    if not path.is_file():
+    if not _is_file(path):
         return None
     state = _read_json_object(path)
     if state is None:

@@ -108,6 +108,11 @@ def information_coefficient(factor: ArrayLike, forward_returns: ArrayLike) -> fl
     if len(f_clean) < _MIN_PAIRS:
         return None
 
+    # A constant input has no rank correlation: say so here, before scipy's
+    # spearmanr warns about it and returns NaN (round-17 follow-up).
+    if f_clean.nunique() < 2 or r_clean.nunique() < 2:
+        return None
+
     if _HAVE_SCIPY and _scipy_spearmanr is not None:
         try:
             rho, _p = _scipy_spearmanr(f_clean.values, r_clean.values)

@@ -350,7 +350,12 @@ class BatchRunner:
         bad symbol doesn't abort the batch — unless ``batch_fail_fast`` is set.
         Results are returned in the input ticker order.
         """
-        tickers = self._dedup(tickers)
+        # Round-17 follow-up: the batch entry points validate the STRIPPED
+        # ticker but handed the original string down, so ``--tickers " AAPL "``
+        # reached propagate() with its spaces and only failed when a report
+        # directory was named after it. Every entry point (the Typer command,
+        # run_batch.py, run_robust's child) hands its tickers over here.
+        tickers = self._dedup([t.strip() for t in tickers])
 
         if self.workers == 1:
             return self._run_serial(tickers, trade_date, asset_type)

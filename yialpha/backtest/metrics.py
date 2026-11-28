@@ -318,10 +318,12 @@ def returns_from_equity(equity: Sequence[float] | np.ndarray) -> np.ndarray:
             f"got {eq.size}"
         )
     prev = eq[:-1]
-    # Guard against division by zero: numpy emits inf/nan naturally, but a
-    # zero in the denominator would warn. We let it pass through and rely on
-    # callers to handle non-finite returns; equity values are assumed > 0.
-    return eq[1:] / prev - 1.0
+    # A zero in the denominator yields inf/nan and numpy would warn about it.
+    # The non-finite returns are the caller's contract (handled downstream),
+    # so the arithmetic stays as it is; the warning is only noise on a curve
+    # that is already degenerate (round-17 follow-up).
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return eq[1:] / prev - 1.0
 
 
 def _expected_max_z(n_trials: int) -> float:
@@ -397,6 +399,11 @@ def _deflated_sharpe_ratio(
 # ---------------------------------------------------------------------------
 # Public entry point.
 # ---------------------------------------------------------------------------
+# A curve with a zero or non-finite point seeds 0/0 and x/0 arithmetic that
+# numpy would warn about all the way into the means, the drawdown and the
+# scipy moments. The non-finite inputs are handled by the guards below; the
+# warnings were noise (round-17 follow-up). Every metric is unchanged.
+@np.errstate(divide="ignore", invalid="ignore")
 def compute_metrics(
     equity: Sequence[float] | np.ndarray,
     benchmark_equity: Sequence[float] | np.ndarray | None = None,

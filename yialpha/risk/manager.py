@@ -9,7 +9,11 @@ a qualitative thesis; this module owns everything quantitative:
   already computes).
 * **Circuit breaker** -- a portfolio drawdown breaker that warns, blocks new
   entries, and hard-stops as losses deepen, plus per-ticker / per-sector
-  exposure caps.
+  exposure caps. The sector cap is consulted only when the caller passes
+  ``sector=`` to :meth:`RiskManager.decide` and fills ``state.sectors``;
+  neither the live overlay nor the backtest adapter does (there is no
+  point-in-time sector source), so in production only the per-ticker cap is
+  in force.
 * **CVaR de-risking** -- scales size down when the tail-loss estimate breaches.
 
 The same :class:`RiskManager` powers two callers:
@@ -444,15 +448,17 @@ def build_backtest_weight_fn(
                     "ATR stop is preserved as advisory metadata only; this "
                     "close-price backtest does not simulate stop-trigger fills."
                 )
-        # Reflect the chosen weight into the state's position map so the next
-        # call sees the (approximate) resulting exposure for is_new checks.
         # A literal Hold carries the actual exposure unless a hard stop requires
         # flattening; returning a numeric target here would cause needless
         # drift-rebalancing and fees on every Hold signal.
+        #
+        # Nothing is written back into ``state.positions`` here: the engine
+        # reports ``current_position_value`` on every call and the top of the
+        # next call overwrites the entry from it, so the "reflect the chosen
+        # weight for the next is_new check" line that used to be here had no
+        # reader (round-17 mutation k47).
         if rating == "Hold" and decision.breaker.regime != "hard_stop":
-            state.positions[ticker] = float(ctx.get("current_position_value") or 0.0)
             return None
-        state.positions[ticker] = decision.target_weight * state.equity
         return decision.target_weight
 
     return _fn

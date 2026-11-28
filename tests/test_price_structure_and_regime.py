@@ -271,8 +271,12 @@ class TestDoubleTopBottom:
 @pytest.mark.unit
 class TestRegimeClassifiers:
     def _trending_frame(self, direction: str, rows: int = 400) -> pd.DataFrame:
+        # Prices stay positive on the way down too (300 -> 100.5): the
+        # classifier rejects a non-positive close as a bad bar, so a fixture
+        # that walks through zero would be testing that gate, not the trend.
         step = 0.5 if direction == "up" else -0.5
-        closes = [100.0 + i * step for i in range(rows)]
+        base = 100.0 if direction == "up" else 100.0 + rows * 0.5
+        closes = [base + i * step for i in range(rows)]
         return _bars([
             (c - step / 2, max(c, c - step / 2) + 0.6, min(c, c - step / 2) - 0.6, c, 1000)
             for c in closes
@@ -288,6 +292,15 @@ class TestRegimeClassifiers:
         trend = classify_trend_state(self._trending_frame("down"))
         assert trend["trend"] == "downtrend"
         assert trend["stack"] == "bear_stack"
+
+    @pytest.mark.parametrize("bad_close", [0.0, -50.0])
+    def test_non_positive_latest_close_is_not_a_trend(self, bad_close):
+        """A zero or negative close is a bad bar, not a price: the classifier
+        says nothing instead of reading a downtrend out of it."""
+        rows = [(c - 0.25, c + 0.85, c - 0.35, c, 1000) for c in (300.0 - 0.5 * i for i in range(400))]
+        open_, high, low, _close, volume = rows[-1]
+        rows[-1] = (open_, high, low, bad_close, volume)
+        assert classify_trend_state(_bars(rows)) is None
 
     def test_short_history_returns_none(self):
         assert classify_trend_state(self._trending_frame("up", rows=100)) is None

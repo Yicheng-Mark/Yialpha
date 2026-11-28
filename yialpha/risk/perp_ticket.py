@@ -21,6 +21,8 @@ The ticket discloses both assumptions.
 """
 from __future__ import annotations
 
+import logging
+
 from ..dataflows.binance import _sig_digits
 from ..dataflows.binance_brackets import (
     DEFAULT_USDT_M_BRACKETS,
@@ -46,6 +48,13 @@ CONV_CAP = {
     2: {"conservative": 5.0, "moderate": 10.0, "aggressive": 15.0},
     1: {"conservative": 3.0, "moderate": 5.0, "aggressive": 8.0},
 }
+
+#: The risk profiles :data:`CONV_CAP` knows: the only values ``risk_profile``
+#: may take. Anything else is sized under :data:`DEFAULT_PROFILE` (see
+#: :func:`compute_leverage`).
+RISK_PROFILES = ("conservative", "moderate", "aggressive")
+
+logger = logging.getLogger(__name__)
 
 #: 波动率杠杆系数 K：L_vol = K / ATR%
 VOL_K = {"crypto_perp": 0.30, "crypto_spot": 0.20, "us_stock": 0.20,
@@ -115,12 +124,27 @@ def compute_leverage(
       L_bracket（可选）= 交易所 leverageBracket 该名义档的 initialLeverage 上限
       —— round-6 新增：低 maxLeverage 合约（< 硬顶 20x）此前会收到交易所
       直接拒单的建议杠杆。None（无签名端点/无该字段）时不参与，行为与旧版一致。
+
+      ``profile`` 不在 :data:`RISK_PROFILES` 里时按 :data:`DEFAULT_PROFILE`
+      （保守档）取上限并告警（round-17 后续）：此前未知值拿到 5.0 这个缺省，
+      对弱评级（Overweight / Underweight）比保守档的 3x 松——配置里拼错的
+      ``risk_profile`` 会悄悄放大单笔杠杆上限。
     """
     hard = HARD_CEILING.get(asset_type, 5.0)
 
     l_liq = 1.0 / (LIQ_SAFETY * stop_dist) if stop_dist and stop_dist > 0 else hard
     l_vol = VOL_K.get(asset_type, 0.20) / atr_pct if atr_pct and atr_pct > 0 else hard
-    l_conv = CONV_CAP.get(abs(strength), {}).get(profile, 5.0) if strength else 0.0
+    l_conv = 0.0
+    if strength:
+        row = CONV_CAP[abs(strength)]
+        profile = profile or DEFAULT_PROFILE
+        if not isinstance(profile, str) or profile not in row:
+            logger.warning(
+                "unknown risk_profile %r (known: %s); sizing under %r",
+                profile, ", ".join(RISK_PROFILES), DEFAULT_PROFILE,
+            )
+            profile = DEFAULT_PROFILE
+        l_conv = row[profile]
 
     caps: dict[str, float] = {"L_liq": l_liq, "L_vol": l_vol, "L_conv": l_conv, "L_hard": hard}
     if bracket_max_leverage is not None and bracket_max_leverage > 0:

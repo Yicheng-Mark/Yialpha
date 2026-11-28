@@ -1642,7 +1642,11 @@ def run_analysis(checkpoint: bool | None = None, asset_type: str = "auto"):
         save_path = Path(save_path_str)
         try:
             report_file = save_report_to_disk(final_state, selections["ticker"], save_path)
-            console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")
+            # soft_wrap: a path is one token; folding it at the console width
+            # used to break the file name itself in a narrow terminal.
+            console.print(
+                f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}", soft_wrap=True
+            )
             console.print(f"  [dim]Complete report:[/dim] {report_file.name}")
         except Exception as e:
             console.print(f"[red]Error saving report: {e}[/red]")
@@ -1834,8 +1838,9 @@ def verify_history_cmd(
         f"Runs: {report['total_runs']} scanned | {report['scored']} scored | "
         f"{report['pending']} pending"
     )
-    console.print(f"[dim]JSON: {json_path}[/dim]")
-    console.print(f"[dim]Markdown: {md_path}[/dim]")
+    # soft_wrap: paths stay on one line whatever the console width.
+    console.print(f"[dim]JSON: {json_path}[/dim]", soft_wrap=True)
+    console.print(f"[dim]Markdown: {md_path}[/dim]", soft_wrap=True)
 
 
 @app.command("scoreboard")
@@ -1897,8 +1902,8 @@ def scoreboard_cmd(
         f"Outcomes: {report.considered} considered | {report.completed} complete | "
         f"{report.incomplete} incomplete | {report.failed} failed"
     )
-    console.print(f"[dim]JSON: {json_path}[/dim]")
-    console.print(f"[dim]Markdown: {md_path}[/dim]")
+    console.print(f"[dim]JSON: {json_path}[/dim]", soft_wrap=True)
+    console.print(f"[dim]Markdown: {md_path}[/dim]", soft_wrap=True)
 
 
 @app.command("memory-resolve")
@@ -2213,6 +2218,26 @@ def config_check():
                 f"  [green]✅[/green] indicator_battery: "
                 f"{len(set(battery))}/{len(INDICATOR_NAMES)} indicator(s), all known"
             )
+
+    # -- Risk profile ---------------------------------------------------------
+    # A typo'd risk_profile used to loosen the perp leverage advice: the unknown
+    # value took the loosest default of the conviction cap. It now falls back
+    # to the conservative profile and warns when a ticket is sized; surfaced
+    # here as ❌, not gating the exit code (same standing as indicator_battery).
+    from yialpha.risk.perp_ticket import DEFAULT_PROFILE, RISK_PROFILES
+
+    profile = get_config().get("risk_profile")
+    console.print("\n[dim]Risk profile:[/dim]")
+    if profile is None:
+        console.print(f"  [dim]• risk_profile unset — {DEFAULT_PROFILE} (default)[/dim]")
+    elif profile in RISK_PROFILES:
+        console.print(f"  [green]✅[/green] risk_profile: {profile}")
+    else:
+        console.print(
+            f"  [red]❌[/red] risk_profile={profile!r} is not one of "
+            f"{', '.join(RISK_PROFILES)} — perp leverage advice falls back to "
+            f"{DEFAULT_PROFILE} and warns"
+        )
 
     # -- Verdict --------------------------------------------------------------
     ready = not provider_unknown and (

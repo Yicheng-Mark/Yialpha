@@ -967,7 +967,7 @@ def test_r16_utils_replace_retry_escalates_then_succeeds(tmp_path, monkeypatch):
     (tmp_path / "a.json").write_text("old")
     df_utils.replace_retry_on_windows(tmp_path / "a.tmp", tmp_path / "a.json", delay_s=0.05)
     assert attempts["n"] == 4
-    assert sleeps == [0.05, 0.05, 0.1]
+    assert sleeps == [0.05, 0.1, 0.2]
     assert (tmp_path / "a.json").read_text() == "new"
     assert not (tmp_path / "a.tmp").exists()
 
@@ -985,7 +985,7 @@ def test_r16_utils_replace_retry_exhaustion_reraises_last_error(tmp_path, monkey
     (tmp_path / "a.tmp").write_text("new")
     with pytest.raises(PermissionError, match="target open in a reader"):
         df_utils.replace_retry_on_windows(tmp_path / "a.tmp", tmp_path / "a.json")
-    assert sleeps == [0.05, 0.05, 0.1, 0.2, 0.4]
+    assert sleeps == [0.05, 0.1, 0.2, 0.4]
     assert (tmp_path / "a.tmp").read_text() == "new"
 
 

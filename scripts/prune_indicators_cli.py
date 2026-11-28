@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from datetime import UTC, datetime
@@ -66,20 +67,6 @@ from yialpha.backtest.ic import (  # noqa: E402
 
 #: Columns ``export_ic_dataset.py --extra-horizons`` emits (e.g. fwd_ret_10d).
 _FWD_RET_RE = re.compile(r"^fwd_ret_(\d+)d$")
-
-
-def _ensure_unicode_stdout() -> None:
-    """Make stdout/stderr locale-proof on Windows.
-
-    The report prints non-ASCII characters (en-dash style typography aside, a
-    plain ``print`` under a Western Windows ANSI codepage like cp1252 raises
-    UnicodeEncodeError on any character outside it). Western-locale CI runners
-    and users hit this even though UTF-8 terminals never do.
-    """
-    for stream in (sys.stdout, sys.stderr):
-        enc = (stream.encoding or "").lower().replace("-", "")
-        if enc != "utf8":
-            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
 
 
 def _load_ic_data(
@@ -116,7 +103,9 @@ def _load_ic_data(
 
 
 def main(argv: list[str] | None = None) -> int:
-    _ensure_unicode_stdout()
+    # Both console streams were made UTF-8 by _bootstrap.bootstrap() at import
+    # (guarded for captured streams); the unguarded copy that used to run here
+    # raised AttributeError on a redirected stdout before argparse even started.
     parser = argparse.ArgumentParser(
         description="Prune low-IC indicators from the market analyst battery.",
     )
@@ -191,6 +180,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.min_observations < 1:
         print(
             f"Error: --min-observations must be >= 1 (got {args.min_observations})",
+            file=sys.stderr,
+        )
+        return 1
+    # Round-17 follow-up: a threshold of 0, a negative one or NaN kept every
+    # indicator and inf pruned them all, each with exit 0 -- a verdict that
+    # came from the flag, not from the evidence.
+    if not (math.isfinite(args.min_abs_ic) and args.min_abs_ic > 0):
+        print(
+            f"Error: --min-abs-ic must be a finite number > 0 (got {args.min_abs_ic})",
             file=sys.stderr,
         )
         return 1
@@ -277,7 +275,9 @@ def main(argv: list[str] | None = None) -> int:
         header = ["Indicator"] + [f"Q{i+1}" for i in range(n_q)]
         header += ["Q_hi-Q_lo", "Monotonic", "Turnover"]
         lines.append("| " + " | ".join(header) + " |")
-        lines.append("|---|" + "---:|" * (len(header) - 2) + "---|---:|")
+        # One column per header cell: text (Indicator) left, the quantiles and
+        # the spread right, Monotonic (yes/no) left, Turnover right.
+        lines.append("|---|" + "---:|" * (len(header) - 3) + "---|---:|")
         for name, qs in spread_by_indicator.items():
             cells = [name]
             for i in range(n_q):

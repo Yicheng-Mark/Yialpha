@@ -6,6 +6,7 @@ Pure-numpy, no network, no scipy required. Marked ``@pytest.mark.unit``.
 from __future__ import annotations
 
 import math
+import warnings
 
 import numpy as np
 import pytest
@@ -185,12 +186,11 @@ def test_zero_start_equity_is_total_loss():
     # eq[0] == 0 used to divide by zero (numpy: inf metrics); the honest
     # degenerate reading is a total loss. The returns path still divides by
     # that zero on purpose (non-finite returns are the caller's contract, see
-    # returns_from_equity), so numpy reports the 0-denominator and the NaN/inf
-    # arithmetic it seeds (mean, drawdown, the scipy moments) -- expected here.
-    with pytest.warns(
-        RuntimeWarning,
-        match="divide by zero encountered in divide|invalid value encountered in (divide|subtract)",
-    ):
+    # returns_from_equity); the metrics are computed under np.errstate, so
+    # numpy no longer reports the 0-denominator and the NaN/inf arithmetic it
+    # seeds (mean, drawdown, the scipy moments).
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
         m = compute_metrics([0.0, 5.0, 10.0])
     assert m.total_return == -1.0
     assert m.cagr == -1.0

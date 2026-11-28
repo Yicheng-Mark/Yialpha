@@ -1550,7 +1550,9 @@ def get_binance_premium_index(symbol: str) -> str:
 
     One weight-1 call returning ``markPrice``, ``indexPrice``,
     ``lastFundingRate`` (the rate currently in effect, payable at the next
-    settlement) and ``nextFundingTime``. Binance liquidates USDT-M positions
+    settlement — Binance calls it "Latest funding rate", but it is not the
+    last settled rate: it moves during the funding period) and
+    ``nextFundingTime``. Binance liquidates USDT-M positions
     against the MARK price, not the last traded price — liquidation-distance
     claims must anchor to ``markPrice`` (vs ``indexPrice`` for the premium
     displacement), while the funding-rate history tool carries the settlement
