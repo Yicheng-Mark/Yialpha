@@ -94,7 +94,22 @@ Breaking changes within the 0.x line are called out explicitly.
   scheduling race, not a clock issue. A read-only review of every test that starts threads or
   processes then listed 15 further candidates; pinned to two cores beside eight CPU burners,
   the fail-fast test above was the only one that failed (5 of 13,920 executions).
-
+- **A test asserted a directory listing's order** (`tests/test_round17_scripts_e2e.py`,
+  `TestRobustFindNewReport`). This one reached CI: on the first run of the pushed tree it
+  was the single failure on both ubuntu lanes (the Windows lane passed). `_find_new_report`
+  (`scripts/run_robust.py`) returns the first report whose mtime beats the pre-attempt
+  snapshot, and among reports with the *same* mtime that is whichever one `Path.glob`
+  happens to yield first — the file system's order, which is sorted by name on NTFS, is
+  creation order on a fresh WSL disk, and is neither on a hosted runner's ext4. The test
+  expected a particular one of two tied reports. It now checks the unambiguous cases while
+  there is a single newest report and treats the tie as a tie. The suite was then run once
+  per scrambled directory order — six orders on Linux py3.13, four on Linux py3.11, four on
+  Windows py3.12 — and this was the only test whose outcome depended on it. The same sweep
+  turned up a neighbour with a different defect:
+  `test_snapshot_record_warns_on_missing_pathlike_evidence` (`tests/test_ic_cycle.py`)
+  wrote a scratch file into the working directory, where two suite runs in one checkout
+  could delete each other's copy mid-test (it happened once in six parallel full runs); the
+  file now lives in the test's `tmp_path`.
 - **Product bugs found by the round-16 audit.** Each one is pinned by a
   regression test that was run against the unmodified `v1.0.0` checkout to
   confirm it fails without the fix:

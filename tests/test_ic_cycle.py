@@ -240,7 +240,7 @@ def test_ic_cycle_command_registered():
 # snapshot record evidence hygiene
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
-def test_snapshot_record_warns_on_missing_pathlike_evidence(monkeypatch, capsys):
+def test_snapshot_record_warns_on_missing_pathlike_evidence(monkeypatch, capsys, tmp_path):
     from yialpha.cli import main as cli_main
 
     def fake_record(config, reason, evidence):
@@ -255,15 +255,15 @@ def test_snapshot_record_warns_on_missing_pathlike_evidence(monkeypatch, capsys)
     out = " ".join(capsys.readouterr().out.split())  # rich wraps at 80 cols
     assert "does not exist" in out
 
-    # Free-text descriptions and real paths stay silent.
-    (Path("real.prune.json")).write_text("{}", encoding="utf-8")
-    try:
-        cli_main.snapshot_record(reason="test", evidence="real.prune.json")
-        cli_main.snapshot_record(reason="test", evidence="IC report from last week")
-        out2 = " ".join(capsys.readouterr().out.split())
-        assert "does not exist" not in out2
-    finally:
-        Path("real.prune.json").unlink(missing_ok=True)
+    # Free-text descriptions and real paths stay silent. The real file lives in
+    # the test's own directory: written to the working directory instead, two
+    # suite runs in one checkout could delete each other's copy mid-test.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "real.prune.json").write_text("{}", encoding="utf-8")
+    cli_main.snapshot_record(reason="test", evidence="real.prune.json")
+    cli_main.snapshot_record(reason="test", evidence="IC report from last week")
+    out2 = " ".join(capsys.readouterr().out.split())
+    assert "does not exist" not in out2
 
 
 # --------------------------------------------------------------------------- #

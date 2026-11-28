@@ -3086,11 +3086,20 @@ class TestRobustFindNewReport:
     def test_r17_robust_find_new_report_newest_wins_and_ties_lose(self, rr, tmp_path):
         older = _touch(tmp_path / "AAPL_20260701_090000" / "complete_report.md", 100.0)
         newer = _touch(tmp_path / "AAPL_20260701_100000" / "complete_report.md", 200.0)
-        _touch(tmp_path / "AAPL_20260701_100500" / "complete_report.md", 200.0)
 
         assert rr._find_new_report(tmp_path, "AAPL", 0.0) == newer
         assert rr._find_new_report(tmp_path, "AAPL", 100.0) == newer
         # A report whose mtime equals the pre-attempt snapshot is not "new".
+        assert rr._find_new_report(tmp_path, "AAPL", 200.0) is None
+
+        # Two reports with the same mtime: neither is newer than the snapshot, and
+        # which of them a directory listing yields first is the file system's choice
+        # (sorted on NTFS, creation order on a fresh WSL disk, neither on a hosted
+        # runner's ext4 -- where asserting a particular one failed).
+        tied = _touch(tmp_path / "AAPL_20260701_100500" / "complete_report.md", 200.0)
+
+        assert rr._find_new_report(tmp_path, "AAPL", 0.0) in {newer, tied}
+        assert rr._find_new_report(tmp_path, "AAPL", 100.0) in {newer, tied}
         assert rr._find_new_report(tmp_path, "AAPL", 200.0) is None
         assert older.exists()
 
