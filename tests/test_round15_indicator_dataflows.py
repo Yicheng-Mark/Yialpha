@@ -111,7 +111,10 @@ class TestR15ResampleEdgeBranches:
             "Open": [1.0, 1.0], "High": [2.0, 2.0], "Low": [0.5, 0.5],
             "Close": [1.5, 1.5], "Volume": [10.0, 10.0],
         })
-        weekly = resample_weekly(daily, curr_date="2025-01-10")
+        # pandas finds no common format in the junk dates and says so before
+        # coercing them one by one (ohlcv_resample.py:51 passes no format=).
+        with pytest.warns(UserWarning, match="Could not infer format"):
+            weekly = resample_weekly(daily, curr_date="2025-01-10")
         assert weekly.empty
         assert list(weekly.columns) == ["Date", "Open", "High", "Low", "Close", "Volume"]
 
@@ -166,41 +169,43 @@ class TestR15ResampleEdgeBranches:
 
 @pytest.mark.unit
 class TestR15HttpTimeoutEnvParsing:
-    def _reload_with(self, value: str | None):
+    @pytest.fixture(autouse=True)
+    def _undo_stockstats_reload(self):
+        """Put ``stockstats_utils`` back as it was after each test.
+
+        ``reload`` re-executes the module into its existing namespace; the
+        tests below do it to re-read ``YIALPHA_HTTP_TIMEOUT_S``. The module's
+        timeout is re-derived at the end of each test, its functions are not:
+        without this the later tests in the session get new function objects.
+        """
+        saved = dict(su.__dict__)
+        yield
+        su.__dict__.clear()
+        su.__dict__.update(saved)
+
+    def _reload_with(self, monkeypatch, value: str | None):
         if value is None:
-            os.environ.pop("YIALPHA_HTTP_TIMEOUT_S", None)
+            monkeypatch.delenv("YIALPHA_HTTP_TIMEOUT_S", raising=False)
         else:
-            os.environ["YIALPHA_HTTP_TIMEOUT_S"] = value
+            monkeypatch.setenv("YIALPHA_HTTP_TIMEOUT_S", value)
         return importlib.reload(su)
 
-    def test_r15_env_timeout_non_positive_falls_back_with_warning(self, caplog):
-        original = os.environ.get("YIALPHA_HTTP_TIMEOUT_S")
-        try:
-            with caplog.at_level(logging.WARNING, logger=su.__name__):
-                module = self._reload_with("-5")
-            assert module.YF_HTTP_TIMEOUT == 30.0
-            assert "not positive" in caplog.text
-            assert "YIALPHA_HTTP_TIMEOUT_S" in caplog.text
-        finally:
-            self._reload_with(original)
+    def test_r15_env_timeout_non_positive_falls_back_with_warning(self, caplog, monkeypatch):
+        with caplog.at_level(logging.WARNING, logger=su.__name__):
+            module = self._reload_with(monkeypatch, "-5")
+        assert module.YF_HTTP_TIMEOUT == 30.0
+        assert "not positive" in caplog.text
+        assert "YIALPHA_HTTP_TIMEOUT_S" in caplog.text
 
-    def test_r15_env_timeout_non_numeric_falls_back_with_warning(self, caplog):
-        original = os.environ.get("YIALPHA_HTTP_TIMEOUT_S")
-        try:
-            with caplog.at_level(logging.WARNING, logger=su.__name__):
-                module = self._reload_with("soon")
-            assert module.YF_HTTP_TIMEOUT == 30.0
-            assert "not a number" in caplog.text
-        finally:
-            self._reload_with(original)
+    def test_r15_env_timeout_non_numeric_falls_back_with_warning(self, caplog, monkeypatch):
+        with caplog.at_level(logging.WARNING, logger=su.__name__):
+            module = self._reload_with(monkeypatch, "soon")
+        assert module.YF_HTTP_TIMEOUT == 30.0
+        assert "not a number" in caplog.text
 
-    def test_r15_env_timeout_zero_opts_out_positive_sets(self):
-        original = os.environ.get("YIALPHA_HTTP_TIMEOUT_S")
-        try:
-            assert self._reload_with("0").YF_HTTP_TIMEOUT is None
-            assert self._reload_with("12.5").YF_HTTP_TIMEOUT == 12.5
-        finally:
-            self._reload_with(original)
+    def test_r15_env_timeout_zero_opts_out_positive_sets(self, monkeypatch):
+        assert self._reload_with(monkeypatch, "0").YF_HTTP_TIMEOUT is None
+        assert self._reload_with(monkeypatch, "12.5").YF_HTTP_TIMEOUT == 12.5
 
 
 # --------------------------------------------------------------------------- #
@@ -261,8 +266,11 @@ class TestR15StaleGuardInputs:
 
     def test_r15_stale_guard_ignores_frame_without_any_dates(self):
         frame = pd.DataFrame({"Close": [1.0, 2.0]}, index=["x", "y"])
-        assert su._coerce_ohlcv_dates(frame).empty
-        su._assert_ohlcv_not_stale(frame, "2026-06-11", "X")  # no raise
+        # "x" / "y" are not dates: pandas finds no common format and says so
+        # before coercing them to NaT (stockstats_utils.py:213). Expected.
+        with pytest.warns(UserWarning, match="Could not infer format"):
+            assert su._coerce_ohlcv_dates(frame).empty
+            su._assert_ohlcv_not_stale(frame, "2026-06-11", "X")  # no raise
 
     def test_r15_stale_guard_reads_datetime_column_fallback(self):
         """A frame whose date column is named ``Datetime`` (yfinance intraday

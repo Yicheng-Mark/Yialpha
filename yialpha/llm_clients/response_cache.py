@@ -160,8 +160,19 @@ class DiskLLMCache(BaseCache):
         if not path.exists():
             return None
         try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            return None  # evicted by a concurrent lookup between exists() and the read
+        except OSError as exc:
+            # Present but not readable RIGHT NOW: on Windows a concurrent writer is
+            # replacing it (os.replace locks the target for an instant), or a scanner
+            # holds it. Round 17: this fell into the "corrupt entry" branch below, which
+            # DELETED a valid, paid-for generation a writer had just landed. Not
+            # corruption — a plain miss; the entry stays for the next lookup.
+            logger.warning("LLM cache: could not read %s (%s); treating as a miss", path, exc)
+            return None
+        try:
+            data = json.loads(raw)
             if data.get("v") != _CACHE_FORMAT_VERSION:
                 raise ValueError("cache format version mismatch")
             gens = _deserialize(data)

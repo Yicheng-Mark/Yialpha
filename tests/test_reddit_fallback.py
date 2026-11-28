@@ -197,13 +197,17 @@ class TestChunkedTransferErrorsHandled:
 
     def test_json_incomplete_read_falls_back_to_rss(self, monkeypatch):
         _set_creds(monkeypatch)
+        rss_posts = [{"title": "NVDA pops", "source": "rss"}]
         # token fetch (OK) then search body chunked-fragments mid-read.
         with patch.object(reddit, "urlopen",
                           side_effect=[_token_resp(),
                                        _raise(http.client.IncompleteRead(b""))]), \
-             patch.object(reddit, "_fetch_subreddit_rss", return_value=[]) as rss:
-            reddit._fetch_subreddit_json("NVDA", "stocks", 5, 5.0)
-        rss.assert_called_once()
+             patch.object(reddit, "_fetch_subreddit_rss", return_value=rss_posts) as rss:
+            out = reddit._fetch_subreddit_json("NVDA", "stocks", 5, 5.0)
+        # The RSS fallback runs once for the same request, and ITS posts are
+        # what the caller receives -- not an empty list.
+        rss.assert_called_once_with("NVDA", "stocks", 5, 5.0)
+        assert out == rss_posts
 
 
 @pytest.mark.unit

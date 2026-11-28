@@ -47,5 +47,8 @@ def test_reasoning_model_receives_effort(monkeypatch):
 
 
 def test_non_reasoning_model_drops_effort(monkeypatch):
-    # gpt-4.1 would 400 with reasoning_effort — it must be dropped.
-    assert _effort_on("gpt-4.1", monkeypatch) is None
+    # gpt-4.1 would 400 with reasoning_effort — it must be dropped. The openai
+    # catalog lists the GPT-5 family only, so this non-reasoning name also
+    # trips the unknown-model warning; that is expected and unrelated to the gate.
+    with pytest.warns(RuntimeWarning, match="not in the known model list"):
+        assert _effort_on("gpt-4.1", monkeypatch) is None

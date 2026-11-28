@@ -8,6 +8,7 @@ guard never fires, and never spawn a real subprocess.
 import contextlib
 import importlib.util
 import io
+import os
 import subprocess
 import tempfile
 import unittest
@@ -21,6 +22,18 @@ _spec = importlib.util.spec_from_file_location("run_robust_under_test", _SCRIPT_
 assert _spec is not None and _spec.loader is not None
 rr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rr)
+
+
+def _absolute(*parts) -> Path:
+    """A path that is absolute on EVERY platform.
+
+    ``"C:/from/dotenv"`` is absolute only on Windows. On Linux it is a
+    relative path, which ``_states_root`` (correctly, per its contract)
+    anchors to the project root — so a Windows-drive-literal fixture made
+    ``TestStatesRootDotenv`` fail on the ubuntu CI lanes ever since the test
+    was written (round-16: surfaced by running the suite on Linux).
+    """
+    return Path(os.path.abspath(os.sep)).joinpath(*parts)
 
 
 class TestCoreSentinelCount(unittest.TestCase):
@@ -106,10 +119,11 @@ class TestStatesRootDotenv(unittest.TestCase):
 
     def test_env_var_beats_dotenv(self):
         with mock.patch("dotenv.dotenv_values", return_value={
-            "YIALPHA_RESULTS_DIR": "C:/from/dotenv",
-        }) as mdv, mock.patch.dict(rr.os.environ,
-                                   {"YIALPHA_RESULTS_DIR": "C:/from/env"}):
-            self.assertEqual(rr._states_root(), Path("C:/from/env"))
+            "YIALPHA_RESULTS_DIR": str(_absolute("from", "dotenv")),
+        }) as mdv, mock.patch.dict(rr.os.environ, {
+            "YIALPHA_RESULTS_DIR": str(_absolute("from", "env")),
+        }):
+            self.assertEqual(rr._states_root(), _absolute("from", "env"))
         # An exported var must not even consult the .env file.
         mdv.assert_not_called()
 
@@ -117,9 +131,9 @@ class TestStatesRootDotenv(unittest.TestCase):
         env = {k: v for k, v in rr.os.environ.items()
                if k != "YIALPHA_RESULTS_DIR"}
         with mock.patch("dotenv.dotenv_values", return_value={
-            "YIALPHA_RESULTS_DIR": "C:/from/dotenv",
+            "YIALPHA_RESULTS_DIR": str(_absolute("from", "dotenv")),
         }), mock.patch.dict(rr.os.environ, env, clear=True):
-            self.assertEqual(rr._states_root(), Path("C:/from/dotenv"))
+            self.assertEqual(rr._states_root(), _absolute("from", "dotenv"))
 
     def test_dotenv_without_key_falls_back_to_home_default(self):
         # Covers every no-value shape with one pin: .env missing, .env with

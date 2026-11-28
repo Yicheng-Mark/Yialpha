@@ -287,16 +287,18 @@ class TestGetEtfFundData:
         assert "S1,Company 1 Inc.,6.2" in out
 
     def test_future_date_refused_before_fetch(self, monkeypatch):
-        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        # Two days ahead: a live date is the host-local OR the UTC calendar
+        # date, so one day past the local date can still be "today".
+        future = (date.today() + timedelta(days=2)).isoformat()
 
         def no_fetch(t, c):
             raise AssertionError("fund info fetched for a future date")
 
         monkeypatch.setattr(efd, "_cached_ticker_info", no_fetch)
         with pytest.raises(NoMarketDataError) as ei:
-            efd.get_etf_fund_data("SPY", tomorrow)
+            efd.get_etf_fund_data("SPY", future)
         assert "point-in-time" in ei.value.detail
-        assert tomorrow in ei.value.detail
+        assert future in ei.value.detail
 
 
 # ---------------------------------------------------------------------------

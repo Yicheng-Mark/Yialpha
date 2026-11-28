@@ -910,6 +910,13 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
         )
         return detail("incomplete", legs_missing=(LEG_CONTRACT_PRICE,), outcome_id=outcome_id)
 
+    # Round-17: the reference path's price gate (``horizon_end_price_invalid``
+    # below it), applied to the legacy entry too. A NaN / zero / negative
+    # vendor close must never reach the return arithmetic: SQLite stores NaN
+    # as NULL inside a "complete" row, and 0 fabricates a -100% return.
+    if not math.isfinite(entry.close) or entry.close <= 0:
+        return missing_endpoint("legacy_entry_price_invalid")
+
     # --- endpoint completeness ------------------------------------------------
     # complete requires the horizon end's own CLOSED bar, never a
     # last-available stand-in: the perp (24/7) must show the bar dated
@@ -960,6 +967,8 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
                 if expected_endpoint >= now_date
                 else "horizon_end_bar_missing"
         )
+    if not math.isfinite(exit_bar.close) or exit_bar.close <= 0:
+        return missing_endpoint("horizon_end_price_invalid")
     contract_price_return = exit_bar.close / entry.close - 1.0
     # The one holding window every leg attributes: the entry/exit bars' close
     # instants (end of each labeled UTC day). The price return is measured
@@ -1006,6 +1015,7 @@ def _compute_one(item: dict[str, Any], now_as_of: str) -> OutcomeComputeDetail:
             u_entry is not None
             and u_exit is not None
             and u_exit.bar_date > u_entry.bar_date
+            and all(math.isfinite(v) and v > 0 for v in (u_entry.close, u_exit.close))
         ):
             underlying_return = u_exit.close / u_entry.close - 1.0
         else:

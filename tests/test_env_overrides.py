@@ -9,6 +9,24 @@ import pytest
 import yialpha.default_config as default_config_module
 
 
+@pytest.fixture(autouse=True)
+def _undo_default_config_reload():
+    """Put ``yialpha.default_config`` back as it was before the test.
+
+    Every test here re-evaluates the module with ``importlib.reload`` under a
+    patched environment. ``reload`` re-executes the module into its existing
+    namespace, so without this the module keeps the ``DEFAULT_CONFIG`` built
+    from that environment for the rest of the session -- ``monkeypatch``
+    restores ``os.environ`` only. On a dev box whose ``.env`` sets e.g.
+    ``YIALPHA_LLM_MAX_RETRIES``, every module that looks the config up after
+    this file then sees the built-in value instead.
+    """
+    saved = dict(default_config_module.__dict__)
+    yield
+    default_config_module.__dict__.clear()
+    default_config_module.__dict__.update(saved)
+
+
 def _reload_with_env(monkeypatch, **overrides):
     """Set/clear env vars then reload default_config to re-evaluate DEFAULT_CONFIG."""
     for key in list(default_config_module._ENV_OVERRIDES):
@@ -105,9 +123,6 @@ def test_invalid_int_raises(monkeypatch):
     monkeypatch.setenv("YIALPHA_MAX_DEBATE_ROUNDS", "not-a-number")
     with pytest.raises(ValueError, match="YIALPHA_MAX_DEBATE_ROUNDS"):
         importlib.reload(default_config_module)
-    # Restore module state for subsequent tests in this process
-    monkeypatch.delenv("YIALPHA_MAX_DEBATE_ROUNDS", raising=False)
-    importlib.reload(default_config_module)
 
 
 @pytest.mark.parametrize("bad", ["treu", "flase", "maybe", "2", "enabled"])
@@ -116,8 +131,6 @@ def test_invalid_bool_raises(monkeypatch, bad):
     monkeypatch.setenv("YIALPHA_CHECKPOINT_ENABLED", bad)
     with pytest.raises(ValueError, match="YIALPHA_CHECKPOINT_ENABLED"):
         importlib.reload(default_config_module)
-    monkeypatch.delenv("YIALPHA_CHECKPOINT_ENABLED", raising=False)
-    importlib.reload(default_config_module)
 
 
 def test_unknown_env_var_is_ignored(monkeypatch):
@@ -162,8 +175,6 @@ def test_invalid_analyst_parallel_bool_raises(monkeypatch, bad):
     monkeypatch.setenv("YIALPHA_ANALYST_PARALLEL", bad)
     with pytest.raises(ValueError, match="YIALPHA_ANALYST_PARALLEL"):
         importlib.reload(default_config_module)
-    monkeypatch.delenv("YIALPHA_ANALYST_PARALLEL", raising=False)
-    importlib.reload(default_config_module)
 
 
 def test_invalid_max_retries_int_raises(monkeypatch):
@@ -171,5 +182,3 @@ def test_invalid_max_retries_int_raises(monkeypatch):
     monkeypatch.setenv("YIALPHA_LLM_MAX_RETRIES", "not-a-number")
     with pytest.raises(ValueError, match="YIALPHA_LLM_MAX_RETRIES"):
         importlib.reload(default_config_module)
-    monkeypatch.delenv("YIALPHA_LLM_MAX_RETRIES", raising=False)
-    importlib.reload(default_config_module)

@@ -794,10 +794,15 @@ def _daily_frame(days: list[date], close: float = 100.0) -> pd.DataFrame:
 def _live_week_days() -> tuple[date, date, date]:
     """(prev_friday, last_friday_on_or_before_today, today).
 
-    ``today`` is the host-local live anchor (is_historical_date → False for
-    it by construction); the trailing bin's Friday label is
-    ``last_friday_on_or_before_today``."""
-    today = date.today()
+    ``today`` is the UTC calendar date. The forming-guard asks whether a
+    bin's Friday label has reached ``today_utc``, so the weekday the two tests
+    below branch on is the UTC one; like the host-local date it is a live
+    anchor (is_historical_date → False for it by construction). Keyed on the
+    host-local date instead, they asserted the wrong weekday on any host
+    whose calendar runs a day ahead of UTC: a local Saturday that is still
+    the UTC Friday has the Friday bin still forming, and it IS dropped. The
+    trailing bin's Friday label is ``last_friday_on_or_before_today``."""
+    today = datetime.now(UTC).date()
     last_friday = today - timedelta(days=(today.weekday() - 4) % 7)
     return last_friday - timedelta(days=7), last_friday, today
 
@@ -835,20 +840,20 @@ def test_resample_weekly_keeps_week_when_row_beyond_label_exists():
     venue after the UTC day rolls). The synthetic Saturday row must already
     be a past day for the scenario to describe a real feed.
 
-    Round-11 note: this test RUNS on a real Saturday (saturday == today
-    clears the skip) and used to FAIL there — the round-8 forming-guard
-    (``last_day >= today``) deleted exactly this completed bin. The
-    round-11 bin-interval criterion keeps it; the skip below fires only on
-    Fridays, where the synthetic beyond-label row would be future-dated
-    (an ill-formed feed, not a real scenario). TestWeeklyPit's sibling in
-    test_weekly_timeframe pins the same verdict with a frozen clock."""
+    Round-11 note: this test RUNS on a real (UTC) Saturday (saturday ==
+    today) and used to FAIL there — the round-8 forming-guard (``last_day >=
+    today``) deleted exactly this completed bin. The round-11 bin-interval
+    criterion keeps it. On a (UTC) Friday the Saturday after this week's
+    label is still in the future (an ill-formed feed, not a real scenario),
+    so the test takes the week before instead of skipping. TestWeeklyPit's
+    sibling in test_weekly_timeframe pins the same verdict with a frozen
+    clock, on every weekday."""
     prev_friday, last_friday, today = _live_week_days()
     saturday = last_friday + timedelta(days=1)
     if saturday > today:
-        pytest.skip(
-            "synthetic beyond-label row would be future-dated today; "
-            "scenario needs a rolled UTC day (run any day but Friday)"
-        )
+        prev_friday -= timedelta(days=7)
+        last_friday -= timedelta(days=7)
+        saturday -= timedelta(days=7)
     days = [prev_friday] + [
         last_friday - timedelta(days=k) for k in (4, 3, 2, 1, 0)
     ] + [saturday]  # the Saturday row

@@ -300,6 +300,12 @@ def get_stock_stats_indicators_window(
             f"Indicator {indicator} is not supported. Please choose from: {list(best_ind_params.keys())}"
         )
 
+    # Dual-form guard (same [:10] normalisation as the news vendors, rounds 11
+    # / 15): a curr_date carrying a time ("2026-05-13 16:00:00" — an LLM
+    # echoing a vendor report's "# Data retrieved on" timestamp) used to hit
+    # the bare strptime below with a ValueError, which the tool layer handed
+    # back to the model in place of every indicator value.
+    curr_date = str(curr_date)[:10]
     end_date = curr_date
     curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     before = curr_date_dt - relativedelta(days=look_back_days)

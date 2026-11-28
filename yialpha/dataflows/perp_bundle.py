@@ -36,6 +36,7 @@ without its price book is not a GOOD-tier decision.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -205,8 +206,20 @@ def _fetch_prices(symbol: str, end_date: str) -> dict[str, Any]:
             frame = binance_klines_frame(
                 symbol, start, end, "1d", "binance_perp", price_type,
             )
+            close = float(frame[KLINE_CLOSE_COLUMN].iloc[-1])
+            # Round-17: a close that is not a finite positive number is no
+            # quote. Taken as-is, a 0 tail rendered "last 0.00… (1d -100.00%)"
+            # and a -10,000 bps mark basis, NaN / inf rendered "nan" / "inf" --
+            # all with core_complete=True, so a perp run without a usable
+            # price book still passed as GOOD-tier. Fail the leg instead (the
+            # verdict a failed kline fetch already gets).
+            if not (math.isfinite(close) and close > 0):
+                raise ValueError(
+                    f"{price_type} kline tail close is not a finite positive "
+                    f"number: {close!r}"
+                )
             frames[price_type] = frame
-            closes[price_type] = float(frame[KLINE_CLOSE_COLUMN].iloc[-1])
+            closes[price_type] = close
         except Exception as exc:  # noqa: BLE001 — per-leg fail-soft
             out[price_type] = {
                 "status": STATUS_UNAVAILABLE,
@@ -906,12 +919,18 @@ def _component_footer(
     for key, comp in bundle.items():
         if keys is not None and key not in keys:
             continue
-        if not isinstance(comp, dict) or comp.get("status") == STATUS_OK:
+        if not isinstance(comp, dict):
             continue
-        status = comp.get("status", STATUS_UNAVAILABLE)
-        reason = comp.get("reason", "")
-        notes.append(f"{key}: {status}" + (f" ({reason})" if reason else ""))
-        # Nested vantage points (LSR) get their own note.
+        if comp.get("status") != STATUS_OK:
+            status = comp.get("status", STATUS_UNAVAILABLE)
+            reason = comp.get("reason", "")
+            notes.append(f"{key}: {status}" + (f" ({reason})" if reason else ""))
+        # Nested legs / vantage points (the price bases, the LSR vantages) get
+        # their own note whenever THEY are not ok -- also under a component
+        # whose overall status is ok (one LSR vantage served, a core-complete
+        # price book without its index leg). Round-17: these used to sit behind
+        # the parent note, so a partly-served component rendered its surviving
+        # reading and said nothing about the legs that were missing.
         for sub_key, sub in comp.items():
             if isinstance(sub, dict) and sub.get("status") not in (None, STATUS_OK):
                 notes.append(

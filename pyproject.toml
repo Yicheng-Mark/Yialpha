@@ -53,6 +53,13 @@ dev = [
     # a transitive dep in practice (langchain-openai -> openai -> httpx), so a
     # [dev]-only resolution must declare it or the web tests cannot even import.
     "httpx>=0.27",
+    # Test-only. backtest/{metrics,ic,event_study}.py and the A/B gate treat
+    # scipy as an OPTIONAL accelerator and ship numpy/math fallbacks so the
+    # runtime install stays lean. The tests that pin "fallback == scipy to
+    # 1e-12" (DSR moments, normal CDF/PPF, Spearman IC, chi-square gate)
+    # importorskip("scipy"): absent from the test environment they skip
+    # silently, which is what happened in CI — 8 tests, never run there.
+    "scipy>=1.14",
 ]
 # Amazon Bedrock support (AWS SigV4 auth + boto3). Optional so the core install
 # stays lean: pip install "yialpha[bedrock]".
@@ -97,13 +104,26 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["yialpha"]
+# yialpha + the two run-in-place trees. web/ and scripts/ are not packaged
+# modules, so they can only be measured as source directories. NOTE: the
+# `--cov=` flags on ci.yml's pytest command lines override this `source`, so
+# the workflow and this list must agree (tests/test_round16_packaging_ci.py).
+source = ["yialpha", "web", "scripts"]
 
 [tool.coverage.report]
-# Coverage gate: baseline is 78% (2026-08-10). The 3-point cushion absorbs
-# minor fluctuations from new untested modules without flaking CI; the gate
-# still catches real regressions. Raise the floor as coverage improves.
-fail_under = 75
+# Coverage gate. The floor was 75 for fifteen weeks while the suite actually
+# measured 95.5% (2026-11-23: 95.52-95.53% of 19,393 statements on every
+# OS x interpreter lane — Windows and Linux, py3.11 / 3.12 / 3.13), so a
+# regression of up to twenty points would have passed. Re-based to 90: a
+# cushion deliberately wider than the 3 points used before, because the
+# GitHub-hosted runners cannot be reproduced exactly locally.
+# 2026-11-28, scope yialpha + web + scripts: every lane measures 99.87-99.90%
+# of 22,287 statements (22-28 untested) -- Windows and Linux (WSL), py3.11 /
+# 3.12 / 3.13, fresh unconstrained installs and a hash-checked install of
+# requirements.lock -- so the floor now leaves room for ~2,200 untested
+# statements. Raise it once a CI run under the widened scope has reported;
+# tests/test_round16_packaging_ci.py pins the floor at >= 90.
+fail_under = 90
 show_missing = true
 
 [tool.ruff]
@@ -131,8 +151,9 @@ combine-as-imports = true
 [tool.mypy]
 # Gradual typing: the repo carries inline annotations on ~87% of source files.
 # We start permissive (no --strict) and tighten per-module as baselines are
-# cleaned. The CI job scopes mypy to the risk overlay, backtest engine,
-# graph, agents, dataflows, and CLI — see ci.yml.
+# cleaned. The CI job type-checks the whole ``yialpha`` package (naming the
+# package root, so a newly added sub-package is gated from day one) — see the
+# typecheck job in ci.yml.
 python_version = "3.11"
 warn_unused_ignores = false
 warn_redundant_casts = true

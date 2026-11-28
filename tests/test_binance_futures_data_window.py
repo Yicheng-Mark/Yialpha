@@ -147,16 +147,20 @@ def test_past_window_neither_appends_live_row_nor_leaks_future_rows(monkeypatch)
     """A window ending in the past (but within retention): (a) no 'latest'
     live row — it would be future data for that decision point; (b) rows a
     non-compliant vendor returns past the requested end are trimmed."""
-    end = _days_ago(1)
-    cap = _Capture([0, 1, 2])  # includes a row NEWER than the window end
+    # Two days back: "reaches the present" treats the host-local AND the UTC
+    # calendar date as live, so UTC yesterday is still today on a host whose
+    # local date is a day behind UTC.
+    end = _days_ago(2)
+    cap = _Capture([0, 1, 2, 3])  # includes rows NEWER than the window end
     monkeypatch.setattr(bn, "_http_get", cap)
     out = bn.get_binance_open_interest(
-        "BTCUSDT", 7, start_date=_days_ago(4), end_date=end,
+        "BTCUSDT", 7, start_date=_days_ago(5), end_date=end,
     )
     assert "latest" not in out
-    # Rows on/before the window end survive; the day-0 row (after end) was
-    # trimmed client-side even though the fake vendor returned it.
-    assert f"{_days_ago(1)},1000" in out
+    # Rows on/before the window end survive; the day-1 and day-0 rows (after
+    # end) were trimmed client-side even though the fake vendor returned them.
     assert f"{_days_ago(2)},1000" in out
+    assert f"{_days_ago(3)},1000" in out
     today_row = datetime.now(UTC).strftime("%Y-%m-%d")
     assert f"{today_row},1000" not in out
+    assert f"{_days_ago(1)},1000" not in out

@@ -51,16 +51,19 @@ __all__ = [
 #
 # Redaction layers, cheapest/most-precise first:
 #   1. every configured credential value (Alpha Vantage + the Zhipu / Tavily
-#      key pools, comma-separated env vars split) — exact string match;
+#      key pools, the Binance keys and every LLM provider key,
+#      comma-separated env vars split) — exact string match;
 #   2. any caller-supplied secret values (e.g. the key a request actually
 #      used, which may come from a patched source rather than the env);
-#   3. ``apikey=<token>`` / ``apikey: <token>`` query-parameter forms;
+#   3. ``apikey=<token>`` / ``apikey: <token>`` query-parameter forms,
+#      quoted or not;
 #   4. key-shaped tokens, family by family: a 16-char alphanumeric run
 #      containing both a letter and a digit (Alpha Vantage shape — the
 #      letter+digit requirement keeps ordinary words and pure numbers
 #      intact); ``tvly-<base62>`` (Tavily shape, prefix is distinctive);
 #      ``<32-hex>.<alnum>`` (Zhipu/BigModel shape — uuid4().hex carries no
-#      dot, so thread/request ids never match).
+#      dot, so thread/request ids never match); ``sk-<32-hex>`` (DeepSeek
+#      shape).
 #
 # Redaction preserves surrounding error semantics ("rate limit exceeded",
 # "Your API key [REDACTED] ...") — the message is scrubbed, never swallowed.
@@ -75,6 +78,15 @@ ALPHA_VANTAGE_KEY_ENV = "ALPHA_VANTAGE_API_KEY"
 # primary coverage for the providers this deployment actually uses. This is
 # the credential SET this deployment configures; a value NOT in an env var
 # relies on the shape fallbacks below.
+#
+# Round-17: the LLM provider keys follow. The list was written for the Zhipu
+# era and never followed the 2026-09-30 switch to DeepSeek, so
+# ``DEEPSEEK_API_KEY`` -- the one credential every run uses -- sat in no layer
+# at all. The names are the ones in
+# ``yialpha.llm_clients.api_key_env.PROVIDER_API_KEY_ENV``, spelled out here
+# so this module stays import-light; ``tests/test_round17_ops.py`` pins the
+# two lists against each other so the next provider switch cannot reopen the
+# gap.
 _KEYRING_ENVS = (
     ALPHA_VANTAGE_KEY_ENV,
     "ZHIPU_CN_API_KEYS",
@@ -83,10 +95,37 @@ _KEYRING_ENVS = (
     "TAVILY_API_KEY",
     "BINANCE_API_KEY",
     "BINANCE_API_SECRET",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GOOGLE_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "XAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "DASHSCOPE_CN_API_KEY",
+    "ZHIPU_API_KEY",
+    "MINIMAX_API_KEY",
+    "MINIMAX_CN_API_KEY",
+    "OPENROUTER_API_KEY",
+    "MISTRAL_API_KEY",
+    "MOONSHOT_API_KEY",
+    "GROQ_API_KEY",
+    "NVIDIA_API_KEY",
+    "OPENAI_COMPATIBLE_API_KEY",
 )
 
+#: A configured value shorter than this cannot be a credential (the shortest
+#: real one, an Alpha Vantage key, is 16 characters). Redacting it would
+#: erase ordinary text: a 1-character "key" takes every "1" out of every
+#: line. Caller-supplied ``extra_secrets`` are never shortened away -- the
+#: caller named that value for a reason.
+_MIN_CONFIGURED_SECRET_CHARS = 6
+
 # ``apikey=SECRET`` / ``apikey: SECRET`` (also inside URLs: stops at '&').
-_APIKEY_PARAM_RE = re.compile(r"(?i)(apikey\s*[=:]\s*)([^\s,'\"&]+)")
+# Round-17: the name may be quoted and the value may open with a quote, the
+# way a JSON request body is logged (``"apikey": "SECRET"``) -- a credential
+# named by position is one however the name is spelled.
+_APIKEY_PARAM_RE = re.compile(r"(?i)(apikey[\"']?\s*[=:]\s*[\"']?)([^\s,'\"&]+)")
 
 # A standalone 16-char alphanumeric run (Alpha Vantage key shape) holding at
 # least one letter and one digit. The lookaheads pin the run so words, plain
@@ -110,18 +149,25 @@ _TAVILY_KEY_SHAPE_RE = re.compile(r"tvly-[0-9A-Za-z]{20,}")
 # thread ids / request ids in logs survive the fallback untouched.
 _ZHIPU_KEY_SHAPE_RE = re.compile(r"[0-9a-f]{32}\.[0-9A-Za-z]{8,}")
 
+# DeepSeek-style keys ("sk-" + 32 lower-case hex characters). "sk-" has to
+# stand at a token boundary and be followed by exactly 32 hex characters, so
+# a word ending in "risk-…", a longer "sk-" key of another provider, and
+# upper-case hex all stay untouched.
+_SK_HEX_KEY_SHAPE_RE = re.compile(r"(?<![A-Za-z0-9])sk-[0-9a-f]{32}(?![A-Za-z0-9])")
+
 
 def redact_secrets(text: str, extra_secrets: Iterable[str] | None = None) -> str:
     """Scrub credential material from *text*, preserving error semantics.
 
     Removes every configured credential value (Alpha Vantage, the Zhipu
     key pool ``ZHIPU_CN_API_KEYS``/``ZHIPU_CN_API_KEY``, the Tavily pool
-    ``TAVILY_API_KEYS``/``TAVILY_API_KEY`` — comma-separated pools are
+    ``TAVILY_API_KEYS``/``TAVILY_API_KEY``, the Binance keys and every LLM
+    provider key in :data:`_KEYRING_ENVS` — comma-separated pools are
     split), any caller-supplied *extra_secrets* (e.g. the key a specific
-    request used), ``apikey=...``/``apikey: ...`` parameter values, and
-    key-shaped tokens (16-char AV shape, ``tvly-`` prefixed Tavily shape,
-    ``<32-hex>.<alnum>`` Zhipu shape). Idempotent: already-redacted text is
-    returned unchanged.
+    request used), ``apikey=...``/``apikey: ...`` parameter values (quoted
+    or not), and key-shaped tokens (16-char AV shape, ``tvly-`` prefixed
+    Tavily shape, ``<32-hex>.<alnum>`` Zhipu shape, ``sk-<32-hex>`` DeepSeek
+    shape). Idempotent: already-redacted text is returned unchanged.
     """
     if not text:
         return text
@@ -135,19 +181,25 @@ def redact_secrets(text: str, extra_secrets: Iterable[str] | None = None) -> str
     # otherwise bite off just the trailing half of a longer family key).
     out = _TAVILY_KEY_SHAPE_RE.sub(REDACTED_PLACEHOLDER, out)
     out = _ZHIPU_KEY_SHAPE_RE.sub(REDACTED_PLACEHOLDER, out)
+    out = _SK_HEX_KEY_SHAPE_RE.sub(REDACTED_PLACEHOLDER, out)
     out = _KEY_SHAPE_RE.sub(REDACTED_PLACEHOLDER, out)
     return out
 
 
 def _active_api_keys() -> tuple[str, ...]:
     """Every configured credential value, read per call so tests/rotations
-    stay current."""
+    stay current. Values too short to be a credential are left out
+    (:data:`_MIN_CONFIGURED_SECRET_CHARS`)."""
     keys: list[str] = []
     for name in _KEYRING_ENVS:
         raw = os.getenv(name)
         if not raw:
             continue
-        keys.extend(part.strip() for part in raw.split(",") if part.strip())
+        keys.extend(
+            part.strip()
+            for part in raw.split(",")
+            if len(part.strip()) >= _MIN_CONFIGURED_SECRET_CHARS
+        )
     return tuple(keys)
 
 
@@ -159,22 +211,50 @@ class CredentialRedactionFilter(logging.Filter):
     is replaced before the record reaches any sink (console, file, collector).
     Runs *after* level filtering and before emit, so it costs nothing for
     suppressed records and composes with other handler filters (e.g. the
-    batch runner's ticker tagger).
+    batch runner's ticker tagger). The exception text of ``exc_info`` records
+    is scrubbed as well -- before the handler renders it.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             message = record.getMessage()
-        except Exception:  # malformed %-args must never break logging
-            message = str(record.msg)
+        except Exception:  # noqa: BLE001 -- malformed %-args must never break logging
+            # The record cannot be formatted. Logging then reports that from
+            # the handler -- with ``record.msg`` and ``record.args`` printed
+            # verbatim -- so when the arguments carry credential material,
+            # scrub both and leave nothing raw behind for that report.
+            raw = f"{record.msg} {record.args}"
+            scrubbed = redact_secrets(raw)
+            if scrubbed != raw:
+                record.msg, record.args = scrubbed, None
+            return True
         redacted = redact_secrets(message)
         if redacted != message:
             record.msg = redacted
             record.args = None  # already interpolated; don't re-format
+        if record.exc_info and not record.exc_text:
+            # Round-17: a fresh record carries the live exception, not its
+            # text. The traceback is rendered by the HANDLER after this
+            # filter has run (the default formatter through ``exc_text``,
+            # ``RichHandler`` straight off the exception object), and only
+            # ``record.exc_text`` was ever looked at -- still None here. So a
+            # key inside an exception's message (``requests`` puts the whole
+            # URL into its ``HTTPError``) reached the sink unredacted.
+            try:
+                rendered = logging.Formatter().formatException(record.exc_info)
+            except Exception:  # noqa: BLE001 -- never break logging
+                rendered = ""
+            scrubbed = redact_secrets(rendered)
+            if rendered and scrubbed != rendered:
+                # Hand the handler the scrubbed text and drop the live
+                # exception, which it would otherwise render unredacted.
+                record.exc_text = scrubbed
+                record.exc_info = None
         if record.exc_text:
             scrubbed = redact_secrets(record.exc_text)
             if scrubbed != record.exc_text:
                 record.exc_text = scrubbed
+                record.exc_info = None  # same reason: never re-render it
         return True
 
 

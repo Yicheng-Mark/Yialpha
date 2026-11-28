@@ -227,12 +227,14 @@ def _isolate_yf_cache(monkeypatch, tmp_path):
 
 @pytest.mark.unit
 def test_history_ttl_is_minutes_for_today_daily_for_past():
-    today = pd.Timestamp.today().strftime("%Y-%m-%d")
+    # "Today" is the UTC calendar date (the rule's anchor), not the host-local
+    # one: west of Greenwich the local date is a day behind for hours every day.
+    today = su._utc_today().strftime("%Y-%m-%d")
     assert y_finance._history_cache_ttl_days(today) == pytest.approx(
         su.OHLCV_CACHE_TTL_SECONDS / 86400.0
     )
     # Tomorrow (yfinance end is exclusive; callers pass future ends).
-    tomorrow = (pd.Timestamp.today() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    tomorrow = (su._utc_today() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     assert y_finance._history_cache_ttl_days(tomorrow) == pytest.approx(
         su.OHLCV_CACHE_TTL_SECONDS / 86400.0
     )
@@ -246,7 +248,7 @@ def test_history_same_day_cache_refetches_after_ttl(monkeypatch, tmp_path):
     previously the 24h TTL meant today's close never reached an intraday run
     until the next day."""
     _isolate_yf_cache(monkeypatch, tmp_path)
-    today = pd.Timestamp.today().strftime("%Y-%m-%d")
+    today = su._utc_today().strftime("%Y-%m-%d")  # the rule's (UTC) "today"
     calls = {"n": 0}
 
     class _Ticker:

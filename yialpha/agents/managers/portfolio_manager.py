@@ -10,6 +10,9 @@ back gracefully to free-text generation.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
+
 from yialpha.agents.schemas import PortfolioDecision, render_pm_decision
 from yialpha.agents.utils.agent_utils import (
     get_instrument_context_from_state,
@@ -40,17 +43,25 @@ def _format_portfolio_state(portfolio_state) -> str:
             return portfolio_state.get(key, default)
         return getattr(portfolio_state, key, default)
 
-    equity = _get("equity")
-    cash = _get("cash")
-    positions = _get("positions") or {}
+    # Round-17: equity / cash take the same guard the holdings already had.
+    # ``{"equity": "100k"}`` raised ValueError out of the whole PM node and a
+    # NaN rendered "Equity: nan" into the prompt; an unusable number is
+    # dropped like an unusable holding. Numeric inputs render byte-identically.
+    equity = _safe_float(_get("equity"))
+    cash = _safe_float(_get("cash"))
+    positions = _get("positions")
+    # ... and so does a container that is no mapping at all (a list of pairs,
+    # a string): ``.items()`` raised AttributeError out of the whole node.
+    if not isinstance(positions, Mapping):
+        positions = {}
     if equity is None and cash is None and not positions:
         return ""
 
     parts = []
     if equity is not None:
-        parts.append(f"Equity: {float(equity):,.0f}")
+        parts.append(f"Equity: {equity:,.0f}")
     if cash is not None:
-        parts.append(f"Cash: {float(cash):,.0f}")
+        parts.append(f"Cash: {cash:,.0f}")
     if positions:
         # Guard each value: an external schema may pass non-numeric holdings
         # (e.g. {"NVDA": "100 shares"} or nested dicts). A ValueError/TypeError
@@ -69,17 +80,20 @@ def _format_portfolio_state(portfolio_state) -> str:
 
 
 def _safe_float(value) -> float | None:
-    """Coerce ``value`` to float, returning ``None`` on any non-numeric input.
+    """Coerce ``value`` to a finite float, ``None`` on any unusable input.
 
     Guards the portfolio-state renderer against schemas that pass strings
     (``"100 shares"``) or nested structures as holding quantities. Pure
     numeric inputs round-trip exactly, so well-formed portfolio_state renders
-    byte-identically to the unguarded path.
+    byte-identically to the unguarded path. Round-17: NaN / inf are
+    float()-able but no quantity, equity or cash — they used to render as
+    ``nan`` / ``inf`` in the PM prompt — so they are unusable here too.
     """
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def _decision_fields_dict(decision) -> dict:

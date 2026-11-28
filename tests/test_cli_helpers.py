@@ -229,8 +229,14 @@ class TestMessageBufferUpdates:
     def test_update_report_section_ignores_unknown(self):
         buf = MessageBuffer()
         buf.init_for_analysis(["market"])
+        before = dict(buf.report_sections)
         buf.update_report_section("nonexistent_section", "data")
-        # Should not crash; unknown section is a no-op
+        # Unknown section is a no-op: nothing stored under any name, and no
+        # report text produced.
+        assert buf.report_sections == before
+        assert not hasattr(buf, "nonexistent_section")
+        assert buf.current_report is None
+        assert buf.final_report is None
 
     def test_final_report_assembles_sections(self):
         buf = MessageBuffer()

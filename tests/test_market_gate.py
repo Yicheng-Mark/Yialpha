@@ -116,17 +116,19 @@ def test_prepare_batch_run_rejects_unsupported_market():
 @pytest.mark.unit
 def test_prepare_batch_run_accepts_us_batch():
     from yialpha.batch.runner import prepare_batch_run
+    from yialpha.default_config import DEFAULT_CONFIG
 
-    cfg, _ = prepare_batch_run(["AAPL", "NVDA"], "2026-06-30")
-    assert cfg  # validation passed and a runner config came back
+    cfg, asset_type = prepare_batch_run(["AAPL", "NVDA"], "2026-06-30")
+    assert asset_type == "stock"  # validation passed and the class was detected
+    assert cfg is not DEFAULT_CONFIG and cfg == DEFAULT_CONFIG  # a per-run copy
 
 
 @pytest.mark.unit
 def test_prepare_batch_run_accepts_crypto_batch():
     from yialpha.batch.runner import prepare_batch_run
 
-    cfg, _ = prepare_batch_run(["BTC-USD", "ETH-USD"], "2026-06-30")
-    assert cfg
+    _, asset_type = prepare_batch_run(["BTC-USD", "ETH-USD"], "2026-06-30")
+    assert asset_type == "crypto"
 
 
 # --- propagate() backstop -----------------------------------------------------

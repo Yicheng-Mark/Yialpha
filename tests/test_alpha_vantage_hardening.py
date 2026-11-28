@@ -197,7 +197,14 @@ def test_filter_failure_raises_not_returns_unfiltered():
     leak) and a live run is over-fed.  This mirrors the y_finance.py contract.
     """
     bad_csv = "garbage_col,foo\nnot_a_date,42\nalso_bad,99\n"
-    with pytest.raises((ValueError, TypeError)):
+    # pandas finds no common format in the junk date column and says so before
+    # parsing element by element (alpha_vantage_common.py:218 passes no
+    # format=). That by-product of the deliberate edge input is expected; the
+    # raise is the contract.
+    with (
+        pytest.warns(UserWarning, match="Could not infer format"),
+        pytest.raises((ValueError, TypeError)),
+    ):
         av._filter_csv_by_date_range(bad_csv, "2025-01-01", "2025-01-03")
 
 

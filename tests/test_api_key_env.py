@@ -66,12 +66,23 @@ def test_case_insensitive_lookup():
 
 
 @pytest.fixture
-def cli_utils(monkeypatch):
-    """Import cli.utils with a fresh environment so module-level state is consistent."""
+def cli_utils():
+    """A freshly reloaded ``yialpha.cli.utils``, restored after the test.
+
+    ``reload`` re-executes the module into its existing namespace. Left in
+    place, the names ``cli.main`` imported from it at import time
+    (``ensure_api_key`` among them) are no longer the objects ``cli.utils``
+    hands out for the rest of the session. Snapshot the namespace and put it
+    back (same objects) on teardown.
+    """
     import importlib
 
     import yialpha.cli.utils as cli_utils_module
-    return importlib.reload(cli_utils_module)
+
+    saved = dict(cli_utils_module.__dict__)
+    yield importlib.reload(cli_utils_module)
+    cli_utils_module.__dict__.clear()
+    cli_utils_module.__dict__.update(saved)
 
 
 def test_ensure_api_key_returns_existing(monkeypatch, cli_utils):

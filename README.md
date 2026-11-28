@@ -451,12 +451,18 @@ One-line telemetry: `python scripts/run_baseline.py --smoke --profile --ticker <
 │   ├── dataflows/            # yfinance / Alpha Vantage / SEC EDGAR / FRED / Polymarket / Reddit / StockTwits / Binance / CoinGecko / DefiLlama / Tavily
 │   ├── graph/                # LangGraph orchestration: trading_graph / propagation / reflection / signal_processing / perf_telemetry
 │   ├── risk/                 # kelly / atr_stop / breaker / cvar / manager (quant risk overlay)
+│   ├── perp/                 # Fair Value Bridge + USDT/USD quote FX for stock perps
 │   ├── backtest/             # engine / metrics / validation_gate / ic / report / cache
+│   ├── ledger/               # SQLite evidence ledger: predictions / outcomes / scoreboard / portfolio snapshots
+│   ├── instruments/          # point-in-time instrument registry / corporate actions / session calendar
+│   ├── regime/               # RegimeState vocabulary + deterministic computation
 │   ├── batch/                # multi-ticker concurrent runner + filelock
 │   ├── monitoring/           # dashboard (HTML dashboard)
 │   ├── llm_clients/          # multi-provider adapters + rate limiter + shared httpx
-│   ├── cli/                  # interactive CLI (analyze / batch / config-check / snapshot)
+│   ├── cli/                  # CLI: analyze / batch / verify-history / scoreboard / memory-resolve / config-check / snapshot / ic-cycle
 │   ├── default_config.py     # config + env mapping
+│   ├── accuracy.py           # rating-vs-outcome verification (verify-history)
+│   ├── tickets.py            # ExecutionTicket: the single cross-stage trading object
 │   └── reporting.py
 ├── web/                      # FastAPI Web UI (run in place, not packaged)
 ├── scripts/                  # run_baseline / run_robust / run_batch / export_ic_dataset / prune_indicators_cli / rank_signals / …

@@ -255,7 +255,12 @@ def _limit_decision(
             rule=rule, action="RESIZE", multiplier=0.0,
             reasons=["book_already_over_limit"], metrics=metrics,
         )
-    if limit - others >= contribution:
+    # Same 1e-12 tolerance as the over-limit branch above: a candidate that
+    # lands the book exactly on the limit in REAL arithmetic (0.5 + 0.1 under
+    # a 0.6 cap) must PASS. Float dust (0.6 - 0.5 = 0.0999...98) used to send
+    # it down the clip path as a RESIZE of x0.9999999999999998, labelling an
+    # at-limit trade as resized by a binding constraint.
+    if limit - others >= contribution - 1e-12:
         return RiskDecision(
             rule=rule, action="PASS", multiplier=1.0, reasons=["within_limit"],
             metrics=metrics,
@@ -631,7 +636,8 @@ def advisory_metrics(
       :func:`yialpha.risk.cvar.historical_cvar`); None below
       :data:`MIN_ADVISORY_HISTORY` finite observations.
     * ``beta_vs_btc`` — ``cov/var`` of portfolio vs ``btc_returns``; None
-      without the optional series (or misaligned/degenerate input).
+      without the optional series, when the two series differ in length
+      (misaligned input), or on degenerate input.
     * ``correlation_matrix`` — pairwise Pearson over ``position_returns``
       (symbol -> series); ``{}`` when absent.
     * ``usdt_depeg_shock`` — post-shock equity delta assuming USDT/USD
@@ -675,7 +681,11 @@ def advisory_metrics(
     # different days, and _beta's equal-length check then fabricated a
     # date-shifted covariance (the exact misalignment its docstring refuses).
     beta: float | None = None
-    if btc_returns is not None:
+    # Round-17: equal length is the precondition for pairing by position. Two
+    # series of DIFFERENT lengths are misaligned input — the truncating zip
+    # below would pair the head of each (day 1 of one with day 1 of the other
+    # over different dates) — so there is no honest beta: None.
+    if btc_returns is not None and len(btc_returns) == len(snapshot.returns_history):
         paired = [
             (p, b)
             for p, b in zip(snapshot.returns_history, btc_returns, strict=False)

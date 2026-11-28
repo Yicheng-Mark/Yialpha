@@ -242,6 +242,20 @@ class TestWarmEquityPerpBasesRefetch:
     perp-run start retries the live exchangeInfo instead of serving a
     transient outage's seed forever."""
 
+    def setup_method(self):
+        # Never depend on a prior test's warmed snapshot.
+        import yialpha.dataflows.binance as bnb
+
+        bnb.refresh_equity_perp_bases()
+
+    def teardown_method(self):
+        # ...nor leave one behind: the tests' own closing refresh is skipped
+        # when an assertion fails, and a leaked snapshot (or its aged warm
+        # time) changes what the later perp tests see.
+        import yialpha.dataflows.binance as bnb
+
+        bnb.refresh_equity_perp_bases()
+
     def _exchange_info(self, onboard_ms=1_770_000_000_000):
         return {
             "symbols": [

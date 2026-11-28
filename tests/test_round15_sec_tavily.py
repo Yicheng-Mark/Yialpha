@@ -49,6 +49,22 @@ from yialpha.dataflows.sec_edgar import SecNoFileError
 CIK = 320193
 
 
+def _r15_patch_cik(monkeypatch):
+    """Resolve every ticker lookup to ``CIK``.
+
+    ``_cik_for_ticker`` is imported from ``sec_edgar`` into this module's
+    namespace, so it reads ``sec_edgar``'s own ``_cached_or_fetch`` /
+    ``_cache_dir`` — patching the ``sec_ownership`` names does not intercept
+    it, and the real lookup fetches ``company_tickers.json`` over the network
+    (round-16: the 15 Form 4 tests only "passed" while the dev-box proxy was
+    up; with it down every one of them raised ``ProxyError``)."""
+    def _cik(ticker):
+        assert ticker == "AAPL", f"unexpected ticker lookup: {ticker}"
+        return CIK
+
+    monkeypatch.setattr(sec_ownership, "_cik_for_ticker", _cik)
+
+
 def _r15_form4_xml(owner="R15 INSIDER", title=None, code="P", shares="1000",
                    price="10.00", tdate="2024-05-01", post="5000"):
     """Minimal parseable Form 4 XML (one non-derivative transaction).
@@ -99,6 +115,7 @@ def _r15_patch_form4(monkeypatch, tmp_path, subs: bytes, xml_by_doc=None,
     """Serve ``subs`` for the head submissions URL; route Form 4 XMLs through
     ``xml_by_doc`` (by doc substring) or a callable ``form4_fetch``."""
     monkeypatch.setattr(sec_ownership, "_cache_dir", lambda: str(tmp_path))
+    _r15_patch_cik(monkeypatch)
 
     def fetch(_path, url, ttl_days):
         assert "submissions" in url, f"unexpected url: {url}"
@@ -402,6 +419,7 @@ def _r15_patch_archive(monkeypatch, tmp_path, files, seg_payloads, subs=None):
     ``seg_payloads`` (name -> bytes); missing segments 404 unless listed in
     ``raise_for``. Returns the requested-URL recorder."""
     monkeypatch.setattr(sec_ownership, "_cache_dir", lambda: str(tmp_path))
+    _r15_patch_cik(monkeypatch)
     requested: list[str] = []
     head = subs if subs is not None else _r15_subs(
         _r15_head(fillers=1000, form4s=0), files=files)
@@ -522,6 +540,7 @@ def test_r15_form4_archive_transport_error_raises(monkeypatch, tmp_path):
     """A transport failure fetching a segment fails the tool — the archive
     being unreachable is not the same as 'no insider activity'."""
     monkeypatch.setattr(sec_ownership, "_cache_dir", lambda: str(tmp_path))
+    _r15_patch_cik(monkeypatch)
     head = _r15_subs(_r15_head(fillers=1000, form4s=0), files=[{"name": _SEG1}])
     requested: list[str] = []
 

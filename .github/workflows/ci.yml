@@ -51,11 +51,17 @@ jobs:
         # Coverage stays local (no upload yet): the term-missing report surfaces
         # untested modules directly in the CI log so the gaps are visible
         # without a third-party badge service. Output is tee'd to pytest.log so
-        # the failure-summary step below can republish the failing test names —
-        # raw logs require a GitHub sign-in even on public repos, but the job
-        # summary is anonymously visible, which is how failures get diagnosed
-        # without repo access.
-        run: pytest -q --cov=yialpha --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
+        # the failure-summary step below can republish the failing test names
+        # on the run's summary page. Both the raw logs and that summary need a
+        # GitHub sign-in, even on a public repo (checked as an anonymous visitor
+        # on 2026-11-23: the job page shows only "Sign in to view logs"). What
+        # an anonymous reader CAN get is each job's conclusion and step-level
+        # status through the REST API, which is enough to see THAT the suite is
+        # red, not which tests failed.
+        # Coverage scope: the package plus the two run-in-place trees (web/,
+        # scripts/). The --cov flags override `[tool.coverage.run] source` in
+        # pyproject.toml, so the two lists must stay in sync.
+        run: pytest -q --cov=yialpha --cov=web --cov=scripts --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
       - name: Publish failure summary
         if: failure()
         shell: bash
@@ -92,11 +98,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,web]"
       - name: Run test suite with coverage
-        # round-13: same tee + PIPESTATUS + failure-summary pattern as the
-        # `test` and `test-windows` jobs — this was the only job (and the only
-        # py3.12 lane on ubuntu) whose failures were invisible without a
-        # GitHub sign-in to read the raw log.
-        run: pytest -q --cov=yialpha --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
+        # Same tee + summary pattern as the ubuntu `test` job (see the note
+        # there: the summary needs a GitHub sign-in too).
+        run: pytest -q --cov=yialpha --cov=web --cov=scripts --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
       - name: Publish failure summary
         if: failure()
         shell: bash
@@ -138,9 +142,9 @@ jobs:
           pip install -e ".[dev,web]"
       - name: Run test suite with coverage
         shell: bash
-        # Same tee + summary pattern as the ubuntu test job: raw logs need a
-        # GitHub sign-in, the job summary does not.
-        run: pytest -q --cov=yialpha --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
+        # Same tee + summary pattern as the ubuntu `test` job (see the note
+        # there: the summary needs a GitHub sign-in too).
+        run: pytest -q --cov=yialpha --cov=web --cov=scripts --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
       - name: Publish failure summary
         if: failure()
         shell: bash
@@ -154,10 +158,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   typecheck:
-    # Gradual typing: mypy is scoped to the risk overlay, backtest engine,
-    # graph, agents, dataflows, and CLI. Widen the scope as baselines are
-    # cleaned.
-    name: mypy (money path + risk + engine + dataflows + cli)
+    # Gradual typing across the whole package. The scope used to be a
+    # hand-maintained module list and silently missed four packages that were
+    # added later (instruments, ledger, perp, regime) plus four top-level
+    # modules; naming the package root makes every sub-package part of the
+    # gate from the day it is created.
+    name: mypy (whole yialpha package)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -172,19 +178,20 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-      - name: Type-check scoped modules
+      - name: Type-check the package
         # --no-site-packages: required because risk/backtest/dataflows directly
         # `import numpy`, and numpy>=2.1's bundled stub uses PEP 695 `type`
         # aliases (Py 3.12+) which mypy cannot parse under our
-        # python_version="3.10" baseline. --follow-imports=skip alone is
+        # python_version="3.11" baseline. --follow-imports=skip alone is
         # insufficient for direct imports (the stub is parsed at the syntax
         # stage before follow policy applies); --no-site-packages makes mypy
         # treat ALL third-party modules as Any, so the stub is never parsed.
-        # The project's own source files are still fully type-checked.
-        # Scope widened 2026-08-10 from money-path-only (7 files) to 6 packages
-        # (~111 files), and 2026-08-14 to add llm_clients (every agent's LLM
-        # transport), batch, monitoring, and the four top-level modules.
-        run: mypy --no-site-packages --follow-imports=skip yialpha/risk yialpha/backtest yialpha/graph yialpha/agents yialpha/dataflows yialpha/cli yialpha/llm_clients yialpha/batch yialpha/monitoring yialpha/reporting.py yialpha/config_snapshot.py yialpha/default_config.py yialpha/logging_config.py
+        # The project's own source files are still fully type-checked. Scope
+        # widened 2026-08-10 from money-path-only (7 files) to 6 packages, on
+        # 2026-08-14 to 13 packages + 4 top-level modules, and on 2026-11-23
+        # to the package root (the list had drifted: 4 packages + 4 top-level
+        # modules were outside the gate).
+        run: mypy --no-site-packages --follow-imports=skip yialpha
 
   smoke-install:
     name: clean-install smoke

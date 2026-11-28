@@ -25,10 +25,12 @@ final, overlay-adjusted decision.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from pathlib import Path
 
+from yialpha.accuracy import sanitize_nonfinite
 from yialpha.agents.utils.rating import parse_rating
 from yialpha.dataflows.utils import safe_ticker_component
 from yialpha.graph.overlay_fields import parse_overlay
@@ -90,6 +92,61 @@ def _dates_for(ticker: str) -> list[str]:
     return sorted(dates)
 
 
+def _null_constant(_literal: str) -> None:
+    """``json`` ``parse_constant`` hook: the bare ``NaN`` / ``Infinity`` /
+    ``-Infinity`` literals read as ``None``."""
+    return None
+
+
+def _null_overflow(text: str) -> float | None:
+    """``json`` ``parse_float`` hook (round-17): an overflowing number literal
+    (``1e999``) is not a bare constant — ``parse_constant`` never sees it and
+    ``float()`` turns it into ``inf``. Nulled like the constants; every finite
+    spelling keeps ``float()``'s exact value (an underflow is a finite 0.0)."""
+    value = float(text)
+    return value if math.isfinite(value) else None
+
+
+def _read_json_object(path: Path) -> dict | None:
+    """Parse ``path`` as a JSON **object**, or return ``None`` when unreadable.
+
+    Unreadable means: a missing / locked file, invalid UTF-8, truncated JSON,
+    or a document whose root is not an object (``[]`` / ``null`` / ``"text"``).
+    One such log must degrade to "no rating / no run" — never raise: the
+    listing endpoints touch every ticker's files in one scan, so a single
+    escaped exception 500'd the whole home grid.
+
+    Round-16: the old ``except (OSError, json.JSONDecodeError)`` missed two
+    cases — ``UnicodeDecodeError`` is a ``ValueError`` but not a
+    ``JSONDecodeError`` (one GBK-encoded log took down ``/api/tickers``), and
+    ``.get`` on a non-object root raised ``AttributeError``.
+
+    ``parse_constant`` maps the bare ``NaN`` / ``Infinity`` literals to ``None``
+    in the same pass as the parse (round-11 semantics, see
+    :func:`load_accuracy_report`): the write side dumps with ``json.dump``
+    defaults (``allow_nan`` on), and this app renders responses with
+    ``allow_nan=False`` — serving such a file as-is was a 500. Round-17:
+    ``parse_float`` does the same for an overflowing literal (``1e999``), which
+    the constants hook cannot see and which 500'd the same way.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f, parse_constant=_null_constant, parse_float=_null_overflow)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _text(value: object) -> str:
+    """A string-typed log field; a non-string value in a malformed log is ``""``."""
+    return value if isinstance(value, str) else ""
+
+
+def _mapping(value: object) -> dict:
+    """An object-typed log field; a non-object value in a malformed log is ``{}``."""
+    return value if isinstance(value, dict) else {}
+
+
 def _latest_rating(ticker: str, latest_date: str) -> str | None:
     """Rating of the most recent run, for the home grid + distribution summary.
 
@@ -100,12 +157,10 @@ def _latest_rating(ticker: str, latest_date: str) -> str | None:
     path = _strategy_dir(ticker) / f"full_states_log_{latest_date}.json"
     if not path.is_file():
         return None
-    try:
-        with open(path, encoding="utf-8") as f:
-            state = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    state = _read_json_object(path)
+    if state is None:
         return None
-    return parse_rating(state.get("final_trade_decision", "") or "")
+    return parse_rating(_text(state.get("final_trade_decision")))
 
 
 def list_tickers() -> list[dict]:
@@ -153,12 +208,16 @@ def list_reports(ticker: str) -> list[dict]:
     stamp_re = re.compile(rf"{re.escape(ticker)}_\d{{8}}_\d{{6}}")
     reports: list[dict] = []
     for d in REPORTS_ROOT.glob(f"{ticker}_*"):
-        if not d.is_dir():
-            continue
         if stamp_re.fullmatch(d.name) is None:
             continue
-        cr = d / "complete_report.md"
+        # Round-17: ``is_dir()`` sits inside the guard — on Python <= 3.13 it
+        # re-raises stat errors pathlib does not ignore, and an entry the loop
+        # cannot stat raised out of the listing (a 500 here, and a finished
+        # analysis then reported as "post-run report lookup failed").
         try:
+            if not d.is_dir():
+                continue
+            cr = d / "complete_report.md"
             mtime = cr.stat().st_mtime if cr.is_file() else d.stat().st_mtime
         except OSError:
             continue
@@ -219,18 +278,18 @@ def load_accuracy_report() -> dict:
     ``NaN`` / ``Infinity`` literals a pre-fix artifact may contain, and this
     app's JSON responses render with ``allow_nan=False`` — serving such an
     artifact as-is turned /api/accuracy into a 500. ``parse_constant`` maps
-    those literals to ``None`` IN THE SAME PASS as the parse (json.loads
-    can only produce a non-finite float from these constants), replacing
+    those literals to ``None`` IN THE SAME PASS as the parse, replacing
     the old post-parse recursive walk — one pass, no deep copy, same
-    nulling semantics as the write side's ``sanitize_nonfinite``.
+    nulling semantics as the write side's ``sanitize_nonfinite``. (Round-17:
+    an overflowing literal such as ``1e999`` bypassed the constants hook —
+    ``_read_json_object`` now nulls it through ``parse_float``.)
     """
     path = LOGS_ROOT / "accuracy" / "accuracy_report.json"
-    try:
-        data = json.loads(
-            path.read_text(encoding="utf-8"),
-            parse_constant=lambda _literal: None,
-        )
-    except (OSError, json.JSONDecodeError):
+    # Round-16: routed through _read_json_object so an invalid-UTF-8 artifact
+    # or a non-object root (``[]`` — ``**data`` raised TypeError) is "not
+    # available" instead of a 500; parse_constant lives there now.
+    data = _read_json_object(path)
+    if data is None:
         return {"available": False, "hint": "yialpha verify-history"}
     return {"available": True, **data}
 
@@ -240,11 +299,31 @@ def load_node_perf(ticker: str, date: str) -> dict | None:
     path = _strategy_dir(ticker) / f"node_perf_{date}.json"
     if not path.is_file():
         return None
+    # Same tolerant reader as the states log (perf_telemetry also dumps with
+    # ``allow_nan`` on); a non-object root reads as "no telemetry".
+    return _read_json_object(path)
+
+
+def _ledger_readable() -> bool:
+    """False when the ledger file exists but cannot be read as a ledger.
+
+    ``ledger_exists()`` only checks the file. A present-but-unreadable ledger
+    (a never-migrated zero-byte file, a corrupt or locked one) makes every
+    ledger reader degrade to an empty result internally, which the aggregate
+    loaders would serve as an empty-but-AVAILABLE table — the "phantom empty
+    book" round-10 fixed for positions. The ``schema_version`` row is written
+    by the same transaction that creates the v1 tables, so a ledger that
+    answers this probe has every table these loaders read.
+    """
+    from yialpha.ledger.sqlite import get_connection
+
     try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
+        get_connection(readonly=True).execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+    except Exception:  # noqa: BLE001 -- read-only UI path degrades, never raises
+        return False
+    return True
 
 
 def load_run_predictions(run_id: str) -> dict | None:
@@ -277,7 +356,15 @@ def load_run_predictions(run_id: str) -> dict | None:
         "run_id": run_id,
         "prediction_ids": [record.prediction_id for record in records],
         "predictions": [
-            asdict(record) if is_dataclass(record) else dict(record)
+            # Round-17: ``expected_return`` / ``target_price`` are not validated
+            # for finiteness on the write side (a REAL column stores ``inf``) —
+            # nulled here instead of failing the whole response render.
+            # ``not isinstance(.., type)`` is mypy-only narrowing (typeshed types
+            # is_dataclass as ``DataclassInstance | type[DataclassInstance]``); a
+            # class object was never a valid record here.
+            sanitize_nonfinite(
+                asdict(record) if is_dataclass(record) and not isinstance(record, type) else dict(record)
+            )
             for record in records
         ],
         "evidence_ids": evidence_ids_for_run(run_id),
@@ -285,18 +372,28 @@ def load_run_predictions(run_id: str) -> dict | None:
 
 
 def load_outcomes(limit: int = 500) -> dict:
-    """Forward-outcome rows with net-return attribution legs (read-only)."""
+    """Forward-outcome rows with net-return attribution legs (read-only).
+
+    ``available`` is true only when the ledger could actually be read: the
+    reader degrades to ``[]`` on any ledger error, which would otherwise be
+    served as an empty-but-available table (see :func:`_ledger_readable`).
+    """
     from dataclasses import asdict, is_dataclass
 
     from yialpha.ledger.outcomes import all_outcomes
     from yialpha.ledger.sqlite import ledger_exists
 
-    if not ledger_exists():
+    if not ledger_exists() or not _ledger_readable():
         return {"available": False, "hint": "yialpha scoreboard", "outcomes": []}
     return {
         "available": True,
+        # Round-17: the outcome legs are not validated for finiteness on the
+        # write side (``inf`` is stored as-is); one such row is nulled rather
+        # than failing the whole render.
         "outcomes": [
-            asdict(row) if is_dataclass(row) else dict(row)
+            sanitize_nonfinite(
+                asdict(row) if is_dataclass(row) and not isinstance(row, type) else dict(row)  # see load_run_predictions
+            )
             for row in all_outcomes(limit=limit)
         ],
     }
@@ -309,11 +406,15 @@ def load_calibration() -> dict:
     ledger DB (or before the operator ever runs ``yialpha scoreboard``),
     return ``available=False`` + the hint instead of a fabricated
     zero-everything table that would read as perfect calibration.
+
+    Round-17: the scoreboard builder swallows ledger errors itself (round-10),
+    so a present-but-unreadable ledger also reached the fabricated zero table;
+    that answer is now reserved for a ledger that actually reads.
     """
     from yialpha.ledger.scoreboard import build_scoreboard
     from yialpha.ledger.sqlite import ledger_exists
 
-    if not ledger_exists():
+    if not ledger_exists() or not _ledger_readable():
         return {"available": False, "hint": "yialpha scoreboard"}
     try:
         return {"available": True, **build_scoreboard()}
@@ -340,7 +441,13 @@ def load_ticket(ticket_id: str) -> dict | None:
     if row is None:
         return None
     try:
-        payload = _json.loads(row["payload"])
+        # Round-17: the mirror is dumped with ``json.dumps`` defaults, so a
+        # ticket carrying a NaN/inf float lands here as a bare literal — null
+        # it at parse time (same hooks as :func:`_read_json_object`); served
+        # as-is it failed the response render.
+        payload = _json.loads(
+            row["payload"], parse_constant=_null_constant, parse_float=_null_overflow
+        )
     except (TypeError, ValueError):
         payload = None
     return {
@@ -359,7 +466,9 @@ def load_portfolio_snapshot(snapshot_id: str) -> dict | None:
 
     if not ledger_exists():
         return None
-    return snapshot_by_id(snapshot_id)
+    # Round-17: the snapshot payload is dumped with ``json.dumps`` defaults and
+    # carries resolver/advisory floats — a NaN/inf must not fail the render.
+    return sanitize_nonfinite(snapshot_by_id(snapshot_id))
 
 
 def load_positions() -> dict:
@@ -373,7 +482,13 @@ def load_positions() -> dict:
     # Round-10: a DEGRADED read used to be served as available=True with
     # positions=[] — the phantom empty book; reflect the read status in the
     # flag (same honesty contract as load_outcomes / load_calibration).
-    return {"available": ok, "positions": rows}
+    return {
+        "available": ok,
+        # Round-17: ``signed_weight`` is a REAL column that stores ``inf`` as-is
+        # and the row payload embeds the same number — one such position 500'd
+        # the whole book.
+        "positions": sanitize_nonfinite(rows),
+    }
 
 
 def load_run(ticker: str, date: str) -> dict | None:
@@ -381,18 +496,19 @@ def load_run(ticker: str, date: str) -> dict | None:
     path = _strategy_dir(ticker) / f"full_states_log_{date}.json"
     if not path.is_file():
         return None
-    try:
-        with open(path, encoding="utf-8") as f:
-            state = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    state = _read_json_object(path)
+    if state is None:
         return None
 
-    final = state.get("final_trade_decision", "") or ""
+    # Type-guarded: ``parse_rating`` / ``parse_overlay`` / ``.get`` on a
+    # non-string decision or a non-object debate block raised (500) on a
+    # malformed log; a malformed field reads as empty.
+    final = _text(state.get("final_trade_decision"))
     rating = parse_rating(final)
     overlay = parse_overlay_local(final)
 
-    ideb = state.get("investment_debate_state") or {}
-    rdeb = state.get("risk_debate_state") or {}
+    ideb = _mapping(state.get("investment_debate_state"))
+    rdeb = _mapping(state.get("risk_debate_state"))
 
     return {
         "ticker": ticker,

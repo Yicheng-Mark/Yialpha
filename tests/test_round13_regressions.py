@@ -229,7 +229,7 @@ def test_with_structured_output_forwards_include_raw(monkeypatch):
         # the placeholder key conftest injects makes offline construction OK.
         from yialpha.llm_clients.openai_client import OpenAIClient
 
-        llm = OpenAIClient("gpt-4.1", provider="openai").get_llm()
+        llm = OpenAIClient("gpt-5.4-mini", provider="openai").get_llm()
         out = llm.with_structured_output(dict, include_raw=True)
     assert out == "BOUND"
     assert captured["include_raw"] is True

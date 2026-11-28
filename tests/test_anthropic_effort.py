@@ -10,14 +10,35 @@ import pytest
 
 from yialpha.llm_clients import anthropic_client as mod
 
+# Model names used below that the model catalog (``VALID_MODELS["anthropic"]``)
+# does not list. The gate is version arithmetic on the NAME (Haiku never,
+# Sonnet >= 4.6, Opus >= 4.5), so it has to be exercised on names the catalog
+# does not carry; each of them makes ``get_llm()`` emit the unknown-model
+# RuntimeWarning. ``_get_llm_kwargs`` asserts that warning for exactly these
+# names, so the file is warning-clean without dropping a gate case.
+_OFF_CATALOG = frozenset({
+    "claude-haiku-5-0", "claude-haiku-4-7-preview",
+    "claude-sonnet-4-5", "claude-sonnet-4-0", "claude-sonnet-5-0",
+    "claude-opus-4-5", "claude-opus-5-0",
+    "claude-mythos-preview", "claude-experimental-x",
+})
 
-def _capture_kwargs(monkeypatch):
+
+def _get_llm_kwargs(monkeypatch, model, **client_kwargs):
+    """Build ``AnthropicClient(model, **client_kwargs).get_llm()``; return the kwargs
+    the chat class was constructed with."""
     captured: dict = {}
     monkeypatch.setattr(
         mod, "NormalizedChatAnthropic",
         lambda **kwargs: captured.setdefault("kwargs", kwargs),
     )
-    return captured
+    client = mod.AnthropicClient(model=model, **client_kwargs)
+    if model in _OFF_CATALOG:
+        with pytest.warns(RuntimeWarning, match="not in the known model list"):
+            client.get_llm()
+    else:
+        client.get_llm()
+    return captured["kwargs"]
 
 
 @pytest.mark.unit
@@ -31,9 +52,8 @@ class TestEffortGate:
         ],
     )
     def test_unsupported_models_do_not_receive_effort(self, monkeypatch, model):
-        captured = _capture_kwargs(monkeypatch)
-        mod.AnthropicClient(model=model, effort="medium", api_key="x").get_llm()
-        assert "effort" not in captured["kwargs"]
+        kwargs = _get_llm_kwargs(monkeypatch, model, effort="medium", api_key="x")
+        assert "effort" not in kwargs
 
     @pytest.mark.parametrize(
         "model",
@@ -43,9 +63,8 @@ class TestEffortGate:
         ],
     )
     def test_current_opus_and_sonnet_receive_effort(self, monkeypatch, model):
-        captured = _capture_kwargs(monkeypatch)
-        mod.AnthropicClient(model=model, effort="high", api_key="x").get_llm()
-        assert captured["kwargs"]["effort"] == "high"
+        kwargs = _get_llm_kwargs(monkeypatch, model, effort="high", api_key="x")
+        assert kwargs["effort"] == "high"
 
     @pytest.mark.parametrize(
         "model",
@@ -53,36 +72,33 @@ class TestEffortGate:
     )
     def test_future_opus_sonnet_inherit_effort_via_pattern(self, monkeypatch, model):
         """Forward-compat: new Opus/Sonnet versions don't need a code change."""
-        captured = _capture_kwargs(monkeypatch)
-        mod.AnthropicClient(model=model, effort="low", api_key="x").get_llm()
-        assert captured["kwargs"]["effort"] == "low"
+        kwargs = _get_llm_kwargs(monkeypatch, model, effort="low", api_key="x")
+        assert kwargs["effort"] == "low"
 
     def test_mythos_preview_receives_effort(self, monkeypatch):
-        captured = _capture_kwargs(monkeypatch)
-        mod.AnthropicClient(
-            model="claude-mythos-preview", effort="medium", api_key="x"
-        ).get_llm()
-        assert captured["kwargs"]["effort"] == "medium"
+        kwargs = _get_llm_kwargs(
+            monkeypatch, "claude-mythos-preview", effort="medium", api_key="x"
+        )
+        assert kwargs["effort"] == "medium"
 
     def test_unknown_anthropic_model_does_not_receive_effort(self, monkeypatch):
         """Default is conservative — unknown models don't get effort to avoid 400s."""
-        captured = _capture_kwargs(monkeypatch)
-        mod.AnthropicClient(
-            model="claude-experimental-x", effort="medium", api_key="x"
-        ).get_llm()
-        assert "effort" not in captured["kwargs"]
+        kwargs = _get_llm_kwargs(
+            monkeypatch, "claude-experimental-x", effort="medium", api_key="x"
+        )
+        assert "effort" not in kwargs
 
     def test_other_kwargs_still_forwarded_when_effort_skipped(self, monkeypatch):
         """Skipping effort must not break other passthrough kwargs."""
-        captured = _capture_kwargs(monkeypatch)
-        mod.AnthropicClient(
-            model="claude-haiku-4-5",
+        kwargs = _get_llm_kwargs(
+            monkeypatch,
+            "claude-haiku-4-5",
             effort="medium",
             api_key="placeholder",
             max_tokens=1024,
             timeout=30,
-        ).get_llm()
-        assert captured["kwargs"]["api_key"] == "placeholder"
-        assert captured["kwargs"]["max_tokens"] == 1024
-        assert captured["kwargs"]["timeout"] == 30
-        assert "effort" not in captured["kwargs"]
+        )
+        assert kwargs["api_key"] == "placeholder"
+        assert kwargs["max_tokens"] == 1024
+        assert kwargs["timeout"] == 30
+        assert "effort" not in kwargs

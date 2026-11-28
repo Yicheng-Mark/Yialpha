@@ -407,7 +407,11 @@ def build_ticket(report_dir: Path, capital: float, profile: str) -> dict:
     # 的 0 / 负数）。Round-9 S4：止损距入场 < 1bp 同样不可交易（任何 venue
     # 的吃单费率都吞掉这个距离，名义仓位会爆到 1e11 USDT 级）——按退化拒出，
     # 不给一张荒谬数字的单。
-    if entry <= 0 or stop == entry or abs(entry - stop) / entry < 1e-4:
+    # Round-16：止损 ≤ 0 同样是无效价——此前只拦入场：trader.md 的
+    # "Stop Loss: $0"、带负号的百分比（"-40"）、或 2·ATR 推导出的负止损
+    # （ATR ≥ 入场/2 时 entry − 2·ATR < 0）都会以 stop_dist ≥ 100% 算出一张
+    # 打在不存在价位上的「ok」单。多空两个方向的止损价都必须为正。
+    if entry <= 0 or stop <= 0 or stop == entry or abs(entry - stop) / entry < 1e-4:
         ticket["status"] = "degenerate_levels"
         return ticket
     # 侧向校验（round-6）：overlay 只在 legacy 权重为正时渲染 LONG 形止损
@@ -726,8 +730,12 @@ def _execution_plan(t):
         f"单笔最大亏损 {_money(t['risk_dollar'])}（资金的 {_pct(t['risk_frac'])}）。",
     ]
     if len(tps) >= 2:
+        # Round-16：止损移到成本的方向随侧向——多头上移、空头下移。此前
+        # 两侧都写「上移」：空头盈利后成本在价格上方，「上移到成本」等于
+        # 把保护性止损挪到亏损一侧的指令。
         parts.append(
-            f"分批止盈：到 TP1 {_money(tps[0])} 平 1/3 锁利并把止损上移到成本；"
+            f"分批止盈：到 TP1 {_money(tps[0])} 平 1/3 锁利并把止损"
+            f"{'上' if d == 'long' else '下'}移到成本；"
             f"到 TP2 {_money(tps[1])} 再平 1/3；余仓用 "
             + ("价格回到成本下方" if d == "long" else "价格回到成本上方")
             + " 的移动止损（或跌破/突破 10 周线）离场。"

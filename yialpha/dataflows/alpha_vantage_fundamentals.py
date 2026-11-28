@@ -5,6 +5,23 @@ from .symbol_utils import NoMarketDataError, normalize_symbol
 from .utils import current_pit_end, is_filing_public, overview_would_leak_future
 
 
+def _api_text(function_name: str, params: dict, ticker: str) -> dict | str:
+    """One Alpha Vantage call whose blank body is a typed no-data, not a payload.
+
+    ``_make_api_request`` returns whatever text the endpoint sent, so an empty
+    200 body used to travel on as a SUCCESSFUL result: the router recorded a
+    success for the statement and the tool handed the model an empty string —
+    a fundamentals-blind read that nothing flagged. Raising lets the router
+    record its sentinel and try the next vendor in the chain.
+    """
+    result = _make_api_request(function_name, params)
+    if isinstance(result, str) and not result.strip():
+        raise NoMarketDataError(
+            ticker, detail=f"Alpha Vantage returned an empty {function_name} body",
+        )
+    return result
+
+
 def _filter_reports_by_date(result: dict | str, curr_date: str | None) -> dict | str:
     """Drop annual/quarterly reports not yet public on ``curr_date``.
 
@@ -81,23 +98,23 @@ def get_fundamentals(ticker: str, curr_date: str | None = None) -> dict | str:
         "symbol": ticker,
     }
 
-    return _make_api_request("OVERVIEW", params)
+    return _api_text("OVERVIEW", params, ticker)
 
 
 def get_balance_sheet(ticker: str, freq: str = "quarterly", curr_date: str | None = None) -> dict | str:
     """Retrieve balance sheet data for a given ticker symbol using Alpha Vantage."""
-    result = _make_api_request("BALANCE_SHEET", {"symbol": ticker})
+    result = _api_text("BALANCE_SHEET", {"symbol": ticker}, ticker)
     return _filter_reports_by_date(result, curr_date)
 
 
 def get_cashflow(ticker: str, freq: str = "quarterly", curr_date: str | None = None) -> dict | str:
     """Retrieve cash flow statement data for a given ticker symbol using Alpha Vantage."""
-    result = _make_api_request("CASH_FLOW", {"symbol": ticker})
+    result = _api_text("CASH_FLOW", {"symbol": ticker}, ticker)
     return _filter_reports_by_date(result, curr_date)
 
 
 def get_income_statement(ticker: str, freq: str = "quarterly", curr_date: str | None = None) -> dict | str:
     """Retrieve income statement data for a given ticker symbol using Alpha Vantage."""
-    result = _make_api_request("INCOME_STATEMENT", {"symbol": ticker})
+    result = _api_text("INCOME_STATEMENT", {"symbol": ticker}, ticker)
     return _filter_reports_by_date(result, curr_date)
 

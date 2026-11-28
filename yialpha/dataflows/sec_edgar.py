@@ -36,7 +36,7 @@ import io
 import json
 import logging
 import os
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from .disk_cache import MinIntervalThrottle, cached_or_fetch, vendor_cache_dir
@@ -229,13 +229,27 @@ def _concept_records(facts: dict[str, Any], candidates: list[str]) -> list[dict[
 
 def _period_public(rec: dict[str, Any], curr_date: str | None) -> bool:
     """Ground-truth PIT gate: ``filed <= curr_date`` when filed is present, else
-    fall back to the project's 45-day ``is_filing_public`` heuristic."""
+    fall back to the project's 45-day ``is_filing_public`` heuristic.
+
+    Both sides are parsed to dates, never compared as strings (round-16):
+    ``curr_date`` comes from LLM-supplied tool arguments, and a non-ISO label
+    sorts lexically in an unrelated order — ``"-" < "/"`` made
+    ``"2024-11-15" <= "2024/05/03"`` true, exposing every later 2024 filing
+    as of a May as-of date (and ``"2024-05-10" <= "2024-5-3"`` likewise).
+    A ``curr_date`` that cannot be parsed fails closed (nothing visible), the
+    same policy as ``is_filing_public`` and ``sec_ownership._as_of_date``; an
+    unparseable ``filed`` drops to the heuristic on ``end`` instead.
+    """
     if not curr_date:
         return True
+    try:
+        as_of = datetime.strptime(str(curr_date)[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return False
     filed = rec.get("filed")
     if filed:
         try:
-            return str(filed)[:10] <= str(curr_date)[:10]
+            return datetime.strptime(str(filed)[:10], "%Y-%m-%d") <= as_of
         except (ValueError, TypeError):
             pass
     return is_filing_public(rec.get("end"), curr_date)

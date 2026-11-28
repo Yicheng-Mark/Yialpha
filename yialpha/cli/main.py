@@ -328,13 +328,15 @@ def format_tokens(n):
 
 
 def update_display(layout, spinner_text=None, stats_handler=None, start_time=None):
-    # Header with welcome message
+    # Header with welcome message. The region is fixed at 3 rows (top border,
+    # text, bottom border): vertical padding makes the panel 5 rows and the
+    # layout crops the middle, i.e. the text itself.
     layout["header"].update(
         Panel(
             "[bold green]Welcome to YiAlpha CLI[/bold green]",
             title="Welcome to YiAlpha",
             border_style="green",
-            padding=(1, 2),
+            padding=(0, 2),
             expand=True,
         )
     )
@@ -452,14 +454,27 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
             content_str = content_str[:197] + "..."
         all_messages.append((timestamp, msg_type, content_str))
 
-    # Sort by timestamp descending (newest first)
-    all_messages.sort(key=lambda x: x[0], reverse=True)
+    # Sort by timestamp descending (newest first). The stamps are wall-clock
+    # "HH:MM:SS" strings: compared as text, a run that crosses 00:00:00 ranks
+    # everything after midnight below the pre-midnight rows, so the newest-12
+    # window freezes on the day boundary. Compare seconds past midnight
+    # instead, moving the pre-midnight rows back one day when the stamps span
+    # the first and the last quarter of the day (a wrap, not a 13h+ run).
+    def _seconds_past_midnight(stamp: str) -> int:
+        hour, minute, second = (int(part) for part in stamp.split(":"))
+        return hour * 3600 + minute * 60 + second
+
+    keys = [_seconds_past_midnight(entry[0]) for entry in all_messages]
+    if keys and min(keys) < 6 * 3600 and max(keys) >= 18 * 3600:
+        keys = [key - 86400 if key >= 18 * 3600 else key for key in keys]
+    # Index sort: equal stamps keep their arrival order (tool call, then message).
+    newest_first = sorted(range(len(keys)), key=keys.__getitem__, reverse=True)
 
     # Calculate how many messages we can show based on available space
     max_messages = 12
 
     # Get the first N messages (newest ones)
-    recent_messages = all_messages[:max_messages]
+    recent_messages = [all_messages[i] for i in newest_first[:max_messages]]
 
     # Add messages to table (already in newest-first order)
     for timestamp, msg_type, content in recent_messages:

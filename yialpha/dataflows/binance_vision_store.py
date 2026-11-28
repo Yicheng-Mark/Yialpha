@@ -130,8 +130,21 @@ class VisionStore:
     # ---- manifest ----------------------------------------------------------
 
     def _read_manifest(self, dataset: str, symbol: str) -> dict:
+        path = self._manifest_path(dataset, symbol)
         try:
-            raw = self._manifest_path(dataset, symbol).read_text(encoding="utf-8")
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except PermissionError:
+                # Round-17: load()/qa() readers take no lock, and a concurrent
+                # sync's replace opens a short window where the reader's open
+                # raises PermissionError — the race _read_partition_with_retry
+                # rides out for partitions. That is neither "missing" nor
+                # "corrupt": retry once before the fresh start below turns it
+                # into "nothing is synced" (blank QA, no row estimate).
+                import time
+
+                time.sleep(0.2)
+                raw = path.read_text(encoding="utf-8")
             data = json.loads(raw)
             if not isinstance(data, dict):
                 raise ValueError("manifest is not an object")

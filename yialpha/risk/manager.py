@@ -100,8 +100,14 @@ def _trade_stats(history: list[dict[str, Any]]) -> tuple[int, int, float, float]
             loss_vals.append(abs(float(ret)))
         # ret == 0: a flat trade is neither a win nor a loss — counting it
         # as a loss would bias the Kelly win rate downward.
-    avg_win = sum(win_vals) / len(win_vals) if win_vals else 1.0
-    avg_loss = sum(loss_vals) / len(loss_vals) if loss_vals else 1.0
+    # A side with NO observations has an unknown magnitude: 0.0 marks it
+    # "missing" for kelly_fraction (symmetric payoff b = 1, its documented
+    # convention for avg_win/avg_loss <= 0). The old 1.0 sentinel posed as a
+    # real 100% win / 100% loss and inverted the payoff ratio: a 10-0 record
+    # scored Kelly 0 (b = avg_win/1.0) while a 0-3 record scored a POSITIVE
+    # Kelly (b = 1.0/avg_loss) out of a ledger that never won.
+    avg_win = sum(win_vals) / len(win_vals) if win_vals else 0.0
+    avg_loss = sum(loss_vals) / len(loss_vals) if loss_vals else 0.0
     return wins, losses, avg_win, avg_loss
 
 

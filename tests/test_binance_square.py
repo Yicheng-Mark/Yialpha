@@ -472,6 +472,10 @@ def test_stale_within_cap_renders_true_fetch_time_and_marker(monkeypatch, _quali
     # Cache 10 min old (> 5-min TTL, < 15-min cap): fetch fails -> stale
     # serve, rendered with the TRUE stored fetch time and an explicit STALE
     # marker — never today's clock on old bytes.
+    # Avoid the transient-retry backoff sleeping 2s per failing scene.
+    from yialpha.dataflows import netretry
+
+    monkeypatch.setattr(netretry.time, "sleep", lambda _s: None)
     fetched_ms = time.time() * 1000 - 600_000
     _write_scene_cache([_fresh_post()], fetched_ms, age_s=600)
     # Same failing cache for the second scene (beyond-cap there is fine —
@@ -627,6 +631,10 @@ def test_mixed_scene_freshness_labelled_mixed(monkeypatch, _quality_ledger):
     """One scene fresh (cache within TTL), the other stale-served (fetch
     failed, within the 15-min cap): the block is labelled MIXED naming the
     stale scene — never wholesale "(fresh)" off the fresh scene's clock."""
+    # Avoid the transient-retry backoff sleeping 2s in the failing scene.
+    from yialpha.dataflows import netretry
+
+    monkeypatch.setattr(netretry.time, "sleep", lambda _s: None)
     # web-homepage: cache 60s old — within the 5-min TTL, served fresh.
     _write_scene_cache([_fresh_post()], time.time() * 1000 - 60_000, age_s=60)
     # web-trending: fetched 10 min ago (> TTL, < cap) — network fails, the

@@ -15,22 +15,25 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _restore_reloaded_modules():
-    """Undo the importlib.reload side effects after every test in this module.
+def _undo_module_reloads():
+    """Put the modules this file ``importlib.reload()``s back as they were.
 
-    ``monkeypatch`` restores the *environment*, but nothing restores modules
-    that were re-imported under the patched env — after these tests, web.store
-    (and default_config, reloaded by the third test) kept pointing at the
-    custom root for the rest of the pytest session, silently affecting every
-    later test that imports them. Reload both under the real (restored)
-    environment to put the session back on defaults.
+    ``reload`` re-executes a module into its existing namespace, so after a
+    test that reloaded ``web.store`` / ``yialpha.default_config`` under a
+    patched ``YIALPHA_RESULTS_DIR`` the modules keep the roots built from it
+    for the rest of the session -- ``monkeypatch`` restores ``os.environ``
+    only. Snapshot both namespaces before the test and restore them after
+    (same objects as before, whatever order the fixtures are torn down in).
     """
-    yield
     import web.store
     import yialpha.default_config
 
-    importlib.reload(yialpha.default_config)
-    importlib.reload(web.store)
+    modules = (web.store, yialpha.default_config)
+    saved = [(module, dict(module.__dict__)) for module in modules]
+    yield
+    for module, namespace in saved:
+        module.__dict__.clear()
+        module.__dict__.update(namespace)
 
 
 @pytest.mark.unit

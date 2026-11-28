@@ -113,7 +113,10 @@ def test_same_day_refresh_still_refetches_on_memo_hit(monkeypatch, tmp_path):
     has passed, instead of serving the cached frame forever.
     """
     set_config({"data_cache_dir": str(tmp_path)})
-    today = pd.Timestamp.today().strftime("%Y-%m-%d")
+    # The same-day rule is keyed on the UTC calendar date, not the host-local
+    # one: west of Greenwich the local date is a day behind for hours every
+    # day, and a local "today" is then a past day with the 24h TTL.
+    today = su._utc_today().strftime("%Y-%m-%d")
     data_file = _cache_file()
     _ohlcv_csv(today, periods=3, base_close=100.0).to_csv(data_file, index=False)
 
@@ -127,7 +130,7 @@ def test_same_day_refresh_still_refetches_on_memo_hit(monkeypatch, tmp_path):
     os.utime(data_file, (stale, stale))
 
     def fake_download(symbol, start, end, **kwargs):
-        idx = pd.DatetimeIndex([pd.Timestamp.today().normalize()], name="Date")
+        idx = pd.DatetimeIndex([pd.Timestamp(today)], name="Date")
         return pd.DataFrame(
             {"Open": [300.0], "High": [301.0], "Low": [299.0],
              "Close": [300.5], "Volume": [1]},

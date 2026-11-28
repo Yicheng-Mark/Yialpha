@@ -63,7 +63,8 @@ class TestTraderEmptyStateRobustness:
         proposal = TraderProposal(action=TraderAction.HOLD, reasoning="no plan")
         trader = create_trader(_structured_llm(proposal))
         result = trader(_state(plan=""))
-        assert result["trader_investment_plan"]  # still rendered something
+        # Still rendered the proposal, final line included.
+        assert "FINAL TRANSACTION PROPOSAL: **HOLD**" in result["trader_investment_plan"]
 
     def test_missing_asset_type_defaults_without_crash(self):
         # state has no asset_type key; get_instrument_context_from_state must
@@ -71,7 +72,7 @@ class TestTraderEmptyStateRobustness:
         proposal = TraderProposal(action=TraderAction.BUY, reasoning="x")
         trader = create_trader(_structured_llm(proposal))
         result = trader({"company_of_interest": "AAPL", "investment_plan": "buy"})
-        assert result["trader_investment_plan"]
+        assert "FINAL TRANSACTION PROPOSAL: **BUY**" in result["trader_investment_plan"]
 
 
 class TestTraderPromptConstruction:

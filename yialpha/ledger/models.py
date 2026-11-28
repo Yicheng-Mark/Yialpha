@@ -204,6 +204,10 @@ def validate_probability(name: str, value: float | None) -> float | None:
     """Validate a probability-style field (``prob_up`` / ``confidence``) in [0, 1]."""
     if value is None:
         return None
+    if isinstance(value, bool):
+        # ``True`` is an int: float(True) is 1.0, a "certain" forecast filed
+        # from a JSON true (same guard as reference_price in time_contract).
+        raise ValueError(f"{name} must be within [0, 1], got {value!r}")
     number = float(value)
     if not 0.0 <= number <= 1.0:
         raise ValueError(f"{name} must be within [0, 1], got {value!r}")
@@ -212,6 +216,9 @@ def validate_probability(name: str, value: float | None) -> float | None:
 
 def validate_horizon_days(horizon_days: int) -> int:
     """Validate ``horizon_days`` against the frozen ladder; returns it as int."""
+    if isinstance(horizon_days, bool):
+        # int(True) is 1: a JSON true would be filed as the 1-day horizon.
+        raise ValueError(f"horizon_days must be an integer, got {horizon_days!r}")
     try:
         horizon = int(horizon_days)
     except (TypeError, ValueError) as exc:

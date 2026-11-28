@@ -123,11 +123,20 @@ def test_detect_asset_type(raw, expected):
 def _mock_interactive(monkeypatch):
     """Patch the interactive prompts; also record the asset_type handed to
     select_analysts so tests can assert the override/detection propagates
-    into the analyst filter (the perp Fundamentals gating depends on it)."""
+    into the analyst filter (the perp Fundamentals gating depends on it).
+
+    A crypto_perp selection also warms the live equity-perp listing cache
+    before the analyst filter. The CLI imports that warmer lazily *inside*
+    get_user_selections, so the stub has to go on the vendor module (a patch
+    on yialpha.cli.main would never be looked up); left real, this test sent
+    a Binance exchangeInfo request from the suite (round-16 network guard).
+    """
     import yialpha.cli.main as cli_main
     from yialpha.cli.models import AnalystType
+    from yialpha.dataflows import binance as binance_mod
 
     seen = {}
+    warmed: list[int] = []
 
     def fake_select_analysts(asset_type, ticker=""):
         seen["asset_type"] = asset_type
@@ -144,6 +153,10 @@ def _mock_interactive(monkeypatch):
         lambda: ("deepseek", "https://api.deepseek.com"),
     )
     monkeypatch.setattr(cli_main, "ensure_api_key", lambda p: None)
+    monkeypatch.setattr(
+        binance_mod, "warm_equity_perp_bases", lambda: warmed.append(1),
+    )
+    seen["warm"] = warmed
     monkeypatch.setenv("YIALPHA_OUTPUT_LANGUAGE", "中文")
     monkeypatch.setenv("YIALPHA_QUICK_THINK_LLM", "deepseek-chat")
     monkeypatch.setenv("YIALPHA_DEEP_THINK_LLM", "deepseek-reasoner")
@@ -156,6 +169,9 @@ def test_get_user_selections_asset_type_override_to_perp(monkeypatch):
     assert selections["asset_type"] == "crypto_perp"
     # The override must reach the analyst filter — not the detected spot type.
     assert seen["asset_type"] == AssetType.CRYPTO_PERP
+    # A perp run warms the equity-perp listing exactly once, before the
+    # analyst filter consults it.
+    assert len(seen["warm"]) == 1
 
 
 def test_get_user_selections_auto_keeps_detection(monkeypatch):
@@ -164,6 +180,8 @@ def test_get_user_selections_auto_keeps_detection(monkeypatch):
     # BTCUSDT detects as the Yahoo spot crypto pair — the historical default.
     assert selections["asset_type"] == "crypto"
     assert seen["asset_type"] == AssetType.CRYPTO
+    # Spot crypto has no equity-perp filter to prime: no warming request.
+    assert seen["warm"] == []
 
 
 def test_get_user_selections_invalid_override_fails_fast(monkeypatch):

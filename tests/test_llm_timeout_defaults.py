@@ -17,14 +17,26 @@ from yialpha.llm_clients.factory import create_llm_client
 # reaching the timeout logic. Use a dummy key for cloud providers.
 _DUMMY_KEY = "sk-test-dummy"
 
+# One catalog model (``VALID_MODELS[provider]``) per provider with a closed model
+# list. A made-up name makes get_llm() warn "not in the known model list", which
+# the timeout resolution under test has nothing to do with.
+_CATALOG_MODEL = {
+    "deepseek": "deepseek-flash",
+    "openai": "gpt-5.4-mini",
+    "anthropic": "claude-sonnet-4-6",
+    "google": "gemini-3.5-flash",
+}
 
-def _captured_llm(monkeypatch, provider, *, model="m", base_url=None, env=None):
+
+def _captured_llm(monkeypatch, provider, *, model=None, base_url=None, env=None):
     """Create a client, intercept the ChatOpenAI kwargs, return the captured dict.
 
     ``env`` is an optional dict of env vars to set before constructing the client
-    (YIALPHA_LLM_TIMEOUT_S, provider API keys, etc.).
+    (YIALPHA_LLM_TIMEOUT_S, provider API keys, etc.). ``model`` defaults to a
+    catalog model of the provider (any name for providers with an open list).
     """
     captured = {}
+    model = model or _CATALOG_MODEL.get(provider, "m")
 
     # Patch ChatOpenAI.__init__ (the real base class every chat_class subclasses)
     # to capture kwargs without constructing a live HTTP client.
@@ -119,7 +131,9 @@ def test_caller_timeout_kwarg_wins(monkeypatch):
     monkeypatch.setattr(ChatOpenAI, "__init__", _fake_init)
     monkeypatch.setenv("DEEPSEEK_API_KEY", _DUMMY_KEY)
 
-    client = create_llm_client(provider="deepseek", model="m", timeout=30)
+    client = create_llm_client(
+        provider="deepseek", model=_CATALOG_MODEL["deepseek"], timeout=30
+    )
     client.get_llm()
     assert captured["timeout"] == 30
 
@@ -272,7 +286,7 @@ def test_anthropic_cloud_default_timeout(monkeypatch):
     monkeypatch.delenv("YIALPHA_LLM_TIMEOUT_S", raising=False)
     captured = _native_captured_llm(
         monkeypatch, "anthropic",
-        model="claude-3-5-sonnet-20240620",
+        model=_CATALOG_MODEL["anthropic"],
         env={"ANTHROPIC_API_KEY": _DUMMY_KEY},
     )
     assert captured["timeout"] == _DEFAULT_CLOUD_TIMEOUT
@@ -283,7 +297,7 @@ def test_anthropic_env_overrides_default(monkeypatch):
     """YIALPHA_LLM_TIMEOUT_S overrides the default for Anthropic."""
     captured = _native_captured_llm(
         monkeypatch, "anthropic",
-        model="claude-3-5-sonnet-20240620",
+        model=_CATALOG_MODEL["anthropic"],
         env={
             "ANTHROPIC_API_KEY": _DUMMY_KEY,
             "YIALPHA_LLM_TIMEOUT_S": "45",
@@ -298,7 +312,7 @@ def test_anthropic_caller_kwarg_wins(monkeypatch):
     monkeypatch.setenv("YIALPHA_LLM_TIMEOUT_S", "45")
     captured = _native_captured_llm(
         monkeypatch, "anthropic",
-        model="claude-3-5-sonnet-20240620",
+        model=_CATALOG_MODEL["anthropic"],
         env={"ANTHROPIC_API_KEY": _DUMMY_KEY},
         client_kwargs={"timeout": 15},
     )
@@ -311,7 +325,7 @@ def test_google_cloud_default_timeout(monkeypatch):
     monkeypatch.delenv("YIALPHA_LLM_TIMEOUT_S", raising=False)
     captured = _native_captured_llm(
         monkeypatch, "google",
-        model="gemini-1.5-pro",
+        model=_CATALOG_MODEL["google"],
         env={"GOOGLE_API_KEY": _DUMMY_KEY},
     )
     assert captured["timeout"] == _DEFAULT_CLOUD_TIMEOUT
@@ -322,7 +336,7 @@ def test_google_env_overrides_default(monkeypatch):
     """YIALPHA_LLM_TIMEOUT_S overrides the default for Google."""
     captured = _native_captured_llm(
         monkeypatch, "google",
-        model="gemini-1.5-pro",
+        model=_CATALOG_MODEL["google"],
         env={"GOOGLE_API_KEY": _DUMMY_KEY, "YIALPHA_LLM_TIMEOUT_S": "50"},
     )
     assert captured["timeout"] == 50.0
@@ -334,7 +348,7 @@ def test_google_caller_kwarg_wins(monkeypatch):
     monkeypatch.setenv("YIALPHA_LLM_TIMEOUT_S", "50")
     captured = _native_captured_llm(
         monkeypatch, "google",
-        model="gemini-1.5-pro",
+        model=_CATALOG_MODEL["google"],
         env={"GOOGLE_API_KEY": _DUMMY_KEY},
         client_kwargs={"timeout": 20},
     )

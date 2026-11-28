@@ -255,11 +255,25 @@ def _gate_deny_reason(s: str) -> str | None:
     :func:`is_supported_market` because both shapes would otherwise sneak
     through: a ``...USD`` forex pair satisfies the crypto-venue suffix check,
     and bare alias words like ``GOLD``/``SPX`` match the US-stock regex.
+
+    A CFD alias is denied both bare and with a quote attached
+    (``GOLDUSD``/``XAU-USDT``/``SPX500USDC``, dashed or compact) — the quoted
+    form is what brokers actually use and it satisfies the crypto-venue
+    suffix check too.
     """
     if len(s) == 6 and s[:3] in _FOREX_CURRENCIES and s[3:] in _FOREX_CURRENCIES:
         return "spot forex pairs are no longer supported"
     if s in _REMOVED_CFD_ALIASES:
         return "former commodity/index CFD alias, no longer supported"
+    # The exact-name check above misses the broker form of the same CFD with
+    # its quote attached (``GOLDUSD`` / ``XAU-USDT`` / ``SPX500USDC``). Those
+    # are not crypto: without this the compact form satisfies the crypto-venue
+    # shape check in :func:`is_supported_market` and the venue normalizer
+    # fabricates a Binance pair (``GOLDUSDT``) for a commodity/index CFD.
+    compact = s.replace("-", "")
+    for quote in _CRYPTO_QUOTES:
+        if compact.endswith(quote) and compact[: -len(quote)] in _REMOVED_CFD_ALIASES:
+            return "former commodity/index CFD alias, no longer supported"
     return None
 
 

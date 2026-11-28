@@ -53,7 +53,7 @@ from threading import Lock
 from typing import Annotated, Any
 
 from langchain_core.tools import BaseTool, tool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from yialpha.dataflows import quality
 from yialpha.ledger.evidence import evidence_ids_for_run
@@ -82,6 +82,13 @@ class PredictionEntryInput(BaseModel):
     so one bad entry is rejected with a precise reason while the others in
     the same call are accepted.
     """
+
+    # Keep unknown keys instead of dropping them: the tool body refuses an
+    # entry that carries one, so a typo'd field name (``prob_pu`` for
+    # ``prob_up``) comes back with its reason instead of being filed with that
+    # forecast silently missing. Rows are immutable once accepted, so a field
+    # dropped here could never be corrected afterwards.
+    model_config = ConfigDict(extra="allow")
 
     horizon_days: int = Field(
         description="Forecast horizon in calendar days: 1, 5, or 21 — one entry per horizon."
@@ -113,6 +120,19 @@ class PredictionEntryInput(BaseModel):
         default=None,
         description="Confidence in this forecast set, in [0, 1].",
     )
+
+    @field_validator(
+        "horizon_days", "prob_up", "expected_return", "target_price", "confidence", mode="before"
+    )
+    @classmethod
+    def _not_a_boolean(cls, value: Any, info: ValidationInfo) -> Any:
+        # pydantic turns True into 1.0 (and into the 1-day horizon for an int
+        # field): a JSON true for prob_up would be filed as a certain forecast.
+        # The ledger validators refuse booleans, but from this model they only
+        # ever receive the coerced number.
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must be a number, not a boolean")
+        return value
 
 
 _DESCRIPTION_TEMPLATE = """File YOUR blind forecasts for {instrument_phrase}.

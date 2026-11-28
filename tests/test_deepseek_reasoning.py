@@ -63,7 +63,6 @@ class TestInputToMessages:
 @pytest.mark.unit
 class TestDeepSeekReasoningContent:
     def _client(self):
-        os.environ.setdefault("DEEPSEEK_API_KEY", "placeholder")
         return DeepSeekChatOpenAI(
             model="deepseek-v4-flash",
             api_key="placeholder",

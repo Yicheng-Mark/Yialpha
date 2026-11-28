@@ -5,8 +5,6 @@ requests so M2.x reasoning models put their <think> block into
 ``reasoning_details`` instead of polluting ``message.content``.
 """
 
-import os
-
 import pytest
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
@@ -15,7 +13,6 @@ from yialpha.llm_clients.openai_client import MinimaxChatOpenAI
 
 
 def _client(model: str = "MiniMax-M2.7"):
-    os.environ.setdefault("MINIMAX_API_KEY", "placeholder")
     return MinimaxChatOpenAI(
         model=model,
         api_key="placeholder",

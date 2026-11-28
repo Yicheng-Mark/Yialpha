@@ -6,10 +6,13 @@ Pure numpy/pandas, no network, no LLM, scipy optional. Marked
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from yialpha.backtest import ic as ic_module
 from yialpha.backtest.ic import (
     build_ic_report,
     consecutive_below_threshold,
@@ -17,6 +20,17 @@ from yialpha.backtest.ic import (
     prune_indicators,
     rolling_ic,
 )
+
+
+def _constant_input_warning():
+    """Expected-warning context for ``information_coefficient`` on a constant input.
+
+    ``scipy.stats.spearmanr`` warns before returning NaN; the numpy fallback taken
+    without scipy (an optional accelerator) is silent.
+    """
+    if ic_module._HAVE_SCIPY:
+        return pytest.warns(RuntimeWarning, match="An input array is constant")
+    return nullcontext()
 
 # ---------------------------------------------------------------------------
 # information_coefficient
@@ -78,7 +92,8 @@ def test_ic_drops_nonfinite_pairwise():
 @pytest.mark.unit
 def test_ic_zero_variance_returns_none():
     # Constant factor -> zero variance -> None.
-    assert information_coefficient([5.0] * 8, list(range(8))) is None
+    with _constant_input_warning():
+        assert information_coefficient([5.0] * 8, list(range(8))) is None
 
 
 # ---------------------------------------------------------------------------

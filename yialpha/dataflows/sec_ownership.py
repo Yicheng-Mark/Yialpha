@@ -678,8 +678,13 @@ def get_ftd_data(
     # Peak fail-day + count.
     peak = max(rows, key=lambda r: _num(r["fails"]) or 0)
     peak_v = _num(peak["fails"])
+    # A row whose QUANTITY (FAILS) cell is blank/garbage is still a real
+    # fail-day for the ticker (rendered above with a blank quantity), so it is
+    # kept — but it has no quantity to print: "n/a", never a fabricated 0 and
+    # never a TypeError on ``None:,.0f`` (round-16).
+    peak_txt = f"{peak_v:,.0f}" if peak_v is not None else "n/a"
     out.write(
-        f"\nPeak fail-day: {peak['date']} ({peak_v:,.0f} fails @ ${peak['price']}). "
+        f"\nPeak fail-day: {peak['date']} ({peak_txt} fails @ ${peak['price']}). "
         f"Total fail-days in window: {len(rows)}."
     )
     return out.getvalue().rstrip("\n")

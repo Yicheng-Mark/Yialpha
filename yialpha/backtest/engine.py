@@ -778,6 +778,12 @@ def run_backtest(
         raise ValueError("run_backtest requires at least one decision date")
     if holding_days < 1:
         raise ValueError("holding_days must be >= 1")
+    # Round-17: 0 / negative / NaN / inf capital never raised -- it marked a
+    # flat, short or NaN book and reported metrics for it.
+    if not (np.isfinite(initial_capital) and initial_capital > 0):
+        raise ValueError(
+            f"initial_capital must be a finite number > 0, got {initial_capital!r}"
+        )
     if not isinstance(n_trials, int) or n_trials < 1:
         raise ValueError(f"n_trials must be an integer >= 1, got {n_trials!r}")
     if not isinstance(execution_lag_bars, int) or execution_lag_bars < 1:
@@ -818,8 +824,15 @@ def run_backtest(
             "(perp family: stock_perp / pure_crypto_perp / unknown_perp; "
             "markPriceKlines is a perp endpoint)"
         )
-    if slippage_bps < 0.0 or (taker_bps is not None and taker_bps < 0.0) or cost_bps < 0.0:
-        raise ValueError("cost_bps / taker_bps / slippage_bps must be >= 0")
+    # Round-17: NaN fails every ``< 0.0`` comparison and +inf passes it, so both
+    # used to walk through this gate and put a non-finite fee / slippage on
+    # every fill -- the whole equity curve came back NaN with no exception.
+    if (
+        not np.isfinite(slippage_bps) or slippage_bps < 0.0
+        or (taker_bps is not None and (not np.isfinite(taker_bps) or taker_bps < 0.0))
+        or not np.isfinite(cost_bps) or cost_bps < 0.0
+    ):
+        raise ValueError("cost_bps / taker_bps / slippage_bps must be finite numbers >= 0")
     if periods_per_year is None:
         # V2.2 class-aware annualization (V2.4 wires it into the backtest):
         # a stock perp annualizes at 365 like a pure crypto perp — klines
@@ -838,8 +851,13 @@ def run_backtest(
                 asset_type, instrument_klass if is_perp_family else None,
             )
         )
-    if periods_per_year < 1:
-        raise ValueError("periods_per_year must be >= 1")
+    # Round-17: mirror compute_metrics' own requirement here. It used to be
+    # the only check, and it runs AFTER the decision loop -- a float (252.0)
+    # or NaN paid for every decision date before being rejected.
+    if not isinstance(periods_per_year, int) or periods_per_year < 1:
+        raise ValueError(
+            f"periods_per_year must be an integer >= 1, got {periods_per_year!r}"
+        )
 
     if allow_short and rating_to_weight is None and weight_fn is None:
         rating_to_weight = SHORT_RATING_TO_WEIGHT
@@ -958,7 +976,13 @@ def run_backtest(
                 "simulation instead."
             )
         if not allow_funding_gaps:
-            funding_days = {str(d) for d in perp_funding.index}
+            # Round-17: a priced day whose summed rate is not a finite number
+            # (NaN / inf from a vendor gap or a hand-built series) is skipped
+            # by the charge loop below, i.e. it accrues zero drag exactly like
+            # an absent day -- so it is missing coverage too.
+            funding_days = {
+                str(day) for day in perp_funding.index if np.isfinite(perp_funding[day])
+            }
             # Days the simulator will actually charge: every price bar from
             # the first decision up to (exclusive) the marking boundary —
             # exactly the charge loop's domain below (``prices.index <
@@ -1393,6 +1417,16 @@ def run_backtest(
             else:
                 weight_lo = -1.0 if allow_short else 0.0
                 target_weight = float(np.clip(requested_weight, weight_lo, 1.0))
+                if math.isnan(target_weight):
+                    # Round-17: np.clip passes NaN through, and a NaN target used
+                    # to reach the share count and the cash leg, turning every
+                    # later equity point NaN. None is the documented "hold";
+                    # anything else has to be a real number.
+                    raise ValueError(
+                        f"weight_fn returned {requested_weight} for {ticker} on "
+                        f"signal {signal_date} (rating {rating!r}): a non-finite "
+                        "target weight would poison the equity curve"
+                    )
                 # Leverage scales the target weight's NOTIONAL (margin =
                 # notional / L inside the same cash account): at L=1 this is
                 # the historical target weight verbatim.

@@ -233,6 +233,10 @@ def test_flush_writes_rows_with_run_context_and_evidence_chain():
         symbol="BTCUSDT",
         scope=SCOPE_CONTRACT,
         payload="MARKET BLOCK",
+        # Anchored like the run-context wrapper does. The raw default is
+        # "now" in UTC, which is already the next day -- later than the
+        # host-local ``_TODAY`` -- for hours every day west of Greenwich.
+        available_at=f"{_TODAY}T00:00:00+00:00",
         replayability=REPLAYABILITY_LIVE_ONLY,
         analysis_as_of=_TODAY,
     )

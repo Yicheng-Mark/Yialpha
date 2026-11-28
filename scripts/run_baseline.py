@@ -81,9 +81,14 @@ def _rebalance_dates(start: str, end: str, step: int, n: int) -> list[str]:
         )
     idx = pd.bdate_range(start, end)
     if len(idx) < n:
-        return [d.strftime("%Y-%m-%d") for d in idx]
-    # 从末尾往前抽，保证有足够的"未来"价格做持仓 mark
-    picked = [idx[-1 - step * i] for i in range(n) if i * step < len(idx)]
+        # Round-17: this branch returned every business day in the window
+        # (consecutive days, no longer `step` apart) with no word -- the same
+        # shrunken calendar round-10 made the branch below announce.
+        picked = list(idx)
+    else:
+        # 从末尾往前抽，保证有足够的"未来"价格做持仓 mark
+        picked = [idx[-1 - step * i] for i in range(n) if i * step < len(idx)]
+        picked.reverse()
     # Round-10: a narrow --start/--end window with a large step silently
     # yielded FEWER than n dates (i*step >= len(idx) dropped picks) — the
     # backtest ran on a shrunken calendar with no signal to the operator.
@@ -95,7 +100,6 @@ def _rebalance_dates(start: str, end: str, step: int, n: int) -> list[str]:
             f"widening the window or lowering --step/--rebalance",
             file=sys.stderr, flush=True,
         )
-    picked.reverse()
     return [d.strftime("%Y-%m-%d") for d in picked]
 
 
@@ -155,6 +159,29 @@ def _map_tickers(
     quantitative overlay explicitly instead of inheriting the DEFAULT_CONFIG flip
     (baseline forces it off, full forces it on); ``None`` inherits the default.
     """
+    # Round-17: the pool path keys its results by ticker, so a ticker named
+    # twice ran twice (two backtests racing on that ticker's state logs and
+    # cache) and handed back the second result twice while the first was
+    # discarded; the serial path returned two distinct results. Run every
+    # ticker once, the way ``BatchRunner._dedup`` does, and say what was dropped.
+    seen: set[str] = set()
+    dropped: list[str] = []
+    unique: list = []
+    for t in tickers:
+        key = t.strip().upper()
+        if key in seen:
+            dropped.append(t)
+        else:
+            seen.add(key)
+            unique.append(t)
+    if dropped:
+        print(
+            f"⚠ removed {len(dropped)} duplicate ticker(s) from the batch: {dropped} "
+            f"(each ticker is run once)",
+            file=sys.stderr, flush=True,
+        )
+    tickers = unique
+
     if workers <= 1:
         graph = _build_graph(
             debug=False, risk_enabled=risk_enabled,
@@ -521,6 +548,17 @@ def main():
         p.error(f"--holding-days must be >= 1 (got {args.holding_days})")
     if args.workers < 1:
         p.error(f"--workers must be >= 1 (got {args.workers})")
+    # Round-17: --smoke handed --date to the graph untouched. The graph does
+    # not validate it either, so an impossible date paid for the analysts
+    # before the data-vacuum gate stopped the run, and a non-canonical one
+    # wrote full_states_log_<as typed>.json where the web store and
+    # verify-history never look (round-13 closed the same hole in the batch
+    # entry). Same predicate as run_robust --date and the web endpoint.
+    if args.smoke:
+        from yialpha.cli.utils import is_canonical_ymd
+
+        if not is_canonical_ymd(args.date):
+            p.error(f"--date must be YYYY-MM-DD (got {args.date!r})")
 
     # Market gate（本脚本绕过 prepare_batch_run 的 CLI 闸门）：仅支持美股 +
     # 加密货币，入口处逐个校验 --tickers，命名违规 ticker 后立刻退出——

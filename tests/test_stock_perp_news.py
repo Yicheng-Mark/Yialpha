@@ -165,11 +165,16 @@ class NewsPrefetchGateTests(unittest.TestCase):
         # prefetch exactly like the bound web_search tool — an explicit
         # unavailable placeholder, no budget charge, and the (mocked) fetcher
         # never invoked. The company angle is a vendor-chain call, NOT web
-        # search, so it still prefetches.
+        # search, so it still prefetches (mocked at _get_news_impl: left
+        # real, it went to yfinance / Alpha Vantage from this test — found by
+        # the round-16 network guard, against this file's "ZERO network").
         with mock.patch.object(
             news, "_fetch_perp_contract_news",
             mock.MagicMock(return_value="SHOULD NOT APPEAR"),
         ) as contract_fetch, mock.patch.object(
+            news, "_get_news_impl",
+            mock.MagicMock(return_value="COMPANY NEWS BODY"),
+        ) as company_fetch, mock.patch.object(
             news, "is_historical_date", lambda _d: False,
         ):
             llm = _PromptCaptureLLM()
@@ -185,6 +190,9 @@ class NewsPrefetchGateTests(unittest.TestCase):
         )
         self.assertNotIn("SHOULD NOT APPEAR", prompt)
         contract_fetch.assert_not_called()
+        # The company angle really did still prefetch, on its 7-day window.
+        company_fetch.assert_called_once_with("MU", "2026-08-10", "2026-08-17")
+        self.assertIn("COMPANY NEWS BODY", prompt)
 
 
 class NewsPrefetchContentTests(unittest.TestCase):

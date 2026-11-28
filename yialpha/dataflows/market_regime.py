@@ -195,13 +195,19 @@ def compute_turbulence(
         .astype(float)
         .dropna()
     )
+    # A zero or negative close is a bad tick, not a -100% session: skip the row
+    # like a missing one (the return then spans the gap).
+    close = close[close > 0]
     returns = close.pct_change().dropna()
     # Need the current return PLUS `window` prior returns.
     if len(returns) < window + 1:
         # Fall back to whatever history exists, as long as it clears min_periods.
         if len(returns) < min_periods + 1:
             return None
-        hist = returns.iloc[-(len(returns) - 1) : -1] if len(returns) > 1 else returns.iloc[:0]
+        # Every return before the current one. (Round-17: the slice used to be
+        # ``iloc[-(len - 1):-1]``, which also dropped the OLDEST return, so a
+        # history of exactly ``min_periods`` prior returns came back None.)
+        hist = returns.iloc[:-1]
     else:
         hist = returns.iloc[-(window + 1) : -1]
 
@@ -254,7 +260,9 @@ def classify_trend_state(df) -> dict | None:
         adx = float(sdf["adx"].iloc[-1])
     except Exception:  # noqa: BLE001 — advisory component, fail-soft
         return None
-    if not all(math.isfinite(v) for v in (close, sma50, sma200, adx)):
+    # A zero close (a bar with no prints, a bad tick) is not a price: compared
+    # against the averages it would print a downtrend out of one bad bar.
+    if close == 0 or not all(math.isfinite(v) for v in (close, sma50, sma200, adx)):
         return None
 
     if close > sma50 > sma200:

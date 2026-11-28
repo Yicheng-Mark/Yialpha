@@ -548,9 +548,11 @@ class PoTExecutor:
         never reaches this method through :meth:`run_sandboxed`; the runtime
         policy rejects host execution before any worker is started.
         """
+        # Same clamp as in ``__init__``: ``timeout_seconds`` is a public
+        # attribute, and a later assignment of None or a non-positive value must
+        # not run LLM-generated code with no watchdog at all.
         if self.timeout_seconds is None or self.timeout_seconds <= 0:
-            func()
-            return
+            self.timeout_seconds = self._MIN_TIMEOUT_SECONDS
 
         # POSIX path: real signal-based timeout.
         can_use_signal = (

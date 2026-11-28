@@ -19,9 +19,10 @@ All side-effect collection in stubs is thread-safe (the fan-out runs a
 
 from __future__ import annotations
 
+import concurrent.futures
 import threading
-import time
 import unittest
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -288,12 +289,16 @@ class CreateAnalystFanoutNodeTests(unittest.TestCase):
         Approach: the fast-raiser sets a shared ``cancel_flag`` then raises
         immediately. The slow sibling's first invoke waits on the flag; once
         set (by the raiser), it aborts before reaching the second invoke where
-        it would record completion. The small delay guarantees the raiser's
-        future is processed first by ``as_completed`` (deterministic exception
-        propagation)."""
+        it would record completion. The fan-out takes the raiser's exception
+        from ``as_completed``, then calls ``cancel()`` on the other futures
+        and stops waiting; the sibling waits for that call before it aborts,
+        so its own exception lands after the fan-out is done with it. The
+        re-raised exception is the raiser's by construction."""
         cancel_flag = threading.Event()
+        raiser_taken = threading.Event()
         completed: list[str] = []
         completed_lock = threading.Lock()
+        waited_in_vain: list[str] = []
 
         def fast_raiser_factory():
             def agent(state):
@@ -309,11 +314,12 @@ class CreateAnalystFanoutNodeTests(unittest.TestCase):
                 call_count[0] += 1
                 if call_count[0] == 1:
                     # Block until the fast-raiser signals (it sets the flag
-                    # before raising). Returns True almost immediately.
-                    cancel_flag.wait(timeout=5.0)
-                    # Small delay so the raiser's future is yielded first by
-                    # as_completed (the re-raised exception is deterministic).
-                    time.sleep(0.1)
+                    # before raising) and the fan-out has taken that exception
+                    # and cancelled this future.
+                    if not cancel_flag.wait(timeout=5.0):
+                        waited_in_vain.append("the raiser never fired")
+                    if not raiser_taken.wait(timeout=5.0):
+                        waited_in_vain.append("the fan-out never cancelled")
                     raise RuntimeError("sibling aborted")
                 # Second invoke — the completion marker. Unreachable because
                 # the first invoke aborts above once the raiser fires.
@@ -337,10 +343,22 @@ class CreateAnalystFanoutNodeTests(unittest.TestCase):
         }
         fanout = create_analyst_fanout_node(plan, factories, tools, ConditionalLogic())
 
+        real_cancel = concurrent.futures.Future.cancel
+
+        def cancel_notifying(future):
+            raiser_taken.set()
+            return real_cancel(future)
+
         state = _make_minimal_state()
-        with self.assertRaisesRegex(RuntimeError, "fast boom"):
+        with (
+            patch.object(
+                concurrent.futures.Future, "cancel", cancel_notifying,
+            ),
+            self.assertRaisesRegex(RuntimeError, "fast boom"),
+        ):
             fanout(state)
 
+        self.assertEqual(waited_in_vain, [])
         # The sibling never reached its second invoke (where it would set the
         # completion marker).
         self.assertEqual(completed, [])

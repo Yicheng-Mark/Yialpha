@@ -42,6 +42,7 @@ setup_logging()  # noqa: E402 — centralised logging before any other import fi
 import argparse  # noqa: E402
 import contextlib  # noqa: E402
 import json  # noqa: E402
+import math  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
 import subprocess  # noqa: E402
@@ -142,6 +143,21 @@ def _parse_args() -> argparse.Namespace:
         p.error(f"--workers must be >= 1 (got {opts.workers})")
     if opts.max_attempts < 1:
         p.error(f"--max-attempts must be >= 1 (got {opts.max_attempts})")
+    # Round-17: the lower-bound checks below compare with 0, which NaN fails
+    # and +inf passes. ``--per-ticker-timeout nan`` was accepted and
+    # ``elapsed > nan`` is always False -- the wall-clock watchdog could never
+    # fire; a NaN / inf backoff reached time.sleep and escaped the worker
+    # thread as ValueError / OverflowError. A negative --stall-cpu never trips.
+    for flag, value in (
+        ("--per-ticker-timeout", opts.per_ticker_timeout),
+        ("--stall-timeout", opts.stall_timeout),
+        ("--stall-cpu", opts.stall_cpu),
+        ("--backoff", opts.backoff),
+    ):
+        if not math.isfinite(value):
+            p.error(f"{flag} must be a finite number (got {value})")
+    if opts.stall_cpu < 0:
+        p.error(f"--stall-cpu must be >= 0 (got {opts.stall_cpu})")
     if opts.per_ticker_timeout <= 0:
         p.error(f"--per-ticker-timeout must be > 0 (got {opts.per_ticker_timeout})")
     if opts.backoff < 0:
@@ -172,6 +188,28 @@ def _parse_args() -> argparse.Namespace:
             file=sys.stderr, flush=True,
         )
     opts.require_data_quality = not opts.allow_degraded
+    # Round-17: one child is spawned per list entry, so a ticker named twice
+    # was analyzed twice at once -- two children on one ticker's state logs
+    # and caches, both worker slots spent on it, two rows in the summary.
+    # run_batch / run_baseline drop duplicates (BatchRunner._dedup); same rule
+    # here, and what was dropped is said.
+    seen: set[str] = set()
+    unique: list[str] = []
+    dropped: list[str] = []
+    for t in opts.tickers:
+        key = t.strip().upper()
+        if key in seen:
+            dropped.append(t)
+        else:
+            seen.add(key)
+            unique.append(t)
+    if dropped:
+        print(
+            f"⚠ removed {len(dropped)} duplicate ticker(s) from --tickers: {dropped} "
+            f"(each ticker is run once)",
+            file=sys.stderr, flush=True,
+        )
+    opts.tickers = unique
     return opts
 
 
@@ -724,9 +762,14 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                         flush=True,
                     )
                     break
-            # 退出码 0 但没产出新报告：视为失败重跑。
-            result["reason"] = "exit 0 but no new complete_report.md"
-            print(f"[{ticker}] ⚠️ {result['reason']} → retry", flush=True)
+            else:
+                # 退出码 0 但没产出新报告：视为失败重跑。
+                # Round-17: these two lines used to run after a strict DEGRADED
+                # verdict too (those branches retry instead of breaking), so the
+                # summary said "exit 0 but no new complete_report.md" for a run
+                # that HAD written a report -- only its data was degraded.
+                result["reason"] = "exit 0 but no new complete_report.md"
+                print(f"[{ticker}] ⚠️ {result['reason']} → retry", flush=True)
         else:
             result["reason"] = f"exit {rc}"
             print(
@@ -734,6 +777,12 @@ def _run_one_ticker(ticker: str, date: str, opts: argparse.Namespace) -> dict:
                 flush=True,
             )
 
+        # Round-17: the abort flag was only read at the top of the next
+        # iteration, i.e. AFTER the backoff. Once main()'s Ctrl+C handler has
+        # killed the children, a worker still slept ``--backoff`` (15 s by
+        # default) before noticing, and pool.shutdown(wait=True) sat it out.
+        if _abort.is_set():
+            break
         if attempt < opts.max_attempts:
             print(f"[{ticker}] ⏳ backoff {opts.backoff:.0f}s before retry…", flush=True)
             time.sleep(opts.backoff)

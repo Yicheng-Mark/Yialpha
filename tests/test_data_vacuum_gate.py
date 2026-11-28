@@ -245,13 +245,18 @@ def test_yf_timeout_env_zero_disables(monkeypatch):
 
     import yialpha.dataflows.stockstats_utils as ssu
 
-    monkeypatch.setenv("YIALPHA_HTTP_TIMEOUT_S", "0")
-    importlib.reload(ssu)
+    # reload() re-executes the module in place; put its namespace back after the
+    # test, so later tests see the objects (and the timeout) the session started
+    # with. Reloading again here would not: monkeypatch still has the variable
+    # deleted until teardown, so that reload re-derived the built-in default.
+    saved = dict(ssu.__dict__)
     try:
+        monkeypatch.setenv("YIALPHA_HTTP_TIMEOUT_S", "0")
+        importlib.reload(ssu)
         assert ssu.YF_HTTP_TIMEOUT is None  # explicit 0 = deliberate opt-out
     finally:
-        monkeypatch.delenv("YIALPHA_HTTP_TIMEOUT_S", raising=False)
-        importlib.reload(ssu)  # restore the module default for later tests
+        ssu.__dict__.clear()
+        ssu.__dict__.update(saved)
     assert ssu.YF_HTTP_TIMEOUT == 30.0
 
 

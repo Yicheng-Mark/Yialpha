@@ -166,15 +166,37 @@ def _state(ticker="BTCUSDT", asset_type="crypto_perp"):
 
 
 def _stub_node_sources(monkeypatch, square_block):
+    """Take every network-backed source offline; returns the call recorder.
+
+    A stock run (``full`` profile) also pulls StockTwits and Reddit from
+    worker threads. Those two were left unstubbed, so the node sent real
+    requests from this test and its evidence block was whatever the live
+    feeds happened to answer (round-16 network guard).
+    """
     class _NewsStub:
         @property
         def func(self):
             return lambda *a, **k: "NEWS BODY"
 
+    calls: list[tuple] = []
+
+    def _square(ticker, as_of=None):
+        calls.append(("square", ticker))
+        return square_block
+
+    def _stocktwits(ticker, limit=30):
+        calls.append(("stocktwits", ticker, limit))
+        return "STOCKTWITS BODY"
+
+    def _reddit(ticker):
+        calls.append(("reddit", ticker))
+        return "REDDIT BODY"
+
     monkeypatch.setattr(sent, "get_news", _NewsStub())
-    monkeypatch.setattr(
-        sent, "fetch_binance_square_block", lambda t, as_of=None: square_block
-    )
+    monkeypatch.setattr(sent, "fetch_binance_square_block", _square)
+    monkeypatch.setattr(sent, "fetch_stocktwits_messages", _stocktwits)
+    monkeypatch.setattr(sent, "fetch_reddit_posts", _reddit)
+    return calls
 
 
 @pytest.mark.unit
@@ -212,9 +234,15 @@ def test_node_injects_evidence_in_user_role_and_caps_report(monkeypatch):
 
 @pytest.mark.unit
 def test_node_uncapped_stock_report_untouched(monkeypatch):
-    _stub_node_sources(monkeypatch, square_block="unused")
+    calls = _stub_node_sources(monkeypatch, square_block="unused")
     # Stock run: square never fetched (config gate off for stocks); no cap.
     llm = _FreeTextLLM("**Confidence:** High\n\nBody.")
     node = sent.create_sentiment_analyst(llm)
     out = node(_state(ticker="AAPL", asset_type="stock"))
     assert out["sentiment_report"] == "**Confidence:** High\n\nBody."
+    # The ``full`` profile fetched each social source exactly once, offline,
+    # and never reached for Binance Square.
+    assert sorted(calls) == [("reddit", "AAPL"), ("stocktwits", "AAPL", 30)]
+    evidence = llm.seen_messages[-1].content
+    assert "STOCKTWITS BODY" in evidence and "REDDIT BODY" in evidence
+    assert "unused" not in evidence

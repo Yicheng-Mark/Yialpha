@@ -115,6 +115,10 @@ def _points(payload: dict[str, Any] | None) -> list[tuple[datetime, float]]:
             continue
         try:
             instant = datetime.fromtimestamp(float(row["x"]), tz=UTC)
+            # A row with an x and no y is malformed too: indexing it raised
+            # KeyError outside the tuple below and dropped the WHOLE chart.
+            if row.get("y") is None:
+                continue
             value = float(row["y"])
         except (TypeError, ValueError, OSError, OverflowError):
             continue

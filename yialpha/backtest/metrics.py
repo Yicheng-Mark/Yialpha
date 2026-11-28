@@ -50,6 +50,19 @@ from dataclasses import dataclass
 import numpy as np
 
 # ---------------------------------------------------------------------------
+# Zero-variance floor. ``equity[1:] / equity[:-1] - 1`` rebuilds a
+# mathematically CONSTANT periodic return only to ~1e-16 (the quotient is
+# rounded), so an exactly flat strategy can arrive here with a standard
+# deviation of ~1e-15 instead of 0.0. No real return series is that flat --
+# even a pegged pair moves ~1e-5 a day -- so anything below this floor is
+# float noise on a variance-free series and is handled like an exact zero.
+# A NaN std is deliberately NOT covered: a non-finite return series must stay
+# visible (NaN DSR poisons the gate's mean instead of scoring a clean 0.0).
+# ---------------------------------------------------------------------------
+_ZERO_STD_FLOOR = 1e-12
+
+
+# ---------------------------------------------------------------------------
 # Optional scipy import -- kept optional so the module works without it.
 # ---------------------------------------------------------------------------
 try:  # pragma: no cover - exercised only by environment
@@ -348,7 +361,11 @@ def _deflated_sharpe_ratio(
         return 0.0
 
     std = float(returns.std(ddof=0))
-    if std == 0.0:
+    # ``std == 0.0`` alone misses a variance-free series rebuilt through the
+    # equity quotient (std ~1e-15): mean/std then blew up to ~1e12 and the
+    # noise-driven skew/kurtosis reported DSR 0.9995 for a flat curve. A NaN
+    # std fails this comparison on purpose and keeps propagating below.
+    if 0.0 <= std < _ZERO_STD_FLOOR:
         return 0.0
 
     sr_per = float(returns.mean()) / std
@@ -456,9 +473,12 @@ def compute_metrics(
     volatility = std_ret * math.sqrt(ppy)
 
     # --- Sharpe -----------------------------------------------------------
+    # Same zero-variance convention as the DSR (noise-level std is not a
+    # measurable dispersion): a flat curve has Sharpe 0.0, not ~1e15. A NaN
+    # std falls to 0.0 here exactly as the old ``ann_vol > 0.0`` guard did.
     ann_excess = mean_ret * ppy - risk_free
-    ann_vol = std_ret * math.sqrt(ppy)
-    sharpe = ann_excess / ann_vol if ann_vol > 0.0 else 0.0
+    sharpe = (ann_excess / (std_ret * math.sqrt(ppy))
+              if std_ret >= _ZERO_STD_FLOOR else 0.0)
 
     # --- Sortino ----------------------------------------------------------
     target_per_period = risk_free / ppy

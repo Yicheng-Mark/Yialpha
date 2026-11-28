@@ -96,39 +96,23 @@ _tt_spec.loader.exec_module(tt)
 
 
 @pytest.mark.unit
-def test_adl_request_params_carry_the_symbol():
+def test_adl_request_params_carry_the_symbol(monkeypatch):
     """The symbol param is OPTIONAL on /fapi/v1/adlQuantile — an empty params
     dict serves the ALL-symbols list whose [0] entry is an arbitrary symbol.
     The existing pin's comment claimed "params carry the canonical symbol"
     but only asserted the function ARG; this pins the actual request."""
-    import os
-
     import yialpha.dataflows.binance_brackets as bb
 
-    saved_key, saved_secret = (
-        os.environ.get("BINANCE_API_KEY"),
-        os.environ.get("BINANCE_API_SECRET"),
-    )
-    os.environ["BINANCE_API_KEY"] = "test-key"
-    os.environ["BINANCE_API_SECRET"] = "test-secret"
+    monkeypatch.setenv("BINANCE_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_API_SECRET", "test-secret")
     seen = {}
 
     def fake_signed_get(path, params, symbol, canonical):
         seen.update(path=path, params=dict(params))
         return [{"symbol": canonical, "adlQuantile": {"LONG": "1", "SHORT": 2}}]
 
-    orig = bb.signed_fapi_get
-    bb.signed_fapi_get = fake_signed_get
-    try:
-        out = pb._fetch_adl("BTCUSDT")
-    finally:
-        bb.signed_fapi_get = orig
-        for k, v in (("BINANCE_API_KEY", saved_key),
-                     ("BINANCE_API_SECRET", saved_secret)):
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+    monkeypatch.setattr(bb, "signed_fapi_get", fake_signed_get)
+    out = pb._fetch_adl("BTCUSDT")
     assert out["status"] == pb.STATUS_OK
     assert seen["params"].get("symbol") == "BTCUSDT"  # the round-12 pin
 
@@ -486,15 +470,21 @@ def test_run_cached_single_flight_under_threads():
     ensure_run_scope()
     try:
         import contextvars
-        import time
 
         calls = []
         lock = threading.Lock()
+        entered: list[int] = []
+        all_entered = threading.Event()
 
         def slow_fetch():
             with lock:
                 calls.append(1)
-            time.sleep(0.15)
+            # Hold the fetch until every worker has called run_cached(): they
+            # all then find the key missing or in flight, which is the
+            # collision the stripe lock exists for. A handshake pins that
+            # arrival order; a fixed sleep could only make it likely.
+            if not all_entered.wait(timeout=10.0):
+                raise AssertionError("the 8 workers never all entered run_cached")
             return {"bundle": "bytes"}
 
         results = []
@@ -502,6 +492,10 @@ def test_run_cached_single_flight_under_threads():
 
         def worker():
             barrier.wait()  # maximize the check-then-set collision window
+            with lock:
+                entered.append(1)
+                if len(entered) == 8:
+                    all_entered.set()
             results.append(
                 run_cached(("perp_market_bundle", "BTCUSDT", "2026-09-30"), slow_fetch)
             )
@@ -517,6 +511,7 @@ def test_run_cached_single_flight_under_threads():
             t.start()
         for t in threads:
             t.join()
+        assert len(results) == 8  # every worker got an answer
         assert len(calls) == 1  # fetched exactly once (the doc's contract)
         assert all(r == {"bundle": "bytes"} for r in results)
     finally:

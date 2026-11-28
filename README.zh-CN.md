@@ -450,12 +450,18 @@ python scripts/run_baseline.py --full --tickers AAPL NVDA --runs 2
 │   ├── dataflows/            # yfinance / Alpha Vantage / SEC EDGAR / FRED / Polymarket / Reddit / StockTwits / Binance / CoinGecko / DefiLlama / Tavily
 │   ├── graph/                # LangGraph 编排：trading_graph / propagation / reflection / signal_processing / perf_telemetry
 │   ├── risk/                 # kelly / atr_stop / breaker / cvar / manager（量化风控叠加层）
+│   ├── perp/                 # 股票永续的 Fair Value Bridge + USDT/USD 计价汇率
 │   ├── backtest/             # engine / metrics / validation_gate / ic / report / cache
+│   ├── ledger/               # SQLite 证据账本：predictions / outcomes / scoreboard / portfolio snapshots
+│   ├── instruments/          # PIT 标的注册表 / 公司行动 / 交易日历
+│   ├── regime/               # RegimeState 词表 + 确定性计算
 │   ├── batch/                # 多 ticker 并发 runner + filelock
 │   ├── monitoring/           # dashboard（HTML 仪表盘）
 │   ├── llm_clients/          # 多 LLM 提供商适配 + 限流器 + 共享 httpx
-│   ├── cli/                  # 交互式 CLI（analyze / batch / config-check / snapshot）
+│   ├── cli/                  # CLI：analyze / batch / verify-history / scoreboard / memory-resolve / config-check / snapshot / ic-cycle
 │   ├── default_config.py     # 配置 + env 映射
+│   ├── accuracy.py           # 评级↔结果验证（verify-history）
+│   ├── tickets.py            # ExecutionTicket：跨阶段的唯一交易对象
 │   └── reporting.py
 ├── web/                      # FastAPI Web UI（原地运行，不打包）
 ├── scripts/                  # run_baseline / run_robust / run_batch / export_ic_dataset / prune_indicators_cli / rank_signals / …

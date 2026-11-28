@@ -41,6 +41,7 @@ loop; the evidence is in the conversation from turn 0):
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -67,6 +68,7 @@ from yialpha.agents.utils.structured import (
     invoke_structured_or_freetext,
 )
 from yialpha.dataflows.config import get_config
+from yialpha.dataflows.perp_bundle import STATUS_OK
 from yialpha.dataflows.utils import is_historical_date
 from yialpha.ledger.models import (
     REPLAYABILITY_LIVE_ONLY,
@@ -95,6 +97,39 @@ _SKIP_NOTE = (
     "crypto_perp runs only (config positioning_split); this run does not "
     "meet the gate, so no positioning read was produced."
 )
+
+#: Skip note for a bundle that WAS fetched but served no positioning data.
+_NO_EVIDENCE_NOTE = (
+    "[Positioning Analyst skipped: every positioning component of the perp "
+    "bundle was unavailable — funding/OI/LSR evidence absent; labels "
+    "withheld rather than fabricated]"
+)
+
+#: Top-level bundle components the positioning half renders (the set
+#: ``perp_bundle._POSITIONING_SECTION_KEYS`` names). At least one of them must
+#: have SERVED data before the analyst may be asked for its labels.
+_POSITIONING_COMPONENTS: tuple[str, ...] = (
+    "funding", "premium_snapshot", "open_interest", "long_short",
+    "taker", "spot_basis", "depth_bands", "adl",
+)
+
+
+def _has_positioning_evidence(bundle: dict[str, Any]) -> bool:
+    """True when at least one positioning component of the bundle served data.
+
+    Round-17: the bundle is fail-soft PER COMPONENT — an exchange outage does
+    not raise out of ``fetch_perp_market_bundle``, it returns a bundle whose
+    every leg carries ``status="unavailable"``, and the rendered block (its
+    header plus the availability footer) is a non-empty string. The
+    fetch-failure gate alone therefore let the LLM be invoked with ZERO
+    positioning evidence, and the schema's required Literals forced labels
+    out of it that rendered as a data-derived header. ``capability_absent`` and
+    ``skipped_live_only`` disclose a missing leg; they are not evidence.
+    """
+    return any(
+        isinstance(bundle.get(key), dict) and bundle[key].get("status") == STATUS_OK
+        for key in _POSITIONING_COMPONENTS
+    )
 
 
 def _bundle_evidence_message(positioning_block: str) -> HumanMessage:
@@ -197,6 +232,7 @@ def create_positioning_analyst(llm):
 
         # ---- evidence: the positioning half of the shared perp bundle ----
         positioning_block = ""
+        bundle: dict[str, Any] | None = None
         try:
             from yialpha.dataflows.perp_bundle import (
                 fetch_perp_market_bundle,
@@ -254,6 +290,22 @@ def create_positioning_analyst(llm):
             return {
                 "positioning_report": note,
                 "messages": [AIMessage(content=note)],
+            }
+        # Round-17: the fetch can also SUCCEED and still deliver no positioning
+        # data — every component fail-soft on its own (an outage), or skipped
+        # by PIT policy on a replay with nothing archived. The round-12 gate
+        # above only saw a raised fetch, and the block (header + availability
+        # footer) is non-empty, so the LLM was still asked for labels it had
+        # nothing to rest on. Same honest skip, same zero LLM calls.
+        if not _has_positioning_evidence(bundle or {}):
+            logger.warning(
+                "perp positioning bundle served no positioning data for %s "
+                "(every component unavailable or skipped); skipping injection",
+                ticker,
+            )
+            return {
+                "positioning_report": _NO_EVIDENCE_NOTE,
+                "messages": [AIMessage(content=_NO_EVIDENCE_NOTE)],
             }
         if positioning_block:
             evidence_messages.append(_bundle_evidence_message(positioning_block))

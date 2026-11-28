@@ -8,6 +8,521 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [Unreleased]
+
+### Fixed
+
+- **The test suite was not hermetic — and CI had been red for 66 days.** The three
+  test jobs of the `CI` workflow had failed on 25 consecutive runs since the last
+  green one (`db79063`, 2026-09-18), including the `v1.0.0` release commit. Two
+  independent causes, both invisible from the Windows dev box the suite was only
+  ever verified on:
+  - **22 unit tests performed real network I/O.** Fifteen Form 4 tests in
+    `tests/test_round15_sec_tavily.py` resolved the ticker's CIK through the
+    unpatched `_cik_for_ticker` (a real `sec.gov` request); two Tavily budget tests
+    called the live API with a fake key; the sentiment analyst node's prefetch
+    threads reached StockTwits and Reddit; the news-prefetch gate test let the
+    company-angle vendor chain run; `get_user_selections` warmed Binance's
+    equity-perp listing; two CLI quality-chain tests downloaded five years of
+    NVDA / AAPL bars through the decision-price fallback. They passed only while
+    the dev-box proxy was up — most vendors swallow the connection error — and
+    turned red as soon as it was down.
+  - **A Windows-only test fixture.** `TestStatesRootDotenv` used Windows-drive
+    literals (`C:/from/dotenv`) as "absolute paths"; on Linux they are relative
+    paths, which `_states_root` correctly anchors to the project root, so the test
+    failed on every ubuntu lane from the day it was written.
+  Verified under CI's own conditions — fresh virtualenvs with *unconstrained*
+  `pip install -e ".[dev,web]"` (what the CI jobs resolve, not the lock), no
+  `.env`, no proxy variables, `TZ=UTC` — on Windows and Linux (WSL Ubuntu 24.04)
+  for py3.11 / 3.12 / 3.13, plus a hash-checked install from `requirements.lock`:
+  8167–8168 passed, 0 failed on every lane (re-measured on the round-17 tree,
+  2026-11-28; the one-test spread is a test that needs scikit-learn, which is
+  not a declared dependency — see the round-17 test files under Added).
+- **`scipy` was used but never declared.** `backtest/metrics.py`, `backtest/ic.py`,
+  `backtest/event_study.py` and the A/B gate treat it as an optional accelerator
+  and ship numpy / math fallbacks so the runtime install stays lean. The eight
+  tests that pin "fallback == scipy to 1e-12" (DSR skew / kurtosis / normal
+  CDF / PPF, Spearman IC, the chi-square gate) `importorskip` it, so in every
+  clean install — CI included — they were silently skipped and the fallbacks were
+  never verified outside the dev box. `scipy>=1.14` is now a `[dev]` dependency
+  (the runtime install is unchanged); the lock gained the single
+  `scipy==1.18.1` entry.
+- **CI's mypy gate had drifted.** It type-checked a hand-maintained module list
+  that no longer named `yialpha/instruments`, `ledger`, `perp`, `regime` or four
+  top-level modules. The gate now names the package root, so a new sub-package is
+  covered from the day it is created.
+- The README "Project structure" tree listed 8 of the 13 `yialpha` sub-packages —
+  the same four the mypy gate had lost.
+- `ci.yml` claimed job summaries are anonymously readable; they are not (both the
+  logs and the summary need a GitHub sign-in even on a public repository — checked
+  as an anonymous visitor). The comment now says what an anonymous reader can get
+  (job conclusions and step status through the REST API).
+- `ic-cycle.yml` pinned `actions/checkout@v4` / `actions/setup-python@v5` while
+  `ci.yml` had moved to v5 / v6.
+- Three tests slept through real retry backoff (`test_binance_square` ×2,
+  `test_tavily_web_search` ×1): ~6 s of wall clock for no assertion.
+
+- **Product bugs found by the round-16 audit.** Each one is pinned by a
+  regression test that was run against the unmodified `v1.0.0` checkout to
+  confirm it fails without the fix:
+  - **The market gate let quoted CFD aliases through**
+    (`yialpha/dataflows/symbol_utils.py`). `_gate_deny_reason` rejected the bare
+    aliases (`GOLD`, `XAU`, `SPX500`, `GER40`, `US30`, `HK50`, `WTI`, `BRENT`) but
+    not the broker form with a quote attached — `GOLDUSDT`, `XAU-USDT`,
+    `SPX500USDC`, dashed or compact, `USD` / `USDT` / `USDC` — which satisfies
+    the crypto-venue suffix check, so a commodity / index CFD was treated as
+    crypto and the venue normalizer fabricated a Binance pair for it (48 cases).
+  - **DSR and Sharpe were meaningless on a variance-free series**
+    (`yialpha/backtest/metrics.py`). The `std == 0.0` guard missed a standard
+    deviation of ~1e-15 — what a mathematically flat equity curve leaves after
+    `equity[1:] / equity[:-1] - 1` is rounded — so `mean / std` blew up and the
+    noise-driven skew / kurtosis reported a **Deflated Sharpe Ratio of 0.9995
+    for a flat strategy**, and a Sharpe of ~1e15. A standard deviation below
+    1e-12 is now handled like an exact zero; a NaN one still propagates.
+  - **The validation gate failed open on unmeasured runs**
+    (`yialpha/backtest/validation_gate.py`). Improved runs without metrics were
+    silently dropped from the means, so with a zero hurdle and a losing
+    buy-and-hold "zero measurements" evaluated to PASS. The gate now requires
+    every improved run to carry metrics and says so in its notes.
+  - **A one-sided trade ledger fabricated a payoff ratio**
+    (`yialpha/risk/manager.py`). `_trade_stats` used `1.0` as the sentinel for
+    "no wins" / "no losses", which then posed as a real 100% average: a 10-0
+    record scored a Kelly fraction of 0 while a ledger that had **never won**
+    (0-3) scored a *positive* Kelly fraction. An unobserved side is now `0.0`,
+    which `kelly_fraction` already documents as "unknown payoff".
+  - **An at-limit candidate was reported as clipped** (`yialpha/risk/constraints.py`).
+    A candidate that fills the book to exactly the limit in real arithmetic
+    (0.5 + 0.1 under a 0.6 cap) failed the strict `limit - others >= contribution`
+    test because `0.6 - 0.5` is `0.0999…98` in binary, and came back as
+    `RESIZE ×0.9999999999999998` with the reason `exceeds_limit` — a full-size
+    trade labelled as resized by a binding constraint. The comparison now uses
+    the same 1e-12 tolerance as the over-limit branch above it; a real breach
+    of 1e-6 is still clipped.
+  - **Trade tickets could carry a stop that cannot exist**
+    (`scripts/trade_ticket.py`). Only the entry was validated: `Stop Loss: $0`,
+    a signed percentage, or a 2·ATR-derived negative stop (ATR ≥ entry / 2) all
+    produced an "ok" ticket with a stop distance of 100% or more. A non-positive
+    stop is now a degenerate ticket. The execution plan also told **shorts** to
+    move the stop *up* to breakeven — i.e. to the losing side.
+  - **SEC EDGAR's point-in-time check compared dates as strings**
+    (`yialpha/dataflows/sec_edgar.py`). `str(filed)[:10] <= str(curr_date)[:10]`
+    with an LLM-supplied `curr_date`: `"2024-11-15" <= "2024/05/03"` is true
+    because `-` sorts before `/`, so a May as-of date exposed every later 2024
+    filing (and `"2024-05-10" <= "2024-5-3"` likewise). Both sides are now
+    parsed; an unparseable `curr_date` fails closed, the same policy as
+    `is_filing_public` — the three statements then raise `NoMarketDataError`
+    (the router turns that into NO_DATA) instead of returning a leaking report.
+    An FTD row whose quantity cannot be parsed also crashed `get_ftd_data`
+    (`yialpha/dataflows/sec_ownership.py`) instead of rendering `n/a` for the
+    peak.
+  - **The stale-cache cap silently disappeared for `inf`**
+    (`yialpha/dataflows/disk_cache.py`): a non-finite `data_cache_max_stale_days`
+    removed the ceiling, so arbitrarily old cached bytes were served when a fetch
+    failed. Non-finite values now fall back to the 30-day default.
+  - **A negative filing lag reopened look-ahead**
+    (`yialpha/dataflows/utils.py`): `YIALPHA_FUNDAMENTALS_FILING_LAG_DAYS=-5` was
+    accepted, putting `period_end + lag` before the period end. Negative and
+    garbage values now fall back to 45 (`0` remains the documented opt-out).
+    `pinned_analysis_date` also wrote `None` on exit instead of restoring the
+    previous value, so a nested use cleared the outer run's PIT clamp.
+  - **One malformed log file took the Web UI's read views down**
+    (`web/store.py`). The readers caught only `OSError` and `JSONDecodeError`,
+    so a log that was not valid UTF-8, whose root was not an object, or that
+    contained a `NaN` / `Infinity` literal raised and 500'd `/api/tickers`,
+    `/api/compare` and the run-detail view — every one of those is now skipped or
+    served as `null`, and non-string fields read as empty. In `web/app.py`:
+    the Host-rejection 403 was the only response without CSP / `nosniff`;
+    `_hostname_of` accepted malformed Host headers such as `[::1]evil.com` or
+    `127.0.0.1:80@evil.com` as loopback (it now parses `host[:port]` /
+    `[v6][:port]` strictly and fails closed); a malformed `YIALPHA_WEB_ALLOWED_HOSTS`
+    entry could whitelist the empty host name; and `/api/analyze` spawned the
+    child for tickers like `"BTC USDT"` or `"[A-Z]USDT"` that the child then
+    rejects — it now applies the same `is_valid_ticker_input` check up front.
+- **Product bugs found by the round-17 audit** (54 fixes in 28 files). As in
+  round 16, every fix is pinned by a regression test in a `tests/test_round17_*.py`
+  file that was run with the fixed file reverted to its pre-round-17 version to
+  confirm it fails without the fix. Line numbers refer to this tree.
+
+  - *Agents and tools*
+    - **A blind forecast could be filed with a field silently missing, or with
+      a JSON `true` in place of a number**
+      (`yialpha/agents/utils/prediction_tools.py:91`, `:124-135`).
+      `PredictionEntryInput` dropped unknown keys, so `prob_pu` typed for
+      `prob_up` was accepted and the row — immutable once filed — carried no
+      probability; unknown keys are now kept and the tool body rejects that
+      entry with its reason. A JSON boolean in a numeric field was coerced to
+      `1.0` / `0` (a 1-day horizon for `horizon_days`), filing a "certain
+      forecast"; it is refused before the coercion. (That refusal is
+      type-level: it rejects the whole call, not just the one entry — the
+      existing behaviour for type errors.)
+    - **The code-sandbox watchdog could be switched off after construction**
+      (`yialpha/agents/utils/pot_executor.py:551-555`). The constructor clamps
+      a `None` or non-positive `timeout_seconds` to the module minimum, but
+      `_run_with_timeout` re-read that public attribute at call time and, on
+      `None` or ≤ 0, ran the function with no watchdog at all. It now applies
+      the constructor's clamp.
+    - **The positioning analyst was asked for labels with zero positioning
+      evidence** (`yialpha/agents/analysts/positioning_analyst.py:117-127`,
+      `:294-312`). `fetch_perp_market_bundle` fails soft per component:
+      during an exchange outage, or on a replay date past the REST retention
+      with no archive to read, it returns a bundle whose every leg is
+      `unavailable` and raises nothing. The round-12 gate only stopped a
+      raised fetch, and the rendered block (header + availability footer) is
+      non-empty, so the LLM was invoked on no evidence and the schema's
+      required labels were rendered as a data-derived header. At least one
+      component must now have `status == ok`; otherwise the node writes an
+      honest skip note and logs a warning, with zero LLM calls.
+    - **Structured decisions turned JSON booleans and non-finite text into
+      numbers** (`yialpha/agents/schemas.py:56-81`, `:728-736`).
+      `_coerce_optional_float` now degrades a boolean and `"nan"` / `"inf"` /
+      `"1e999"` to `None` like any unparseable string: `confidence: true`
+      rendered as `**Confidence**: 100%`, `price_target: true` became a 1.0
+      target and `"nan"` rendered as `**Price Target**: nan`.
+      `SentimentReport.overall_score` refuses a boolean (`true` was read as
+      1.0 on its 0–10 scale).
+    - **A malformed portfolio snapshot crashed the PM node, and NaN reached
+      the prompt** (`yialpha/agents/managers/portfolio_manager.py`,
+      `_format_portfolio_state` and `_safe_float`). `{"equity": "100k"}`
+      raised `ValueError` out of the whole node, `Equity: nan` was rendered
+      into the prompt, and a `positions` that is not a mapping raised
+      `AttributeError`. `equity` / `cash` now take the guard the holdings
+      already had, `_safe_float` refuses NaN / inf, and a non-mapping
+      `positions` is dropped.
+
+  - *Ledger, backtest and risk constraints*
+    - **A bad vendor close fabricated a return in the prediction ledger**
+      (`yialpha/ledger/outcome_compute.py:913-918`, `:970-971`, `:1018`). The
+      legacy path's entry price had no gate: a NaN close was written as a
+      `complete` row with a NULL return, and a 0 close produced −100%. Entry,
+      terminal and underlying closes must now be finite and positive — the
+      gate the reference path already had.
+    - **Booleans were filed as probabilities and horizons**
+      (`yialpha/ledger/models.py:207`, `:219`): `validate_probability` and
+      `validate_horizon_days` refuse them.
+    - **`run_backtest` accepted capital and costs that are not finite
+      numbers** (`yialpha/backtest/engine.py:781-786`, `:827-835`). Zero,
+      negative, NaN or inf `initial_capital` produced a flat, short or NaN
+      book and was reported on; NaN fails every `< 0.0` test and +inf passes
+      it, so a non-finite fee or slippage landed on every fill and the whole
+      equity curve came back NaN with no exception. Both now raise
+      `ValueError`.
+    - **`periods_per_year` was validated only after the decision loop**
+      (`yialpha/backtest/engine.py:854-860`): a float or NaN paid for every
+      decision date before `compute_metrics` rejected it. It must now be an
+      `int >= 1` before any decision is billed.
+    - **A non-finite funding rate counted as coverage**
+      (`yialpha/backtest/engine.py:979-985`): a priced day whose summed rate
+      is NaN / inf was skipped by the charge loop — zero drag, exactly like
+      an absent day — yet counted toward the funding-coverage gate. It is
+      missing coverage now.
+    - **A NaN target weight poisoned the equity curve**
+      (`yialpha/backtest/engine.py:1420-1429`): `np.clip` passes NaN through,
+      and a NaN `weight_fn` result reached the share count and the cash leg,
+      turning every later equity point NaN. `None` remains the documented
+      "hold"; anything that is not a real number raises.
+    - **The event study counted events it could not decide**
+      (`yialpha/backtest/event_study.py:298-312`): a NaN / inf return
+      anywhere in the estimation or the event window left the fit or the CAR
+      NaN, and the event was still counted with `car=nan`, sinking the
+      cross-event mean and every statistic derived from it. Such events are
+      now skipped with a warning, like a window that runs off the tape.
+    - **`advisory_metrics` computed a beta from misaligned series**
+      (`yialpha/risk/constraints.py:684-688`). Its docstring promises `None`
+      for misaligned input, and finite values were paired by date — but two
+      series of different lengths were truncated by `zip` and paired from the
+      head: a 3-day history against a 2-day benchmark read as a beta of 0.5
+      and `btc_crash_x_earnings_gap` produced a number. Unequal lengths now
+      yield `None`. (The only production caller passes no benchmark series.)
+
+  - *Data vendors*
+    - **A perp price book with no usable price passed as GOOD tier**
+      (`yialpha/dataflows/perp_bundle.py:209-222`). `_fetch_prices` took the
+      tail close as-is, so a 0 rendered "last 0.00… (1d -100.00%)" and a
+      −10,000 bps mark basis, NaN / inf rendered "nan" / "inf" — all with
+      `core_complete=True`. A close that is not a finite positive number now
+      fails the leg.
+    - **A partly served bundle component said nothing about its missing
+      legs** (`yialpha/dataflows/perp_bundle.py:921-939`): `_component_footer`
+      noted nested legs only under a component whose overall status was not
+      ok, so a core-complete price book without its index leg, or one LSR
+      vantage out of two, rendered its surviving reading in silence. Nested
+      legs get their own note.
+    - **A zero close read as a crash in the market-regime index**
+      (`yialpha/dataflows/market_regime.py:200`, `:210`, `:265`).
+      `compute_turbulence` treated a zero or negative close as a −100% day —
+      one zero-close bar rendered "elevated (107.4σ)" — and its numpy
+      fallback dropped the oldest return; `classify_trend_state` read a zero
+      close as a downtrend. Zero / negative closes are now missing rows and
+      the trend component is omitted.
+    - **A malformed subreddit feed aborted the whole analysis**
+      (`yialpha/dataflows/reddit.py:171`): `safe_xml_root` rejects a body
+      with a DOCTYPE / ENTITY by raising `ValueError`, which
+      `_fetch_subreddit_rss` did not catch; the sentiment analyst node has no
+      try/except, so the exception ended the run. It now takes the degraded
+      fetch path.
+    - **Indicator windows returned an error string as every indicator's
+      value** (`yialpha/dataflows/y_finance.py:308`,
+      `yialpha/dataflows/alpha_vantage_indicator.py:62`): with a `curr_date`
+      that carries a time, both tools raised `ValueError` and the tool layer
+      handed the error text to the model. The date is cut to its first ten
+      characters.
+    - **An empty Alpha Vantage body was a successful payload**
+      (`yialpha/dataflows/alpha_vantage_fundamentals.py:8-24`): HTTP 200 with
+      a blank body travelled on as `''`, and the router recorded three
+      successes and zero sentinels. `_api_text` now raises
+      `NoMarketDataError`, so the router records its sentinel and tries the
+      next vendor.
+    - **Two non-canonical date forms defeated CoinGecko's point-in-time
+      filter** (`yialpha/dataflows/coingecko_vendor.py:512`): a basic ISO
+      date (`20260627`) or an ISO week date was compared with the row dates
+      as strings, letting every row of the same year through. The as-of label
+      is normalised to `YYYY-MM-DD` first.
+    - **One row without a `y` value dropped a whole chart**
+      (`yialpha/dataflows/onchain_flows.py:120`): `_points` raised `KeyError`
+      on a point that has `x` but no `y`. Such rows are skipped.
+    - **DefiLlama chain-resolution failures were silent or mislabelled**
+      (`yialpha/dataflows/defillama_vendor.py:468`, `:525`): the fallback
+      `except` now logs a warning, and a directory outage is no longer
+      reported as the symbol having no coverage; a 429 stays a
+      `VendorRateLimitError`.
+    - **A transient read failure read as "nothing is synced"**
+      (`yialpha/dataflows/binance_vision_store.py:132-147`): the lock-free
+      `_read_manifest` hit `PermissionError` while a concurrent sync's
+      `os.replace` held the file, took it for a missing manifest and reported
+      0 synced days — `qa()` came back blank and the bookDepth memory gate
+      was skipped. It now sleeps 0.2 s and re-reads once.
+
+  - *LLM clients*
+    - **A cache replay broke the next call's cache key**
+      (`yialpha/llm_clients/base_client.py:22-33`). On a cache hit
+      langchain-core copies the replayed message and stamps
+      `usage_metadata["total_cost"] = 0` on it (`_convert_cached_generations`;
+      same on 1.5.3, 1.6.1 and 1.8.4). `usage_metadata` is part of the prompt
+      serialization, so once a replayed assistant message sat in the history
+      the next call's key did not match — in a tool loop only the first call
+      was ever replayed. `normalize_content` now drops that zero marker (live
+      messages never carry it; a no-op with the cache off).
+    - **A transient "cannot open" evicted a valid cache entry**
+      (`yialpha/llm_clients/response_cache.py:162-175`): `DiskLLMCache.lookup`
+      treated every read failure as a corrupt entry and deleted it —
+      including the `PermissionError` of the instant `os.replace` on Windows,
+      i.e. a paid-for generation a writer had just landed. `OSError` is now a
+      miss that keeps the entry and logs `could not read`; only unparsable
+      content is evicted.
+
+  - *Logging*
+    - **Secrets reached the log sinks through four side doors**
+      (`yialpha/logging_config.py`). `CredentialRedactionFilter` looked only
+      at `record.exc_text`, which is still `None` on a fresh record while the
+      handler renders the live exception, so a key inside an exception's
+      message (`requests` puts the whole URL into its `HTTPError`) went out
+      unredacted (`:235-257`); a record whose %-args were malformed was
+      reported by the handler with `record.msg` and `record.args` verbatim
+      (`:221-230`); the `apikey=` pattern did not match the quoted JSON form
+      (`:128`); and the exact-match list of key environment variables lacked
+      every provider in use, `DEEPSEEK_API_KEY` included (`:90-115`). Also
+      added: the `sk-<32-hex>` key shape (`:156`) and a 6-character floor
+      below which a configured value is not treated as a credential (`:122`,
+      `:189-203`).
+
+  - *Web UI*
+    - **A non-finite number in the ledger 500'd the read-only views**
+      (`web/store.py`). Ticket, snapshot and position payloads are stored
+      with `json.dumps` defaults, so a bare `NaN` / `Infinity` lands in the
+      cell and a REAL column holds `inf`; the readers returned it and the
+      response — rendered with `allow_nan=False` — failed the whole endpoint
+      (for positions, the entire book). `load_run_predictions` (`:365`),
+      `load_outcomes` (`:394`), `load_portfolio_snapshot` (`:471`) and
+      `load_positions` (`:490`) pass their results through
+      `yialpha.accuracy.sanitize_nonfinite`.
+    - **An overflowing number literal 500'd a run page** (`web/store.py:134`,
+      `:449`): `1e999` parses to `inf` through `json.load`, and the existing
+      `parse_constant` hook only sees the `NaN` / `Infinity` words.
+      `_read_json_object` and `load_ticket` add a `parse_float` hook.
+    - **An unreadable ledger was served as "empty but available"**
+      (`web/store.py:307`, `_ledger_readable`, used by `load_outcomes` and
+      `load_calibration`): a zero-byte, corrupt or locked ledger file
+      degraded to an empty read and answered `available: true`. It now
+      answers `available: false`.
+    - **One entry that cannot be stat'ed marked a finished run as an error**
+      (`web/store.py:217-224`): `Path.is_dir()` raises the stat error on
+      Python 3.11–3.13, and in `list_reports` it sat outside the
+      `except OSError`, so that ticker's runs page returned 500. `is_dir()`
+      moved inside.
+
+  - *Scripts*
+    - **`run_baseline` ran a ticker named twice, twice**
+      (`scripts/run_baseline.py:162-183`): the pool path keys its results by
+      ticker, so a ticker named twice ran two backtests racing on that
+      ticker's state logs and cache, returned the second result twice and
+      discarded the first (the serial path returned two distinct results).
+      Duplicates are dropped by `strip().upper()` and listed on stderr.
+    - **`run_baseline` hid a shrunken rebalance calendar**
+      (`scripts/run_baseline.py:83-102`): when the window held fewer trading
+      days than `n`, the branch returned every trading day in the window
+      (consecutive, no longer `step` apart) without a word. It prints the
+      round-10 "calendar shrunk" warning too.
+    - **`run_baseline --smoke` passed `--date` to the graph unvalidated**
+      (`scripts/run_baseline.py:551-561`): the graph does not validate it
+      either, so an impossible date paid for the analysts before the
+      data-vacuum gate stopped the run, and a non-canonical one wrote
+      `full_states_log_<as typed>.json` where the web store and
+      `verify-history` never look. It now goes through `is_canonical_ymd`,
+      the predicate `run_robust --date` and the web endpoint already use.
+    - **`run_robust` accepted non-finite timeouts**
+      (`scripts/run_robust.py:146-160`): the lower-bound checks compare with
+      0, which NaN fails and +inf passes. `--per-ticker-timeout nan` was
+      accepted and `elapsed > nan` is always false, so the wall-clock
+      watchdog could never fire; a NaN / inf `--backoff` reached `time.sleep`
+      and escaped the worker thread; a negative `--stall-cpu` never tripped.
+      The four flags must be finite and `--stall-cpu` ≥ 0.
+    - **`run_robust` analyzed a ticker named twice, twice**
+      (`scripts/run_robust.py:191-212`): one child is spawned per list entry,
+      so two children worked on one ticker's state logs and caches at once,
+      both worker slots went to it and the summary showed two rows.
+      `--tickers` is deduplicated the way `run_batch` / `run_baseline` do it,
+      and the dropped spellings are listed.
+    - **A degraded run was reported as "no new report"**
+      (`scripts/run_robust.py:760-773`): in strict mode (the default) a
+      DEGRADED verdict retries instead of breaking, but the "exit 0 but no
+      new complete_report.md" line and the `result["reason"]` overwrite still
+      ran after it, so the summary claimed that a run had written no report
+      when it had — only with degraded data. The verdict keeps its own
+      reason.
+    - **Ctrl+C still slept the backoff** (`scripts/run_robust.py:779-785`):
+      the abort flag was read only at the top of the next iteration, i.e.
+      after the backoff — once main()'s handler had killed the children, a
+      worker still slept `--backoff` (15 s by default) and
+      `pool.shutdown(wait=True)` sat it out. The flag is checked before
+      sleeping.
+    - **The analyst-parallel A/B gate crashed when one leg had no usable
+      run** (`scripts/run_analyst_parallel_ab.py:1005-1012`,
+      `_compute_metrics`): `all([])` is true, so a leg whose every
+      `propagate` failed passed the check and the mean divided by zero; the
+      whole run died as an "infra crash" (exit 3, no report) instead of the
+      criterion-6 / criterion-7 failure those criteria exist to report. An
+      empty leg reports N/A.
+
+  - *CLI*
+    - **The live panel froze at midnight** (`yialpha/cli/main.py`,
+      `update_display`): messages were sorted by their `HH:MM:SS` stamps as
+      text, so in a run crossing 00:00:00 everything after midnight ranked
+      below the pre-midnight rows and the newest-messages window stopped
+      updating. They are ordered by seconds past midnight, with pre-midnight
+      rows moved back one day when the stamps wrap.
+    - **The header text was cropped** (`yialpha/cli/main.py`, `update_display`):
+      the header region is fixed at 3 rows (border, text, border); a vertical
+      padding of 1 made the panel 5 rows and the layout cropped the middle —
+      the text itself. The padding is 0.
+
+### Security
+
+- **`requirements.lock` resolved 43 known vulnerabilities in 7 packages**
+  (pip-audit on 2026-11-24: aiohttp 17, filelock 12, pyasn1 4, soupsieve 4,
+  urllib3 3, langgraph-sdk 2, multidict 1). The lock was regenerated: 8 of its
+  120 pins moved — aiohttp 3.14.3→3.14.5, filelock 3.32.2→4.3.1,
+  langgraph-sdk 0.4.2→0.4.14, multidict 6.7.1→7.2.1, pyasn1 0.6.4→0.6.5,
+  soupsieve 2.9.2→4.1.3, urllib3 2.7.0→2.8.0, yarl 1.24.5→1.25.1 — and nothing
+  was added or removed by the audit. filelock crosses a major version because
+  every advisory against 3.32.2 is fixed only in 4.x. The audit reports no
+  known vulnerability on the regenerated lock (at the time of the audit).
+
+### Added
+
+- **A network guard for the whole suite** (`tests/conftest.py::NetworkGuard`,
+  autouse): real network I/O raises where it happens, and — because most vendors
+  catch `Exception` and degrade — every attempt is also recorded and re-checked at
+  teardown, so an attempt whose error the code under test swallowed still fails the
+  test. Three transport layers are covered, since a vendor only has to sit on one
+  that is not: Python sockets (`requests` / `urllib3` / sync `httpx`), the Windows
+  asyncio Proactor loop (`ConnectEx` never calls `socket.connect`), and
+  `curl_cffi` (yfinance builds a libcurl session whenever the package is
+  installed). Connections made from inside `socket.socketpair()` are let through
+  (in-process plumbing on Windows); the hop to a loopback proxy is not.
+  `tests/test_round16_network_guard.py` pins each layer, including the
+  proxy hop. `-m integration` remains the opt-out.
+- **Drift guards** (`tests/test_round16_packaging_ci.py`): `requirements.lock`
+  must satisfy every dependency `pyproject.toml` declares for the scopes the lock
+  covers and must stay exactly pinned (CI installed the lock but never validated
+  the project's own metadata against it); the mypy gate must name the package
+  root; the coverage floor must not be quietly lowered; every `yialpha <command>`
+  the docs mention must be registered on the real CLI; the README project tree
+  must list every sub-package and every CLI command.
+- **The round-17 test files** — 13 files, 2,711 tests: `tests/test_round17_`
+  `pot_tools.py` (170), `ledger.py` (186), `backtest_engine.py` (147),
+  `perp_bundle.py` (95), `ops.py` (167), `agents.py` (192), `llm_clients.py`
+  (233), `dataflows_vendors.py` (422), `web_runtime.py` (157),
+  `scripts_e2e.py` (722), `test_hygiene.py` (67), `mutation_graph.py` (97)
+  and `cli_ui.py` (56). On the final tree (2026-11-28), under the CI conditions
+  described under Fixed: Windows py3.13 (the baseline interpreter), py3.11 /
+  3.12 / 3.13 (fresh installs) and the locked 3.12 install; Linux (WSL Ubuntu
+  24.04) py3.11 / 3.13 (fresh installs) and py3.12 with `requirements.lock`
+  installed hash-checked — the first time the lock was installed on Linux.
+  0 failed on every lane, 8167 or 8168 passed and 2 or 3 skipped: the skips are
+  `langchain_aws` (the optional Bedrock extra, not installed), a symlink test
+  Windows does not permit, and one test that needs scikit-learn, which is
+  present only on the dev baseline interpreter. Also green with the collection
+  order reversed (Windows, Linux py3.11) and on clocks whose calendar date is a
+  day ahead of UTC (`TZ=XXX-14`: Windows, Linux py3.13) or a day behind it
+  (`TZ=XXX24` and `TZ=XXX18` on Windows; `TZ=XXX24` on Linux py3.11 and py3.13).
+  A plain run reports 0 warnings. Under coverage the py3.13 lanes print 21
+  `ResourceWarning: unclosed database` lines — thread-local ledger connections
+  (`yialpha/ledger/sqlite.py`, `get_connection`) that are never closed
+  explicitly — and the locked 3.12 install prints one
+  `StarletteDeprecationWarning` from FastAPI's test client; neither comes from
+  a test of its own.
+- **Test-hygiene pins** (`tests/test_round17_test_hygiene.py`): 12 checks that
+  hold the suite itself to the rules this round fell foul of. They look at
+  every `.py` file under `tests/`: each one must parse; no test body may be
+  empty or a constant `True`; `skip` / `xfail` must carry a `reason`; a real
+  `time.sleep` longer than 0.05 s, a Windows drive-letter literal and a
+  `sys.path` edit each need an allow-listed reason (the allow-lists are exact
+  sets and are checked in both directions); pytest-style tests, fixtures and
+  helpers never write `os.environ` directly; no warning filter outlives its
+  block; `pyproject.toml` silences only `DeprecationWarning`; every
+  `importlib.reload` a test reaches must be undone; and a list of session
+  objects must still be what it was at collection when the last test file
+  runs. 44 existing test files were brought up to them: the full suite went
+  from 45 warnings to 0, nine files stopped leaking a reloaded module into
+  the rest of the session (two round-17 sessions went red, 6 and 20 tests, on
+  state leaked that way), three real sleeps went, and 16 tests that passed
+  the local calendar date where the product reasons in UTC now use the
+  product's own clock. A plain run of the full suite went from 45 warnings
+  to 0.
+- **A mutation-testing pass over the graph and the risk money path**
+  (`tests/test_round17_mutation_graph.py`, 97 tests). 478 single-line
+  mutations were applied, one at a time and only in throwaway copies, to 15
+  modules (`yialpha/graph/*` and `yialpha/risk/{constraints,manager,resolver,
+  perp_ticket}.py`), each at a decision that changes a trade, a risk limit, a
+  price, a position or which node runs next. The existing suite killed 364;
+  114 survived the whole suite, and the pass found the `advisory_metrics` fix
+  above. 96 of the new tests each kill one of the survivors (99 mutations);
+  15 are left alive on purpose — 9 equivalent, 5 on branches production
+  cannot reach and 1 observable only in the last bit of a float. The gaps
+  clustered in the backtest adapter `build_backtest_weight_fn` (latest
+  equity, realized P&L merged once, Hold flattened under a hard stop, the
+  engine's current position), in what the risk overlay forwards from the
+  injected positions, return series and trade ledger, in `from_config`
+  defaults and the funding thresholds' endpoints, in the perp advisory
+  ticket's liquidation checks, and in the telemetry wall clock (the existing
+  tests asserted `wall_seconds >= 0`, which a constant 0 satisfies).
+
+### Changed
+
+- **`web/` and `scripts/` joined the CI coverage scope.** The three test jobs
+  ran `pytest --cov=yialpha`, and a command-line `--cov` replaces
+  `[tool.coverage.run] source` — so the two run-in-place trees (2,772
+  statements) were measured by no gate. The workflow and the config now both
+  name `yialpha`, `web` and `scripts`, and `tests/test_round16_packaging_ci.py`
+  fails when the two lists disagree or either tree drops out. With them every
+  lane measures 99.87–99.90% of 22,287 statements.
+- **Coverage floor raised from 75% to 90%.** The floor had been set when the
+  baseline was 78%; by 2026-11-23 every OS × interpreter lane measured 95.5% of
+  19,393 statements, so the gate would have passed a twenty-point regression.
+  On the round-17 tree every lane measures 99.87–99.90% of 22,287 statements,
+  so the floor is now a wide cushion; raise it once a CI run under the widened
+  scope has reported.
+
 ## [1.0.0] — 2026-11-23
 
 ### Added
@@ -2176,3 +2691,4 @@ PRs from late 2025 also landed here.
 [0.2.0]: https://github.com/zhang12120113-creator/Yiagents/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/zhang12120113-creator/Yiagents/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/zhang12120113-creator/Yiagents/releases/tag/v0.1.0
+[unreleased]: https://github.com/Yicheng-Mark/Yialpha/compare/v1.0.0...HEAD

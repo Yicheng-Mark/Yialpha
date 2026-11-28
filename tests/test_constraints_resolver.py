@@ -65,11 +65,20 @@ def _dec(rule: str, action: str, mult: float) -> RiskDecision:
 
 @pytest.mark.unit
 def test_risk_decision_accepts_valid_verdicts():
-    RiskDecision(rule="r", action="PASS", multiplier=1.0, reasons=[], metrics={})
-    RiskDecision(rule="r", action="RESIZE", multiplier=0.5, reasons=["exceeds_limit"], metrics={})
-    # A RESIZE all the way to zero is still a RESIZE (shrinking, not refusing).
-    RiskDecision(rule="r", action="RESIZE", multiplier=0.0, reasons=["exceeds_limit"], metrics={})
-    RiskDecision(rule="r", action="VETO", multiplier=0.0, reasons=["non_positive_equity"], metrics={})
+    for action, multiplier, reasons in (
+        ("PASS", 1.0, []),
+        ("RESIZE", 0.5, ["exceeds_limit"]),
+        # A RESIZE all the way to zero is still a RESIZE (shrinking, not refusing).
+        ("RESIZE", 0.0, ["exceeds_limit"]),
+        ("VETO", 0.0, ["non_positive_equity"]),
+    ):
+        decision = RiskDecision(
+            rule="r", action=action, multiplier=multiplier, reasons=list(reasons), metrics={},
+        )
+        # Accepted, and kept exactly as given.
+        assert (decision.action, decision.multiplier, decision.reasons) == (
+            action, multiplier, reasons,
+        )
 
 
 @pytest.mark.unit

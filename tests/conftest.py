@@ -1,6 +1,11 @@
 """Shared pytest fixtures that prevent CI hangs when API keys are absent."""
 
 import os
+import socket
+import sys
+import threading
+import traceback
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,6 +14,8 @@ import pytest
 # [tool.pytest.ini_options] alongside --strict-markers, so they don't need to
 # be re-registered here.
 
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[1]) + os.sep
+_THIS_FILE = os.path.normcase(os.path.abspath(__file__))
 _API_KEY_ENV_VARS = (
     "OPENAI_API_KEY",
     "GOOGLE_API_KEY",
@@ -33,6 +40,154 @@ def _dummy_api_keys(monkeypatch):
         # `or` not a .get default: an env var present but empty (e.g. a key left
         # blank in a .env copied from .env.example) must still get the placeholder.
         monkeypatch.setenv(env_var, os.environ.get(env_var) or "placeholder")
+
+
+class NetworkAccessError(RuntimeError):
+    """A unit test attempted real network I/O."""
+
+
+def _is_project_frame(filename: str) -> bool:
+    """Is this stack frame the repo's own code rather than a dependency's?
+
+    A virtualenv created inside the repo tree (``.venv/``) puts its
+    ``site-packages`` "under the project root", so the prefix alone also
+    matches pytest and plugin internals. The guard's own frames are excluded
+    for the same reason: they sit between the test and the refused call.
+    """
+    if not filename.startswith(_PROJECT_ROOT):
+        return False
+    if os.path.normcase(os.path.abspath(filename)) == _THIS_FILE:
+        return False
+    parts = filename[len(_PROJECT_ROOT):].replace("\\", "/").split("/")
+    return not any(part in ("site-packages", "dist-packages") for part in parts)
+
+
+class NetworkGuard:
+    """Refuse and record real outbound network I/O while installed.
+
+    Mocking a vendor *function* is not the same as being offline. Round-16's
+    socket audit found 22 tests whose vendor seam was only partly patched
+    (``_cik_for_ticker`` imported into ``sec_ownership``, an unstubbed Tavily
+    ``requests.post``, prefetch threads outliving the test). They were green
+    on a dev box whose proxy was up — the request really went out — and turned
+    red the day the proxy was down.
+
+    Three transport layers are covered, because a vendor only has to sit on
+    one that is not covered to walk past the others:
+
+    * ``socket.socket.connect`` / ``connect_ex`` — requests / urllib3 / httpx
+      (sync) / PySocks, including the hop to the loopback proxy itself;
+    * ``BaseProactorEventLoop.sock_connect`` — Windows' default asyncio loop
+      connects through ``ConnectEx`` and never calls ``socket.connect``;
+    * ``curl_cffi`` sessions — libcurl opens its own sockets. yfinance builds
+      a curl_cffi session whenever the package is installed, and the package
+      is a hard dependency of yfinance.
+
+    Two mechanisms, because most vendors catch ``Exception`` and degrade:
+
+    * the refused call raises :class:`NetworkAccessError` where it is made;
+    * every attempt is *recorded* and re-checked at teardown
+      (:meth:`assert_offline`), so an attempt whose exception the code under
+      test swallowed still fails the test.
+
+    Windows has no AF_UNIX socketpair: the stdlib emulates it with a loopback
+    listener + ``connect()``. That call is in-process plumbing (anyio's
+    TestClient portal, asyncio / multiprocessing self-pipes), so connections
+    made from inside ``socket.socketpair()`` are let through — a loopback
+    address alone is NOT a pass, because the dev-box proxy is loopback too.
+
+    Limits, by design: in-process only (a child interpreter started by a test
+    does not inherit it) and it does not intercept DNS resolution.
+    """
+
+    def __init__(self) -> None:
+        self.attempts: list[str] = []
+        self._in_socketpair = threading.local()
+
+    def _refuse(self, what: str) -> NetworkAccessError:
+        """Record ``what`` and return the exception for the caller to raise."""
+        # Innermost project frames only: they name the vendor seam to mock.
+        frames = [
+            f"{os.path.relpath(f.filename, _PROJECT_ROOT)}:{f.lineno} {f.name}"
+            for f in traceback.extract_stack(limit=80)
+            if _is_project_frame(f.filename)
+        ]
+        self.attempts.append(f"{what} via {' <- '.join(reversed(frames[-6:]))}")
+        return NetworkAccessError(
+            f"test attempted real network I/O ({what}); mock the vendor seam "
+            "instead (see _hermetic_no_network in tests/conftest.py)"
+        )
+
+    def install(self, monkeypatch) -> None:
+        real_connect = socket.socket.connect
+        real_socketpair = socket.socketpair
+
+        def _socketpair(*args, **kwargs):
+            self._in_socketpair.active = True
+            try:
+                return real_socketpair(*args, **kwargs)
+            finally:
+                self._in_socketpair.active = False
+
+        def _connect(sock, address):
+            if getattr(self._in_socketpair, "active", False):
+                return real_connect(sock, address)
+            raise self._refuse(f"connect to {address!r}")
+
+        def _connect_ex(sock, address):
+            _connect(sock, address)  # raises before any errno is computed
+
+        monkeypatch.setattr(socket, "socketpair", _socketpair)
+        monkeypatch.setattr(socket.socket, "connect", _connect)
+        monkeypatch.setattr(socket.socket, "connect_ex", _connect_ex)
+
+        if sys.platform == "win32":
+            from asyncio import proactor_events
+
+            async def _sock_connect(loop, sock, address):
+                raise self._refuse(f"asyncio connect to {address!r}")
+
+            monkeypatch.setattr(
+                proactor_events.BaseProactorEventLoop, "sock_connect", _sock_connect
+            )
+
+        try:
+            from curl_cffi import requests as curl_requests
+        except ImportError:  # pragma: no cover - depends on the environment
+            pass
+        else:
+            def _curl_request(session, *args, **kwargs):
+                method = args[0] if args else kwargs.get("method", "?")
+                url = args[1] if len(args) > 1 else kwargs.get("url", "?")
+                raise self._refuse(f"curl_cffi {method} {url}")
+
+            for cls in (curl_requests.Session, curl_requests.AsyncSession):
+                monkeypatch.setattr(cls, "request", _curl_request)
+
+    def assert_offline(self) -> None:
+        if self.attempts:
+            pytest.fail(
+                f"{len(self.attempts)} real network attempt(s) made during this "
+                "test (the error was swallowed, so the body may have passed):\n  "
+                + "\n  ".join(self.attempts[:8]),
+                pytrace=False,
+            )
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_no_network(monkeypatch, request):
+    """Keep the suite offline: install :class:`NetworkGuard` around every test.
+
+    Yields the guard, so a test can request this fixture by name to inspect
+    ``attempts``. ``integration`` tests (``-m integration``) are the opt-out.
+    """
+    if request.node.get_closest_marker("integration") is not None:
+        yield None
+        return
+    guard = NetworkGuard()
+    guard.install(monkeypatch)
+    yield guard
+    guard.assert_offline()
 
 
 @pytest.fixture(autouse=True)

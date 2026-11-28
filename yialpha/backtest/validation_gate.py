@@ -114,6 +114,10 @@ def evaluate_gate(
 
     dsr_values = [r.metrics.deflated_sharpe for r in improved if r.metrics]
     tr_values = [r.metrics.total_return for r in improved if r.metrics]
+    # An improved run without metrics is NO evidence, not a neutral one: it
+    # must not be silently dropped from the means below (with a zero hurdle
+    # and a losing B&H that turned "zero measurements" into a PASS).
+    unmeasured = sum(1 for r in improved if r.metrics is None)
     mean_dsr = _mean(dsr_values)
     improved_total_return = _mean(tr_values)
 
@@ -154,9 +158,15 @@ def evaluate_gate(
         and (mean_dsr > min_dsr)
         and beats
         and cost_bps_already_applied
+        and unmeasured == 0
     )
 
     notes: list[str] = []
+    if unmeasured:
+        notes.append(
+            f"{unmeasured} improved run(s) carry no metrics; the gate has no "
+            "evidence for them and fails closed."
+        )
     if not cost_bps_already_applied:
         notes.append("Transaction costs NOT applied to improved runs; the B&H "
                      "comparison likely flatters the strategy, so the gate "

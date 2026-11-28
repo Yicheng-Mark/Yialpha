@@ -241,15 +241,39 @@ def test_warm_equity_perp_bases_single_flight_double_check(monkeypatch):
          "underlyingType": "EQUITY", "status": "TRADING"},
     ]}
     fetches: list[str] = []
+    gate_arrivals: list[int] = []
+    both_at_gate = threading.Event()
+    gate = bn._EQUITY_PERP_WARM_GATE
+
+    class _GateCountingWarmers:
+        """``_EQUITY_PERP_WARM_GATE`` plus one signal: a warmer enters the
+        gate right after its first TTL check, so the second arrival means the
+        other warmer has found the snapshot stale as well."""
+
+        def __enter__(self):
+            gate_arrivals.append(1)
+            if len(gate_arrivals) == 2:
+                both_at_gate.set()
+            gate.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            gate.release()
 
     def slow_http(path, params, **kw):  # noqa: ARG001
         fetches.append(path)
-        time.sleep(0.3)  # wide enough for both warmers to pile onto the gate
+        # Hold the round trip until the other warmer has passed its first TTL
+        # check and arrived at the gate. The swap has not landed yet, so that
+        # is the arrival order the double-check exists for; a handshake pins
+        # it, where a fixed sleep could only make it likely.
+        if not both_at_gate.wait(timeout=3.0):
+            raise AssertionError("the second warmer never reached the gate")
         return second
 
     bn.refresh_equity_perp_bases()
     try:
         monkeypatch.setattr(bn, "_http_get", slow_http)
+        monkeypatch.setattr(bn, "_EQUITY_PERP_WARM_GATE", _GateCountingWarmers())
         barrier = threading.Barrier(2)
         results: dict[str, frozenset] = {}
 
@@ -265,6 +289,7 @@ def test_warm_equity_perp_bases_single_flight_double_check(monkeypatch):
         for t in threads:
             t.join(timeout=5.0)
         assert not any(t.is_alive() for t in threads)
+        assert sorted(results) == ["a", "b"]  # both warmers returned
         assert len(fetches) == 1  # one request per stale window, not two
         assert results["a"] == results["b"] == frozenset({"TSLA"})
     finally:

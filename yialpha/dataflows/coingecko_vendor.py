@@ -505,8 +505,11 @@ def get_crypto_token_fundamentals(
         # (fail-closed); parsing here must degrade honestly rather than
         # crash on date.fromisoformat downstream.
         try:
-            as_of = str(curr_date)[:10]
-            date.fromisoformat(as_of)
+            # Canonical YYYY-MM-DD, not merely parseable: fromisoformat also
+            # takes the basic (20260627) and ISO week (2026-W26-5) forms, and
+            # _render_historical compares the series' dashed date keys against
+            # this label as plain strings ("2026-06-28" <= "20260627" holds).
+            as_of = date.fromisoformat(str(curr_date)[:10]).isoformat()
         except ValueError:
             return (
                 f"Crypto token fundamentals for {base}: the passed curr_date "
@@ -515,9 +518,9 @@ def get_crypto_token_fundamentals(
                 "available' for this item; do not estimate."
             )
         series = _market_chart_series(coin_id)
-        # Pass the validated slice: is_historical_date's bool return cannot
-        # narrow str | None for the type checker, and str(curr_date)[:10] is
-        # exactly — and solely — what _render_historical consumes.
+        # Pass the normalized as-of day: is_historical_date's bool return
+        # cannot narrow str | None for the type checker, and this canonical
+        # day is exactly — and solely — what _render_historical consumes.
         return _render_historical(coin_id, base, as_of, look_back_days, series)
 
     # community_data / developer_data are deliberately NOT requested: the

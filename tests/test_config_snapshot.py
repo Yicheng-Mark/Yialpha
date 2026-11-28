@@ -149,4 +149,7 @@ class TestConfigSnapshot:
         )
         assert path.exists()
         assert (cache / "config_history").is_dir()
-        assert load_last_snapshot(self._config(data_cache_dir=str(cache))) is not None
+        # ...and it is this snapshot that comes back, not just any file.
+        snapshot = load_last_snapshot(self._config(data_cache_dir=str(cache)))
+        assert snapshot is not None
+        assert snapshot["reason"] == "baseline"

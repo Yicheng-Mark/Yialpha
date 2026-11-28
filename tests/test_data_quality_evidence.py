@@ -137,6 +137,11 @@ def test_check_data_vacuum_passes_when_data_ok(_policy_ctx):
     quality.record_sentinel("get_news", quality.KIND_NO_DATA, "news only")
     quality.record_success("get_stock_data")
     quality.check_data_vacuum()  # not a vacuum: market data succeeded
+    # The evidence itself says "not a vacuum" (core calls were attempted and
+    # one returned data) -- the gate passed on the merits, not by accident.
+    assert quality.is_data_vacuum(
+        quality.snapshot_quality(), quality.snapshot_core_successes()
+    ) is False
 
 
 @pytest.mark.unit

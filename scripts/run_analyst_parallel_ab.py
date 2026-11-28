@@ -1003,7 +1003,13 @@ def _compute_metrics(
         all(x is not None and x > 0 for x in serial_segs)
         and all(x is not None and x > 0 for x in par_segs)
     )
-    if segs_ok:
+    # Round-17: ``all([])`` is True, so a leg whose every propagate failed (no
+    # usable runs left) passed the check above and the mean below divided by
+    # zero -- the whole run died as an "infra crash" (exit 3, no report)
+    # instead of the criterion-6 / criterion-7 failure those criteria exist to
+    # report. An empty leg has no segment to measure: N/A, like a leg without
+    # telemetry.
+    if segs_ok and serial_segs and par_segs:
         ss = [x for x in serial_segs if x is not None]
         ps = [x for x in par_segs if x is not None]
         speedup = (sum(ss) / len(ss)) / (sum(ps) / len(ps))

@@ -163,6 +163,10 @@ def test_inline_smoke_example():
     assert math.isfinite(m.cagr)
     assert math.isfinite(m.sharpe)
     assert math.isfinite(m.deflated_sharpe)
+    # ...and the knowable values are the right ones, not merely finite.
+    assert m.total_return == pytest.approx(0.20)  # 120 / 100 - 1
+    assert m.max_drawdown == pytest.approx(103.0 / 105.0 - 1.0)  # the 105 -> 103 dip
+    assert m.num_periods == 5
 
 
 @pytest.mark.unit
@@ -179,7 +183,14 @@ def test_negative_terminal_equity_is_total_loss():
 @pytest.mark.unit
 def test_zero_start_equity_is_total_loss():
     # eq[0] == 0 used to divide by zero (numpy: inf metrics); the honest
-    # degenerate reading is a total loss.
-    m = compute_metrics([0.0, 5.0, 10.0])
+    # degenerate reading is a total loss. The returns path still divides by
+    # that zero on purpose (non-finite returns are the caller's contract, see
+    # returns_from_equity), so numpy reports the 0-denominator and the NaN/inf
+    # arithmetic it seeds (mean, drawdown, the scipy moments) -- expected here.
+    with pytest.warns(
+        RuntimeWarning,
+        match="divide by zero encountered in divide|invalid value encountered in (divide|subtract)",
+    ):
+        m = compute_metrics([0.0, 5.0, 10.0])
     assert m.total_return == -1.0
     assert m.cagr == -1.0

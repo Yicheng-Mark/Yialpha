@@ -65,14 +65,29 @@ def _full_streamed_state(ticker: str = "NVDA", trade_date: str = "2026-06-10") -
     }
 
 
-def _make_graph(tmp_path):
-    """Minimal YiAlphaGraph stand-in exposing finalize_streamed_run."""
+def _make_graph(tmp_path, close_and_atr=(None, None)):
+    """Minimal YiAlphaGraph stand-in exposing finalize_streamed_run.
+
+    ``close_and_atr`` is what the decision-price fallback answers. Without it
+    ``_log_state`` calls the memoized PIT OHLCV loader, which on this bare
+    graph is a real yfinance download (five years of NVDA / AAPL bars) from
+    inside the test — found by the round-16 network guard. Returns the graph;
+    the fallback's calls land in ``graph.close_and_atr_calls``.
+    """
     from yialpha.graph.trading_graph import YiAlphaGraph
 
     graph = YiAlphaGraph.__new__(YiAlphaGraph)  # skip __init__: attrs below suffice
     graph.ticker = None
     graph.log_states_dict = {}
     object.__setattr__(graph, "config", {"results_dir": str(tmp_path / "results")})
+    calls: list[tuple] = []
+    graph.close_and_atr_calls = calls
+
+    def _close_and_atr(ticker, trade_date, asset_type="stock"):
+        calls.append((ticker, trade_date, asset_type))
+        return close_and_atr
+
+    graph._latest_close_and_atr = _close_and_atr
     return graph
 
 
@@ -100,6 +115,11 @@ def test_finalize_streamed_run_writes_full_states_log_and_quality(tmp_path):
     assert data["data_quality"]["core_sentinel_count"] == 1
     assert data["data_quality"]["sentinels"][0]["method"] == "get_stock_data"
     assert data["final_trade_decision"] == "Rating: BUY"
+    # No overlay stamped a decision price, and the fallback loader had none
+    # either: the entry says so instead of carrying a stale or missing key.
+    assert data["price_at_decision"] is None
+    assert data["price_at_decision_basis"] == "unavailable"
+    assert graph.close_and_atr_calls == [("NVDA", "2026-06-10", "stock")]
 
     # The consumed block is attached to the returned state (report writer /
     # web UI render the DEGRADED banner from it), and the accumulator reset.
@@ -111,10 +131,23 @@ def test_finalize_streamed_run_writes_full_states_log_and_quality(tmp_path):
 
 @pytest.mark.unit
 def test_finalize_streamed_run_without_context_still_writes_empty_quality(tmp_path):
-    graph = _make_graph(tmp_path)
-    final_state = graph.finalize_streamed_run("AAPL", "2026-01-10", _full_streamed_state("AAPL", "2026-01-10"))
+    # The fallback loader answers here: the entry must carry ITS close as the
+    # decision price, labelled as the fallback rather than an overlay anchor.
+    graph = _make_graph(tmp_path, close_and_atr=(189.5, 3.25))
+    final_state = graph.finalize_streamed_run(
+        "AAPL", "2026-01-10", _full_streamed_state("AAPL", "2026-01-10")
+    )
     assert final_state["data_quality"]["core_sentinel_count"] == 0
     assert final_state["data_quality"]["sentinels"] == []
+    log_path = (
+        tmp_path / "results" / "AAPL" / "YiAlphaStrategy_logs"
+        / "full_states_log_2026-01-10.json"
+    )
+    data = json.loads(log_path.read_text(encoding="utf-8"))
+    assert data["price_at_decision"] == 189.5
+    assert data["price_at_decision_basis"] == "fallback_loader"
+    assert data["asset_type"] == "stock"
+    assert graph.close_and_atr_calls == [("AAPL", "2026-01-10", "stock")]
 
 
 @pytest.mark.unit

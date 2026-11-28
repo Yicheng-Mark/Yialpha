@@ -168,9 +168,11 @@ def _fetch_subreddit_rss(
         logger.warning("Reddit RSS fetch failed for r/%s · %s: %s", sub, ticker, exc)
         _record_degrade(f"r/{sub} RSS failed for {ticker}: {exc}")
         return []
-    except (OSError, http.client.HTTPException, ET.ParseError) as exc:
+    except (OSError, http.client.HTTPException, ET.ParseError, ValueError) as exc:
         # OSError covers URLError/TimeoutError/connection resets; HTTPException
         # covers chunked-transfer errors (IncompleteRead/BadStatusLine, #1024).
+        # ValueError is safe_xml_root's DTD/ENTITY refusal above: a hostile or
+        # malformed feed degrades like any other unparseable body.
         logger.warning("Reddit RSS fetch failed for r/%s · %s: %s", sub, ticker, exc)
         _record_degrade(f"r/{sub} RSS failed for {ticker}: {exc}")
         return []

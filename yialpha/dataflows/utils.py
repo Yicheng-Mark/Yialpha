@@ -37,13 +37,29 @@ logger = logging.getLogger(__name__)
 # The filing lag is tunable via env for conservatism (set to 0 to revert to the
 # old lookahead-leaking behaviour).
 # ---------------------------------------------------------------------------
-_FILING_LAG_ENV = os.environ.get("YIALPHA_FUNDAMENTALS_FILING_LAG_DAYS")
-try:
-    FUNDAMENTALS_FILING_LAG_DAYS: int = (
-        int(_FILING_LAG_ENV) if _FILING_LAG_ENV not in (None, "") else 45
-    )
-except ValueError:
-    FUNDAMENTALS_FILING_LAG_DAYS = 45
+_FILING_LAG_ENV = "YIALPHA_FUNDAMENTALS_FILING_LAG_DAYS"
+_FILING_LAG_DEFAULT = 45
+
+
+def _parse_filing_lag_days(raw: str | None) -> int:
+    """Filing lag (days) from the env value; anything but a non-negative
+    integer falls back to the 45-day default.
+
+    A NEGATIVE value is invalid like any other garbage: it would make
+    ``period end + lag`` land before the period even ended, i.e. re-open the
+    lookahead this guard exists to close. ``0`` is the documented switch that
+    reverts to the legacy (leaking) behaviour.
+    """
+    if raw is None or raw == "":
+        return _FILING_LAG_DEFAULT
+    try:
+        lag = int(raw)
+    except ValueError:
+        return _FILING_LAG_DEFAULT
+    return lag if lag >= 0 else _FILING_LAG_DEFAULT
+
+
+FUNDAMENTALS_FILING_LAG_DAYS: int = _parse_filing_lag_days(os.environ.get(_FILING_LAG_ENV))
 
 
 def is_filing_public(
@@ -175,12 +191,17 @@ def pinned_analysis_date(curr_date: str | None):
     this manager alongside its run-lock to get the identical PIT contract —
     including clearing on an exception, so a crashed run cannot leave the
     clamp pinned into the next one.
+
+    On exit the manager restores whatever was pinned *before* it (``None`` for
+    a top-level run) rather than blindly clearing: a nested manager must not
+    strip the PIT clamp of the outer run that is still in progress.
     """
+    previous = get_analysis_date()
     set_analysis_date(str(curr_date) if curr_date else None)
     try:
         yield
     finally:
-        set_analysis_date(None)
+        set_analysis_date(previous)
 
 
 def clamp_end_date(end_date: str | None, curr_date: str | None = None) -> str | None:

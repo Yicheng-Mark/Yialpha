@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import sys
 import time
 from datetime import date, datetime
@@ -52,7 +53,11 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from web import health, runner, store  # noqa: E402
-from yialpha.cli.utils import is_canonical_ymd, normalize_ticker_symbol  # noqa: E402
+from yialpha.cli.utils import (  # noqa: E402
+    is_canonical_ymd,
+    is_valid_ticker_input,
+    normalize_ticker_symbol,
+)
 from yialpha.dataflows.utils import safe_ticker_component  # noqa: E402
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -118,14 +123,18 @@ _CONTENT_SECURITY_POLICY = "; ".join(
 )
 
 
-@app.middleware("http")
-async def add_security_headers(request, call_next):
-    """Apply defense-in-depth browser restrictions to every response."""
-    response = await call_next(request)
+def _with_security_headers(response):
+    """Stamp the defense-in-depth browser restrictions onto ``response``."""
     response.headers["Content-Security-Policy"] = _CONTENT_SECURITY_POLICY
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     return response
+
+
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    """Apply defense-in-depth browser restrictions to every response."""
+    return _with_security_headers(await call_next(request))
 
 
 # Hostnames the loopback-bound server trusts in the ``Host`` header. The
@@ -135,19 +144,48 @@ _TRUSTED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1", "testserver"})
 _EXTRA_ALLOWED_HOSTS_ENV = "YIALPHA_WEB_ALLOWED_HOSTS"
 
 
+_HOST_PORT_SUFFIX_RE = re.compile(r":[0-9]*")  # optional ":" + *DIGIT (RFC 3986 port)
+
+
 def _hostname_of(host_header: str) -> str:
     """Extract the bare hostname from a ``Host`` header value (port stripped,
     IPv6 brackets removed), lowercased. Compares hostname-only so the check is
-    port-agnostic (the dev server's port may differ between invocations)."""
+    port-agnostic (the dev server's port may differ between invocations).
+
+    Strict on purpose (round-16) — returns ``""`` (matches nothing) for any
+    value that is not ``host[:port]`` or ``[v6][:port]``. The old parser kept
+    whatever preceded the first ``]`` / ``:`` (or the whole value), so
+    ``[::1]evil.com`` → ``::1``, ``[::1`` → ``::1`` and
+    ``127.0.0.1:80@evil.com`` → ``127.0.0.1`` all read as loopback: a
+    malformed header failed OPEN against an allowlist whose job is to fail
+    closed. ``Host`` carries no userinfo, so ``@`` is never legal, and a bare
+    unbracketed IPv6 literal (``::1``) is kept for the TestClient-era
+    spellings the suite pins.
+    """
     host = host_header.strip().lower()
     if not host:
         return ""
     if host.startswith("["):                     # [::1]:8000
         end = host.find("]")
-        return host[1:end] if end != -1 else host[1:]
-    if host.count(":") == 1:                     # host:port (single colon)
-        return host.rsplit(":", 1)[0]
-    return host                                  # bare name or bare ::1
+        if end == -1:
+            return ""                             # unterminated bracket
+        hostname, rest = host[1:end], host[end + 1:]
+        if ":" not in hostname:
+            return ""                             # brackets are for IPv6 only
+    elif "@" in host:
+        return ""                                 # "127.0.0.1:80@evil.com"
+    elif host.count(":") == 1:                    # host:port (single colon)
+        hostname, port = host.rsplit(":", 1)
+        rest = f":{port}"
+    else:
+        hostname, rest = host, ""                 # bare name or bare ::1
+    # Only an optional (possibly empty) numeric port may follow the host, and
+    # a hostname never contains whitespace.
+    if not hostname or any(ch.isspace() for ch in hostname):
+        return ""
+    if rest and not _HOST_PORT_SUFFIX_RE.fullmatch(rest):
+        return ""
+    return hostname
 
 
 def _allowed_hostnames() -> frozenset[str]:
@@ -161,23 +199,36 @@ def _allowed_hostnames() -> frozenset[str]:
     alias (or an explicit ``YIALPHA_WEB_ALLOWED_HOSTS`` entry — comma-
     separated, for reverse proxies or tests) are served; everything else gets
     403. Read per request so environment changes take effect without a
-    process restart in tests."""
+    process restart in tests.
+
+    A malformed entry normalizes to ``""`` and is dropped, never added: the
+    empty hostname is what a value-less ``Host:`` header yields, so adding it
+    would fail the whole guard open for one operator typo.
+    """
     hosts = set(_TRUSTED_HOSTNAMES)
     for name in os.environ.get(_EXTRA_ALLOWED_HOSTS_ENV, "").split(","):
         name = name.strip().lower()
-        if name:
-            hosts.add(_hostname_of(name))
+        parsed = _hostname_of(name) if name else ""
+        if parsed:
+            hosts.add(parsed)
     return frozenset(hosts)
 
 
 @app.middleware("http")
 async def verify_host_header(request, call_next):
-    """Reject requests whose Host header does not name this local server."""
+    """Reject requests whose Host header does not name this local server.
+
+    This middleware is the outermost one (registered last), so its 403 never
+    passes through ``add_security_headers`` — a rejected request used to be
+    the only response without CSP / nosniff (round-16). Stamp them here.
+    """
     hostname = _hostname_of(request.headers.get("host", ""))
     if hostname not in _allowed_hostnames():
-        return JSONResponse(
-            status_code=403,
-            content={"detail": f"untrusted Host header: {hostname!r}"},
+        return _with_security_headers(
+            JSONResponse(
+                status_code=403,
+                content={"detail": f"untrusted Host header: {hostname!r}"},
+            )
         )
     return await call_next(request)
 
@@ -214,8 +265,6 @@ def _validate_date(date: str) -> str:
     venue run 404'd ("unconverted data remains: _perp"). The suffix
     vocabulary mirrors ``web/store._DATE_RE`` exactly.
     """
-    import re
-
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:_perp|_spot)?", date):
         raise HTTPException(status_code=404, detail=f"bad date: {date!r}")
     return date
@@ -380,6 +429,22 @@ async def api_analyze(req: AnalyzeReq):
             raise HTTPException(status_code=400, detail=str(exc)) from None
     else:
         ticker = normalize_ticker_symbol(raw)
+
+    # Charset parity with the child (round-16): every batch frontend's
+    # ``prepare_batch_run`` exits 2 on a ticker outside ``is_valid_ticker_input``
+    # (letters/digits and ``._-^=``, <= 32 chars) — except this endpoint, which
+    # let e.g. ``"BTC USDT"`` (the venue normalizer keeps the space) or
+    # ``"BTC/USDT"`` / ``"BTC,USDT"`` (crypto-venue-shaped, so the market gate
+    # below passes them) spawn a run that died seconds later. Same class as the
+    # round-11 date pin: reject here, with the SHARED predicate, exactly what
+    # the child rejects. Checked on the normalized symbol — the spelling that
+    # goes into the child's argv, the on-disk dir and ``report_url``
+    # (``#/t/<ticker>/<date>`` is not a valid SPA route with a ``/`` inside).
+    if not is_valid_ticker_input(ticker):
+        raise HTTPException(
+            status_code=400,
+            detail=f"bad ticker: {ticker!r} (letters/digits and ._-^=)",
+        )
 
     # Market allowlist gate (US-listed equities + crypto only): reject right
     # here with a 400 + the shared policy message instead of letting the

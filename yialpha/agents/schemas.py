@@ -58,15 +58,27 @@ def _coerce_optional_float(value):
     strings parsed here (comma-grouping stripped) so an unparseable string
     degrades the OPTIONAL field to None instead of raising through pydantic
     and discarding the WHOLE structured decision."""
+    # Round-17: two float-parseable forms are not a number for these fields.
+    # A JSON boolean (pydantic's lax conversion reads ``true`` as ``1.0``:
+    # "100% conviction", a 1.0 price target) and a non-finite value
+    # (``"NaN"`` / ``"inf"`` / ``"1e999"`` — no price, and the two coercers
+    # below already refuse them). Both degrade the OPTIONAL field to None,
+    # exactly like an unparseable string.
+    if isinstance(value, bool):
+        return None
     if isinstance(value, str):
         stripped = value.strip()
         if stripped.lower() in _NULLISH_FLOAT:
             return None
         try:
-            return float(_strip_grouping(stripped))
+            parsed = float(_strip_grouping(stripped))
         except ValueError:
             return None
-    return value
+    else:
+        parsed = value
+    if isinstance(parsed, float) and not math.isfinite(parsed):
+        return None
+    return parsed
 
 
 def _coerce_unit_interval(value):
@@ -711,6 +723,17 @@ class SentimentReport(BaseModel):
             "cap (that ceiling is enforced on the report mechanically)."
         ),
     )
+
+    @field_validator("overall_score", mode="before")
+    @classmethod
+    def _not_a_boolean(cls, v):
+        """Round-17: pydantic's lax float conversion reads a JSON ``true`` as
+        ``1.0`` — "maximally bearish" on this 0-10 scale. A boolean is not a
+        score; it fails the field's validation like any other out-of-contract
+        value (``85`` does), so the caller takes its free-text fallback."""
+        if isinstance(v, bool):
+            raise ValueError("overall_score must be a number, not a boolean")
+        return v
 
     @field_validator("confidence", mode="before")
     @classmethod

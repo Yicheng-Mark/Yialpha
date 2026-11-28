@@ -219,7 +219,7 @@ tests = [
     "tests/test_ledger_replay_idempotency.py", "tests/test_tickets_mirror.py",
     "tests/test_positioning_analyst.py", "tests/test_ledger_evidence.py",
     "tests/test_evidence_time_contract.py", "tests/test_v21_ledger_wiring.py",
-    "tests/test_v24_portfolio_control.py", "tests/test_execution_isolation.py",
+    "tests/test_v24_portfolio_control.py",
 ]
 result = pytest.main(tests + ["-q", "--basetemp", str(p0_temp / "pytest")])
 print(f"P0 blocked network attempts: {len(blocked_network)}")
@@ -227,6 +227,8 @@ raise SystemExit(result or (1 if blocked_network else 0))
 '@
 & .\.venv-dev\Scripts\python.exe -c $p0Tests
 ```
+
+> 2026-11-24 更新：上方清单去掉了 `tests/test_execution_isolation.py`——执行层 `yialpha/execution/` 已于 2026-11-22 删除，该测试随之移除。下文 2026-09-07 日志提到的 `tests/test_p0_shadow_artifacts.py` 也已随 `scripts/p0_shadow/` 删除；日志原文按历史保留。
 
 ## B0 实现与离线验证补充（2026-09-07）
 

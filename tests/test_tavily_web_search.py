@@ -94,22 +94,32 @@ def test_missing_key_sentinel_and_evidence(monkeypatch):
 
 
 def test_budget_exhausted_sentinel(monkeypatch):
+    # HTTP is mocked: these two budget tests used to send a real request with
+    # the fake key, so "first" was whatever Tavily answered (401) and the
+    # assertions held by accident (found by the network guard, round-16).
     _fresh(monkeypatch, max_calls=1)
-    first = tavily.get_web_search("q1")
-    second = tavily.get_web_search("q2")
-    assert "budget exhausted" in second
+    with requests_mock_post(_post_returning(_FakeResponse({"results": []}))) as post:
+        first = tavily.get_web_search("q1")
+        second = tavily.get_web_search("q2")
     assert "budget exhausted" not in first
+    assert "budget exhausted" in second
+    # The budget gate sits in front of the HTTP call: the refused call never
+    # reached Tavily (and so was never charged by the provider either).
+    assert post.call_count == 1
     assert any("budget" in e["detail"] for e in quality.snapshot_quality())
 
 
 def test_reset_run_budget_restores_calls(monkeypatch):
     _fresh(monkeypatch, max_calls=1)
-    tavily.get_web_search("q1")
-    exhausted = tavily.get_web_search("q2")
-    tavily.reset_run_budget()
-    fresh = tavily.get_web_search("q3")
+    with requests_mock_post(_post_returning(_FakeResponse({"results": []}))) as post:
+        tavily.get_web_search("q1")
+        exhausted = tavily.get_web_search("q2")
+        assert post.call_count == 1          # refused by the budget, no HTTP
+        tavily.reset_run_budget()
+        fresh = tavily.get_web_search("q3")
     assert "budget exhausted" in exhausted
     assert "budget exhausted" not in fresh
+    assert post.call_count == 2              # the reset really bought a call
 
 
 def test_empty_query_sentinel(monkeypatch):
@@ -190,6 +200,11 @@ def test_http_error_sentinel(monkeypatch):
 
 
 def test_transport_error_sentinel_after_retry(monkeypatch):
+    from yialpha.dataflows import netretry
+
+    # The transient-retry backoff is not what this test is about; without the
+    # patch it sleeps through a real 2s and was among the slowest tests.
+    monkeypatch.setattr(netretry.time, "sleep", lambda _s: None)
     calls = {"n": 0}
 
     def _post(url, json=None, headers=None, timeout=None):  # noqa: A002

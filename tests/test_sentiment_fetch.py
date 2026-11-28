@@ -243,11 +243,19 @@ def test_default_flag_is_off(monkeypatch):
     # to today's sequential behaviour) unless the env var is set.
     import importlib
 
-    monkeypatch.delenv("YIALPHA_SENTIMENT_PARALLEL_FETCH", raising=False)
-    assert importlib.reload(sent)._SENTIMENT_PARALLEL_FETCH is False
-    monkeypatch.setenv("YIALPHA_SENTIMENT_PARALLEL_FETCH", "true")
-    assert importlib.reload(sent)._SENTIMENT_PARALLEL_FETCH is True
-    importlib.reload(sent)  # restore module to its process-default state
+    # reload() re-executes the module in place. Restore its namespace after the
+    # test: reloading again here would not -- monkeypatch still has the flag set
+    # to "true" until teardown, so that reload left the parallel fetch ON for
+    # the rest of the session.
+    saved = dict(sent.__dict__)
+    try:
+        monkeypatch.delenv("YIALPHA_SENTIMENT_PARALLEL_FETCH", raising=False)
+        assert importlib.reload(sent)._SENTIMENT_PARALLEL_FETCH is False
+        monkeypatch.setenv("YIALPHA_SENTIMENT_PARALLEL_FETCH", "true")
+        assert importlib.reload(sent)._SENTIMENT_PARALLEL_FETCH is True
+    finally:
+        sent.__dict__.clear()
+        sent.__dict__.update(saved)
 
 
 # ---------------------------------------------------------------------------

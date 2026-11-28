@@ -102,7 +102,11 @@ def test_overview_does_not_leak_today_or_live():
 def test_overview_rejects_future_label_for_todays_snapshot():
     from datetime import date, timedelta
 
-    future = (date.today() + timedelta(days=1)).isoformat()
+    # A live date is the host-local OR the UTC calendar date (two anchors):
+    # one day past the local date is still "today", hence no leak, on a host
+    # whose local date is a day behind UTC. Two days ahead is future in every
+    # time zone.
+    future = (date.today() + timedelta(days=2)).isoformat()
     assert overview_would_leak_future(future) is True
 
 

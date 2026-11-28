@@ -169,4 +169,7 @@ class TestDebateRoundValidation:
         {"max_risk_discuss_rounds": 5},
     ])
     def test_valid_rounds_accepted(self, kwargs):
-        ConditionalLogic(**kwargs)
+        logic = ConditionalLogic(**kwargs)
+        # Accepted, and kept as given (the other count stays at its default).
+        assert logic.max_debate_rounds == kwargs.get("max_debate_rounds", 1)
+        assert logic.max_risk_discuss_rounds == kwargs.get("max_risk_discuss_rounds", 1)

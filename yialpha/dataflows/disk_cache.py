@@ -26,7 +26,7 @@ the single resolver for ``<data_cache_dir>/<vendor>/`` (config-aware, with the
 ``~/.yialpha/cache`` fallback in exactly one place).
 
 Security: every cache filename passes :func:`sanitize_cache_filename` (an
-allowlist — only ``[A-Za-z0-9._-]`` characters, and never ``.``/``..``), and the
+allowlist — only ``[A-Za-z0-9._-()]`` characters, and never ``.``/``..``), and the
 joined path is re-checked with ``os.path.commonpath`` against the normalized
 ``base_dir``. A ticker-derived filename containing ``..`` or a path separator
 can therefore never resolve outside the cache directory.
@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import os
 import re
 import threading
@@ -165,14 +166,15 @@ def max_stale_days() -> float:
     """Configured cap (days) beyond which a stale cache is refused on failure.
 
     ``YIALPHA_DATA_CACHE_MAX_STALE_DAYS`` (default 30). ``0`` is valid and
-    means "never serve stale" (fully fail-closed); negative/garbage values
-    fall back to the default rather than silently disabling the cap.
+    means "never serve stale" (fully fail-closed); negative/garbage/non-finite
+    values fall back to the default rather than silently disabling the cap
+    (an infinite cap would serve a cache of any age).
     """
     try:
         n = float(get_config().get("data_cache_max_stale_days", 30))
     except (TypeError, ValueError):
         return 30.0
-    return n if n >= 0 else 30.0
+    return n if n >= 0 and math.isfinite(n) else 30.0
 
 
 def _age_seconds(mtime: float) -> float:

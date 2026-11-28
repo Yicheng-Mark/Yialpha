@@ -6,21 +6,32 @@ import importlib
 
 import pytest
 
+# A catalog model per provider whose base_url is resolved below (ollama accepts
+# any name). A made-up one makes get_llm() warn "not in the known model list",
+# which base_url resolution has nothing to do with.
+_MODEL = {"ollama": "llama3.1", "xai": "grok-4.3", "deepseek": "deepseek-flash"}
 
-@pytest.fixture(scope="module", autouse=True)
-def _resync_reloaded_modules():
-    """Restore module state after this file's importlib.reload() calls.
 
-    Several tests below reload ``cli.utils`` to re-evaluate OLLAMA_BASE_URL.
-    That leaves ``cli.main``'s star-imported names (e.g. get_ticker) bound to
-    the pre-reload module objects, which breaks identity checks in unrelated
-    tests that happen to run afterward. Re-sync once on teardown so the reload
-    doesn't leak across test modules.
+@pytest.fixture(autouse=True)
+def _undo_module_reloads():
+    """Put the modules this file ``importlib.reload()``s back as they were.
+
+    ``reload`` re-executes a module into its existing namespace, and nothing
+    undoes that for the rest of the session (``monkeypatch`` restores
+    ``os.environ`` only). Left in place, ``openai_client`` hands out new class
+    objects -- identity checks against names other modules imported earlier
+    fail -- and ``cli.main``'s star-imported names are no longer the objects
+    ``cli.utils`` holds. Snapshot both namespaces and restore them after each
+    test, so the file leaves the session as it found it.
     """
+    import yialpha.cli.utils as cli_utils
+    import yialpha.llm_clients.openai_client as openai_client
+
+    saved = [(module, dict(module.__dict__)) for module in (cli_utils, openai_client)]
     yield
-    from yialpha.cli import main as _main, utils as _utils
-    importlib.reload(_utils)
-    importlib.reload(_main)
+    for module, namespace in saved:
+        module.__dict__.clear()
+        module.__dict__.update(namespace)
 
 
 # ---- openai_client side: registry-driven base_url resolution --------------
@@ -32,7 +43,8 @@ def _reload_client():
 
 
 def _base_url(mod, provider, **kwargs):
-    return str(mod.OpenAIClient(model="m", provider=provider, **kwargs).get_llm().openai_api_base)
+    client = mod.OpenAIClient(model=_MODEL[provider], provider=provider, **kwargs)
+    return str(client.get_llm().openai_api_base)
 
 
 def test_resolver_returns_default_when_env_unset(monkeypatch):

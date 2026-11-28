@@ -266,6 +266,7 @@ class TestChiSquareSparsePolicy:
         m = ab._compute_metrics(runs(["Buy"]), runs(["Hold"]), dry_run=False)
         assert m["rating_test_method"]
         assert isinstance(m["rating_p"], float)
+        assert 0.0 <= m["rating_p"] <= 1.0  # a p-value, not NaN / inf
 
 
 # ---------------------------------------------------------------------------

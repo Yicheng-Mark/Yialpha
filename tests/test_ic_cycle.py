@@ -6,13 +6,24 @@ indicator_ic_context advisory block.
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from unittest import mock
 
 import pandas as pd
 import pytest
 
+from yialpha.backtest import ic as ic_module
 from yialpha.dataflows import stockstats_utils
+
+
+def _constant_input_warning():
+    """Expected-warning context for a constant Spearman input (the ``flat_junk``
+    column below): ``scipy.stats.spearmanr`` warns before returning NaN; the numpy
+    fallback taken without scipy (an optional accelerator) is silent."""
+    if ic_module._HAVE_SCIPY:
+        return pytest.warns(RuntimeWarning, match="An input array is constant")
+    return nullcontext()
 
 
 def _ohlcv(days: int = 60, start_close: float = 100.0) -> pd.DataFrame:
@@ -80,7 +91,8 @@ def test_prune_verdict_for_csv_shape(tmp_path):
     csv = tmp_path / "X_5d.csv"
     df.to_csv(csv, index=False)
 
-    verdict = prune_verdict_for_csv(csv, window=30, min_observations=10)
+    with _constant_input_warning():
+        verdict = prune_verdict_for_csv(csv, window=30, min_observations=10)
     assert set(verdict) == {"generated_at", "params", "keep", "prune", "per_indicator"}
     assert "close_50_sma" in verdict["per_indicator"]
     entry = verdict["per_indicator"]["close_50_sma"]

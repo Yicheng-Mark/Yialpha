@@ -44,11 +44,14 @@ the naive ``alpha_vs_index`` baseline it strengthens.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # Optional scipy -- the exact two-sided p-value needs the t-distribution CDF.
 try:  # pragma: no cover - exercised only by environment
@@ -289,10 +292,24 @@ def event_study(
 
         a_est = asset_ret.values[est_start:est_end]
         b_est = bench_ret.values[est_start:est_end]
-        alpha, beta = fit_market_model(a_est, b_est)
 
         a_ev = asset_ret.values[ev_start:ev_end + 1]
         b_ev = bench_ret.values[ev_start:ev_end + 1]
+        # Round-17: a NaN / inf return anywhere in either window (a missing or
+        # a zero close divides to NaN / inf) leaves the fit or the CAR NaN.
+        # Such an event cannot be decided: skip it like a window that runs off
+        # the tape, and say so. It used to be COUNTED with car=nan, which sank
+        # the cross-event mean and every statistic derived from it.
+        if not (
+            np.isfinite(a_est).all() and np.isfinite(b_est).all()
+            and np.isfinite(a_ev).all() and np.isfinite(b_ev).all()
+        ):
+            logger.warning(
+                "event study: event %s skipped -- a non-finite return in its "
+                "estimation or event window", event_date,
+            )
+            continue
+        alpha, beta = fit_market_model(a_est, b_est)
         ar = abnormal_returns(a_ev, b_ev, alpha, beta)
         car = float(ar.sum())
 

@@ -11,7 +11,7 @@ monkeypatched.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 
 import pandas as pd
 import pytest
@@ -40,6 +40,16 @@ def _kline_frame(closes, start="2026-07-01"):
 def _ts(days_ago: int) -> int:
     d = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     return int((d.timestamp() - days_ago * 86_400) * 1000)
+
+
+def _utc_today() -> str:
+    """The UTC calendar date ``_ts`` builds its rows on.
+
+    The bundle trims rows dated after ``end_date``. Passing the host-local
+    date instead cut the ``_ts(0)`` row off for hours every day on any host
+    whose local date is a day behind UTC.
+    """
+    return datetime.now(UTC).date().isoformat()
 
 
 # ---- price bases ------------------------------------------------------------
@@ -110,7 +120,7 @@ def test_funding_trailing_sum_live_only(monkeypatch):
             {"fundingTime": _ts(0), "fundingRate": "-0.0002"},
         ],
     )
-    out = pb._fetch_funding("BTCUSDT", date.today().isoformat())
+    out = pb._fetch_funding("BTCUSDT", _utc_today())
     assert out["status"] == pb.STATUS_OK
     assert out["sum_7d"] == pytest.approx(0.0)
     assert out["settlements"] == 3
@@ -127,7 +137,7 @@ def test_open_interest_change_and_percentile(monkeypatch):
             {"timestamp": _ts(0), "sumOpenInterest": "121"},
         ],
     )
-    out = pb._fetch_open_interest("BTCUSDT", date.today().isoformat())
+    out = pb._fetch_open_interest("BTCUSDT", _utc_today())
     assert out["status"] == pb.STATUS_OK
     assert out["latest"] == pytest.approx(121.0)
     assert out["chg_1d"] == pytest.approx(121.0 / 110.0 - 1.0)
@@ -147,7 +157,7 @@ def test_lsr_three_vantages_and_spread(monkeypatch):
         ]
 
     monkeypatch.setattr(pb, "_http_get", fake_http)
-    out = pb._fetch_lsr("BTCUSDT", date.today().isoformat())
+    out = pb._fetch_lsr("BTCUSDT", _utc_today())
     assert out["status"] == pb.STATUS_OK
     assert out["top_account"]["latest"] == pytest.approx(1.8)
     assert out["top_position"]["latest"] == pytest.approx(1.8)
@@ -165,7 +175,7 @@ def test_taker_latest_and_mean(monkeypatch):
             for d in range(7, -1, -1)
         ],
     )
-    out = pb._fetch_taker("BTCUSDT", date.today().isoformat())
+    out = pb._fetch_taker("BTCUSDT", _utc_today())
     assert out["status"] == pb.STATUS_OK
     assert out["latest"] == pytest.approx(1.35)
     # Round-7: "7d" means 7 daily values END-INCLUSIVE ([D-6..D]) — the same
@@ -487,7 +497,7 @@ def test_open_interest_monotonic_new_high_reads_100th(monkeypatch):
         for i in range(30)
     ]
     monkeypatch.setattr(pb, "_http_get", lambda path, params, *a, **k: rows)
-    out = pb._fetch_open_interest("BTCUSDT", date.today().isoformat())
+    out = pb._fetch_open_interest("BTCUSDT", _utc_today())
     assert out["status"] == pb.STATUS_OK
     assert out["days"] == 30
     assert out["percentile"] == pytest.approx(100.0)
@@ -497,7 +507,7 @@ def test_open_interest_monotonic_new_high_reads_100th(monkeypatch):
         for i, v in enumerate([100.0, 90.0, 125.0, 110.0, 105.0, 120.0])
     ]
     monkeypatch.setattr(pb, "_http_get", lambda path, params, *a, **k: rows_mid)
-    out_mid = pb._fetch_open_interest("BTCUSDT", date.today().isoformat())
+    out_mid = pb._fetch_open_interest("BTCUSDT", _utc_today())
     assert out_mid["percentile"] == pytest.approx(4 / 5 * 100.0)
 
 
@@ -512,7 +522,7 @@ def test_open_interest_single_row_window_is_disclosed_vacuous(monkeypatch):
             {"timestamp": _ts(0), "sumOpenInterest": "121"},
         ],
     )
-    out = pb._fetch_open_interest("BTCUSDT", date.today().isoformat())
+    out = pb._fetch_open_interest("BTCUSDT", _utc_today())
     assert out["status"] == pb.STATUS_OK
     assert out["days"] == 1
     assert out["percentile"] == pytest.approx(100.0)
@@ -539,7 +549,7 @@ def test_oi_series_trims_rows_past_window_end(monkeypatch):
         ]
 
     monkeypatch.setattr(pb, "_http_get", fake_http)
-    rows = pb._oi_series("BTCUSDT", date.today().isoformat(), 30)
+    rows = pb._oi_series("BTCUSDT", _utc_today(), 30)
     assert [v for _ts, v in rows] == [100.0, 110.0]
 
 
@@ -557,10 +567,10 @@ def test_lsr_and_taker_trim_rows_past_window_end(monkeypatch):
         ]
 
     monkeypatch.setattr(pb, "_http_get", fake_http)
-    lsr = pb._fetch_lsr("BTCUSDT", date.today().isoformat())
+    lsr = pb._fetch_lsr("BTCUSDT", _utc_today())
     for key in ("top_account", "top_position", "global_account"):
         assert lsr[key]["latest"] == pytest.approx(1.5)
-    taker = pb._fetch_taker("BTCUSDT", date.today().isoformat())
+    taker = pb._fetch_taker("BTCUSDT", _utc_today())
     assert taker["latest"] == pytest.approx(1.2)
 
 
@@ -579,13 +589,19 @@ def test_leg_timeout_default_and_env_parsing(monkeypatch):
     import importlib
 
     assert pb.LEG_TIMEOUT_S == 300.0
-    for raw, expected in (("900", 900.0), ("0", None), ("-5", 300.0),
-                          ("garbage", 300.0)):
-        monkeypatch.setenv("YIALPHA_PERP_BUNDLE_LEG_TIMEOUT_S", raw)
-        importlib.reload(pb)
-        assert expected == pb.LEG_TIMEOUT_S, raw
-    monkeypatch.delenv("YIALPHA_PERP_BUNDLE_LEG_TIMEOUT_S", raising=False)
-    importlib.reload(pb)
+    # reload() re-executes the module in place; put its namespace back after the
+    # test, so later tests see the objects (and the timeout) the session started
+    # with.
+    saved = dict(pb.__dict__)
+    try:
+        for raw, expected in (("900", 900.0), ("0", None), ("-5", 300.0),
+                              ("garbage", 300.0)):
+            monkeypatch.setenv("YIALPHA_PERP_BUNDLE_LEG_TIMEOUT_S", raw)
+            importlib.reload(pb)
+            assert expected == pb.LEG_TIMEOUT_S, raw
+    finally:
+        pb.__dict__.clear()
+        pb.__dict__.update(saved)
     assert pb.LEG_TIMEOUT_S == 300.0
 
 
@@ -786,7 +802,7 @@ def test_adl_unavailable_records_bundle_scoped_sentinel(monkeypatch):
 
     quality.ensure_run_context()
     try:
-        pb.fetch_perp_market_bundle("BTCUSDT", date.today().isoformat())
+        pb.fetch_perp_market_bundle("BTCUSDT", _utc_today())
         events = quality.snapshot_quality()
     finally:
         quality.reset_quality()
@@ -913,7 +929,7 @@ class _PromptCaptureLLM(Runnable):
 
 def _market_state():
     return {
-        "trade_date": date.today().isoformat(),
+        "trade_date": _utc_today(),
         "company_of_interest": "BTCUSDT",
         "asset_type": "crypto_perp",
         "instrument_context": "CTX",

@@ -22,7 +22,7 @@ the raw ``fetch_chart_json`` binding are monkeypatched, never the network):
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -61,6 +61,16 @@ def _today_end() -> datetime:
     return datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def _utc_today() -> str:
+    """The UTC calendar date ``_chart_payload`` builds its points on.
+
+    The PIT filter drops points dated after ``curr_date``: with the host-local
+    date instead, the newest point was cut off for hours every day on any host
+    whose local date is a day behind UTC.
+    """
+    return datetime.now(UTC).date().isoformat()
+
+
 def _patch_cached(monkeypatch, per_chart: dict[str, tuple[object, str]]) -> None:
     """Monkeypatch the disk-cache seam: chart -> (payload, fetched_at)."""
     def _fake(chart: str):
@@ -80,7 +90,7 @@ def test_render_labels_actual_span_not_nominal_30d(monkeypatch):
     _patch_cached(monkeypatch, {
         c: (_chart_payload(5), "2026-09-19T00:00:00") for c in ocf.CHARTS
     })
-    flows = ocf.fetch_onchain_flows(date.today().isoformat())
+    flows = ocf.fetch_onchain_flows(_utc_today())
 
     assert flows is not None
     for entry in flows.series.values():
@@ -104,7 +114,7 @@ def test_render_labels_actual_span_not_nominal_30d(monkeypatch):
 def test_disk_cache_wrapper_carries_fetched_at(monkeypatch):
     payload = _chart_payload(5)
     monkeypatch.setattr(ocf, "fetch_chart_json", lambda chart, **k: payload)
-    flows = ocf.fetch_onchain_flows(date.today().isoformat())
+    flows = ocf.fetch_onchain_flows(_utc_today())
     assert flows is not None
 
     cache_dir = Path(vendor_cache_dir("onchain"))
@@ -162,7 +172,7 @@ def test_failed_chart_records_sentinel_other_chart_renders(monkeypatch):
         _VOLUME: (None, "2026-09-19T00:00:00"),
         _ADDRESSES: (_chart_payload(5, end=end), "2026-09-19T01:00:00"),
     })
-    flows = ocf.fetch_onchain_flows(date.today().isoformat())
+    flows = ocf.fetch_onchain_flows(_utc_today())
 
     assert flows is not None
     assert flows.series[_VOLUME] is None
@@ -195,7 +205,7 @@ def test_garbage_cached_payload_fails_soft(monkeypatch):
         _VOLUME: ([{"x": 1, "y": 2}], "2026-09-19T00:00:00"),
         _ADDRESSES: (_chart_payload(5), "2026-09-19T01:00:00"),
     })
-    flows = ocf.fetch_onchain_flows(date.today().isoformat())
+    flows = ocf.fetch_onchain_flows(_utc_today())
 
     assert flows is not None
     assert flows.series[_VOLUME] is None
@@ -216,7 +226,7 @@ def test_fetched_at_is_oldest_ingredient(monkeypatch):
         _VOLUME: (_chart_payload(5), older),
         _ADDRESSES: (_chart_payload(5), newer),
     })
-    flows = ocf.fetch_onchain_flows(date.today().isoformat())
+    flows = ocf.fetch_onchain_flows(_utc_today())
     assert flows is not None
     assert flows.fetched_at == older
 
@@ -225,7 +235,7 @@ def test_fetched_at_is_oldest_ingredient(monkeypatch):
         _VOLUME: (_chart_payload(5), newer),
         _ADDRESSES: (_chart_payload(5), older),
     })
-    flows2 = ocf.fetch_onchain_flows(date.today().isoformat())
+    flows2 = ocf.fetch_onchain_flows(_utc_today())
     assert flows2 is not None
     assert flows2.fetched_at == older
 
@@ -238,7 +248,7 @@ def test_fetched_at_falls_back_to_assembly_now(monkeypatch):
         c: (_chart_payload(5), "") for c in ocf.CHARTS
     })
     before = datetime.now(UTC)
-    flows = ocf.fetch_onchain_flows(date.today().isoformat())
+    flows = ocf.fetch_onchain_flows(_utc_today())
     after = datetime.now(UTC)
     assert flows is not None
     got = datetime.fromisoformat(flows.fetched_at).replace(tzinfo=UTC)

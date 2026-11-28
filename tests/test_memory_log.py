@@ -480,6 +480,8 @@ class TestDeferredReflection:
     def test_update_noop_when_no_log_path(self):
         log = TradingMemoryLog(config=None)
         log.update_with_outcome("NVDA", "2026-01-10", 0.05, 0.02, 5, "Reflection")
+        # A no-op in effect, not merely "no exception": nothing was recorded.
+        assert log.load_entries() == []
 
     def test_formatting_roundtrip_after_update(self, tmp_path):
         """All fields intact and blank line between tag and DECISION preserved after update."""

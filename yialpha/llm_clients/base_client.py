@@ -19,6 +19,18 @@ def normalize_content(response: Any) -> Any:
             for item in content
         ]
         response.content = "\n".join(t for t in texts if t)
+    # langchain's cache-hit path copies a replayed message and stamps
+    # ``usage_metadata["total_cost"] = 0`` on it ("we zero out cost on cache
+    # hits", BaseChatModel._convert_cached_generations). usage_metadata is part
+    # of the prompt string the LLM response cache is keyed on, so an answer
+    # replayed into a later turn's history hashed differently from the live
+    # answer it replaced and that turn missed the cache — in a tool loop only
+    # the first call was ever replayed (round 17). The live answer never
+    # carries the key; a replay is still marked, by the cache's own
+    # ``cached_replay`` stamp on the generation.
+    usage = getattr(response, "usage_metadata", None)
+    if isinstance(usage, dict) and usage.get("total_cost") == 0:
+        del usage["total_cost"]
     return response
 
 

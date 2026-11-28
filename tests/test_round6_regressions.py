@@ -875,34 +875,29 @@ def test_disk_cache_lookup_stamps_cached_replay(tmp_path):
 
 
 @pytest.mark.unit
-def test_shared_http_clients_follow_redirects():
+def test_shared_http_clients_follow_redirects(monkeypatch):
     """Both custom transports (keepalive singleton + key-pool client) must
     set follow_redirects=True, matching the openai SDK's own default client
     — a 30x-relaying base_url otherwise turns into an APIStatusError only
     on the custom-client paths."""
     from yialpha.llm_clients import http_client as hc, key_pool as kp
 
+    # Both transports are process-wide singletons. Start from none and drop
+    # the ones built here again on the way out: the pooled client was built
+    # against the test key above, and its proxy configuration is read once.
     hc.reset_for_test()
     kp.reset_for_test()
-    client = hc.get_shared_http_client()
-    assert client is not None and client.follow_redirects is True
-
-    import os
-
-    old_keys = os.environ.get("ZHIPU_CN_API_KEYS")
-    old_single = os.environ.get("ZHIPU_CN_API_KEY")
     try:
-        os.environ["ZHIPU_CN_API_KEYS"] = "test-key-1"
-        os.environ.pop("ZHIPU_CN_API_KEY", None)
+        client = hc.get_shared_http_client()
+        assert client is not None and client.follow_redirects is True
+
+        monkeypatch.setenv("ZHIPU_CN_API_KEYS", "test-key-1")
+        monkeypatch.delenv("ZHIPU_CN_API_KEY", raising=False)
         pooled = kp.get_pool_http_client("glm-cn")
         assert pooled is not None and pooled.follow_redirects is True
     finally:
-        if old_keys is None:
-            os.environ.pop("ZHIPU_CN_API_KEYS", None)
-        else:
-            os.environ["ZHIPU_CN_API_KEYS"] = old_keys
-        if old_single is not None:
-            os.environ["ZHIPU_CN_API_KEY"] = old_single
+        hc.reset_for_test()
+        kp.reset_for_test()
 
 
 @pytest.mark.unit

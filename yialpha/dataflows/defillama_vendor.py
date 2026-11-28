@@ -464,7 +464,8 @@ def get_crypto_network_fundamentals(
     chain = None
     try:
         chain = _chain_for_base(base)
-    except Exception:  # noqa: BLE001 — _chain_for_base already swallows its own
+    except Exception as exc:  # noqa: BLE001 — _chain_for_base already swallows its own typed errors
+        logger.warning("DefiLlama chain resolution failed for %s: %s", base, exc)
         chain = None
     if chain is None and protocol is not None:
         chains_list = [
@@ -518,7 +519,10 @@ def get_crypto_network_fundamentals(
     # failure to the router (sentinel); genuine no-coverage -> typed error;
     # anything rendered -> in-band failure notes. ---
     if not protocol_rendered and not chain_rendered:
-        if protocol is None and chain is None:
+        # ``protocol = None`` is also the resolution-FAILURE outcome, so a
+        # recorded failure means coverage was never established: it outranks
+        # the no-coverage verdict instead of being dropped by it.
+        if protocol is None and chain is None and not failures:
             raise NoMarketDataError(
                 ticker,
                 detail=(
