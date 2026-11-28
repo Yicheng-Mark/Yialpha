@@ -899,6 +899,12 @@ class TestRound15VerifyHistoryCommand:
         }
 
     def test_hit_rate_branch_prints_stats_and_paths(self, monkeypatch, tmp_path):
+        # Rich folds console output at 80 columns when no terminal is attached, and
+        # WHERE it folds depends on the length of tmp_path: with a temp directory one
+        # to nineteen characters longer than this box's, the file name came out split
+        # over two lines ("accuracy_report.jso" / "n") -- a GitHub ubuntu runner's
+        # /tmp/pytest-of-runner/pytest-0 is in that range. Keep the paths on one line.
+        monkeypatch.setenv("COLUMNS", "400")
         import yialpha.accuracy as accuracy_mod
 
         fake = mock.Mock(

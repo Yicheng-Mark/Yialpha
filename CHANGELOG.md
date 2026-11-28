@@ -61,6 +61,39 @@ Breaking changes within the 0.x line are called out explicitly.
   `ci.yml` had moved to v5 / v6.
 - Three tests slept through real retry backoff (`test_binance_square` ×2,
   `test_tavily_web_search` ×1): ~6 s of wall clock for no assertion.
+- **Five tests could fail for reasons outside the code they test.** None of them reproduces
+  on an idle dev box; all five were found after the round-17 regression matrix had come back
+  green.
+  - **Three `_map_tickers` tests asserted the order in which worker threads start**
+    (`tests/test_round17_scripts_e2e.py`, `TestMapTickers`). `_map_tickers`
+    (`scripts/run_baseline.py`) runs one task per ticker on a pool and promises that the
+    *results* come back in input order, which the pool path delivers. The tests also
+    asserted the start order, and with two workers that is the scheduler's choice. Under CPU
+    load on Linux the third ticker started before the second in 587 of 3,200 repetitions; on
+    Windows it never did, in 3,200. The three tests now assert the contract — results in
+    input order, each ticker run exactly once — and the counting task they share takes its
+    counter under a lock.
+  - **The real-thread fail-fast test assumed the second task had started**
+    (`tests/test_round17_ops.py`,
+    `test_r17_concurrent_fail_fast_with_real_threads_still_returns_every_ticker`). If BOOM
+    fails before NVDA's task is picked up, fail-fast cancels NVDA, as it should; that
+    happened in 5 of 480 runs on two saturated cores. NVDA now announces itself and BOOM
+    waits for it.
+  - **A CLI test's outcome depended on the length of the temporary directory**
+    (`tests/test_round15_cli_helpers.py`, `TestRound15VerifyHistoryCommand`).
+    `verify-history` prints the report paths through Rich, which folds at 80 columns when no
+    terminal is attached, and where it folds depends on the path's length: with `tmp_path`
+    one to nineteen characters longer than this dev box's, `accuracy_report.json` came out
+    split over two lines. `/tmp/pytest-of-runner/pytest-0` on a GitHub ubuntu runner is in
+    that range; the dev box's own path is one character outside it. The test sets
+    `COLUMNS`, as the other CLI-output tests already do. The 17 CLI- and script-driving test
+    files (1,656 tests) were then run once per temp-path length — 60 lengths on Linux, 35 on
+    Windows — and no other test depends on it.
+  The first of these surfaced in the westward-clock run the round-17 matrix had asked for
+  (`TZ=Pacific/Honolulu`, Linux py3.13) and reproduces just as well under `TZ=UTC`: it is a
+  scheduling race, not a clock issue. A read-only review of every test that starts threads or
+  processes then listed 15 further candidates; pinned to two cores beside eight CPU burners,
+  the fail-fast test above was the only one that failed (5 of 13,920 executions).
 
 - **Product bugs found by the round-16 audit.** Each one is pinned by a
   regression test that was run against the unmodified `v1.0.0` checkout to
@@ -465,6 +498,11 @@ Breaking changes within the 0.x line are called out explicitly.
   order reversed (Windows, Linux py3.11) and on clocks whose calendar date is a
   day ahead of UTC (`TZ=XXX-14`: Windows, Linux py3.13) or a day behind it
   (`TZ=XXX24` and `TZ=XXX18` on Windows; `TZ=XXX24` on Linux py3.11 and py3.13).
+  The literal westward settings — `TZ=HST10` on Windows and `TZ=Pacific/Honolulu`
+  on Linux py3.11 and py3.13 — need the UTC clock between 00:00 and 10:00 and
+  were run afterwards (2026-11-28), on the tree with the five test fixes
+  described under Fixed: green on all three. On the round-17 tree itself the
+  Linux py3.13 run came back with the `_map_tickers` failure listed there.
   A plain run reports 0 warnings. Under coverage the py3.13 lanes print 21
   `ResourceWarning: unclosed database` lines — thread-local ledger connections
   (`yialpha/ledger/sqlite.py`, `get_connection`) that are never closed

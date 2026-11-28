@@ -1387,8 +1387,27 @@ class TestRunConcurrentLoop:
 
     def test_r17_concurrent_fail_fast_with_real_threads_still_returns_every_ticker(self, tmp_path):
         config = _batch_config(tmp_path, batch_concurrency=True, batch_fail_fast=True)
-        with BatchRunner(config, graph_factory=_CrashGraph, workers=2, progress=False) as run:
+        # Real threads: which task a worker picks up first is the scheduler's
+        # choice. If BOOM fails before NVDA's task has started, fail-fast is
+        # right to cancel NVDA and the row checked below is a cancellation, not
+        # a signal -- that happened in 5 of 480 runs on two saturated cores. So
+        # make "already in flight" a fact: NVDA announces itself and BOOM waits
+        # for it (bounded, so a NVDA that never starts fails instead of hanging).
+        nvda_in_flight = threading.Event()
+
+        class _CrashAfterNvdaStarts(_CrashGraph):
+            def propagate(self, ticker: str, trade_date: str, asset_type: str = "stock"):
+                if ticker == "NVDA":
+                    nvda_in_flight.set()
+                elif ticker == "BOOM":
+                    assert nvda_in_flight.wait(5), "NVDA never started"
+                return super().propagate(ticker, trade_date, asset_type=asset_type)
+
+        with BatchRunner(
+            config, graph_factory=_CrashAfterNvdaStarts, workers=2, progress=False
+        ) as run:
             rows = run.run(["BOOM", "NVDA"], "2026-01-05")
+        assert nvda_in_flight.is_set()
         assert [r["ticker"] for r in rows] == ["BOOM", "NVDA"]
         assert isinstance(rows[0]["error"], RuntimeError)
         assert rows[0]["signal"] is None

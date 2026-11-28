@@ -1203,10 +1203,17 @@ def built_graphs(rbl, monkeypatch):
 
 
 def _counting_task(calls, **extra):
-    """``task(ticker, graph)`` that records its calls and returns ``{"ticker", "n"}``."""
+    """``task(ticker, graph)`` that records its calls and returns ``{"ticker", "n"}``.
+
+    ``calls`` and ``n`` are taken under one lock: with a pool, two workers can be
+    inside the task at the same time.
+    """
+    lock = threading.Lock()
+
     def task(ticker, graph):
-        calls.append((ticker, graph.number))
-        return {"ticker": ticker, "n": len(calls), **extra}
+        with lock:
+            calls.append((ticker, graph.number))
+            return {"ticker": ticker, "n": len(calls), **extra}
 
     return task
 
@@ -1237,12 +1244,18 @@ class TestMapTickers:
                 "debug": False, "risk_enabled": risk_enabled,
                 "asset_type": asset_type, "tickers": tickers,
             }
-        assert [t for t, _ in calls] == tickers
-        assert [row["ticker"] for row in out] == tickers
-        assert [row["n"] for row in out] == [1, 2, 3]
+        assert [row["ticker"] for row in out] == tickers  # the contract: results in input order
         if workers == 1:
+            assert [t for t, _ in calls] == tickers
+            assert [row["n"] for row in out] == [1, 2, 3]
             assert [g for _, g in calls] == [0, 0, 0]
         else:
+            # With a pool, which worker thread picks which ticker is the
+            # scheduler's choice (on a loaded Linux box this ran the third ticker
+            # before the second in about one run in five); only the results are
+            # ordered.
+            assert sorted(t for t, _ in calls) == sorted(tickers)
+            assert sorted(row["n"] for row in out) == [1, 2, 3]
             assert {g for _, g in calls} <= {graph.number for graph in built_graphs}
 
     @pytest.mark.parametrize("workers", [1, 0, -3])
@@ -1297,7 +1310,9 @@ class TestMapTickers:
         out = rbl._map_tickers(["AAPL", "MSFT", "NVDA"], task, workers)
 
         assert out == [["AAPL"], None, ["NVDA"]]
-        assert calls[0] == "AAPL" and "NVDA" in calls and calls.count("MSFT") == 1
+        # Each ticker ran exactly once. With a pool the start order is the
+        # scheduler's choice, so AAPL is not necessarily ``calls[0]``.
+        assert sorted(calls) == ["AAPL", "MSFT", "NVDA"]
         assert capsys.readouterr().err == "[MSFT] ❌ ticker failed, skipping: RuntimeError('vendor down')\n"
 
     def test_r17_map_tickers_failure_line_carries_the_exception_repr(self, rbl, built_graphs, capsys):
@@ -1357,8 +1372,16 @@ class TestMapTickers:
 
         out = rbl._map_tickers(tickers, _counting_task(calls), workers)
 
-        assert [t for t, _ in calls] == kept
-        assert out == [{"ticker": t, "n": i + 1} for i, t in enumerate(kept)]
+        if workers == 1:
+            assert [t for t, _ in calls] == kept
+            assert out == [{"ticker": t, "n": i + 1} for i, t in enumerate(kept)]
+        else:
+            # With a pool the start order is the scheduler's choice (see
+            # ``..._keeps_input_order``); what must hold is one run per kept
+            # ticker and results in input order.
+            assert sorted(t for t, _ in calls) == sorted(kept)
+            assert [row["ticker"] for row in out] == kept
+            assert sorted(row["n"] for row in out) == list(range(1, len(kept) + 1))
         assert capsys.readouterr().err == (
             f"⚠ removed {len(tickers) - len(kept)} duplicate ticker(s) from the batch: "
             f"{dropped} (each ticker is run once)\n"
