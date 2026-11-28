@@ -38,6 +38,11 @@ Breaking changes within the 0.x line are called out explicitly.
   8167–8168 passed, 0 failed on every lane (re-measured on the round-17 tree,
   2026-11-28; the one-test spread is a test that needs scikit-learn, which is
   not a declared dependency — see the round-17 test files under Added).
+  On GitHub, the first run after the push (2026-11-28) passed every job but the
+  two ubuntu test jobs, each on a single test — the directory-order test listed
+  further down. The run after that fix was green on every job: 8168 passed and
+  2 skipped on py3.11, py3.13 and Windows py3.12, 99.87% of 22,287 statements on
+  each. It is the first green run since `db79063` (2026-09-18).
 - **`scipy` was used but never declared.** `backtest/metrics.py`, `backtest/ic.py`,
   `backtest/event_study.py` and the A/B gate treat it as an optional accelerator
   and ship numpy / math fallbacks so the runtime install stays lean. The eight
@@ -110,6 +115,22 @@ Breaking changes within the 0.x line are called out explicitly.
   wrote a scratch file into the working directory, where two suite runs in one checkout
   could delete each other's copy mid-test (it happened once in six parallel full runs); the
   file now lives in the test's `tmp_path`.
+- **Ledger connections were dropped without `close()`** (`yialpha/ledger/sqlite.py`,
+  `_connect`). `get_connection()` keeps one connection per path per mode in a
+  `threading.local`. A connection opened inside a worker thread (batch runner, prediction
+  flush, the web app) has no other owner, and one whose PRAGMA setup fails never reaches the
+  cache: both were dropped without `close()` when the cyclic collector got to them. Nothing
+  leaked — the dealloc closes the database — but Python 3.13 reports an unclosed connection
+  as `ResourceWarning: unclosed database`, pytest-cov lifts Python's default ignore for
+  exactly that message, and every run under coverage on 3.13 printed one line per connection
+  (21 on the tree this follows, Windows and Linux alike; 3.11 and 3.12 emit no such warning).
+  `_connect` now asks for a `sqlite3.Connection` subclass whose finalizer closes the
+  connection. Three tests in `tests/test_round17_ledger.py` pin it: a worker thread's
+  connections are closed once the thread is gone, a connection whose setup fails is closed
+  too, and a connection whose *open* fails — `sqlite3.connect()` allocates before it opens,
+  leaving an instance whose `__init__` never ran, on which `close()` raises — is finalized
+  silently. With them CI's coverage command reports 0 warnings on py3.13, on Windows and on
+  Linux (8171 passed, 2 skipped on both).
 - **Product bugs found by the round-16 audit.** Each one is pinned by a
   regression test that was run against the unmodified `v1.0.0` checkout to
   confirm it fails without the fix:
@@ -518,10 +539,10 @@ Breaking changes within the 0.x line are called out explicitly.
   were run afterwards (2026-11-28), on the tree with the five test fixes
   described under Fixed: green on all three. On the round-17 tree itself the
   Linux py3.13 run came back with the `_map_tickers` failure listed there.
-  A plain run reports 0 warnings. Under coverage the py3.13 lanes print 21
-  `ResourceWarning: unclosed database` lines — thread-local ledger connections
-  (`yialpha/ledger/sqlite.py`, `get_connection`) that are never closed
-  explicitly — and the locked 3.12 install prints one
+  A plain run reports 0 warnings. On the round-17 tree a run under coverage printed 21
+  `ResourceWarning: unclosed database` lines on the py3.13 lanes — ledger
+  connections that were never closed explicitly; see under Fixed, the tree now
+  reports none — and the locked 3.12 install prints one
   `StarletteDeprecationWarning` from FastAPI's test client; neither comes from
   a test of its own.
 - **Test-hygiene pins** (`tests/test_round17_test_hygiene.py`): 12 checks that
@@ -574,7 +595,8 @@ Breaking changes within the 0.x line are called out explicitly.
   19,393 statements, so the gate would have passed a twenty-point regression.
   On the round-17 tree every lane measures 99.87–99.90% of 22,287 statements,
   so the floor is now a wide cushion; raise it once a CI run under the widened
-  scope has reported.
+  scope has reported. It has: every test job of the first green run (2026-11-28)
+  measured 99.87% of 22,287 statements.
 
 ## [1.0.0] — 2026-11-23
 

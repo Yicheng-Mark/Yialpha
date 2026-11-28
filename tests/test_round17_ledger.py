@@ -7,10 +7,13 @@ database-backed seams further down the file.
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import math
 import sqlite3
+import sys
+import threading
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -1909,3 +1912,90 @@ def test_r17_open_positions_keeps_a_row_whose_payload_does_not_parse():
         ("N-ok", "BTCUSDT", "LONG", 0.1, {"instrument_class": "pure_crypto_perp"}),
         ("N-bad", "ETHUSDT", "SHORT", -0.2, {}),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# sqlite.get_connection — connections are closed, never only dropped
+# --------------------------------------------------------------------------- #
+
+
+def _trace_closes(monkeypatch):
+    """Make every connection the ledger opens record its own close().
+
+    The connection class the product asks for (``factory``) is subclassed, so
+    whatever the product does to a connection when it is dropped still runs.
+    """
+    closed: list[int] = []
+    real_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        base = kwargs.get("factory", sqlite3.Connection)
+
+        class Tracing(base):
+            def close(self):
+                closed.append(id(self))
+                super().close()
+
+        kwargs["factory"] = Tracing
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    return closed
+
+
+def test_r17_a_thread_closes_its_ledger_connections_when_it_exits(monkeypatch):
+    """get_connection() caches per thread. A connection opened inside a worker
+    thread (batch runner, prediction flush, the web app) has no other owner:
+    once the thread is gone the connection must be closed, not only dropped.
+
+    A sqlite3 connection sits in a reference cycle (its statement cache holds
+    the connection), so it is destroyed by the cyclic collector, not when the
+    thread's last reference goes away; hence the explicit collect()."""
+    closed = _trace_closes(monkeypatch)
+    seen: list[int] = []
+
+    def work():
+        conn = ledger_sqlite.get_connection()  # conftest points the ledger at a per-test file
+        conn.execute("SELECT 1")
+        seen.append(id(conn))
+
+    worker = threading.Thread(target=work)
+    worker.start()
+    worker.join(timeout=30)
+    gc.collect()
+
+    assert not worker.is_alive()
+    assert len(seen) == 1
+    assert closed == seen
+
+
+def test_r17_a_connection_whose_setup_fails_is_closed_before_it_is_dropped(
+    monkeypatch, tmp_path
+):
+    """_connect() sets WAL journal mode on a read-write open, which reads the
+    file header: on a file that is not a database it raises after the
+    connection was already opened. That connection must be closed too."""
+    closed = _trace_closes(monkeypatch)
+    path = tmp_path / "not-a-database.db"
+    path.write_bytes(b"not a sqlite database " * 40)
+
+    with pytest.raises(sqlite3.DatabaseError):
+        ledger_sqlite._connect(str(path), readonly=False)
+    gc.collect()
+
+    assert len(closed) == 1
+
+
+def test_r17_a_connection_whose_open_fails_is_finalized_silently(monkeypatch, tmp_path):
+    """sqlite3.connect() allocates the connection before __init__ opens the
+    file. When the open fails, an instance that was never initialised is
+    dropped; its finalizer must not raise (pytest reports that as an
+    unraisable exception)."""
+    unraisable: list[object] = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+
+    with pytest.raises(sqlite3.OperationalError):
+        ledger_sqlite._connect(str(tmp_path / "absent" / "ledger.db"), readonly=True)
+    gc.collect()
+
+    assert unraisable == []

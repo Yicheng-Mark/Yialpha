@@ -78,6 +78,25 @@ def ledger_exists() -> bool:
     return Path(ledger_db_path()).exists()
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """A ledger connection that closes itself when it is garbage collected.
+
+    get_connection() keeps one connection per path per mode in a
+    threading.local. A connection opened inside a worker thread (batch
+    runner, prediction flush, the web app) has no other owner, and one whose
+    PRAGMA setup in _connect() fails never reaches the cache: both used to be
+    dropped without close(). Python 3.13 reports that as ``ResourceWarning:
+    unclosed database``; pytest-cov lifts Python's default ignore for exactly
+    that message, so every ``--cov`` run printed one line per leaked
+    connection. close() on a closed connection is a no-op, so the explicit
+    closes in reset_ledger_state_for_test() are unaffected.
+    """
+
+    def __del__(self) -> None:
+        with suppress(sqlite3.Error):  # a finalizer must never raise
+            self.close()
+
+
 def _connect(path: str, *, readonly: bool) -> sqlite3.Connection:
     if readonly:
         conn = sqlite3.connect(
@@ -86,6 +105,7 @@ def _connect(path: str, *, readonly: bool) -> sqlite3.Connection:
             timeout=5.0,
             check_same_thread=False,
             isolation_level=None,
+            factory=_ClosingConnection,
         )
     else:
         conn = sqlite3.connect(
@@ -93,6 +113,7 @@ def _connect(path: str, *, readonly: bool) -> sqlite3.Connection:
             timeout=5.0,
             check_same_thread=False,
             isolation_level=None,
+            factory=_ClosingConnection,
         )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 5000")
