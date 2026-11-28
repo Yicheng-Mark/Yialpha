@@ -9,8 +9,11 @@ on:
     # support-floor (3.11) and current (3.13) plus Windows; the middle
     # version only breaks on interpreter-specific regressions, which this
     # scheduled run catches within a week instead of burning an extra
-    # full-suite run on every push (the suite ran 5x per push before).
+    # full-suite run on every push (the suite ran 5x per push before). The
+    # same run does the scrambled-directory-order screen.
     - cron: "15 3 * * 0"
+  # By hand: runs the push set plus the scrambled-directory-order job.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -107,6 +110,60 @@ jobs:
         run: |
           {
             echo "## Test failures (auto-extracted)"
+            grep -E "^(FAILED|ERROR) " pytest.log || echo "(no FAILED/ERROR lines captured)"
+            echo ""
+            echo "### Tail of pytest output"
+            tail -n 40 pytest.log
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  test-directory-order:
+    # Weekly screen for tests whose outcome depends on the order in which a
+    # directory lists its entries. Path.glob / iterdir order belongs to the
+    # file system -- sorted by name on NTFS, creation order on a fresh WSL
+    # disk, neither on a hosted runner's ext4 -- so such a test passes wherever
+    # the order happens to match: the first CI run on the round-17 tree failed
+    # one on both ubuntu lanes while every local lane was green. The plugin in
+    # tests/_plugins/ permutes every listing; the run id is the seed, so each
+    # run samples a new order and a failure is reproduced with that number:
+    #   SHUFFLE_SEED=<run id> PYTHONPATH=tests/_plugins pytest -p shuffle_plugin
+    # Not on every push: one more full suite for a class of defect the weekly
+    # pass already catches.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: tests, scrambled directory order (py3.13)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.lock
+      - name: Install (with dev + web extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,web]"
+      - name: Show that the plugin is active
+        env:
+          SHUFFLE_SEED: ${{ github.run_id }}
+          PYTHONPATH: tests/_plugins
+        run: python -c "import os, shuffle_plugin; print('os.scandir comes from', os.scandir.__module__, '| seed', shuffle_plugin.SEED)"
+      - name: Run test suite with every directory listing permuted
+        env:
+          SHUFFLE_SEED: ${{ github.run_id }}
+          PYTHONPATH: tests/_plugins
+        # Same tee + summary pattern as the ubuntu `test` job (see the note
+        # there: the summary needs a GitHub sign-in too).
+        run: pytest -q -p shuffle_plugin --cov=yialpha --cov=web --cov=scripts --cov-report=term-missing 2>&1 | tee pytest.log; test ${PIPESTATUS[0]} -eq 0
+      - name: Publish failure summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "## Test failures (auto-extracted)"
+            echo "Directory-order seed: $SHUFFLE_SEED -- reproduce with"
+            echo 'SHUFFLE_SEED='"$SHUFFLE_SEED"' PYTHONPATH=tests/_plugins pytest -p shuffle_plugin'
             grep -E "^(FAILED|ERROR) " pytest.log || echo "(no FAILED/ERROR lines captured)"
             echo ""
             echo "### Tail of pytest output"

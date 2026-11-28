@@ -517,6 +517,19 @@ Breaking changes within the 0.x line are called out explicitly.
   root; the coverage floor must not be quietly lowered; every `yialpha <command>`
   the docs mention must be registered on the real CLI; the README project tree
   must list every sub-package and every CLI command.
+- **A weekly screen for tests that depend on directory order**
+  (`tests/_plugins/shuffle_plugin.py`, CI job `tests, scrambled directory order`).
+  The order in which `Path.glob` and friends list a directory belongs to the file
+  system — sorted by name on NTFS, creation order on a fresh WSL disk, neither on
+  a hosted runner's ext4 — so a test that assumes an order passes wherever the
+  order happens to match (see the directory-order test under Fixed). The plugin
+  permutes every listing — `os.scandir`, `os.listdir`, and the copy bound inside
+  Python 3.13's `glob._StringGlobber` — with a seed; the job runs the whole suite
+  once a week with the run id as the seed and prints how to reproduce a failure.
+  The workflow can also be started by hand (`workflow_dispatch`), which runs that
+  job alongside the push set. The same technique found the defect on 2026-11-28:
+  six scrambled orders on Linux py3.13, four on Linux py3.11 and four on Windows
+  py3.12, first with that one failure, then — after the fix — with none.
 - **The round-17 test files** — 13 files, 2,711 tests: `tests/test_round17_`
   `pot_tools.py` (170), `ledger.py` (186), `backtest_engine.py` (147),
   `perp_bundle.py` (95), `ops.py` (167), `agents.py` (192), `llm_clients.py`
@@ -590,13 +603,13 @@ Breaking changes within the 0.x line are called out explicitly.
   name `yialpha`, `web` and `scripts`, and `tests/test_round16_packaging_ci.py`
   fails when the two lists disagree or either tree drops out. With them every
   lane measures 99.87–99.90% of 22,287 statements.
-- **Coverage floor raised from 75% to 90%.** The floor had been set when the
-  baseline was 78%; by 2026-11-23 every OS × interpreter lane measured 95.5% of
-  19,393 statements, so the gate would have passed a twenty-point regression.
-  On the round-17 tree every lane measures 99.87–99.90% of 22,287 statements,
-  so the floor is now a wide cushion; raise it once a CI run under the widened
-  scope has reported. It has: every test job of the first green run (2026-11-28)
-  measured 99.87% of 22,287 statements.
+- **Coverage floor raised from 75% to 90%, then to 98%.** The floor had been set
+  when the baseline was 78%; by 2026-11-23 every OS × interpreter lane measured
+  95.5% of 19,393 statements, so the gate would have passed a twenty-point
+  regression. On the round-17 tree every lane measures 99.87–99.90% of 22,287
+  statements, so 90 was a wide cushion. The first green run on GitHub (2026-11-28)
+  measured 99.87% of 22,287 statements on each of its three test jobs, and the
+  floor now sits at 98: room for about 400 untested statements.
 
 ## [1.0.0] — 2026-11-23
 

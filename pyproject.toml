@@ -120,10 +120,11 @@ source = ["yialpha", "web", "scripts"]
 # 2026-11-28, scope yialpha + web + scripts: every lane measures 99.87-99.90%
 # of 22,287 statements (22-28 untested) -- Windows and Linux (WSL), py3.11 /
 # 3.12 / 3.13, fresh unconstrained installs and a hash-checked install of
-# requirements.lock -- so the floor now leaves room for ~2,200 untested
-# statements. Raise it once a CI run under the widened scope has reported;
-# tests/test_round16_packaging_ci.py pins the floor at >= 90.
-fail_under = 90
+# requirements.lock -- and so did every test job of the first green run on
+# GitHub (2026-11-28, commit 7d5715f: 99.87% on ubuntu py3.11 / py3.13 and
+# windows py3.12). Raised to 98: room for about 400 untested statements.
+# tests/test_round16_packaging_ci.py pins the floor at >= 98.
+fail_under = 98
 show_missing = true
 
 [tool.ruff]

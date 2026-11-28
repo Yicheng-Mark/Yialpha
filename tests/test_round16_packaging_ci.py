@@ -151,7 +151,10 @@ def test_r16_coverage_floor_is_not_twenty_points_below_reality():
     """The floor sat at 75 while every lane measured 95.5%, so it gated
     nothing. Lowering it again should be a deliberate edit of this test."""
     floor = _pyproject["tool"]["coverage"]["report"]["fail_under"]
-    assert floor >= 90, f"coverage fail_under is {floor}; it was re-based to 90 on 2026-11-23"
+    assert floor >= 98, (
+        f"coverage fail_under is {floor}; it was re-based to 90 on 2026-11-23 and "
+        "raised to 98 on 2026-11-28, after every CI test job had measured 99.87%"
+    )
 
 
 def _pytest_cov_targets_in_ci() -> list[frozenset[str]]:
